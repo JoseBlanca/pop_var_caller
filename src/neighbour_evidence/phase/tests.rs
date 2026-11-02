@@ -42,13 +42,14 @@ fn the_alignment_swaps_a_stretch_back_exactly() {
     let mut phase = SamplePhase::new(&[2; 20], &pairs);
     phase.add_round(&path(20, |_| false));
     let round = path(20, |site| (8..14).contains(&site));
-    let swapped = phase.alignment(&round);
+    let swapped = phase.align(&round);
     let expected: Vec<bool> = (0..20).map(|site| (8..14).contains(&site)).collect();
     assert_eq!(swapped, expected);
     // Added, the swapped round agrees with the consensus everywhere.
     phase.add_round(&round);
     for index in 0..20 {
-        let (first, second) = phase.consensus(index);
+        let (mut first, mut second) = (Vec::new(), Vec::new());
+        phase.consensus_into(index, &mut first, &mut second);
         assert!((first[1] - 0.95).abs() < 1e-6 && (second[1] - 0.05).abs() < 1e-6);
     }
 }
@@ -59,10 +60,7 @@ fn the_alignment_keeps_an_isolated_disagreement() {
     let pairs = layout(20);
     let mut phase = SamplePhase::new(&[2; 20], &pairs);
     phase.add_round(&path(20, |_| false));
-    assert_eq!(
-        phase.alignment(&path(20, |site| site == 10)),
-        vec![false; 20]
-    );
+    assert_eq!(phase.align(&path(20, |site| site == 10)), vec![false; 20]);
 }
 
 /// One round a path, each path's bits recorded and the path added to the consensus.
@@ -85,31 +83,31 @@ fn the_link_test_catches_a_switch_the_alignment_absorbs() {
     let mut paths: Vec<Vec<HaplotypePair>> = (0..4).map(|_| path(n, |_| false)).collect();
     paths.push(path(n, |site| site >= 10));
     let (pairs, phase) = rounds(n, &paths);
-    let phased = phase.phased(
+    let phased = phase.phase_heterozygotes(
         &pairs,
         &every_site_heterozygous(n),
         &positions(n),
         300_000.0,
-        MIN_PATH_AGREEMENT,
+        PathAgreement::ALL,
     );
     for (site, written) in phased.iter().enumerate() {
         let written = written.expect("every site is phased");
         let block_start = if site < 10 { 1 } else { 1 + 10 * 1_000 };
-        assert_eq!(written.block, block_start, "site {site}");
-        assert_eq!((written.first, written.second), (1, 0));
+        assert_eq!(written.phase_set, block_start, "site {site}");
+        assert_eq!((written.copy_0_allele, written.copy_1_allele), (1, 0));
     }
     // With one path of five allowed to disagree, the link holds.
-    let phased = phase.phased(
+    let phased = phase.phase_heterozygotes(
         &pairs,
         &every_site_heterozygous(n),
         &positions(n),
         300_000.0,
-        0.75,
+        PathAgreement::try_new(0.75).expect("a share"),
     );
     assert!(
         phased
             .iter()
-            .all(|written| written.is_some_and(|w| w.block == 1))
+            .all(|written| written.is_some_and(|w| w.phase_set == 1))
     );
 }
 
@@ -123,12 +121,12 @@ fn the_lean_minimum_is_inclusive() {
     };
     for (middle, phased_middle) in [(0.75, true), (0.74, false)] {
         let (pairs, phase) = rounds(n, &[make(middle)]);
-        let phased = phase.phased(
+        let phased = phase.phase_heterozygotes(
             &pairs,
             &every_site_heterozygous(n),
             &positions(n),
             300_000.0,
-            MIN_PATH_AGREEMENT,
+            PathAgreement::ALL,
         );
         assert_eq!(phased[1].is_some(), phased_middle, "middle {middle}");
     }
@@ -149,15 +147,27 @@ fn only_heterozygotes_in_blocks_of_two_are_phased() {
         Some((0, 1)),
     ];
     let positions = vec![1, 1_001, 2_001, 3_001, 50_001, 51_001];
-    let phased = phase.phased(&pairs, &heterozygotes, &positions, 30_000.0, 1.0);
-    let blocks: Vec<Option<u64>> = phased.iter().map(|w| w.map(|w| w.block)).collect();
+    let phased = phase.phase_heterozygotes(
+        &pairs,
+        &heterozygotes,
+        &positions,
+        30_000.0,
+        PathAgreement::ALL,
+    );
+    let blocks: Vec<Option<u64>> = phased.iter().map(|w| w.map(|w| w.phase_set)).collect();
     // Sites 0, 1 and 3 link (no uncalled record breaks a block); 3 → 4 is past S; 4 and 5 link.
     assert_eq!(
         blocks,
         vec![Some(1), Some(1), None, Some(1), Some(50_001), Some(50_001)]
     );
     let heterozygotes = vec![Some((0, 1)), None, None, None, Some((0, 1)), None];
-    let phased = phase.phased(&pairs, &heterozygotes, &positions, 30_000.0, 1.0);
+    let phased = phase.phase_heterozygotes(
+        &pairs,
+        &heterozygotes,
+        &positions,
+        30_000.0,
+        PathAgreement::ALL,
+    );
     assert!(phased.iter().all(Option::is_none), "two blocks of one");
 }
 
@@ -170,15 +180,15 @@ fn a_broken_link_at_one_position_leaves_the_second_unphased() {
     paths.push(path(n, |site| site >= 2));
     let (pairs, phase) = rounds(n, &paths);
     let positions = vec![1, 1_001, 1_001, 2_001];
-    let phased = phase.phased(
+    let phased = phase.phase_heterozygotes(
         &pairs,
         &every_site_heterozygous(n),
         &positions,
         300_000.0,
-        1.0,
+        PathAgreement::ALL,
     );
-    assert_eq!(phased[0].map(|w| w.block), Some(1));
-    assert_eq!(phased[1].map(|w| w.block), Some(1));
+    assert_eq!(phased[0].map(|w| w.phase_set), Some(1));
+    assert_eq!(phased[1].map(|w| w.phase_set), Some(1));
     assert_eq!(phased[2], None);
     // Site 3 follows site 1 across the same switch: a new block, which has one record.
     assert_eq!(phased[3], None);
@@ -199,16 +209,19 @@ fn a_multi_allelic_pair_is_phased_on_its_own_alleles() {
     let mut phase = SamplePhase::new(&[2, 3, 2], &pairs);
     phase.record_path(&pairs, &path);
     phase.add_round(&path);
-    let phased = phase.phased(
+    let phased = phase.phase_heterozygotes(
         &pairs,
         &[Some((0, 1)), Some((1, 2)), Some((0, 1))],
         &positions(3),
         300_000.0,
-        1.0,
+        PathAgreement::ALL,
     );
     let middle = phased[1].expect("the 1/2 is phased");
-    assert_eq!((middle.first, middle.second), (2, 1));
-    assert_eq!(phased[0].map(|w| (w.first, w.second)), Some((1, 0)));
+    assert_eq!((middle.copy_0_allele, middle.copy_1_allele), (2, 1));
+    assert_eq!(
+        phased[0].map(|w| (w.copy_0_allele, w.copy_1_allele)),
+        Some((1, 0))
+    );
 }
 
 /// **The pair entries of a site are its pairs `(a, b)`, `a < b`, in order**, one after another.
@@ -231,12 +244,40 @@ fn window_phase(n: usize, phased: &[(usize, usize, u64)]) -> Vec<Option<WrittenP
     let mut out = vec![None; n];
     for &(site, first, block) in phased {
         out[site] = Some(WrittenPhase {
-            first,
-            second: 1 - first,
-            block,
+            copy_0_allele: first,
+            copy_1_allele: 1 - first,
+            phase_set: block,
         });
     }
     out
+}
+
+/// The last written block of phase set 77 that wrote copy 0's allele `allele` at each `(site, allele)`
+/// of `written` — biallelic records, so copy 1 carries the other.
+fn last_block(written: &[(usize, usize)]) -> LastBlock {
+    LastBlock {
+        phase_set: 77,
+        records: written
+            .iter()
+            .map(|&(record, allele)| JoinRecord {
+                record,
+                copy_0_allele: allele,
+                copy_1_allele: 1 - allele,
+            })
+            .collect(),
+    }
+}
+
+/// [`join_and_name_core_blocks`] on an eight-site window whose core is sites 4–7, records being
+/// sites.
+fn join(window: &[Option<WrittenPhase>], last: Option<&LastBlock>) -> Vec<Option<WrittenPhase>> {
+    join_and_name_core_blocks(
+        window,
+        |site| site >= 4,
+        &positions(8),
+        last,
+        |record| record,
+    )
 }
 
 /// **A window joins the last written block where three shared records agree** (spec §2.4): sites
@@ -245,8 +286,6 @@ fn window_phase(n: usize, phased: &[(usize, usize, u64)]) -> Vec<Option<WrittenP
 /// core is swapped as a whole.
 #[test]
 fn a_window_joins_where_three_shared_records_agree() {
-    let positions = positions(8);
-    let in_core = |site: usize| site >= 4;
     let written = [(1, 1), (2, 1), (3, 1)];
     let window = window_phase(
         8,
@@ -258,22 +297,22 @@ fn a_window_joins_where_three_shared_records_agree() {
             (6, 1, 1_001),
         ],
     );
-    let out = written_in_core(&window, in_core, &positions, Some((77, &written)));
+    let out = join(&window, Some(&last_block(&written)));
     assert_eq!(out[..4], [None; 4], "the margin is not written");
     assert_eq!(
         out[4],
         Some(WrittenPhase {
-            first: 0,
-            second: 1,
-            block: 77
+            copy_0_allele: 0,
+            copy_1_allele: 1,
+            phase_set: 77
         })
     );
     assert_eq!(
         out[6],
         Some(WrittenPhase {
-            first: 1,
-            second: 0,
-            block: 77
+            copy_0_allele: 1,
+            copy_1_allele: 0,
+            phase_set: 77
         })
     );
 
@@ -287,21 +326,21 @@ fn a_window_joins_where_three_shared_records_agree() {
             (6, 1, 1_001),
         ],
     );
-    let out = written_in_core(&reversed, in_core, &positions, Some((77, &written)));
+    let out = join(&reversed, Some(&last_block(&written)));
     assert_eq!(
         out[4],
         Some(WrittenPhase {
-            first: 1,
-            second: 0,
-            block: 77
+            copy_0_allele: 1,
+            copy_1_allele: 0,
+            phase_set: 77
         })
     );
     assert_eq!(
         out[6],
         Some(WrittenPhase {
-            first: 0,
-            second: 1,
-            block: 77
+            copy_0_allele: 0,
+            copy_1_allele: 1,
+            phase_set: 77
         })
     );
 }
@@ -312,12 +351,10 @@ fn a_window_joins_where_three_shared_records_agree() {
 /// one record is unphased.
 #[test]
 fn a_window_does_not_join_without_agreement() {
-    let positions = positions(8);
-    let in_core = |site: usize| site >= 4;
     let written = [(1, 1), (2, 1), (3, 1)];
     let named_by_core = |out: &[Option<WrittenPhase>]| {
-        assert_eq!(out[4].map(|phase| phase.block), Some(4_001));
-        assert_eq!(out[6].map(|phase| phase.block), Some(4_001));
+        assert_eq!(out[4].map(|phase| phase.phase_set), Some(4_001));
+        assert_eq!(out[6].map(|phase| phase.phase_set), Some(4_001));
     };
     let mixed = window_phase(
         8,
@@ -329,22 +366,12 @@ fn a_window_does_not_join_without_agreement() {
             (6, 1, 1_001),
         ],
     );
-    named_by_core(&written_in_core(
-        &mixed,
-        in_core,
-        &positions,
-        Some((77, &written)),
-    ));
+    named_by_core(&join(&mixed, Some(&last_block(&written))));
     let two = window_phase(
         8,
         &[(2, 1, 2_001), (3, 1, 2_001), (4, 0, 2_001), (6, 1, 2_001)],
     );
-    named_by_core(&written_in_core(
-        &two,
-        in_core,
-        &positions,
-        Some((77, &written)),
-    ));
+    named_by_core(&join(&two, Some(&last_block(&written))));
     let ends_before = window_phase(
         8,
         &[
@@ -355,20 +382,148 @@ fn a_window_does_not_join_without_agreement() {
             (6, 1, 4_001),
         ],
     );
-    named_by_core(&written_in_core(
-        &ends_before,
-        in_core,
-        &positions,
-        Some((77, &written)),
-    ));
+    named_by_core(&join(&ends_before, Some(&last_block(&written))));
 
     // One core record: phased only as part of a joined block.
     let lone = window_phase(
         8,
         &[(1, 1, 1_001), (2, 1, 1_001), (3, 1, 1_001), (5, 0, 1_001)],
     );
-    let joined = written_in_core(&lone, in_core, &positions, Some((77, &written)));
-    assert_eq!(joined[5].map(|phase| phase.block), Some(77));
-    let alone = written_in_core(&lone, in_core, &positions, None);
+    let joined = join(&lone, Some(&last_block(&written)));
+    assert_eq!(joined[5].map(|phase| phase.phase_set), Some(77));
+    let alone = join(&lone, None);
     assert_eq!(alone[5], None);
+}
+
+/// **A link breaks where a path agrees in orientation but does not lean** (spec §2.3, code review
+/// 2026-11-02): at site 1 the fifth path leans by 0.6·0.6 − 0.4·0.4 = 0.2, below [`LEAN_MIN`].
+#[test]
+fn a_link_breaks_where_one_path_does_not_lean() {
+    let n = 3;
+    let mut paths: Vec<Vec<HaplotypePair>> = (0..4).map(|_| path(n, |_| false)).collect();
+    paths.push(vec![site(0.95, 0.05), site(0.6, 0.4), site(0.95, 0.05)]);
+    let (pairs, phase) = rounds(n, &paths);
+    let phased = phase.phase_heterozygotes(
+        &pairs,
+        &every_site_heterozygous(n),
+        &positions(n),
+        300_000.0,
+        PathAgreement::ALL,
+    );
+    assert!(phased.iter().all(Option::is_none), "{phased:?}");
+}
+
+/// **A share asks for its paths rounded up**: with 3 of 5 paths agreeing, 0.7 (3.5 paths, so 4)
+/// breaks the link and 0.5 (2.5, so 3) keeps it.
+#[test]
+fn a_share_asks_for_whole_paths_rounded_up() {
+    let n = 2;
+    let pairs = layout(n);
+    let mut phase = SamplePhase::new(&[2; 2], &pairs);
+    for _ in 0..3 {
+        let agreeing = path(n, |_| false);
+        phase.record_path(&pairs, &agreeing);
+        phase.add_round(&agreeing);
+    }
+    for _ in 0..2 {
+        phase.record_path(&pairs, &path(n, |site| site == 1));
+    }
+    let at = |share: f64| {
+        phase.phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions(n),
+            300_000.0,
+            PathAgreement::try_new(share).expect("a share"),
+        )
+    };
+    assert!(
+        at(0.7).iter().all(Option::is_none),
+        "3 of 5 is short of 0.7"
+    );
+    assert!(at(0.5).iter().all(Option::is_some), "3 of 5 meets 0.5");
+}
+
+/// **A share is a number in `(0, 1]`**.
+#[test]
+fn a_path_agreement_is_a_share() {
+    for share in [0.0, -0.1, 1.000_001, f64::NAN, f64::INFINITY] {
+        assert!(PathAgreement::try_new(share).is_none(), "{share}");
+    }
+    for share in [1.0, 0.5, 1e-3] {
+        assert_eq!(
+            PathAgreement::try_new(share).map(PathAgreement::get),
+            Some(share)
+        );
+    }
+    assert_eq!(PathAgreement::default(), PathAgreement::ALL);
+}
+
+/// **A tie between "kept" and "swapped" goes to "kept"**: one agreeing and one disagreeing site,
+/// each state costing 1.
+#[test]
+fn the_alignment_resolves_a_tie_to_kept() {
+    let pairs = layout(2);
+    let mut phase = SamplePhase::new(&[2; 2], &pairs);
+    phase.add_round(&path(2, |_| false));
+    assert_eq!(phase.align(&path(2, |site| site == 1)), vec![false, false]);
+}
+
+/// **The alignment ignores sites where the round does not lean**: a stretch where the round is
+/// swapped by only 0.4 is not marked, so it is not swapped back.
+#[test]
+fn the_alignment_ignores_sites_where_the_round_does_not_lean() {
+    let pairs = layout(20);
+    let mut phase = SamplePhase::new(&[2; 20], &pairs);
+    phase.add_round(&path(20, |_| false));
+    let round: Vec<HaplotypePair> = (0..20)
+        .map(|index| {
+            if (8..14).contains(&index) {
+                site(0.3, 0.7)
+            } else {
+                site(0.95, 0.05)
+            }
+        })
+        .collect();
+    assert_eq!(phase.align(&round), vec![false; 20]);
+}
+
+/// **A join reads the shared records nearest the core**: the farthest of four disagrees, the
+/// three nearest agree, and the window joins.
+#[test]
+fn a_join_reads_the_records_nearest_the_core() {
+    let written = [(0, 0), (1, 1), (2, 1), (3, 1)];
+    let window = window_phase(
+        8,
+        &[
+            (0, 1, 1),
+            (1, 1, 1),
+            (2, 1, 1),
+            (3, 1, 1),
+            (4, 0, 1),
+            (6, 1, 1),
+        ],
+    );
+    let out = join(&window, Some(&last_block(&written)));
+    assert_eq!(out[4].map(|phase| phase.phase_set), Some(77));
+}
+
+/// **A join reads the block of the window's first phased core record**, not of its first phased
+/// record: site 0 is in a block of its own in this window, and the core continues the last block.
+#[test]
+fn a_join_reads_the_block_of_the_first_core_record() {
+    let written = [(0, 1), (1, 1), (2, 1), (3, 1)];
+    let window = window_phase(
+        8,
+        &[
+            (0, 1, 1),
+            (1, 1, 1_001),
+            (2, 1, 1_001),
+            (3, 1, 1_001),
+            (4, 0, 1_001),
+            (6, 1, 1_001),
+        ],
+    );
+    let out = join(&window, Some(&last_block(&written)));
+    assert_eq!(out[4].map(|phase| phase.phase_set), Some(77));
 }

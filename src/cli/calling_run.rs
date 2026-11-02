@@ -39,6 +39,7 @@ use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
 use crate::cli::run_output;
 use crate::fasta::ContigList;
+use crate::neighbour_evidence::phase::PathAgreement;
 use crate::neighbour_evidence::stage::{
     NeighbourEvidenceDecision, NeighbourEvidenceSwitch, decide,
 };
@@ -672,27 +673,23 @@ pub enum NeighbourEvidenceArg {
 /// # Errors
 ///
 /// A value that is not a number in `(0, 1]`.
-pub fn parse_path_agreement(text: &str) -> Result<f64, String> {
+pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
     let share: f64 = text
         .parse()
         .map_err(|_| format!("`{text}` is not a number"))?;
-    if share > 0.0 && share <= 1.0 {
-        Ok(share)
-    } else {
-        Err(format!("`{text}` is not a share in (0, 1]"))
-    }
+    PathAgreement::try_new(share).ok_or_else(|| format!("`{text}` is not a share in (0, 1]"))
 }
 
 /// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
 /// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
-/// header is written, and stated in it either way. `min_path_agreement` is
+/// header is written, and stated in it either way. `path_agreement` is
 /// `--phase-min-path-agreement`.
 #[must_use]
 pub fn neighbour_evidence_decision(
     asked: NeighbourEvidenceArg,
     inbreeding_by_sample: &[InbreedingF],
     ploidy: Ploidy,
-    min_path_agreement: f64,
+    path_agreement: PathAgreement,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
         NeighbourEvidenceArg::Auto => NeighbourEvidenceSwitch::Auto,
@@ -700,7 +697,7 @@ pub fn neighbour_evidence_decision(
         NeighbourEvidenceArg::Off => NeighbourEvidenceSwitch::Off,
     };
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
-    let decision = decide(switch, &inbreeding, ploidy).with_min_path_agreement(min_path_agreement);
+    let decision = decide(switch, &inbreeding, ploidy).with_path_agreement(path_agreement);
     tracing::info!(
         "neighbour-evidence pass: {} ({})",
         if decision.ran { "runs" } else { "off" },

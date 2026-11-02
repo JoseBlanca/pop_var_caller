@@ -20,7 +20,8 @@ use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
 use super::phase::{
-    EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, MIN_PATH_AGREEMENT, WrittenPhase,
+    DISAGREEMENT_COST, EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, PathAgreement,
+    SHARED_RECORDS_TO_JOIN, SWITCH_COST, WrittenPhase,
 };
 use super::records::SiteRecord;
 use super::refine::{
@@ -62,24 +63,16 @@ pub struct NeighbourEvidenceDecision {
     /// The window sizes the run plans with.
     pub sizes: WindowSizes,
     /// The share of drawn paths that must agree at a phase link (`--phase-min-path-agreement`,
-    /// phase output spec §9).
-    pub min_path_agreement: f64,
+    /// phase output spec §9); [`decide`] sets all of them.
+    pub path_agreement: PathAgreement,
 }
 
 impl NeighbourEvidenceDecision {
-    /// The same decision, a phase link kept where `share` of the drawn paths agree.
-    ///
-    /// # Panics
-    ///
-    /// If `share` is not in `(0, 1]`; the command line checks it first.
+    /// The same decision, a phase link kept where `agreement` of the drawn paths agree.
     #[must_use]
-    pub fn with_min_path_agreement(self, share: f64) -> Self {
-        assert!(
-            share > 0.0 && share <= 1.0,
-            "a path agreement is a share in (0, 1]: got {share}"
-        );
+    pub fn with_path_agreement(self, agreement: PathAgreement) -> Self {
         Self {
-            min_path_agreement: share,
+            path_agreement: agreement,
             ..self
         }
     }
@@ -94,8 +87,11 @@ impl NeighbourEvidenceDecision {
                  rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES},\
                  hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
                  hidden_share={MAX_HIDDEN_SHARE},extra_paths={EXTRA_PATHS_PER_ROUND},\
-                 lean_min={LEAN_MIN},path_agreement={}>",
-                self.sizes.core_bases, self.sizes.margin_bases, self.min_path_agreement
+                 lean_min={LEAN_MIN},path_agreement={},join_records={SHARED_RECORDS_TO_JOIN},\
+                 alignment_costs={DISAGREEMENT_COST}/{SWITCH_COST}>",
+                self.sizes.core_bases,
+                self.sizes.margin_bases,
+                self.path_agreement.get()
             )
         } else {
             format!("<ran=no,why=\"{why}\">")
@@ -149,7 +145,7 @@ pub fn decide(
         why,
         inbreeding_by_sample: inbreeding_by_sample.to_vec(),
         sizes: WindowSizes::default(),
-        min_path_agreement: MIN_PATH_AGREEMENT,
+        path_agreement: PathAgreement::ALL,
     }
 }
 
@@ -161,13 +157,20 @@ struct HeldLine {
     site: Option<usize>,
 }
 
-/// **A sample's last written block** (phase output spec §2.4): its `PS`, and its records written
-/// within a margin of the last core's end — run-wide site number, position, the alleles on copy 0
-/// and copy 1 — ascending.
+/// **A sample's last written block** (phase output spec §2.4): its phase set, and its records
+/// written within a margin of its last one, ascending.
 #[derive(Clone, Debug)]
 struct WrittenBlock {
-    block: u64,
-    records: Vec<(usize, u64, usize, usize)>,
+    phase_set: u64,
+    records: Vec<WrittenRecord>,
+}
+
+/// One record of a [`WrittenBlock`]: its run-wide site number, its position, and its phase.
+#[derive(Clone, Copy, Debug)]
+struct WrittenRecord {
+    site: usize,
+    position: u64,
+    phase: WrittenPhase,
 }
 
 /// **The pass, fed one line at a time.**
@@ -176,7 +179,7 @@ pub struct NeighbourEvidenceStage {
     /// Each contig's length, by contig id, for §4.2's rule at a contig's end.
     contig_lengths: Vec<u64>,
     sizes: WindowSizes,
-    min_path_agreement: f64,
+    path_agreement: PathAgreement,
     fits: Vec<SampleFit>,
     contig: Option<ContigId>,
     held: Vec<HeldLine>,
@@ -205,7 +208,7 @@ impl NeighbourEvidenceStage {
             samples: decision.inbreeding_by_sample.len(),
             contig_lengths,
             sizes: decision.sizes,
-            min_path_agreement: decision.min_path_agreement,
+            path_agreement: decision.path_agreement,
             fits: decision
                 .inbreeding_by_sample
                 .iter()
@@ -307,17 +310,17 @@ impl NeighbourEvidenceStage {
                     .iter()
                     .map(|last| {
                         last.as_ref().map(|last| LastBlock {
-                            block: last.block,
+                            phase_set: last.phase_set,
                             records: last
                                 .records
                                 .iter()
-                                .filter(|&&(site, ..)| {
-                                    (window_sites.start..core_sites.start).contains(&site)
+                                .filter(|record| {
+                                    (window_sites.start..core_sites.start).contains(&record.site)
                                 })
-                                .map(|&(site, _, first, second)| JoinRecord {
-                                    record: site - window_sites.start,
-                                    first,
-                                    second,
+                                .map(|record| JoinRecord {
+                                    record: record.site - window_sites.start,
+                                    copy_0_allele: record.phase.copy_0_allele,
+                                    copy_1_allele: record.phase.copy_1_allele,
                                 })
                                 .collect(),
                         })
@@ -331,7 +334,7 @@ impl NeighbourEvidenceStage {
                     &mut self.fits,
                     MAX_TEMPLATES,
                     NoReadRule::default(),
-                    Phasing::rounds_for(key).with_min_path_agreement(self.min_path_agreement),
+                    Phasing::rounds_for(key).with_path_agreement(self.path_agreement),
                     &joins,
                 );
                 for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
@@ -367,33 +370,38 @@ impl NeighbourEvidenceStage {
     /// window's margin reaches.
     fn remember_last_blocks(&mut self, first_site: usize, core: &[RefinedRecord]) {
         for (sample, last) in self.last_blocks.iter_mut().enumerate() {
-            let phased: Vec<(usize, u64, WrittenPhase)> = core
+            let phased: Vec<WrittenRecord> = core
                 .iter()
                 .enumerate()
                 .filter_map(|(offset, record)| {
                     record.phases[sample].map(|phase| {
                         let site = first_site + offset;
-                        (site, self.sites[site - self.first_site].position, phase)
+                        WrittenRecord {
+                            site,
+                            position: self.sites[site - self.first_site].position,
+                            phase,
+                        }
                     })
                 })
                 .collect();
-            let Some(&(_, end, final_phase)) = phased.last() else {
+            let Some(&final_record) = phased.last() else {
                 continue;
             };
-            let block = final_phase.block;
+            let phase_set = final_record.phase.phase_set;
             let mut records = match last.take() {
-                Some(previous) if previous.block == block => previous.records,
+                Some(previous) if previous.phase_set == phase_set => previous.records,
                 _ => Vec::new(),
             };
             records.extend(
                 phased
                     .iter()
-                    .filter(|(.., phase)| phase.block == block)
-                    .map(|&(site, position, phase)| (site, position, phase.first, phase.second)),
+                    .filter(|record| record.phase.phase_set == phase_set),
             );
-            let reach = end.saturating_sub(self.sizes.margin_bases);
-            records.retain(|&(_, position, ..)| position >= reach);
-            *last = Some(WrittenBlock { block, records });
+            let reach = final_record
+                .position
+                .saturating_sub(self.sizes.margin_bases);
+            records.retain(|record| record.position >= reach);
+            *last = Some(WrittenBlock { phase_set, records });
         }
     }
 

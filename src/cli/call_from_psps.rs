@@ -256,11 +256,11 @@ pub struct CallFromPspsArgs {
     /// them, is the strictest; lower values give longer phase blocks with more wrong links.
     #[arg(
         long,
-        default_value_t = crate::neighbour_evidence::phase::MIN_PATH_AGREEMENT,
+        default_value = "1",
         value_parser = calling_run::parse_path_agreement,
         help_heading = "Advanced"
     )]
-    pub phase_min_path_agreement: f64,
+    pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
 
     /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
     ///

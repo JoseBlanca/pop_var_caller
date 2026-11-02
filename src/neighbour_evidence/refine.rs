@@ -36,8 +36,8 @@ use super::model::{
     walk_and_draw_paths,
 };
 use super::phase::{
-    EXTRA_PATHS_PER_ROUND, LastBlock, MIN_PATH_AGREEMENT, PairLayout, SamplePhase, WrittenPhase,
-    written_in_core,
+    EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PathAgreement, SamplePhase,
+    WrittenPhase, join_and_name_core_blocks,
 };
 use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
@@ -187,15 +187,18 @@ struct SampleSolution {
 /// **How a window is solved: in one round, or in phasing's rounds** (phasing spec §2.1, §5). One
 /// round is the pass without phasing. With phasing the genotypes are averaged over rounds 2 to the
 /// last, the window's draws are keyed by `window_key`, and each averaged round draws
-/// `extra_paths` more paths for the phase's link test, a link kept where `min_path_agreement` of
-/// all paths agree (phase output spec §2.3).
+/// `extra_paths` more paths for the phase's link test, a link kept where `path_agreement` of all
+/// paths agree (phase output spec §2.3).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Phasing {
     rounds: usize,
     window_key: u64,
     extra_paths: usize,
-    min_path_agreement: f64,
+    path_agreement: PathAgreement,
 }
+
+// The default rounds' paths fit the link test's masks.
+const _: () = assert!((PHASING_ROUNDS - 1) * (1 + EXTRA_PATHS_PER_ROUND) <= MAX_PATHS);
 
 impl Phasing {
     /// No phasing: one round, the pass as it was before phasing.
@@ -205,7 +208,7 @@ impl Phasing {
             rounds: 1,
             window_key: 0,
             extra_paths: 0,
-            min_path_agreement: MIN_PATH_AGREEMENT,
+            path_agreement: PathAgreement::ALL,
         }
     }
 
@@ -216,35 +219,35 @@ impl Phasing {
         Self::new(PHASING_ROUNDS, window_key)
     }
 
-    /// `rounds` rounds keyed by `window_key`; one round is [`Phasing::none`].
+    /// `rounds` rounds keyed by `window_key`, each averaged round drawing
+    /// [`EXTRA_PATHS_PER_ROUND`] extra paths, a link kept where all paths agree; one round is
+    /// [`Phasing::none`].
     ///
     /// # Panics
     ///
-    /// If `rounds` is 0.
+    /// If `rounds` is 0, or its averaged rounds would draw more paths than the link test holds
+    /// ([`MAX_PATHS`]: 8 rounds at most with 8 extra paths a round).
     #[must_use]
     pub fn new(rounds: usize, window_key: u64) -> Self {
         assert!(rounds > 0, "a window is solved in at least one round");
+        let paths = (rounds - 1) * (1 + EXTRA_PATHS_PER_ROUND);
+        assert!(
+            paths <= MAX_PATHS,
+            "{rounds} rounds draw {paths} paths; the phase's link test holds {MAX_PATHS}"
+        );
         Self {
             rounds,
             window_key,
             extra_paths: EXTRA_PATHS_PER_ROUND,
-            min_path_agreement: MIN_PATH_AGREEMENT,
+            path_agreement: PathAgreement::ALL,
         }
     }
 
-    /// The same, a link kept where `share` of the paths agree (`--phase-min-path-agreement`).
-    ///
-    /// # Panics
-    ///
-    /// If `share` is not in `(0, 1]`.
+    /// The same, a link kept where `agreement` of the paths agree (`--phase-min-path-agreement`).
     #[must_use]
-    pub fn with_min_path_agreement(self, share: f64) -> Self {
-        assert!(
-            share > 0.0 && share <= 1.0,
-            "a path agreement is a share in (0, 1]: got {share}"
-        );
+    pub fn with_path_agreement(self, agreement: PathAgreement) -> Self {
         Self {
-            min_path_agreement: share,
+            path_agreement: agreement,
             ..self
         }
     }
@@ -666,6 +669,11 @@ pub fn refine_window_joined(
             continue;
         };
         checks[sample] = solution.check;
+        assert_eq!(
+            solution.sites.len(),
+            solution.phases.len(),
+            "one phase a solved site"
+        );
         for (&(record, outcome, start, background), &phase) in
             solution.sites.iter().zip(&solution.phases)
         {
@@ -990,7 +998,12 @@ fn final_solution(
         solution.posteriors.extend_from_slice(&posterior);
     }
     // The phase, at the heterozygotes called in the core and the last written block's records in
-    // the margin, joined to that block where they agree (phase output spec §2.2–§2.4).
+    // the left margin, joined to that block where they agree (phase output spec §2.2–§2.4).
+    // The core's first record; with no site in the core every record is before it.
+    let core_start = layout
+        .core_sites
+        .first()
+        .map_or(usize::MAX, |&site| layout.record_of_site[site]);
     let phases = match &state.phase {
         Some(phase) => {
             let positions: Vec<u64> = layout
@@ -998,38 +1011,29 @@ fn final_solution(
                 .iter()
                 .map(|&index| records[index].position)
                 .collect();
-            let written: Vec<(usize, usize)> = last_block
-                .map(|block| {
-                    block
-                        .records
-                        .iter()
-                        .map(|record| {
-                            let site = layout.site(record.record);
-                            assert!(
-                                !layout.core_sites.contains(&site),
-                                "a last block's record is in the margin"
-                            );
-                            heterozygotes[site] = Some((
-                                record.first.min(record.second),
-                                record.first.max(record.second),
-                            ));
-                            (site, record.first)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let phased = phase.phased(
+            for record in last_block.iter().flat_map(|block| &block.records) {
+                assert!(
+                    record.record < core_start,
+                    "a last block's record is in the window's left margin"
+                );
+                // A record an earlier window phased was a walk site there, and whether a record is
+                // one depends on the record alone, so it is one here.
+                let (a, b) = (record.copy_0_allele, record.copy_1_allele);
+                heterozygotes[layout.site(record.record)] = Some((a.min(b), a.max(b)));
+            }
+            let phased = phase.phase_heterozygotes(
                 pairs_layout,
                 &heterozygotes,
                 &positions,
                 parameters.segment_bases,
-                phasing.min_path_agreement,
+                phasing.path_agreement,
             );
-            written_in_core(
+            join_and_name_core_blocks(
                 &phased,
                 |site| layout.core_sites.binary_search(&site).is_ok(),
                 &positions,
-                last_block.map(|block| (block.block, written.as_slice())),
+                last_block,
+                |record| layout.site(record),
             )
         }
         None => vec![None; layout.sites()],

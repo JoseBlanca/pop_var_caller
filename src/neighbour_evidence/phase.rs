@@ -14,6 +14,10 @@
 //! After the last round a sample's heterozygous calls whose consensus leans by at least
 //! [`LEAN_MIN`] are linked in order, a link kept when enough paths give the two records the
 //! consensus's relative orientation and lean at both; blocks of one record are written unphased.
+//! A window's first block continues the sample's last written block where the two windows'
+//! overlap shows how (§2.4).
+
+use std::collections::BTreeMap;
 
 use super::model::HaplotypePair;
 
@@ -22,26 +26,75 @@ use super::model::HaplotypePair;
 /// (`doc/devel/ng/research/neighbour_evidence/phase_blocks_check_2026-11-02.md`).
 pub const EXTRA_PATHS_PER_ROUND: usize = 8;
 
+/// **The most paths a window can record**: one bit a path in a 64-bit mask. Rounds × paths a round
+/// must stay within it; `refine::Phasing::new` checks.
+pub const MAX_PATHS: usize = u64::BITS as usize;
+
 /// **How far a pair of copies must lean on a record's two alleles to count** (spec §2.2): the lean
 /// `w − w′`, with `w = h₀(a)·h₁(b)` and `w′ = h₀(b)·h₁(a)`, at least this in size — for a
 /// biallelic record the prototype's `|h₀ − h₁| ≥ 0.5`.
 pub const LEAN_MIN: f64 = 0.5;
 
-/// **The share of paths that must agree, and lean, at a link by default** (spec §9): all of them.
-pub const MIN_PATH_AGREEMENT: f64 = 1.0;
+/// **The share of drawn paths that must agree at a link, and lean at both its records**
+/// (`--phase-min-path-agreement`, spec §9): a number in `(0, 1]`, all of them by default. The
+/// count of paths it asks for is rounded up, so 0.7 of 36 paths is 26.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PathAgreement(f64);
 
-/// The alignment's cost of a record whose state disagrees with it, and of a change of state
-/// (spec §2.1, soft).
-const DISAGREEMENT_COST: f64 = 1.0;
-const SWITCH_COST: f64 = 2.0;
+impl PathAgreement {
+    /// All paths: the rule of spec §2.3.
+    pub const ALL: Self = Self(1.0);
 
-/// **One phased record of one sample, as written**: copy 0's allele and copy 1's, in the record's
-/// alleles as the pass read them, and the block's `PS`.
+    /// The share `share`, or `None` when it is not in `(0, 1]` (NaN included).
+    #[must_use]
+    pub fn try_new(share: f64) -> Option<Self> {
+        (share > 0.0 && share <= 1.0).then_some(Self(share))
+    }
+
+    /// The share.
+    #[must_use]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+
+    /// How many of `paths` paths must agree: the share of them, rounded up.
+    fn paths_needed(self, paths: u32) -> u32 {
+        (self.0 * f64::from(paths)).ceil() as u32
+    }
+}
+
+impl Default for PathAgreement {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+/// The alignment's cost of a marked record whose state disagrees with it (spec §2.1, soft).
+pub const DISAGREEMENT_COST: f64 = 1.0;
+
+/// The alignment's cost of a change of state between two marked records (spec §2.1, soft): with
+/// 2, a stretch is swapped back only if it holds at least five marked records inside the window,
+/// or three at its end.
+pub const SWITCH_COST: f64 = 2.0;
+
+/// **One phased record of one sample, as written**: the allele on copy 0 and the allele on copy 1,
+/// in the record's alleles as the pass read them, and the phase set (`PS`) it belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WrittenPhase {
-    pub first: usize,
-    pub second: usize,
-    pub block: u64,
+    pub copy_0_allele: usize,
+    pub copy_1_allele: usize,
+    pub phase_set: u64,
+}
+
+impl WrittenPhase {
+    /// The same record with its two copies swapped.
+    fn swapped(self) -> Self {
+        Self {
+            copy_0_allele: self.copy_1_allele,
+            copy_1_allele: self.copy_0_allele,
+            ..self
+        }
+    }
 }
 
 /// **Where each site's allele pairs sit** among a sample's pair entries: a site of `A` alleles has
@@ -72,18 +125,28 @@ impl PairLayout {
     }
 }
 
-/// Each path's bits at one pair entry: bit `p` of `towards_first` says path `p`'s copy 0 leans to
-/// the pair's first allele, bit `p` of `leans` that it leans by at least [`LEAN_MIN`].
+/// Each path's bits at one pair entry: bit `p` of `towards_lower` says path `p`'s copy 0 leans to
+/// the pair's lower-numbered allele, bit `p` of `leans` that it leans by at least [`LEAN_MIN`].
 #[derive(Clone, Copy, Debug, Default)]
 struct PathBits {
-    towards_first: u64,
+    towards_lower: u64,
     leans: u64,
 }
 
 /// **The lean of two copies on alleles `a` and `b`**: `h₀(a)·h₁(b) − h₀(b)·h₁(a)`, positive when
 /// copy 0 carries `a` and copy 1 `b` rather than the reverse.
-fn lean(first: &[f64], second: &[f64], a: usize, b: usize) -> f64 {
-    first[a] * second[b] - first[b] * second[a]
+fn lean(copy_0: &[f64], copy_1: &[f64], a: usize, b: usize) -> f64 {
+    copy_0[a] * copy_1[b] - copy_0[b] * copy_1[a]
+}
+
+/// A heterozygote the consensus leans on: its site, its alleles `a < b`, the paths' bits there,
+/// and whether the consensus's copy 0 carries `a`.
+#[derive(Clone, Copy)]
+struct Candidate {
+    site: usize,
+    alleles: (usize, usize),
+    bits: PathBits,
+    towards_lower: bool,
 }
 
 /// **One sample's phase across a window's averaged rounds.**
@@ -121,43 +184,51 @@ impl SamplePhase {
     ///
     /// # Panics
     ///
-    /// If more than 64 paths are recorded.
+    /// If more than [`MAX_PATHS`] paths are recorded; `refine::Phasing::new` refuses round counts
+    /// that would.
     pub(super) fn record_path(&mut self, pairs: &PairLayout, haplotypes: &[HaplotypePair]) {
-        assert!(self.paths < 64, "at most 64 paths a window");
+        assert!(
+            (self.paths as usize) < MAX_PATHS,
+            "at most {MAX_PATHS} paths a window"
+        );
         let bit = 1_u64 << self.paths;
-        for (site, [first, second]) in haplotypes.iter().enumerate() {
-            let alleles = first.len();
+        for (site, [copy_0, copy_1]) in haplotypes.iter().enumerate() {
+            let alleles = copy_0.len();
+            // A site's pairs are consecutive entries, in the order the two loops visit them.
+            let mut entry = pairs.entry(site, 0, 1, alleles.max(2));
             for a in 0..alleles {
                 for b in a + 1..alleles {
-                    let entry = &mut self.bits[pairs.entry(site, a, b, alleles)];
-                    let lean = lean(first, second, a, b);
+                    let bits = &mut self.bits[entry];
+                    let lean = lean(copy_0, copy_1, a, b);
                     if lean > 0.0 {
-                        entry.towards_first |= bit;
+                        bits.towards_lower |= bit;
                     }
                     if lean.abs() >= LEAN_MIN {
-                        entry.leans |= bit;
+                        bits.leans |= bit;
                     }
+                    entry += 1;
                 }
             }
         }
         self.paths += 1;
     }
 
-    /// The consensus's two haplotypes at `site`, `A` probabilities a copy.
-    fn consensus(&self, site: usize) -> (Vec<f64>, Vec<f64>) {
+    /// The consensus's two haplotypes at `site`, `A` probabilities a copy, into the two buffers.
+    fn consensus_into(&self, site: usize, copy_0: &mut Vec<f64>, copy_1: &mut Vec<f64>) {
         let start = self.sum_offsets[site];
         let stored = (self.sum_offsets[site + 1] - start) / 2;
         let count = f64::from(self.rounds_added.max(1));
-        let copy = |from: usize| -> Vec<f64> {
-            let mut copy: Vec<f64> = self.sums[from..from + stored]
-                .iter()
-                .map(|&sum| f64::from(sum) / count)
-                .collect();
+        for (copy, from) in [(copy_0, start), (copy_1, start + stored)] {
+            copy.clear();
+            copy.extend(
+                self.sums[from..from + stored]
+                    .iter()
+                    .map(|&sum| f64::from(sum) / count),
+            );
             // f32 rounding can take the stored ones a hair past one.
-            copy.push((1.0 - copy.iter().sum::<f64>()).max(0.0));
-            copy
-        };
-        (copy(start), copy(start + stored))
+            let rest = (1.0 - copy.iter().sum::<f64>()).max(0.0);
+            copy.push(rest);
+        }
     }
 
     /// **Lines a round's own haplotypes up with the consensus and adds them** (spec §2.1).
@@ -165,22 +236,22 @@ impl SamplePhase {
         let swapped = if self.rounds_added == 0 {
             vec![false; haplotypes.len()]
         } else {
-            self.alignment(haplotypes)
+            self.align(haplotypes)
         };
-        for (site, ([first, second], &swap)) in haplotypes.iter().zip(&swapped).enumerate() {
-            let (first, second) = if swap {
-                (second, first)
+        for (site, ([copy_0, copy_1], &swap)) in haplotypes.iter().zip(&swapped).enumerate() {
+            let (copy_0, copy_1) = if swap {
+                (copy_1, copy_0)
             } else {
-                (first, second)
+                (copy_0, copy_1)
             };
             let start = self.sum_offsets[site];
-            let stored = first.len() - 1;
-            for (sum, value) in self.sums[start..start + stored].iter_mut().zip(first) {
+            let stored = copy_0.len() - 1;
+            for (sum, value) in self.sums[start..start + stored].iter_mut().zip(copy_0) {
                 *sum += *value as f32;
             }
             for (sum, value) in self.sums[start + stored..start + 2 * stored]
                 .iter_mut()
-                .zip(second)
+                .zip(copy_1)
             {
                 *sum += *value as f32;
             }
@@ -188,16 +259,17 @@ impl SamplePhase {
         self.rounds_added += 1;
     }
 
-    /// Whether to swap the round's copies at each site: the cheapest path of two states over the
-    /// sites where both the consensus and the round lean by at least [`LEAN_MIN`] on the allele the
-    /// consensus's copies differ most on, ties to "kept"; each site takes the state of the last such
-    /// site at or before it, the first such site's before it.
-    fn alignment(&self, haplotypes: &[HaplotypePair]) -> Vec<bool> {
+    /// **Whether to swap the round's copies at each site**: the cheapest path of two states over
+    /// the sites where both the consensus and the round lean by at least [`LEAN_MIN`] on the allele
+    /// the consensus's copies differ most on, ties to "kept"; each site takes the state of the last
+    /// such site at or before it, the first such site's before it.
+    fn align(&self, haplotypes: &[HaplotypePair]) -> Vec<bool> {
+        let (mut consensus_0, mut consensus_1) = (Vec::new(), Vec::new());
         let mut marked: Vec<(usize, bool)> = Vec::new();
-        for (site, [first, second]) in haplotypes.iter().enumerate() {
-            let (consensus_first, consensus_second) = self.consensus(site);
-            let (allele, difference) = (0..first.len())
-                .map(|allele| (allele, consensus_first[allele] - consensus_second[allele]))
+        for (site, [copy_0, copy_1]) in haplotypes.iter().enumerate() {
+            self.consensus_into(site, &mut consensus_0, &mut consensus_1);
+            let (allele, difference) = (0..copy_0.len())
+                .map(|allele| (allele, consensus_0[allele] - consensus_1[allele]))
                 .fold((0, 0.0_f64), |best, next| {
                     if next.1.abs() > best.1.abs() {
                         next
@@ -205,7 +277,7 @@ impl SamplePhase {
                         best
                     }
                 });
-            let round_difference = first[allele] - second[allele];
+            let round_difference = copy_0[allele] - copy_1[allele];
             if difference.abs() >= LEAN_MIN && round_difference.abs() >= LEAN_MIN {
                 marked.push((site, (difference > 0.0) == (round_difference > 0.0)));
             }
@@ -257,83 +329,83 @@ impl SamplePhase {
         swapped
     }
 
-    /// **The sample's phased records**, given the candidates: per site, the written genotype's two
-    /// alleles `(a, b)`, `a < b`, where it is a heterozygote the pass called, and `None` elsewhere;
-    /// `positions` the sites' positions; `segment_bases` the sample's copying length `S`, beyond
-    /// which no link is kept; `min_agreement` the share of paths that must agree at a link. Returns
-    /// one entry per site.
-    pub(super) fn phased(
+    /// **Phases the sample's heterozygotes in blocks** (spec §2.2, §2.3). `heterozygotes` holds,
+    /// per site, the written genotype's two alleles `(a, b)`, `a < b`, where it is a heterozygote
+    /// the pass called, and `None` elsewhere; `positions` the sites' positions; `segment_bases`
+    /// the sample's copying length `S`, beyond which no link is kept; `agreement` the share of paths
+    /// that must agree at a link. Each block is named by its first record's position. Returns one
+    /// entry per site.
+    pub(super) fn phase_heterozygotes(
         &self,
         pairs: &PairLayout,
         heterozygotes: &[Option<(usize, usize)>],
         positions: &[u64],
         segment_bases: f64,
-        min_agreement: f64,
+        agreement: PathAgreement,
     ) -> Vec<Option<WrittenPhase>> {
         let mut out = vec![None; heterozygotes.len()];
         if self.paths == 0 {
             return out;
         }
-        let all_paths = if self.paths == 64 {
+        let all_paths = if self.paths as usize == MAX_PATHS {
             u64::MAX
         } else {
             (1_u64 << self.paths) - 1
         };
-        let needed = (min_agreement * f64::from(self.paths)).ceil() as u32;
-        // Candidates: the consensus leans on the genotype's pair. `towards_first` is the consensus's
-        // orientation, copy 0 carrying the pair's first allele.
-        let mut candidates: Vec<(usize, PathBits, bool)> = Vec::new();
-        for (site, heterozygote) in heterozygotes.iter().enumerate() {
-            let Some((a, b)) = *heterozygote else {
-                continue;
+        let needed = agreement.paths_needed(self.paths);
+        let (mut consensus_0, mut consensus_1) = (Vec::new(), Vec::new());
+        let candidates: Vec<Candidate> = heterozygotes
+            .iter()
+            .enumerate()
+            .filter_map(|(site, heterozygote)| {
+                let (a, b) = (*heterozygote)?;
+                self.consensus_into(site, &mut consensus_0, &mut consensus_1);
+                let lean = lean(&consensus_0, &consensus_1, a, b);
+                (lean.abs() >= LEAN_MIN).then(|| Candidate {
+                    site,
+                    alleles: (a, b),
+                    bits: self.bits[pairs.entry(site, a, b, consensus_0.len())],
+                    towards_lower: lean > 0.0,
+                })
+            })
+            .collect();
+        // A link is kept within S where enough paths give the two records the consensus's relation
+        // — their two bits' exclusive-or — and lean at both.
+        let linked = |before: &Candidate, after: &Candidate| -> bool {
+            let near = (positions[after.site] - positions[before.site]) as f64 <= segment_bases;
+            let same_relation = !(after.bits.towards_lower ^ before.bits.towards_lower);
+            let agreeing = if after.towards_lower == before.towards_lower {
+                same_relation
+            } else {
+                !same_relation
             };
-            let (first, second) = self.consensus(site);
-            let lean = lean(&first, &second, a, b);
-            if lean.abs() >= LEAN_MIN {
-                let entry = self.bits[pairs.entry(site, a, b, first.len())];
-                candidates.push((site, entry, lean > 0.0));
-            }
-        }
-        let mut blocks: Vec<Vec<(usize, bool)>> = Vec::new();
-        let mut current: Vec<(usize, bool)> = Vec::new();
-        let mut previous: Option<(usize, PathBits, bool)> = None;
-        for &(site, bits, towards_first) in &candidates {
-            let kept = previous.is_some_and(|(before, before_bits, before_towards)| {
-                let near = (positions[site] - positions[before]) as f64 <= segment_bases;
-                let same_relation = towards_first == before_towards;
-                // A path agrees where its two bits' relation is the consensus's, and leans at both.
-                let relation = !(bits.towards_first ^ before_bits.towards_first);
-                let agreeing = if same_relation { relation } else { !relation };
-                let agree = agreeing & bits.leans & before_bits.leans & all_paths;
-                near && agree.count_ones() >= needed
-            });
-            if previous.is_some()
-                && !kept
-                && previous.is_some_and(|(before, _, _)| positions[before] == positions[site])
-            {
+            let agree = agreeing & after.bits.leans & before.bits.leans & all_paths;
+            near && agree.count_ones() >= needed
+        };
+        let mut blocks: Vec<Vec<Candidate>> = Vec::new();
+        for candidate in candidates {
+            match blocks.last_mut() {
+                Some(block) if linked(&block[block.len() - 1], &candidate) => block.push(candidate),
                 // A broken link between two records at one position: the second stays unphased,
                 // so two blocks never share a PS (spec §2.3).
-                continue;
+                Some(block)
+                    if positions[block[block.len() - 1].site] == positions[candidate.site] => {}
+                _ => blocks.push(vec![candidate]),
             }
-            if !kept && !current.is_empty() {
-                blocks.push(std::mem::take(&mut current));
-            }
-            current.push((site, towards_first));
-            previous = Some((site, bits, towards_first));
-        }
-        if !current.is_empty() {
-            blocks.push(current);
         }
         for block in blocks.iter().filter(|block| block.len() >= 2) {
-            let ps = positions[block[0].0];
-            for &(site, towards_first) in block {
-                // PANIC-FREE: every candidate site has a heterozygote.
-                let (a, b) = heterozygotes[site].expect("a candidate is a heterozygote");
-                let (first, second) = if towards_first { (a, b) } else { (b, a) };
-                out[site] = Some(WrittenPhase {
-                    first,
-                    second,
-                    block: ps,
+            let phase_set = positions[block[0].site];
+            for candidate in block {
+                let (a, b) = candidate.alleles;
+                let (copy_0_allele, copy_1_allele) = if candidate.towards_lower {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                out[candidate.site] = Some(WrittenPhase {
+                    copy_0_allele,
+                    copy_1_allele,
+                    phase_set,
                 });
             }
         }
@@ -343,97 +415,99 @@ impl SamplePhase {
 
 /// **How many shared records join two windows' blocks** (spec §2.4, soft): the records of the
 /// last written block nearest the core boundary that the new window also phases. With 3, no join
-/// was wrong in 57 on four simulated cohorts; 2 added 13 joins, none wrong
+/// was wrong in 53 on four simulated cohorts; 2 added 11 joins, none wrong
 /// (`phase_blocks_check_2026-11-02.md`).
-pub const JOIN_RECORDS: usize = 3;
+pub const SHARED_RECORDS_TO_JOIN: usize = 3;
 
 /// **One record of a sample's last written block, as the next window sees it**: the record's index
-/// in the window, and the allele the earlier window wrote on copy 0, and on copy 1.
+/// in the window, and the alleles the earlier window wrote on copy 0 and copy 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JoinRecord {
     pub record: usize,
-    pub first: usize,
-    pub second: usize,
+    pub copy_0_allele: usize,
+    pub copy_1_allele: usize,
 }
 
-/// **A sample's last written block** (spec §2.4): its `PS` and its records inside the window's
-/// left margin, ascending.
+/// **A sample's last written block** (spec §2.4): its phase set and its records inside the
+/// window's left margin, ascending.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LastBlock {
-    pub block: u64,
+    pub phase_set: u64,
     pub records: Vec<JoinRecord>,
 }
 
-/// **The phase a window writes in its core** (spec §2.4, §2.5), from `phased` — [`SamplePhase::phased`]
-/// over the window's core and the last written block's margin records, each named by its first
-/// record's position. `in_core(site)` says which sites the window writes; `last` is the last
-/// written block, its `PS` and, per margin site of it, the allele written on copy 0.
+/// **Joins a window's blocks to the last written block and names them** (spec §2.4, §2.5), from
+/// `phased` — [`SamplePhase::phase_heterozygotes`] over the window's core and the last written
+/// block's margin records. `in_core(site)` says which sites the window writes; `site_of(record)`
+/// turns a [`JoinRecord::record`] into a site.
 ///
-/// The window's block that holds its first phased core record continues the last written block —
-/// keeps its `PS`, its orientation swapped as a whole if need be — when the last
-/// [`JOIN_RECORDS`] of the block's margin records the window phases all lie in that block and the
-/// two windows' relative orientation is the same at all of them. Every other block is named by
-/// its first core record's position, and a block with one core record is written unphased.
-pub(super) fn written_in_core(
+/// The window's block that holds its first phased core record continues `last` — keeps its phase
+/// set, its orientation swapped as a whole if need be — when the [`SHARED_RECORDS_TO_JOIN`] of
+/// `last`'s records nearest the core that the window phases all lie in that block, and the two
+/// windows' relative orientation is the same at all of them. Every other block is named by its
+/// first core record's position, and a block with one core record is written unphased. Returns
+/// one entry per site, `None` outside the core.
+pub(super) fn join_and_name_core_blocks(
     phased: &[Option<WrittenPhase>],
     in_core: impl Fn(usize) -> bool,
     positions: &[u64],
-    last: Option<(u64, &[(usize, usize)])>,
+    last: Option<&LastBlock>,
+    site_of: impl Fn(usize) -> usize,
 ) -> Vec<Option<WrittenPhase>> {
-    let first_core = (0..phased.len()).find(|&site| in_core(site) && phased[site].is_some());
-    let joined: Option<(u64, bool)> = match (last, first_core) {
-        (Some((_, written)), Some(first_core)) => {
-            // PANIC-FREE: `first_core` is a phased site.
-            let block = phased[first_core].expect("phased").block;
-            let shared: Vec<(WrittenPhase, usize)> = written
+    // Each block's core records, keyed by the window's name for the block.
+    let mut core_blocks: BTreeMap<u64, Vec<(usize, WrittenPhase)>> = BTreeMap::new();
+    for (site, phase) in phased.iter().enumerate() {
+        if let (true, Some(phase)) = (in_core(site), phase) {
+            core_blocks
+                .entry(phase.phase_set)
+                .or_default()
+                .push((site, *phase));
+        }
+    }
+    let first_core_block = phased
+        .iter()
+        .enumerate()
+        .find_map(|(site, phase)| phase.filter(|_| in_core(site)))
+        .map(|phase| phase.phase_set);
+    // The join: the block it continues in this window, whether it is swapped, and the phase set.
+    let join: Option<(u64, bool, u64)> = match (last, first_core_block) {
+        (Some(last), Some(block)) => {
+            let shared: Vec<(WrittenPhase, usize)> = last
+                .records
                 .iter()
-                .filter_map(|&(site, first)| phased[site].map(|phase| (phase, first)))
+                .filter_map(|record| {
+                    phased[site_of(record.record)].map(|phase| (phase, record.copy_0_allele))
+                })
                 .collect();
-            let nearest = &shared[shared.len().saturating_sub(JOIN_RECORDS)..];
-            let same: Vec<bool> = nearest
-                .iter()
-                .map(|(phase, first)| phase.first == *first)
-                .collect();
-            (nearest.len() == JOIN_RECORDS
-                && nearest.iter().all(|(phase, _)| phase.block == block)
-                && same.iter().all(|&same_way| same_way == same[0]))
-            .then(|| (block, !same[0]))
+            let nearest = &shared[shared.len().saturating_sub(SHARED_RECORDS_TO_JOIN)..];
+            let in_block = nearest.iter().all(|(phase, _)| phase.phase_set == block);
+            match nearest {
+                [(phase, written), rest @ ..]
+                    if nearest.len() == SHARED_RECORDS_TO_JOIN && in_block =>
+                {
+                    let same_way = phase.copy_0_allele == *written;
+                    rest.iter()
+                        .all(|(phase, written)| (phase.copy_0_allele == *written) == same_way)
+                        .then_some((block, !same_way, last.phase_set))
+                }
+                _ => None,
+            }
         }
         _ => None,
     };
-    let mut core_members: std::collections::HashMap<u64, Vec<usize>> = Default::default();
-    for site in (0..phased.len()).filter(|&site| in_core(site)) {
-        if let Some(phase) = phased[site] {
-            core_members.entry(phase.block).or_default().push(site);
-        }
-    }
     let mut out = vec![None; phased.len()];
-    for (block, sites) in core_members {
-        match joined {
-            Some((joined_block, swap)) if joined_block == block => {
-                // PANIC-FREE: a join needs a last written block.
-                let (written_block, _) = last.expect("a join has a last block");
-                for site in sites {
-                    let phase = phased[site].expect("a member is phased");
-                    let (first, second) = if swap {
-                        (phase.second, phase.first)
-                    } else {
-                        (phase.first, phase.second)
-                    };
-                    out[site] = Some(WrittenPhase {
-                        first,
-                        second,
-                        block: written_block,
-                    });
+    for (block, members) in core_blocks {
+        match join {
+            Some((joined, swap, phase_set)) if joined == block => {
+                for (site, phase) in members {
+                    let phase = if swap { phase.swapped() } else { phase };
+                    out[site] = Some(WrittenPhase { phase_set, ..phase });
                 }
             }
-            _ if sites.len() >= 2 => {
-                let named = positions[sites[0]];
-                for site in sites {
-                    out[site] = phased[site].map(|phase| WrittenPhase {
-                        block: named,
-                        ..phase
-                    });
+            _ if members.len() >= 2 => {
+                let phase_set = positions[members[0].0];
+                for (site, phase) in members {
+                    out[site] = Some(WrittenPhase { phase_set, ..phase });
                 }
             }
             _ => {}

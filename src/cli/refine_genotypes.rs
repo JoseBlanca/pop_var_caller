@@ -30,8 +30,7 @@ use crate::cli::run_output::{self, LogFileError};
 use crate::neighbour_evidence::stage::{NeighbourEvidenceSwitch, decide};
 use crate::types::{ContigId, GenomePosition, Ploidy, Position};
 use crate::vcf::header::{
-    HeaderContig, HeaderMetadataError, PHASE_SET_DECLARATION, PHASED_GENOTYPE_DECLARATION,
-    VcfHeaderMetadata,
+    HeaderContig, HeaderMetadataError, VcfHeaderMetadata, phased_genotype_declarations,
 };
 use crate::vcf::{RecordPlace, VcfWriteError, VcfWriter};
 
@@ -70,10 +69,10 @@ pub struct RefineGenotypesArgs {
     /// sites are phased for the VCF to phase them together. 1, all of them, is the strictest.
     #[arg(
         long,
-        default_value_t = crate::neighbour_evidence::phase::MIN_PATH_AGREEMENT,
+        default_value = "1",
         value_parser = calling_run::parse_path_agreement
     )]
-    pub phase_min_path_agreement: f64,
+    pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
 }
 
 /// What stops `pvc refine-genotypes`.
@@ -185,7 +184,7 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
     }
     let (inbreeding, ploidy) = read_parameters(args, &header)?;
     let decision = decide(NeighbourEvidenceSwitch::On, &inbreeding, ploidy)
-        .with_min_path_agreement(args.phase_min_path_agreement);
+        .with_path_agreement(args.phase_min_path_agreement);
     if !decision.ran {
         return Err(RefineGenotypesCliError::CannotRun {
             path: args.vcf.clone(),
@@ -218,8 +217,7 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
         }
         // `GT` now says it is phased where `PS` is set, and `PS` is declared beside it.
         if line.starts_with("##FORMAT=<ID=GT,") {
-            out_header.push(PHASED_GENOTYPE_DECLARATION.to_string());
-            out_header.push(PHASE_SET_DECLARATION.to_string());
+            out_header.extend(phased_genotype_declarations());
             declared_phase = true;
             continue;
         }
@@ -240,8 +238,7 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
         ));
     }
     if !declared_phase {
-        out_header.push(PHASED_GENOTYPE_DECLARATION.to_string());
-        out_header.push(PHASE_SET_DECLARATION.to_string());
+        out_header.extend(phased_genotype_declarations());
     }
     out_header.push(header.column_line.clone());
     let mut header_text = out_header.join("\n");
@@ -279,12 +276,11 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
             continue;
         }
         if has_a_phased_genotype(&line) {
+            let mut fields = line.split('\t');
+            let (contig, position) = (fields.next().unwrap_or("?"), fields.next().unwrap_or("?"));
             return Err(RefineGenotypesCliError::AlreadyPhased {
                 path: args.vcf.clone(),
-                what: format!(
-                    "a GT has `|`: {}",
-                    line.chars().take(80).collect::<String>()
-                ),
+                what: format!("the record at {contig}:{position} has a GT with `|`"),
             });
         }
         let place = place_of_line(&line, &contig_ids).ok_or_else(|| {

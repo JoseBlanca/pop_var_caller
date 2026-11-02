@@ -264,16 +264,16 @@ fn a_phased_column_is_written_with_its_block() {
     let posteriors: Vec<f64> = heterozygous.iter().copied().cycle().take(18).collect();
     let phases = vec![
         Some(WrittenPhase {
-            first: 2,
-            second: 0,
-            block: 40,
+            copy_0_allele: 2,
+            copy_1_allele: 0,
+            phase_set: 40,
         }),
         None,
         // A phase for a genotype the column is not written with is ignored.
         Some(WrittenPhase {
-            first: 1,
-            second: 0,
-            block: 40,
+            copy_0_allele: 1,
+            copy_1_allele: 0,
+            phase_set: 40,
         }),
     ];
     let (text, _) = rewrite_phased(&source, vec![Outcome::Called; 3], posteriors, phases);
@@ -289,4 +289,35 @@ fn a_phased_column_is_written_with_its_block() {
     assert!(columns[2].starts_with("0/1:"), "{}", columns[2]);
     assert_eq!(columns[2].split(':').count(), 8, "{}", columns[2]);
     assert!(columns[2].ends_with(":."), "{}", columns[2]);
+}
+
+/// **A phase is written only on a column the pass called** (phase output spec §7.4): the same
+/// phase on an unchanged column and on a withheld one writes no `|` and `PS` `.`.
+#[test]
+fn a_phase_on_an_uncalled_column_is_not_written() {
+    let source = line(
+        &[
+            "0/1:20:5:2,3:30,0,30:0,1,0",
+            "./.:.:0:0,0:0,0,0:0.25,0.5,0.25",
+        ],
+        "C",
+        "AF=0.5;AC=1;AN=2",
+        BIALLELIC_FORMAT,
+    );
+    let phase = Some(WrittenPhase {
+        copy_0_allele: 1,
+        copy_1_allele: 0,
+        phase_set: 100,
+    });
+    let (text, _) = rewrite_phased(
+        &source,
+        vec![Outcome::Unchanged, Outcome::Withheld],
+        vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+        vec![phase, phase],
+    );
+    let text = text.expect("kept");
+    let columns = sample_columns(&text);
+    assert_eq!(columns[0], "0/1:20:5:2,3:30,0,30:0,1,0:.");
+    assert!(columns[1].starts_with("./.:"), "{}", columns[1]);
+    assert!(columns[1].ends_with(":."), "{}", columns[1]);
 }

@@ -699,25 +699,28 @@ fn the_written_phase_follows_the_true_copies() {
             let Some(phase) = record.phases[sample] else {
                 continue;
             };
-            assert_ne!(phase.first, phase.second, "only heterozygotes are phased");
-            assert!(phase.block <= cohort.records[index].position);
-            *block_sizes.entry(phase.block).or_default() += 1;
-            if block_sizes[&phase.block] == 1 {
+            assert_ne!(
+                phase.copy_0_allele, phase.copy_1_allele,
+                "only heterozygotes are phased"
+            );
+            assert!(phase.phase_set <= cohort.records[index].position);
+            *block_sizes.entry(phase.phase_set).or_default() += 1;
+            if block_sizes[&phase.phase_set] == 1 {
                 assert_eq!(
-                    phase.block, cohort.records[index].position,
+                    phase.phase_set, cohort.records[index].position,
                     "PS is the first POS"
                 );
             }
             phased += 1;
             // Right where the record is truly heterozygous and copy 0 carries copy 0's allele.
-            let right = copy_0 != copy_1 && phase.first == copy_0;
+            let right = copy_0 != copy_1 && phase.copy_0_allele == copy_0;
             if let Some((block, was_right)) = previous
-                && block == phase.block
+                && block == phase.phase_set
             {
                 links += 1;
                 flips += usize::from(right != was_right);
             }
-            previous = Some((phase.block, right));
+            previous = Some((phase.phase_set, right));
         }
         assert!(
             block_sizes.values().all(|&size| size >= 2),
@@ -732,4 +735,69 @@ fn the_written_phase_follows_the_true_copies() {
         "{phased} of {heterozygous} phased"
     );
     assert!(flips * 100 <= links, "{flips} flips in {links} links");
+}
+
+/// **A phased window's written phase is the same bits everywhere** (phase output spec §7.5; code
+/// review 2026-11-02: the posteriors' hash never reads the extra paths or the consensus): the
+/// window of [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] at 4×, FNV-1a over each
+/// sample's `[copy 0's allele, copy 1's allele, phase set]` at each record as little-endian `u64`s,
+/// `u64::MAX` three times where unphased. Recorded on macOS arm64 at 19102f1e and unchanged by the
+/// review's fixes; to be checked on Linux x86-64.
+#[test]
+fn a_phased_windows_phase_is_the_same_bits_everywhere() {
+    let cohort = test_cohort(CohortShape {
+        records: 400,
+        inbred: false,
+        depth: 4.0,
+        ..SHAPE
+    });
+    let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.05)).collect();
+    let solved = refine_window_in_rounds(
+        &cohort.records,
+        0..cohort.records.len(),
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+        Phasing::rounds_for(window_key(3, 1_000)),
+    );
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut phased = 0;
+    for record in &solved.records {
+        for phase in &record.phases {
+            let words = match phase {
+                Some(phase) => {
+                    phased += 1;
+                    [
+                        phase.copy_0_allele as u64,
+                        phase.copy_1_allele as u64,
+                        phase.phase_set,
+                    ]
+                }
+                None => [u64::MAX; 3],
+            };
+            for byte in words.iter().flat_map(|word| word.to_le_bytes()) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    assert!(phased > 1_000, "{phased} phased columns");
+    assert_eq!(
+        (hash, phased),
+        (RECORDED_PHASE_BITS, RECORDED_PHASED_COLUMNS),
+        "the phase's bits are {hash:#018x} over {phased} phased columns"
+    );
+}
+
+/// The hash and the count [`a_phased_windows_phase_is_the_same_bits_everywhere`] expects.
+const RECORDED_PHASE_BITS: u64 = 0xd508_e073_3852_7b7f;
+const RECORDED_PHASED_COLUMNS: usize = 2_574;
+
+/// **More rounds than the link test's masks hold are refused when the phasing is set up**, not in
+/// the middle of a window: 9 rounds would draw 8 × 9 = 72 paths, more than 64; 8 rounds draw 63.
+#[test]
+#[should_panic(expected = "72 paths")]
+fn more_rounds_than_the_link_test_holds_are_refused() {
+    let _ = Phasing::new(8, 0);
+    let _ = Phasing::new(9, 0);
 }

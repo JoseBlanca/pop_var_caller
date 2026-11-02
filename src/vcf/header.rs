@@ -598,8 +598,6 @@ const FILTER_DECLARATIONS: &[&str] = &[
     r#"##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">"#,
 ];
 
-/// **Every `FORMAT` field the file can carry, declared** — spec §7.
-/// `GP`'s declaration as calling writes it.
 /// `GT`'s declaration as calling writes it: never phased.
 pub(crate) const UNPHASED_GENOTYPE_DECLARATION: &str =
     r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#;
@@ -611,12 +609,23 @@ pub(crate) const PHASED_GENOTYPE_DECLARATION: &str = r#"##FORMAT=<ID=GT,Number=1
 /// `PS`'s declaration, where the neighbour-evidence pass ran (phase output spec §3).
 pub(crate) const PHASE_SET_DECLARATION: &str = r#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the POS of the first phased record of this block; records of a sample with the same PS are phased together">"#;
 
+/// **What stands in for calling's `GT` declaration where the pass ran**: the phased `GT`, then
+/// `PS` beside it — the one place both writers of a refined header take them from.
+pub(crate) fn phased_genotype_declarations() -> [String; 2] {
+    [
+        PHASED_GENOTYPE_DECLARATION.to_string(),
+        PHASE_SET_DECLARATION.to_string(),
+    ]
+}
+
+/// `GP`'s declaration as calling writes it.
 const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities, VCF genotype order">"#;
 
 /// `GP`'s declaration where the neighbour-evidence pass rewrote it (`neighbour_evidence_pass.md`
 /// §4.1).
 const REFINED_GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">"#;
 
+/// **Every `FORMAT` field the file can carry, declared** — spec §7.
 const FORMAT_DECLARATIONS: &[&str] = &[
     UNPHASED_GENOTYPE_DECLARATION,
     r#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred probability the called genotype is wrong, capped at 99">"#,
@@ -703,17 +712,14 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     let refined = neighbour_evidence
         .as_ref()
         .is_some_and(|decision| decision.ran);
-    lines.extend(FORMAT_DECLARATIONS.iter().map(|declaration| {
+    for declaration in FORMAT_DECLARATIONS {
         if refined && *declaration == GENOTYPE_POSTERIOR_DECLARATION {
-            REFINED_GENOTYPE_POSTERIOR_DECLARATION.to_string()
+            lines.push(REFINED_GENOTYPE_POSTERIOR_DECLARATION.to_string());
         } else if refined && *declaration == UNPHASED_GENOTYPE_DECLARATION {
-            PHASED_GENOTYPE_DECLARATION.to_string()
+            lines.extend(phased_genotype_declarations());
         } else {
-            (*declaration).to_string()
+            lines.push((*declaration).to_string());
         }
-    }));
-    if refined {
-        lines.push(PHASE_SET_DECLARATION.to_string());
     }
 
     let mut headings = FIXED_COLUMN_HEADINGS.to_string();

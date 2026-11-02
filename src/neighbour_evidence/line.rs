@@ -162,8 +162,11 @@ pub(crate) fn rewrite_line(
         .iter()
         .map(|column| {
             let mut values: Vec<String> = column.split(':').map(str::to_string).collect();
-            // A column may drop trailing fields; `PS` must land in its own place.
-            values.resize(field_count, ".".to_string());
+            // A column may drop trailing fields; `PS` must land in its own place. A column with more
+            // fields than `FORMAT` is kept as it is.
+            if values.len() < field_count {
+                values.resize(field_count, ".".to_string());
+            }
             values
         })
         .collect();
@@ -246,11 +249,17 @@ pub(crate) fn rewrite_line(
         let phase = refined.phases[sample].filter(|phase| {
             outcome == Outcome::Called
                 && genotypes[sample]
-                    == Some((phase.first.min(phase.second), phase.first.max(phase.second)))
+                    == Some((
+                        phase.copy_0_allele.min(phase.copy_1_allele),
+                        phase.copy_0_allele.max(phase.copy_1_allele),
+                    ))
         });
         let genotype_text = |genotype: Option<(usize, usize)>| match (genotype, phase) {
             (Some(_), Some(phase)) => {
-                format!("{}|{}", new_index[phase.first], new_index[phase.second])
+                format!(
+                    "{}|{}",
+                    new_index[phase.copy_0_allele], new_index[phase.copy_1_allele]
+                )
             }
             (Some((first, second)), None) => {
                 format!("{}/{}", new_index[first], new_index[second])
@@ -261,7 +270,7 @@ pub(crate) fn rewrite_line(
             column[genotype_at] = genotype_text(genotypes[sample]);
         }
         column[phase_set_at] =
-            phase.map_or_else(|| ".".to_string(), |phase| phase.block.to_string());
+            phase.map_or_else(|| ".".to_string(), |phase| phase.phase_set.to_string());
         let posteriors: Option<Vec<f64>> = if recalled {
             Some(
                 refined.posteriors[sample * genotype_count..(sample + 1) * genotype_count].to_vec(),
@@ -316,7 +325,9 @@ pub(crate) fn rewrite_line(
             column[repeats_at] = match genotypes[sample] {
                 None => ".".to_string(),
                 Some(pair) => phase
-                    .map_or([pair.0, pair.1], |phase| [phase.first, phase.second])
+                    .map_or([pair.0, pair.1], |phase| {
+                        [phase.copy_0_allele, phase.copy_1_allele]
+                    })
                     .iter()
                     .map(|&allele| {
                         repeat_counts[allele].clone().unwrap_or_else(|| {

@@ -1,6 +1,8 @@
 use super::*;
 use crate::neighbour_evidence::test_cohort::{CohortShape, test_cohort};
-use crate::vcf::header::UNPHASED_GENOTYPE_DECLARATION;
+use crate::vcf::header::{
+    PHASE_SET_DECLARATION, PHASED_GENOTYPE_DECLARATION, UNPHASED_GENOTYPE_DECLARATION,
+};
 
 const SAMPLES: usize = 20;
 
@@ -60,7 +62,7 @@ fn args(vcf: PathBuf, parameters: PathBuf, output: PathBuf) -> RefineGenotypesAr
         output,
         threads: 0,
         force: true,
-        phase_min_path_agreement: 1.0,
+        phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
     }
 }
 

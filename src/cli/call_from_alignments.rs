@@ -276,11 +276,11 @@ pub struct CallFromAlignmentsArgs {
     /// them, is the strictest; lower values give longer phase blocks with more wrong links.
     #[arg(
         long,
-        default_value_t = crate::neighbour_evidence::phase::MIN_PATH_AGREEMENT,
+        default_value = "1",
         value_parser = calling_run::parse_path_agreement,
         help_heading = "Advanced"
     )]
-    pub phase_min_path_agreement: f64,
+    pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
 
     /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
