@@ -17,6 +17,7 @@ fn rewrite(
     let rewritten = rewrite_line(
         line,
         &RefinedRecord {
+            background_copy: vec![0.0; outcomes.len()],
             outcomes,
             posteriors,
         },
