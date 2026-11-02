@@ -45,10 +45,10 @@ pass must re-measure them (§8).
 
 ### 1.2 Non-goals
 
-- **Writing phase.** `GT` stays unphased. The pass may phase samples to give each other haplotype
-  templates, as a means to the genotype — specified in
-  [`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md) (owner, 2026-11-02) — but writes
-  no phase.
+- **Phasing — in two companion specs.** The pass phases samples to give each other haplotype
+  templates ([`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md)) and writes the phase
+  in confident blocks ([`neighbour_evidence_phase_output.md`](neighbour_evidence_phase_output.md))
+  (owner, 2026-11-02).
 - **New loci.** A locus pvc did not build stays unbuilt; the pass changes genotypes only. On one
   tomato accession alone at 3×, 42% of the true non-reference genotypes were at such loci (report
   §5.2); that loss belongs to candidate generation, not here.

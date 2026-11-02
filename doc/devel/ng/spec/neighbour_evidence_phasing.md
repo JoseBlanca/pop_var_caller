@@ -66,10 +66,9 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 
 ### 1.2 Non-goals
 
-- **Writing phase.** `GT` stays unphased and no `PS` is written: the haplotypes serve the genotype
-  call. Writing them is *Deferred* (§9).
-- **Phase across windows.** Each window phases its own records; nothing links one window's
-  haplotypes to the next's, because nothing downstream needs it while phase is not written.
+- **Writing phase — in this spec.** The haplotypes serve the genotype call here; writing their phase,
+  in confident blocks joined across windows, is
+  [`neighbour_evidence_phase_output.md`](neighbour_evidence_phase_output.md) (owner, 2026-11-02).
 - **A reference panel.** The cohort phases itself, as the pass's templates come from the cohort.
 - **Read-backed phasing** — reads spanning two heterozygous sites. Out, as for the pass (ruled
   2026-11-01).
@@ -453,9 +452,8 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
 
 ## 9. Deferred, with a recommended home
 
-- **Writing the phase** (`GT` with `|`, `PS`): the haplotypes exist after the pass; writing them
-  needs phase continuity across windows (§1.2). Home: a follow-up spec once phasing accuracy is
-  measured on tomato against the deep accessions.
+- **Writing the phase** (`GT` with `|`, `PS`): now
+  [`neighbour_evidence_phase_output.md`](neighbour_evidence_phase_output.md).
 - **Windows solved in parallel**, for cohorts smaller than the thread count: the stage would hand
   windows to workers and reorder their lines. Home: pass §2.1's "a thread of its own" change.
 - **Viterbi instead of a drawn path**, and **starting from the subtraction**: unmeasured
