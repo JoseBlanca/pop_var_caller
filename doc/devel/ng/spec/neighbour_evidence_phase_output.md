@@ -210,6 +210,22 @@ link.** Measured by the review: first cohort 16 flips in 4,827 links (0.33%) at 
 records, against 31 (0.54%) at 39 with agreement alone; 64-founder 48 in 1,361 (3.5%). With 9 rounds
 for the phase, 64-founder 23 in 1,149 (2.0%) at a block N50 of 8.
 
+**Then made stricter by the prototype check (§7.1;
+[`phase_blocks_check_2026-11-02.md`](../research/neighbour_evidence/phase_blocks_check_2026-11-02.md)):
+each round draws 8 more paths from the same forward probabilities, and the test runs over all 36
+paths (4 rounds × 9).** A link is kept only when every path gives the two records the consensus's
+relative orientation and leans by at least 0.5 at both. The extra paths serve the link test only;
+the round's own path still feeds the next round and the consensus, so genotypes are unchanged. The
+rule passes the 1% ceiling on every inbred and mixed-depth cohort: 0.05% to 0.35% flips inside
+blocks, with 28% to 61% of true heterozygotes phased. The round rule above passes on only two of
+them. It fails on outbred cohorts: 1.2%, 7.8% and 36% (§6). Fewer extra draws are not enough: with
+4, the 64-founder 50-sample cohort is at 1.43%.
+
+In Rust the extra draws share one pass per record. A record's cumulative state weights are built
+once, and each draw picks from them, so 8 draws should cost much less than 8 backward walks
+(unmeasured). The link test needs each path's orientation bit at every record whose paths all lean,
+since only those can be linked: 36 bits, about 5 bytes a record a sample.
+
 A stricter `LEAN_MIN` is **not** a lever on the block rule — above 0.75 no round can disagree — but
 it is one on which records are phased.
 
@@ -354,6 +370,12 @@ flipped (40%) under the plain agreement test — every round agreed on a near-ra
 "confident" does not yet mean the same thing on every cohort. §7.1 sets one ceiling for all cohorts,
 and the Rust build waits until the rule meets it on each.
 
+**Measured with the 36-path rule (§2.3), the outbred cohorts still fail.** At 50 outbred samples
+from 64 founders, 1,977 links have all 36 paths agreeing, and 244 of them (12%) are wrong. The
+draws sample the model's uncertainty given its templates. When the templates do not hold the
+sample's haplotypes, the model is confidently wrong, and no number of draws shows it. Fixing that
+needs a check that does not come from the model's own draws (open, §9).
+
 ---
 
 ## 7. How we know it works
@@ -368,7 +390,16 @@ and the Rust build waits until the rule meets it on each.
      that continue a block, and the flips at joins against the flips inside one window;
    - deep and shallow samples reported apart, and fills apart.
    **The rule passes if the flips inside blocks are at most 1% on every cohort** — one ceiling,
-   whatever the cohort, because "confident" must mean the same everywhere (§6). A cohort may phase
+   whatever the cohort, because "confident" must mean the same everywhere (§6). **The ceiling is
+   meant to become the user's parameter** (owner, 2026-11-02), e.g. `--phase-max-link-error 0.01`:
+   a user who wants longer blocks accepts more wrong links, and one who feeds a tool that trusts
+   `PS` absolutely asks for fewer. That needs a link confidence that *is* an error rate — a number
+   per link whose complement, over the links that pass it, matches the share that flip — so that
+   the parameter is a threshold on it. The plain all-rounds-agree rule is a yes/no and cannot be
+   set to a rate; the draw-based confidence below can (the share of drawn paths that disagree with
+   the consensus at the link). §7.1 measures whether it is calibrated: links binned by it, the
+   observed flip share against the bin's value, on every cohort. If it is, the option is added with
+   1% as its default; if not, the rule stays fixed and the parameter waits. A cohort may phase
    few records; it may not phase them wrongly. Where a cohort misses the ceiling, the rule is made
    stricter by a signal that tightens on its own where the phase is poor, never by excluding the
    cohort. Candidates, each measured before chosen: several paths drawn per round from the same
@@ -415,6 +446,8 @@ Both questions were ruled by the owner on 2026-11-02:
 - **Q2. Phase on a diverse cohort where blocks still flip?** No cohort gate: pvc is a general tool,
   and writing only confident phase must handle every cohort by itself (§6). The ceiling of §7.1
   enforces it.
+- **The 1% ceiling** (owner): a parameter the user may want to set — added as an option if the
+  link confidence proves calibrated (§7.1).
 
 The questions as they were put follow, for the record.
 

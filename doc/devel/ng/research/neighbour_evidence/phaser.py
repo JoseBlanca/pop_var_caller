@@ -3,10 +3,14 @@ each sample's two haplotypes as its templates' contribution, scored on founder_g
 against the simulator's truth.
 
 usage: uv run --with numpy python phaser.py [--rounds R] [--haplotypes 16 [--one-per-sample]]
-                                           [--hide N] [--dump DIR] <cell dir> [...]
+                                           [--hide N] [--extra-draws D] [--region START-END] [--dump DIR] <cell dir> [...]
 
 --dump DIR writes each round's haplotypes, with the truth, to DIR/<cell>.round<r>.pickle, for
-phase_accuracy.py.
+phase_accuracy.py. --extra-draws D also draws D more paths per sample per round from the same
+forward probabilities, on their own random stream (the rounds are unchanged), and dumps their
+haplotypes under 'extra_draws' — for the link confidence of neighbour_evidence_phase_output.md §2.3.
+--region START-END keeps only the records at positions START <= POS < END on every contig: one
+window, for the join test of that spec's §2.4.
 
 Each sample carries two haplotypes, soft: at each record, each copy's probability of carrying the
 alternative. Round 1 starts every template sample's two haplotypes at its GP allele share, so the
@@ -69,6 +73,12 @@ def lik_matrix(lik):
 def draw_path(rows, target, q_sites, inbreeding, rng, liks):
     """One state path, drawn backwards from the forward probabilities; then each copy's
     probability of carrying the alternative along it."""
+    return draw_from(forward(rows, q_sites, inbreeding, liks), rows, q_sites, inbreeding, rng)
+
+
+def forward(rows, q_sites, inbreeding, liks):
+    """The walk's forward probabilities, (autozygous, pair) per record, and the likelihood
+    matrices; shared by every path drawn from them."""
     f = min(max(inbreeding, 1e-4), 1 - 1e-4)
     n = len(rows)
     T = q_sites[0].shape[0]
@@ -101,6 +111,17 @@ def draw_path(rows, target, q_sites, inbreeding, rng, liks):
         d, p = d / s, p / s
         fwd_d.append(d); fwd_p.append(p)
         prev_d, prev_p = d, p
+    return fwd_d, fwd_p, Ms
+
+
+def draw_from(forwards, rows, q_sites, inbreeding, rng):
+    """One path drawn backwards from `forward`'s probabilities, and each copy's probability of
+    carrying the alternative along it."""
+    fwd_d, fwd_p, Ms = forwards
+    f = min(max(inbreeding, 1e-4), 1 - 1e-4)
+    n = len(rows)
+    T = q_sites[0].shape[0]
+    pos = [r['pos'] for r in rows]
 
     def pick(w_d, w_p):
         flat = np.concatenate([w_d, w_p.ravel()])
@@ -204,7 +225,7 @@ def one_sample(args):
     else:
         pairs = choose_haplotypes(cell, target, PREVIOUS[target])
     rng = np.random.default_rng([SEED, round_index, target])
-    new, posts = {}, {}
+    new, posts, extra = {}, {}, {}
     for contig, rows in pc.CONTIGS[cell].items():
         q_sites = template_q(rows, pairs, HAPS[cell], contig)
         # hmm.haplotypes blurs the shares itself, so it is given them unblurred
@@ -215,8 +236,14 @@ def one_sample(args):
                                    [r['pos'] for r in rows], raw, inbreeding[target],
                                    pc.RUN_BASES, pc.SEGMENT_BASES)
         posts[contig] = np.array(posteriors)
-        new[contig] = draw_path(rows, target, q_sites, inbreeding[target], rng, liks)
-    return target, posts, new
+        forwards = forward(rows, q_sites, inbreeding[target], liks)
+        new[contig] = draw_from(forwards, rows, q_sites, inbreeding[target], rng)
+        if EXTRA_DRAWS:
+            # their own stream, so the round's own path and every later round are unchanged
+            extra_rng = np.random.default_rng([SEED, round_index, target, 7, len(extra)])
+            extra[contig] = [draw_from(forwards, rows, q_sites, inbreeding[target], extra_rng)
+                             for _ in range(EXTRA_DRAWS)]
+    return target, posts, new, extra
 
 
 def score(cell, posts):
@@ -277,10 +304,12 @@ HIDDEN = {}
 PREVIOUS = {}
 HAPLOTYPE_TEMPLATES = None
 ONE_PER_SAMPLE = False
+EXTRA_DRAWS = 0
+REGION = None
 
 
 def main():
-    global HAPLOTYPE_TEMPLATES, PREVIOUS, ONE_PER_SAMPLE
+    global HAPLOTYPE_TEMPLATES, PREVIOUS, ONE_PER_SAMPLE, EXTRA_DRAWS, REGION
     args = sys.argv[1:]
     rounds = 4
     hide = 0
@@ -290,6 +319,10 @@ def main():
             rounds = int(args[1])
         elif args[0] == '--dump':
             dump = args[1]
+        elif args[0] == '--region':
+            REGION = tuple(int(x) for x in args[1].split('-'))
+        elif args[0] == '--extra-draws':
+            EXTRA_DRAWS = int(args[1])
         elif args[0] == '--hide':
             hide = int(args[1])
         elif args[0] == '--haplotypes':
@@ -303,6 +336,11 @@ def main():
     print('|---|---|---|---|---|---|---|')
     for cell in args:
         pc.DATA[cell] = pc.load(cell)
+        if REGION:
+            # one window of a contig, for the join test of neighbour_evidence_phase_output.md §2.4
+            samples_, records_, inbreeding_ = pc.DATA[cell]
+            pc.DATA[cell] = (samples_, [r for r in records_ if REGION[0] <= r['pos'] < REGION[1]],
+                             inbreeding_)
         samples, records, _ = pc.DATA[cell]
         pc.CONTIGS[cell] = {}
         for r in records:
@@ -322,11 +360,12 @@ def main():
                 HIDDEN[cell][t] = {candidates[j] for j in chosen}
         summed = None
         for round_index in range(1, rounds + 1):
-            posts, new_haps = {}, {}
+            posts, new_haps, extras = {}, {}, {}
             with ProcessPoolExecutor(6, mp_context=multiprocessing.get_context('fork')) as pool:
-                for target, post, new in pool.map(one_sample, [(cell, t, round_index)
+                for target, post, new, extra in pool.map(one_sample, [(cell, t, round_index)
                                                                for t in range(len(samples))]):
                     new_haps[target] = new
+                    extras[target] = extra
                     posts[target] = post
             HAPS[cell] = new_haps
             if dump:
@@ -334,7 +373,7 @@ def main():
                 os.makedirs(dump, exist_ok=True)
                 name_ = os.path.basename(os.path.normpath(cell))
                 with open(os.path.join(dump, f'{name_}.round{round_index}.pickle'), 'wb') as fh:
-                    pickle.dump({'haplotypes': new_haps,
+                    pickle.dump({'haplotypes': new_haps, 'extra_draws': extras,
                                  'records': [[(r['pos'], r['truth']) for r in rows]
                                              for rows in pc.CONTIGS[cell].values()],
                                  'contigs': list(pc.CONTIGS[cell].keys())}, fh)
