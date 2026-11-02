@@ -41,6 +41,11 @@ DESIGNS = ["pcr", "pcr_free"]
 SAMPLE_COUNTS = [1, 50]
 DEPTHS = [5, 15, 30, 60]
 SLICE_SETTINGS = "segments_per_period=10 bundles=10 genome_bp=300000 contigs=1"
+# The simulated reads are made once and kept. Their fingerprint is the settings and this number, not
+# the simulator's source: a change to the simulator does not remake them, and so does not rerun GATK
+# and the other competitors on new reads. Raise it when a simulator change should reach the
+# benchmark. The source's checksum is kept in the step's record (`meta`), for the record only.
+SIMULATION_VERSION = 1
 q = shlex.quote
 
 PVC_ARMS = ["pvc_defaults", "pvc_fitted"]
@@ -107,12 +112,12 @@ def _configuration(ctx, design, n_samples, depth):
             f"{q(d)}/typing_check.tsv | sort) <(sort {q(d)}/segments.bed) "
             f"&& rm -f {q(reference)}.repeats.parquet {q(catalog)}")
         run_commands([("check_typing", check)], logs)
-        return {"measurement": m}
+        return {"measurement": m, "meta": {"simulator": file_identity(simulator_source)}}
 
+    simulator_source = os.path.join(ctx.project_dir, "examples", "ng_str_stutter_benchmark.rs")
     steps.append(Step(f"{name}/simulate", "input", simulate,
                       {"settings": settings.replace(f"threads={ctx.threads}", ""),
-                       "simulator": file_identity(os.path.join(
-                           ctx.project_dir, "examples", "ng_str_stutter_benchmark.rs"))}))
+                       "simulation": SIMULATION_VERSION}))
 
     def map_reads(d):
         cmds = []

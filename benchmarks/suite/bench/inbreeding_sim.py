@@ -58,6 +58,12 @@ STATED_F = 0.9
 # stutter and no indels, so a long repeat holds nothing pvc's SNP/indel model would get wrong; left
 # off, pvc wrote nothing at the SNPs inside them (17 positions at 30x, 2026-10-31).
 CALL_SATELLITES = True
+# The simulated reads are made once and kept. Their fingerprint is the settings and this number, not
+# the GPS build: rebuilding or updating GPS does not remake them, and so does not rerun GATK and
+# DeepVariant on new reads. Raise it when a change to GPS or to lib/popsim.py should reach the
+# benchmark. The GPS binary's checksum and commit are kept in the step's record (`meta`), for the
+# record only.
+SIMULATION_VERSION = 1
 ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "deepvariant"]
 STATED_LABEL = f"pvc (F stated {STATED_F})"
 # The slice: 100 kb, 2 samples a group, 10x, called at 5x.
@@ -118,11 +124,12 @@ def steps(ctx):
                            f"&& bcftools view --no-version {q(os.path.join(d, 'gps', 'outputs', 'truth.vcf'))} "
                            f"-Oz -o {q(truth)} && bcftools index -t {q(truth)}")],
                          os.path.join(d, "logs"))
-        return {"measurement": m, "meta": {"snvs": n_snvs, "contig": contig}}
+        return {"measurement": m, "meta": {"snvs": n_snvs, "contig": contig,
+                                           "simulator": file_identity(popsim.GPS_BIN),
+                                           "simulator_commit": _gps_commit()}}
 
     out.append(Step(f"{name}/simulate", "input", simulate,
-                    lambda: {"settings": cfg, "simulator": file_identity(popsim.GPS_BIN),
-                             "simulator_commit": _gps_commit(), "popsim": 1}))
+                    lambda: {"settings": cfg, "popsim": SIMULATION_VERSION}))
 
     def map_reads(d):
         fastq = os.path.join(sim_dir, "gps", "outputs", "fastq", "reads")

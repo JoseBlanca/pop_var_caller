@@ -81,7 +81,10 @@ regions; freebayes on the simulated 50-sample runs at 60×).
 
 A competitor's stored calls carry a fingerprint of its version, its command and its inputs. If an
 input has changed, the suite stops and names it rather than quietly rerunning hours of work; rerun
-with `--rerun-competitors` (narrowed with `--only` and `--caller`) to remake it. `--redo-step
+with `--rerun-competitors` (narrowed with `--only` and `--caller`) to remake it. The simulated reads
+(`stutter_sim`, `inbreeding_sim`) are fingerprinted by their settings and a `SIMULATION_VERSION`
+in the benchmark's module, not by the simulator's code, so a change to a simulator remakes nothing
+until that number is raised. `--redo-step
 <source>` redoes any one step, for instance a speed figure measured while the laptop was busy (the
 summary marks those with ⚠).
 
