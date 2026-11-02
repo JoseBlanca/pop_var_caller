@@ -69,6 +69,17 @@ impl SampleFit {
         }
     }
 
+    /// A sample frozen at grid point `chosen` (segment-major) and share `inbreeding_coefficient`,
+    /// for tests that compare a walk with the prototype at fixed parameters.
+    #[cfg(test)]
+    pub(crate) fn frozen_at(inbreeding_coefficient: f64, chosen: usize) -> Self {
+        Self {
+            chosen,
+            frozen: true,
+            ..Self::new(inbreeding_coefficient)
+        }
+    }
+
     /// Whether the fitting windows have held [`FIT_RECORDS`] of the sample's informative records,
     /// so the parameters no longer move.
     #[must_use]
