@@ -7,6 +7,11 @@
 //! keeps the posteriors at the core's records. Samples are solved independently of one another,
 //! so they are shared among threads and the result does not depend on how many there are.
 //!
+//! **With phasing the window is solved in rounds** (`neighbour_evidence_phasing.md` §2):
+//! round 1 is the solve above; in each later round every sample copies other samples' haplotypes
+//! from the round before, draws a path and re-estimates its own two haplotypes along it, and the
+//! written result is the mean of rounds 2 to [`PHASING_ROUNDS`] ([`refine_window_in_rounds`]).
+//!
 //! **A sample whose reads said nothing at a record is called there only with evidence nearby**
 //! (§4.2): an informative record of its own within one segment length `S` on each side, or on one
 //! side where the contig ends within `S` on the other — and only if the call's `GQ` is at least
@@ -24,9 +29,10 @@ use std::ops::Range;
 use rayon::prelude::*;
 
 use super::fit::SampleFit;
-use super::model::{GenotypePairs, WalkSite, walk};
+use super::model::{GenotypePairs, HaplotypePair, WalkParameters, WalkSite, walk, walk_and_draw};
+use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
-use super::templates::choose_templates;
+use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
@@ -159,11 +165,51 @@ struct SampleSolution {
     check: FillCheck,
 }
 
+/// **How many rounds a window is solved in, and what keys its random draws** (phasing spec §2.1,
+/// §5). One round is the pass without phasing; more are phasing, its genotypes averaged over rounds
+/// 2 to `rounds`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phasing {
+    /// Rounds; 1 writes round 1, the pass without phasing.
+    pub rounds: usize,
+    /// The run-wide number of the window's first core site, which keys the window's draws.
+    pub window_key: u64,
+}
+
+impl Phasing {
+    /// No phasing: one round, the pass as it was before phasing.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            rounds: 1,
+            window_key: 0,
+        }
+    }
+
+    /// The phased pass's rounds, for the window whose first core site is run-wide site `window_key`.
+    #[must_use]
+    pub fn rounds_for(window_key: u64) -> Self {
+        Self {
+            rounds: PHASING_ROUNDS,
+            window_key,
+        }
+    }
+}
+
+/// **The rounds a phased window is solved in** (phasing spec §2.2: a starting value, measured on one
+/// cohort; 3 and 8 to be measured).
+pub const PHASING_ROUNDS: usize = 5;
+
+/// **How many core records of each sample are hidden from the rounds for the fill check**
+/// (phasing spec §4.1).
+pub const HIDDEN_RECORDS_PER_SAMPLE: usize = 20;
+
 /// **Solves one window**: `records` is the whole window, `core` the indices of the records it
 /// writes, `contig_length` the contig's length if the header gives it (for §4.2's rule at the
 /// contig's end), `fits` one per sample, updated while the samples are still fitting, `no_read`
-/// when a sample without reads is written with a genotype. Returns one [`RefinedRecord`] per core
-/// record, in order, and each sample's [`FillCheck`] over the core.
+/// when a sample without reads is written with a genotype. One round: the pass without phasing
+/// (see [`refine_window_in_rounds`]). Returns one [`RefinedRecord`] per core record, in order, and
+/// each sample's [`FillCheck`] over the core.
 ///
 /// # Panics
 ///
@@ -177,25 +223,195 @@ pub fn refine_window(
     max_templates: usize,
     no_read: NoReadRule,
 ) -> WindowRefinement {
+    refine_window_in_rounds(
+        records,
+        core,
+        contig_length,
+        fits,
+        max_templates,
+        no_read,
+        Phasing::none(),
+    )
+}
+
+/// One sample's state across a window's rounds.
+struct SampleRounds {
+    /// Round 1's template samples; `None` when the sample has no informative record in the window,
+    /// so it is not walked and carries its `GP` shares as both haplotypes (phasing spec §2.3).
+    templates: Option<Vec<usize>>,
+    /// The records its templates are chosen over.
+    compared: Vec<usize>,
+    /// Its previous round's posterior at each compared record.
+    previous: Vec<Vec<f64>>,
+    /// Core records hidden from the rounds for the fill check, ascending; empty with one round.
+    hidden: Vec<usize>,
+    /// Positions of its informative records, for §4.2's evidence-nearby rule.
+    informative_positions: Vec<u64>,
+    /// The parameters round 1 fitted or read.
+    parameters: Option<WalkParameters>,
+    /// Per core walked site, in order: the summed posterior, prediction and background-copy
+    /// probability over the rounds averaged.
+    sums: Vec<(Vec<f64>, Vec<f64>, f64)>,
+}
+
+/// **Solves one window in `phasing.rounds` rounds** (phasing spec §2.1). Round 1 is the pass without
+/// phasing; from round 2 each sample's templates are other samples' haplotypes from the round before
+/// (`choose_haplotypes`), every sample walks and draws a path, and its two haplotypes are
+/// re-estimated along it; all samples' haplotypes are replaced together at the end of a round. The
+/// result is the mean of rounds 2 to `rounds` (round 1's alone with one round), to which the no-read
+/// rules and the fill check are applied once. With more than one round, [`HIDDEN_RECORDS_PER_SAMPLE`]
+/// core records of each sample where its reads are informative are hidden from every round, and the
+/// fill check runs at them only (§4.1).
+///
+/// # Panics
+///
+/// As [`refine_window`]; and if `phasing.rounds` is 0.
+#[must_use]
+pub fn refine_window_in_rounds(
+    records: &[SiteRecord],
+    core: Range<usize>,
+    contig_length: Option<u64>,
+    fits: &mut [SampleFit],
+    max_templates: usize,
+    no_read: NoReadRule,
+    phasing: Phasing,
+) -> WindowRefinement {
     assert!(
         records
             .windows(2)
             .all(|pair| pair[0].position <= pair[1].position),
         "a window's records must not descend in position"
     );
+    assert!(
+        phasing.rounds > 0,
+        "a window is solved in at least one round"
+    );
     let samples = records.first().map_or(0, SiteRecord::sample_count);
     assert_eq!(fits.len(), samples, "one fit a sample");
-    let solutions: Vec<Option<SampleSolution>> = fits
-        .par_iter_mut()
+    let rounds = phasing.rounds;
+
+    let walked: Vec<usize> = (0..records.len())
+        .filter(|&index| records[index].is_site())
+        .collect();
+    // Where each walked site's two haplotypes start in a sample's store: `2 · A` numbers a site.
+    let mut offsets = Vec::with_capacity(walked.len() + 1);
+    offsets.push(0);
+    for &index in &walked {
+        offsets.push(offsets.last().copied().unwrap_or(0) + 2 * records[index].allele_count);
+    }
+    let core_walked: Vec<usize> = (0..walked.len())
+        .filter(|&site| core.contains(&walked[site]))
+        .collect();
+
+    let mut states: Vec<SampleRounds> = (0..samples)
+        .into_par_iter()
+        .map(|sample| {
+            let templates = choose_templates(records, sample, max_templates);
+            let informative_positions = walked
+                .iter()
+                .filter(|&&index| records[index].row(sample) == SampleRow::Informative)
+                .map(|&index| records[index].position)
+                .collect();
+            let hidden = if rounds > 1 && templates.is_some() {
+                hidden_records(records, &core_walked, &walked, sample, phasing.window_key)
+            } else {
+                Vec::new()
+            };
+            SampleRounds {
+                templates,
+                compared: compared_records(records, sample),
+                previous: Vec::new(),
+                hidden,
+                informative_positions,
+                parameters: None,
+                sums: Vec::new(),
+            }
+        })
+        .collect();
+
+    // Every sample's two haplotypes, starting from its `GP` shares for both copies.
+    let mut store: Vec<Vec<f64>> = (0..samples)
+        .map(|sample| {
+            let mut haplotypes = Vec::with_capacity(offsets[walked.len()]);
+            for &index in &walked {
+                let shares: Vec<f64> = records[index].template_shares(sample).collect();
+                haplotypes.extend_from_slice(&shares);
+                haplotypes.extend_from_slice(&shares);
+            }
+            haplotypes
+        })
+        .collect();
+
+    for round in 1..=rounds {
+        let solved: Vec<Option<RoundSolve>> = states
+            .par_iter_mut()
+            .zip(fits.par_iter_mut())
+            .enumerate()
+            .map(|(sample, (state, fit))| {
+                solve_round(
+                    records,
+                    &walked,
+                    &offsets,
+                    &core_walked,
+                    &store,
+                    sample,
+                    state,
+                    fit,
+                    max_templates,
+                    round,
+                    phasing,
+                )
+            })
+            .collect();
+        for (sample, solve) in solved.into_iter().enumerate() {
+            let Some(solve) = solve else {
+                continue;
+            };
+            let state = &mut states[sample];
+            state.previous = solve.compared_posteriors;
+            if rounds == 1 || round >= 2 {
+                if state.sums.is_empty() {
+                    state.sums = solve.core;
+                } else {
+                    for (sum, (posterior, prediction, background)) in
+                        state.sums.iter_mut().zip(solve.core)
+                    {
+                        add_to(&mut sum.0, &posterior);
+                        add_to(&mut sum.1, &prediction);
+                        sum.2 += background;
+                    }
+                }
+            }
+            if let Some(haplotypes) = solve.haplotypes {
+                let own = &mut store[sample];
+                for (site, pair) in haplotypes.iter().enumerate() {
+                    let alleles = records[walked[site]].allele_count;
+                    if records[walked[site]].row(sample) == SampleRow::Absent {
+                        // The store holds 1/A at absent rows (phasing spec §5).
+                        own[offsets[site]..offsets[site + 1]].fill(1.0 / alleles as f64);
+                    } else {
+                        own[offsets[site]..offsets[site] + alleles].copy_from_slice(&pair[0]);
+                        own[offsets[site] + alleles..offsets[site + 1]].copy_from_slice(&pair[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    let averaged = if rounds == 1 { 1 } else { rounds - 1 } as f64;
+    let solutions: Vec<Option<SampleSolution>> = states
+        .par_iter()
         .enumerate()
-        .map(|(sample, fit)| {
-            refine_sample(
+        .map(|(sample, state)| {
+            final_solution(
                 records,
-                core.clone(),
-                contig_length,
+                &walked,
+                &core_walked,
                 sample,
-                fit,
-                max_templates,
+                state,
+                averaged,
+                rounds,
+                contig_length,
                 no_read,
             )
         })
@@ -230,33 +446,122 @@ pub fn refine_window(
     }
 }
 
-/// One sample's walk over the window, or `None` if it has no informative record there.
-fn refine_sample(
+fn add_to(sum: &mut [f64], values: &[f64]) {
+    for (total, value) in sum.iter_mut().zip(values) {
+        *total += value;
+    }
+}
+
+/// **The core records of `sample` hidden from the rounds** (phasing spec §4.1): up to
+/// [`HIDDEN_RECORDS_PER_SAMPLE`] of the core walked sites where its reads are informative, drawn
+/// without replacement — a partial Fisher–Yates shuffle of them in record order, one uniform a draw
+/// — and returned ascending.
+fn hidden_records(
     records: &[SiteRecord],
-    core: Range<usize>,
-    contig_length: Option<u64>,
+    core_walked: &[usize],
+    walked: &[usize],
     sample: usize,
+    window_key: u64,
+) -> Vec<usize> {
+    let mut candidates: Vec<usize> = core_walked
+        .iter()
+        .map(|&site| walked[site])
+        .filter(|&index| records[index].row(sample) == SampleRow::Informative)
+        .collect();
+    let mut uniforms = Uniforms::new(StreamPurpose::HiddenRecords, window_key, sample, 0);
+    let count = HIDDEN_RECORDS_PER_SAMPLE.min(candidates.len());
+    for draw in 0..count {
+        let remaining = candidates.len() - draw;
+        let picked =
+            draw + ((uniforms.next_uniform() * remaining as f64) as usize).min(remaining - 1);
+        candidates.swap(draw, picked);
+    }
+    let mut hidden = candidates[..count].to_vec();
+    hidden.sort_unstable();
+    hidden
+}
+
+/// What one sample's walk in one round gives back.
+struct RoundSolve {
+    /// Its two haplotypes at every walked site; `None` with one round (no path is drawn).
+    haplotypes: Option<Vec<HaplotypePair>>,
+    /// Its posterior at each compared record, for the next round's haplotype choice.
+    compared_posteriors: Vec<Vec<f64>>,
+    /// At each core walked site, in order: the posterior, the prediction and the background-copy
+    /// probability.
+    core: Vec<(Vec<f64>, Vec<f64>, f64)>,
+}
+
+/// **One sample's walk in one round**, or `None` when it is not walked in the window.
+#[allow(clippy::too_many_arguments)]
+fn solve_round(
+    records: &[SiteRecord],
+    walked: &[usize],
+    offsets: &[usize],
+    core_walked: &[usize],
+    store: &[Vec<f64>],
+    sample: usize,
+    state: &mut SampleRounds,
     fit: &mut SampleFit,
     max_templates: usize,
-    no_read: NoReadRule,
-) -> Option<SampleSolution> {
-    let templates = choose_templates(records, sample, max_templates)?;
-    let walked: Vec<usize> = (0..records.len())
-        .filter(|&index| records[index].is_site())
-        .collect();
+    round: usize,
+    phasing: Phasing,
+) -> Option<RoundSolve> {
+    let round_one = state.templates.as_ref()?;
+    let haplotype = |other: usize, copy: usize, index: usize| -> &[f64] {
+        let site = walked
+            .binary_search(&index)
+            .expect("a compared record is walked");
+        let alleles = records[index].allele_count;
+        let start = offsets[site] + copy * alleles;
+        &store[other][start..start + alleles]
+    };
+    // Round 1: template samples' GP shares; later rounds: other samples' haplotypes.
+    let haplotype_templates: Vec<(usize, usize)> = if round == 1 {
+        Vec::new()
+    } else {
+        let previous = |index: usize| -> &[f64] {
+            let position = state
+                .compared
+                .binary_search(&index)
+                .expect("the choice reads compared records");
+            &state.previous[position]
+        };
+        choose_haplotypes(
+            records,
+            sample,
+            &state.compared,
+            &previous,
+            &haplotype,
+            max_templates,
+        )
+    };
+    let template_count = if round == 1 {
+        round_one.len()
+    } else {
+        haplotype_templates.len()
+    };
 
-    // Every site's likelihoods and template shares, the background last, in two flat buffers the
-    // walk's sites point into.
     let mut likelihoods: Vec<f64> = Vec::new();
     let mut shares: Vec<f64> = Vec::new();
     let mut spans = Vec::with_capacity(walked.len());
-    for &index in &walked {
+    for &index in walked {
         let record = &records[index];
         let likelihood_start = likelihoods.len();
-        likelihoods.extend(record.likelihoods(sample));
+        if state.hidden.binary_search(&index).is_ok() {
+            likelihoods.extend(std::iter::repeat_n(1.0, record.genotype_count()));
+        } else {
+            likelihoods.extend(record.likelihoods(sample));
+        }
         let share_start = shares.len();
-        for &template in &templates {
-            shares.extend(record.template_shares(template));
+        if round == 1 {
+            for &template in round_one {
+                shares.extend(record.template_shares(template));
+            }
+        } else {
+            for &(other, copy) in &haplotype_templates {
+                shares.extend_from_slice(haplotype(other, copy, index));
+            }
         }
         shares.extend(record.background_shares());
         spans.push((
@@ -274,69 +579,132 @@ fn refine_sample(
             template_shares: &shares[share_span.clone()],
         })
         .collect();
-    let walk_templates = templates.len() + 1;
-
-    let informative_positions: Vec<u64> = walked
+    let walk_templates = template_count + 1;
+    let parameters = match state.parameters {
+        Some(parameters) => parameters,
+        None => {
+            // Round 1 only: fitting again would add the window's log-likelihoods twice.
+            let parameters = fit.fit_window(
+                &sites,
+                walk_templates,
+                state.informative_positions.len(),
+                MISMATCH,
+            );
+            state.parameters = Some(parameters);
+            parameters
+        }
+    };
+    let (result, haplotypes) = if phasing.rounds == 1 {
+        (walk(&sites, walk_templates, parameters), None)
+    } else {
+        let mut uniforms = Uniforms::new(StreamPurpose::Path, phasing.window_key, sample, round);
+        let (result, haplotypes) = walk_and_draw(&sites, walk_templates, parameters, &mut uniforms);
+        (result, Some(haplotypes))
+    };
+    let compared_posteriors = state
+        .compared
         .iter()
-        .filter(|&&index| records[index].row(sample) == SampleRow::Informative)
-        .map(|&index| records[index].position)
+        .map(|index| {
+            let site = walked
+                .binary_search(index)
+                .expect("a compared record is walked");
+            result.posteriors[site].clone()
+        })
         .collect();
-    let parameters = fit.fit_window(
-        &sites,
-        walk_templates,
-        informative_positions.len(),
-        MISMATCH,
-    );
-    let result = walk(&sites, walk_templates, parameters);
-    let mut pairs = GenotypePairs::default();
-    let reach = parameters.segment_bases as u64;
+    let core = core_walked
+        .iter()
+        .map(|&site| {
+            (
+                result.posteriors[site].clone(),
+                result.neighbour_predictions[site].clone(),
+                result.last_template_copy[site],
+            )
+        })
+        .collect();
+    Some(RoundSolve {
+        haplotypes,
+        compared_posteriors,
+        core,
+    })
+}
 
-    // Whether a no-read call at `site`, with genotype posterior `posterior`, is written. For a
-    // sample with reads there, `posterior` is the neighbours' prediction and the rule asks whether
-    // it would have been; the record's own position counts on neither side of it.
-    let would_write = |site: usize, posterior: &[f64]| {
-        has_evidence_nearby(
-            &informative_positions,
-            sites[site].position,
-            reach,
-            contig_length,
-        ) && score_best_genotype(posterior).1.get() >= no_read.min_genotype_quality
+/// **One sample's written result from its averaged rounds**: the no-read rules and the fill check
+/// (pass §4.2, §4.3; phasing spec §4, §4.1). `None` when the sample was not walked.
+#[allow(clippy::too_many_arguments)]
+fn final_solution(
+    records: &[SiteRecord],
+    walked: &[usize],
+    core_walked: &[usize],
+    sample: usize,
+    state: &SampleRounds,
+    averaged: f64,
+    rounds: usize,
+    contig_length: Option<u64>,
+    no_read: NoReadRule,
+) -> Option<SampleSolution> {
+    let parameters = state.parameters?;
+    let reach = parameters.segment_bases as u64;
+    let mut pairs = GenotypePairs::default();
+    let would_write = |position: u64, posterior: &[f64], background: f64| {
+        has_evidence_nearby(&state.informative_positions, position, reach, contig_length)
+            && score_best_genotype(posterior).1.get() >= no_read.min_genotype_quality
             && no_read
                 .max_background_copy
-                .is_none_or(|most| result.last_template_copy[site] <= most)
+                .is_none_or(|most| background <= most)
     };
-
     let mut solution = SampleSolution {
         sites: Vec::new(),
         posteriors: Vec::new(),
         check: FillCheck::default(),
     };
-    for (site, &index) in walked.iter().enumerate() {
-        if !core.contains(&index) {
-            continue;
-        }
+    for (&site, (posterior_sum, prediction_sum, background_sum)) in
+        core_walked.iter().zip(&state.sums)
+    {
+        let index = walked[site];
         let record = &records[index];
+        let mean = |sum: &[f64]| -> Vec<f64> { sum.iter().map(|value| value / averaged).collect() };
+        let prediction = mean(prediction_sum);
+        let background = background_sum / averaged;
+        let mut posterior = mean(posterior_sum);
         let outcome = match record.row(sample) {
             SampleRow::Absent => continue,
             SampleRow::Informative => {
-                let prediction = &result.neighbour_predictions[site];
-                let walk_site = &sites[site];
-                let frequencies =
-                    &walk_site.template_shares[templates.len() * walk_site.allele_count..];
-                if let Some(settled) = settled_genotype(
-                    walk_site.likelihoods,
-                    frequencies,
-                    parameters.autozygous_share,
-                    pairs.of(walk_site.allele_count),
-                ) && would_write(site, prediction)
-                {
-                    solution.check.checked += 1;
-                    solution.check.disagreed += u32::from(argmax(prediction) != settled);
+                let hidden = state.hidden.binary_search(&index).is_ok();
+                // Without phasing every informative record is checked, its prediction free of its
+                // own reads; with phasing only hidden records are (phasing spec §4.1).
+                if rounds == 1 || hidden {
+                    let likelihoods: Vec<f64> = record.likelihoods(sample).collect();
+                    let frequencies: Vec<f64> = record.background_shares().collect();
+                    if let Some(settled) = settled_genotype(
+                        &likelihoods,
+                        &frequencies,
+                        parameters.autozygous_share,
+                        pairs.of(record.allele_count),
+                    ) && would_write(record.position, &prediction, background)
+                    {
+                        solution.check.checked += 1;
+                        solution.check.disagreed += u32::from(argmax(&prediction) != settled);
+                    }
+                    if hidden {
+                        // The clean prediction times the sample's own reads, renormalised: its
+                        // reads enter once.
+                        posterior = prediction
+                            .iter()
+                            .zip(&likelihoods)
+                            .map(|(weight, likelihood)| weight * likelihood)
+                            .collect();
+                        let total: f64 = posterior.iter().sum();
+                        if total > 0.0 {
+                            for value in &mut posterior {
+                                *value /= total;
+                            }
+                        }
+                    }
                 }
                 Outcome::Called
             }
             SampleRow::Flat => {
-                if would_write(site, &result.posteriors[site]) {
+                if would_write(record.position, &posterior, background) {
                     solution.check.filled += 1;
                     Outcome::Called
                 } else {
@@ -344,15 +712,10 @@ fn refine_sample(
                 }
             }
         };
-        solution.sites.push((
-            index,
-            outcome,
-            solution.posteriors.len(),
-            result.last_template_copy[site],
-        ));
         solution
-            .posteriors
-            .extend_from_slice(&result.posteriors[site]);
+            .sites
+            .push((index, outcome, solution.posteriors.len(), background));
+        solution.posteriors.extend_from_slice(&posterior);
     }
     Some(solution)
 }

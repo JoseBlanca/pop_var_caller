@@ -313,3 +313,126 @@ fn a_few_wrong_sites_do_not_make_a_poor_sample() {
     assert!(check(100, 10).wrong_share_at_least() > 0.02);
     assert!(check(0, 0).wrong_share_at_least() < 0.0);
 }
+
+/// Wrong genotypes at records where samples have reads, and at records where they have none and
+/// the pass called them, from a solve's posteriors.
+fn errors(
+    cohort: &crate::neighbour_evidence::test_cohort::TestCohort,
+    refined: &[RefinedRecord],
+    samples: usize,
+) -> (usize, usize, usize) {
+    let (mut with_reads, mut filled, mut filled_wrong) = (0, 0, 0);
+    for (index, record) in cohort.records.iter().enumerate() {
+        for sample in 0..samples {
+            let posterior = &refined[index].posteriors[sample * 3..sample * 3 + 3];
+            let wrong = argmax(posterior) != cohort.truth[index][sample];
+            match record.row(sample) {
+                SampleRow::Informative => with_reads += usize::from(wrong),
+                SampleRow::Flat if refined[index].outcomes[sample] == Outcome::Called => {
+                    filled += 1;
+                    filled_wrong += usize::from(wrong);
+                }
+                _ => {}
+            }
+        }
+    }
+    (with_reads, filled, filled_wrong)
+}
+
+/// **Phasing removes errors an outbred cohort's genotype templates cannot** (phasing spec §1): 30
+/// outbred samples from 4 founders at 3×, solved in one round and in [`PHASING_ROUNDS`]. A
+/// heterozygous template tells a copy only "either allele"; its haplotypes say which. The rounds
+/// leave at most half the wrong genotypes where samples have reads (on seed 5: 867 against 2,795).
+#[test]
+fn phasing_removes_errors_on_an_outbred_cohort() {
+    let shape = CohortShape {
+        inbred: false,
+        depth: 3.0,
+        records: 1_500,
+        ..SHAPE
+    };
+    let cohort = test_cohort(shape);
+    let solve = |phasing| {
+        let mut fits: Vec<SampleFit> = (0..shape.samples).map(|_| SampleFit::new(0.05)).collect();
+        refine_window_in_rounds(
+            &cohort.records,
+            0..cohort.records.len(),
+            None,
+            &mut fits,
+            MAX_TEMPLATES,
+            NoReadRule::default(),
+            phasing,
+        )
+        .records
+    };
+    let (one_round, _, _) = errors(&cohort, &solve(Phasing::none()), shape.samples);
+    let (phased, _, _) = errors(&cohort, &solve(Phasing::rounds_for(0)), shape.samples);
+    assert!(
+        phased * 2 <= one_round,
+        "wrong where samples have reads: one round {one_round}, phased {phased}"
+    );
+}
+
+/// **Phasing gives the same result at any thread count** (phasing spec §5): the draws are keyed by
+/// window, sample and round, and the rounds are synchronous.
+#[test]
+fn phasing_does_not_depend_on_the_thread_count() {
+    let cohort = test_cohort(CohortShape {
+        records: 600,
+        inbred: false,
+        ..SHAPE
+    });
+    let solve = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a pool");
+        pool.install(|| {
+            let mut fits: Vec<SampleFit> =
+                (0..SHAPE.samples).map(|_| SampleFit::new(0.05)).collect();
+            refine_window_in_rounds(
+                &cohort.records,
+                100..500,
+                None,
+                &mut fits,
+                MAX_TEMPLATES,
+                NoReadRule::default(),
+                Phasing::rounds_for(17),
+            )
+        })
+    };
+    assert_eq!(solve(1), solve(4));
+}
+
+/// **With phasing the fill check runs at hidden records only** (phasing spec §4.1): no sample is
+/// checked at more than [`HIDDEN_RECORDS_PER_SAMPLE`] records, and most samples at some.
+#[test]
+fn phasing_checks_fills_at_hidden_records_only() {
+    let cohort = test_cohort(CohortShape {
+        depth: 6.0,
+        records: 1_000,
+        ..SHAPE
+    });
+    let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.95)).collect();
+    let solved = refine_window_in_rounds(
+        &cohort.records,
+        0..cohort.records.len(),
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+        Phasing::rounds_for(3),
+    );
+    assert!(
+        solved
+            .checks
+            .iter()
+            .all(|check| check.checked as usize <= HIDDEN_RECORDS_PER_SAMPLE)
+    );
+    let checked = solved
+        .checks
+        .iter()
+        .filter(|check| check.checked > 0)
+        .count();
+    assert!(checked * 2 > SHAPE.samples, "{checked} samples checked");
+}
