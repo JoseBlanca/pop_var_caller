@@ -33,6 +33,10 @@ use rayon::prelude::*;
 use super::fit::SampleFit;
 use super::model::{
     GenotypePairs, HaplotypePair, WalkParameters, WalkResult, WalkSite, walk, walk_and_draw,
+    walk_and_draw_paths,
+};
+use super::phase::{
+    EXTRA_PATHS_PER_ROUND, MIN_PATH_AGREEMENT, PairLayout, SamplePhase, WrittenPhase,
 };
 use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
@@ -164,6 +168,8 @@ pub struct RefinedRecord {
     /// Each sample's probability of copying the background template here — of having no sampled
     /// haplotype to copy (§3.3); meaningful only where the outcome is not [`Outcome::Unchanged`].
     pub background_copy: Vec<f64>,
+    /// Each sample's phase where it is written phased (phase output spec §2.2), `None` elsewhere.
+    pub phases: Vec<Option<WrittenPhase>>,
 }
 
 /// One sample's posteriors at the core's sites.
@@ -171,17 +177,23 @@ struct SampleSolution {
     /// Index into the window's records, the outcome, where the posterior starts in `posteriors`,
     /// and the probability of copying the background there.
     sites: Vec<(usize, Outcome, usize, f64)>,
+    /// The phase written at each of `sites`.
+    phases: Vec<Option<WrittenPhase>>,
     posteriors: Vec<f64>,
     check: FillCheck,
 }
 
 /// **How a window is solved: in one round, or in phasing's rounds** (phasing spec §2.1, §5). One
 /// round is the pass without phasing. With phasing the genotypes are averaged over rounds 2 to the
-/// last, and the window's draws are keyed by `window_key`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// last, the window's draws are keyed by `window_key`, and each averaged round draws
+/// `extra_paths` more paths for the phase's link test, a link kept where `min_path_agreement` of
+/// all paths agree (phase output spec §2.3).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Phasing {
     rounds: usize,
     window_key: u64,
+    extra_paths: usize,
+    min_path_agreement: f64,
 }
 
 impl Phasing {
@@ -191,6 +203,8 @@ impl Phasing {
         Self {
             rounds: 1,
             window_key: 0,
+            extra_paths: 0,
+            min_path_agreement: MIN_PATH_AGREEMENT,
         }
     }
 
@@ -209,7 +223,29 @@ impl Phasing {
     #[must_use]
     pub fn new(rounds: usize, window_key: u64) -> Self {
         assert!(rounds > 0, "a window is solved in at least one round");
-        Self { rounds, window_key }
+        Self {
+            rounds,
+            window_key,
+            extra_paths: EXTRA_PATHS_PER_ROUND,
+            min_path_agreement: MIN_PATH_AGREEMENT,
+        }
+    }
+
+    /// The same, a link kept where `share` of the paths agree (`--phase-min-path-agreement`).
+    ///
+    /// # Panics
+    ///
+    /// If `share` is not in `(0, 1]`.
+    #[must_use]
+    pub fn with_min_path_agreement(self, share: f64) -> Self {
+        assert!(
+            share > 0.0 && share <= 1.0,
+            "a path agreement is a share in (0, 1]: got {share}"
+        );
+        Self {
+            min_path_agreement: share,
+            ..self
+        }
     }
 
     fn is_on(self) -> bool {
@@ -457,6 +493,8 @@ struct SampleRounds {
     parameters: Option<WalkParameters>,
     /// One per core site, in order: the sums over the averaged rounds; empty until the first.
     sums: Vec<CoreSite>,
+    /// The phase across the averaged rounds; `None` without phasing or for a sample not walked.
+    phase: Option<SamplePhase>,
 }
 
 /// **Solves one window in `phasing`'s rounds** (phasing spec §2.1). Round 1 is the pass without
@@ -490,6 +528,12 @@ pub fn refine_window_in_rounds(
     let samples = records.first().map_or(0, SiteRecord::sample_count);
     assert_eq!(fits.len(), samples, "one fit a sample");
     let layout = WindowLayout::new(records, &core);
+    let allele_counts: Vec<usize> = layout
+        .record_of_site
+        .iter()
+        .map(|&index| records[index].allele_count)
+        .collect();
+    let pairs = PairLayout::new(allele_counts.iter().copied());
 
     let mut states: Vec<SampleRounds> = (0..samples)
         .into_par_iter()
@@ -507,13 +551,15 @@ pub fn refine_window_in_rounds(
                 Vec::new()
             };
             SampleRounds {
-                templates,
                 compared: compared_records(records, sample),
                 previous_posteriors: Vec::new(),
                 hidden,
                 informative_positions,
                 parameters: None,
                 sums: Vec::new(),
+                phase: (phasing.is_on() && templates.is_some())
+                    .then(|| SamplePhase::new(&allele_counts, &pairs)),
+                templates,
             }
         })
         .collect();
@@ -533,6 +579,7 @@ pub fn refine_window_in_rounds(
                 solve_round(
                     records,
                     &layout,
+                    &pairs,
                     store_view,
                     row,
                     sample,
@@ -555,6 +602,7 @@ pub fn refine_window_in_rounds(
             final_solution(
                 records,
                 &layout,
+                &pairs,
                 sample,
                 state,
                 averaged,
@@ -571,6 +619,7 @@ pub fn refine_window_in_rounds(
             outcomes: vec![Outcome::Unchanged; samples],
             posteriors: vec![0.0; samples * record.genotype_count()],
             background_copy: vec![0.0; samples],
+            phases: vec![None; samples],
         })
         .collect();
     let mut checks = vec![FillCheck::default(); samples];
@@ -579,11 +628,14 @@ pub fn refine_window_in_rounds(
             continue;
         };
         checks[sample] = solution.check;
-        for &(record, outcome, start, background) in &solution.sites {
+        for (&(record, outcome, start, background), &phase) in
+            solution.sites.iter().zip(&solution.phases)
+        {
             let genotypes = records[record].genotype_count();
             let out = &mut refined[record - core.start];
             out.outcomes[sample] = outcome;
             out.background_copy[sample] = background;
+            out.phases[sample] = phase;
             out.posteriors[sample * genotypes..(sample + 1) * genotypes]
                 .copy_from_slice(&solution.posteriors[start..start + genotypes]);
         }
@@ -642,6 +694,7 @@ fn draw_hidden_records(
 fn solve_round(
     records: &[SiteRecord],
     layout: &WindowLayout,
+    pairs: &PairLayout,
     store: &HaplotypeStore,
     row: &mut [f32],
     sample: usize,
@@ -733,7 +786,29 @@ fn solve_round(
     };
     let result = if phasing.is_on() {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, phasing.window_key, sample, round);
-        let (result, haplotypes) = walk_and_draw(&sites, walk_templates, parameters, &mut uniforms);
+        let (result, haplotypes) = match state.phase.as_mut().filter(|_| phasing.averages(round)) {
+            // An averaged round also draws the link test's extra paths, from a stream of their own,
+            // and adds its own path to the consensus (phase output spec §2.1, §2.3).
+            Some(phase) => {
+                let mut extra_uniforms =
+                    Uniforms::new(StreamPurpose::ExtraPaths, phasing.window_key, sample, round);
+                let (result, haplotypes, extra) = walk_and_draw_paths(
+                    &sites,
+                    walk_templates,
+                    parameters,
+                    &mut uniforms,
+                    &mut extra_uniforms,
+                    phasing.extra_paths,
+                );
+                phase.record_path(pairs, &haplotypes);
+                for path in &extra {
+                    phase.record_path(pairs, path);
+                }
+                phase.add_round(&haplotypes);
+                (result, haplotypes)
+            }
+            None => walk_and_draw(&sites, walk_templates, parameters, &mut uniforms),
+        };
         HaplotypeStore::write(&store.offsets, row, &haplotypes, |site| {
             records[layout.record_of_site[site]].row(sample) == SampleRow::Absent
         });
@@ -779,6 +854,7 @@ fn solve_round(
 fn final_solution(
     records: &[SiteRecord],
     layout: &WindowLayout,
+    pairs_layout: &PairLayout,
     sample: usize,
     state: &SampleRounds,
     averaged: f64,
@@ -798,6 +874,7 @@ fn final_solution(
     };
     let mut solution = SampleSolution {
         sites: Vec::new(),
+        phases: Vec::new(),
         posteriors: Vec::new(),
         check: FillCheck::default(),
     };
@@ -806,6 +883,7 @@ fn final_solution(
         layout.core_sites.len(),
         "one sum a core site"
     );
+    let mut heterozygotes: Vec<Option<(usize, usize)>> = vec![None; layout.sites()];
     for (&site, sum) in layout.core_sites.iter().zip(&state.sums) {
         let index = layout.record_of_site[site];
         let record = &records[index];
@@ -860,11 +938,41 @@ fn final_solution(
                 }
             }
         };
+        if outcome == Outcome::Called {
+            let (best, _) = score_best_genotype(&posterior);
+            let (a, b) = pairs.of(record.allele_count)[best.0 as usize];
+            if a != b {
+                heterozygotes[site] = Some((a, b));
+            }
+        }
         solution
             .sites
             .push((index, outcome, solution.posteriors.len(), background));
         solution.posteriors.extend_from_slice(&posterior);
     }
+    // The phase, at the heterozygotes called in the core (phase output spec §2.2, §2.3).
+    let phases = match &state.phase {
+        Some(phase) => {
+            let positions: Vec<u64> = layout
+                .record_of_site
+                .iter()
+                .map(|&index| records[index].position)
+                .collect();
+            phase.phased(
+                pairs_layout,
+                &heterozygotes,
+                &positions,
+                parameters.segment_bases,
+                phasing.min_path_agreement,
+            )
+        }
+        None => vec![None; layout.sites()],
+    };
+    solution.phases = solution
+        .sites
+        .iter()
+        .map(|&(index, ..)| phases[layout.site(index)])
+        .collect();
     Some(solution)
 }
 

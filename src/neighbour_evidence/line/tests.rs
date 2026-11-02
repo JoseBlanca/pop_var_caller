@@ -18,6 +18,7 @@ fn rewrite(
         line,
         &RefinedRecord {
             background_copy: vec![0.0; outcomes.len()],
+            phases: vec![None; outcomes.len()],
             outcomes,
             posteriors,
         },

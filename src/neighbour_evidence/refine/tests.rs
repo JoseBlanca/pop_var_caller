@@ -666,3 +666,70 @@ fn window_keys_differ_by_contig_and_position() {
         assert!(!keys[index + 1..].contains(key), "{keys:?}");
     }
 }
+
+/// **The written phase against the truth** (phase output spec §7.4): on an outbred cohort of four
+/// founders at 4×, the window phases about half the true heterozygotes (3,797 of 7,496 when
+/// written), every block holds at least two records and is named by its first one's position, and
+/// the links inside blocks are right (0 of 3,341 wrong when written; at most 1 in 100 allowed).
+#[test]
+fn the_written_phase_follows_the_true_copies() {
+    let cohort = test_cohort(CohortShape {
+        records: 800,
+        inbred: false,
+        depth: 4.0,
+        ..SHAPE
+    });
+    let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.05)).collect();
+    let solved = refine_window_in_rounds(
+        &cohort.records,
+        0..cohort.records.len(),
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+        Phasing::rounds_for(11),
+    );
+    let (mut heterozygous, mut phased, mut links, mut flips) = (0, 0, 0, 0);
+    for sample in 0..SHAPE.samples {
+        let mut previous: Option<(u64, bool)> = None;
+        let mut block_sizes: std::collections::HashMap<u64, usize> = Default::default();
+        for (index, record) in solved.records.iter().enumerate() {
+            let [copy_0, copy_1] = cohort.truth_copies[index][sample];
+            heterozygous += usize::from(copy_0 != copy_1);
+            let Some(phase) = record.phases[sample] else {
+                continue;
+            };
+            assert_ne!(phase.first, phase.second, "only heterozygotes are phased");
+            assert!(phase.block <= cohort.records[index].position);
+            *block_sizes.entry(phase.block).or_default() += 1;
+            if block_sizes[&phase.block] == 1 {
+                assert_eq!(
+                    phase.block, cohort.records[index].position,
+                    "PS is the first POS"
+                );
+            }
+            phased += 1;
+            // Right where the record is truly heterozygous and copy 0 carries copy 0's allele.
+            let right = copy_0 != copy_1 && phase.first == copy_0;
+            if let Some((block, was_right)) = previous
+                && block == phase.block
+            {
+                links += 1;
+                flips += usize::from(right != was_right);
+            }
+            previous = Some((phase.block, right));
+        }
+        assert!(
+            block_sizes.values().all(|&size| size >= 2),
+            "no block of one"
+        );
+    }
+    eprintln!(
+        "{phased} of {heterozygous} true heterozygotes phased; {flips} flips in {links} links"
+    );
+    assert!(
+        phased * 5 > heterozygous * 2,
+        "{phased} of {heterozygous} phased"
+    );
+    assert!(flips * 100 <= links, "{flips} flips in {links} links");
+}

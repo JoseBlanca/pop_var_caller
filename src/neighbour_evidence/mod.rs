@@ -10,6 +10,8 @@
 //!   samples' haplotypes in a phasing round (phasing spec §2.3).
 //! - [`fit`] — each sample's walk parameters, fitted on the first windows and then frozen (§3.5).
 //! - [`windows`] — where each window's core and margins end, under the memory budget (§2.2, §6).
+//! - [`phase`] — the phase the rounds estimate, written in blocks of confident phase (phase output
+//!   spec).
 //! - [`refine`] — re-calling every sample in one window, in phasing's rounds, and the rule for
 //!   samples without reads and the fill check (§4.2, §4.3; phasing spec §4).
 //! - [`line`](mod@line) — reading a finished VCF line into the pass and writing it back re-called (§4.1).
@@ -18,6 +20,7 @@
 pub mod fit;
 pub mod line;
 pub mod model;
+pub mod phase;
 pub(crate) mod random;
 pub mod records;
 pub mod refine;
