@@ -341,3 +341,47 @@ fn the_re_estimation_at_three_alleles() {
     assert!((second[1] - two_then_one / total).abs() < 1e-12);
     assert!(first[0].abs() < 1e-12 && second[0].abs() < 1e-12);
 }
+
+/// **Extra paths change nothing the round passes on** (phase output spec §2.3): the walk and the
+/// round's own path are [`walk_and_draw`]'s exactly, bit for bit, and the extra paths are a
+/// function of their own stream — the same stream gives the same paths, another gives others.
+#[test]
+fn extra_paths_leave_the_round_unchanged() {
+    use crate::neighbour_evidence::random::{StreamPurpose, Uniforms};
+    // A sample even between the alleles, two templates of opposite alleles: every path is a
+    // genuine draw, so two streams disagree somewhere.
+    let likelihoods = [0.2, 1.0, 0.2];
+    let shares = [0.9, 0.1, 0.1, 0.9];
+    let sites: Vec<WalkSite<'_>> = (0..60)
+        .map(|index| WalkSite {
+            position: 1 + index * 2_000,
+            allele_count: 2,
+            likelihoods: &likelihoods,
+            template_shares: &shares,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.3,
+        mismatch: 0.01,
+    };
+    let mut alone = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
+    let (walked, own) = walk_and_draw(&sites, 2, parameters, &mut alone);
+    let mut with = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
+    let mut extra = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
+    let (walked_again, own_again, paths) =
+        walk_and_draw_paths(&sites, 2, parameters, &mut with, &mut extra, 4);
+    assert_eq!(walked, walked_again);
+    assert_eq!(own, own_again);
+    assert_eq!(paths.len(), 4);
+    let mut extra_again = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
+    let mut with_again = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
+    let (_, _, paths_again) =
+        walk_and_draw_paths(&sites, 2, parameters, &mut with_again, &mut extra_again, 4);
+    assert_eq!(paths, paths_again);
+    assert!(
+        paths.iter().any(|path| *path != own),
+        "an extra path is a draw of its own"
+    );
+}

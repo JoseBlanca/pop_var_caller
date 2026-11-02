@@ -18,6 +18,9 @@ pub enum StreamPurpose {
     HiddenRecords,
     /// The state path a sample draws in a round.
     Path,
+    /// The extra paths a sample draws in a round for the phase's link test
+    /// (`neighbour_evidence_phase_output.md` §2.3).
+    ExtraPaths,
 }
 
 /// **A SplitMix64 stream** of uniforms in `[0, 1)`.
@@ -34,6 +37,7 @@ impl Uniforms {
         let purpose = match purpose {
             StreamPurpose::HiddenRecords => 1,
             StreamPurpose::Path => 2,
+            StreamPurpose::ExtraPaths => 3,
         };
         let mut state = SEED;
         for value in [purpose, window, sample as u64, round as u64] {

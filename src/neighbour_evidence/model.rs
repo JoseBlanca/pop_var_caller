@@ -201,7 +201,7 @@ fn persistence(gap: f64, parameters: &WalkParameters) -> (f64, f64, f64) {
 /// not strictly between 0 and 1.
 #[must_use]
 pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters) -> WalkResult {
-    walk_with_draw(sites, templates, parameters, None).0
+    walk_with_draw(sites, templates, parameters, None, None).0
 }
 
 /// **One haplotype pair at one site**: each copy's probability of carrying each allele, `A`
@@ -227,11 +227,44 @@ pub(crate) fn walk_and_draw(
     parameters: WalkParameters,
     uniforms: &mut Uniforms,
 ) -> (WalkResult, Vec<HaplotypePair>) {
-    let (result, drawn) = walk_with_draw(sites, templates, parameters, Some(uniforms));
+    let (result, drawn, _) = walk_with_draw(sites, templates, parameters, Some(uniforms), None);
     (
         result,
         // PANIC-FREE: `walk_with_draw` draws whenever it is given a stream, as it is here.
         drawn.expect("a stream was given, so a path was drawn"),
+    )
+}
+
+/// **[`walk_and_draw`], and `extra` more paths drawn from the same forward probabilities**
+/// (`neighbour_evidence_phase_output.md` §2.3): the round's own path from `uniforms`, exactly as
+/// [`walk_and_draw`] draws it, and the extra paths one after another from `extra_uniforms`, so
+/// drawing them changes neither the round's path nor anything the round passes on. The extra paths
+/// serve the phase's link test only.
+///
+/// # Panics
+///
+/// As [`walk_and_draw`].
+#[must_use]
+pub(crate) fn walk_and_draw_paths(
+    sites: &[WalkSite<'_>],
+    templates: usize,
+    parameters: WalkParameters,
+    uniforms: &mut Uniforms,
+    extra_uniforms: &mut Uniforms,
+    extra: usize,
+) -> (WalkResult, Vec<HaplotypePair>, Vec<Vec<HaplotypePair>>) {
+    let (result, drawn, extra_paths) = walk_with_draw(
+        sites,
+        templates,
+        parameters,
+        Some(uniforms),
+        Some((extra_uniforms, extra)),
+    );
+    (
+        result,
+        // PANIC-FREE: as in `walk_and_draw`.
+        drawn.expect("a stream was given, so a path was drawn"),
+        extra_paths,
     )
 }
 
@@ -247,7 +280,12 @@ fn walk_with_draw(
     templates: usize,
     parameters: WalkParameters,
     uniforms: Option<&mut Uniforms>,
-) -> (WalkResult, Option<Vec<HaplotypePair>>) {
+    extra: Option<(&mut Uniforms, usize)>,
+) -> (
+    WalkResult,
+    Option<Vec<HaplotypePair>>,
+    Vec<Vec<HaplotypePair>>,
+) {
     assert!(
         sites
             .windows(2)
@@ -340,6 +378,23 @@ fn walk_with_draw(
             uniforms,
         )
     });
+    let extra_paths = match extra {
+        None => Vec::new(),
+        Some((extra_uniforms, count)) => (0..count)
+            .map(|_| {
+                draw_haplotypes(
+                    sites,
+                    &terms,
+                    &forward_autozygous,
+                    &forward_pairs,
+                    k,
+                    &parameters,
+                    &mut genotype_pairs,
+                    extra_uniforms,
+                )
+            })
+            .collect(),
+    };
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
     let mut posteriors = vec![Vec::new(); sites.len()];
@@ -514,6 +569,7 @@ fn walk_with_draw(
             log_likelihood,
         },
         drawn,
+        extra_paths,
     )
 }
 
