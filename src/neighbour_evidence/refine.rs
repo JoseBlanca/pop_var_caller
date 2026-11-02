@@ -93,6 +93,19 @@ pub struct FillCheck {
     pub disagreed: u32,
 }
 
+impl FillCheck {
+    /// **The least the sample's fill error rate plausibly is**: the mean of the rate's
+    /// Beta(`disagreed + 1`, `checked − disagreed + 1`) posterior, from a flat prior, less two of
+    /// its standard deviations. Above a limit, the excess is not the chance of a few checked sites:
+    /// one wrong in 30 is a share of 3.3% and a bound of 0.
+    #[must_use]
+    pub fn wrong_share_at_least(&self) -> f64 {
+        let checked = f64::from(self.checked);
+        let mean = (f64::from(self.disagreed) + 1.0) / (checked + 2.0);
+        mean - 2.0 * (mean * (1.0 - mean) / (checked + 3.0)).sqrt()
+    }
+}
+
 impl std::ops::AddAssign for FillCheck {
     fn add_assign(&mut self, other: Self) {
         self.filled += other.filled;

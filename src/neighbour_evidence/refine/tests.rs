@@ -299,3 +299,17 @@ fn the_fill_check_counts_the_fills_and_tries_the_settled_sites() {
         "{disagreed} of {checked} checked sites disagreed"
     );
 }
+
+/// **A fill check's lower bound separates chance from a poor sample**: one wrong in 30 is a share
+/// of 3.3% but plausibly under 2%; ten in 100 is not.
+#[test]
+fn a_few_wrong_sites_do_not_make_a_poor_sample() {
+    let check = |checked, disagreed| FillCheck {
+        filled: 0,
+        checked,
+        disagreed,
+    };
+    assert!(check(30, 1).wrong_share_at_least() < 0.02);
+    assert!(check(100, 10).wrong_share_at_least() > 0.02);
+    assert!(check(0, 0).wrong_share_at_least() < 0.0);
+}

@@ -549,10 +549,66 @@ pub fn report_neighbour_evidence(finished: &FinishedVcf, vcf_path: &Path) {
             worst.join(", "),
         );
     }
+    warn_of_poor_fills(&finished.fill_checks, table_note.as_str());
     if let Some(path) = table
         && let Err(error) = write_fill_check_table(&path, &finished.fill_checks)
     {
         tracing::warn!("fill check: could not write {}: {error}", path.display());
+    }
+}
+
+/// **The fill error rate above which a run warns** (owner, 2026-11-02): over the whole cohort, or
+/// for a sample whose rate is plausibly above it ([`FillCheck::wrong_share_at_least`]).
+pub const POOR_FILL_SHARE: f64 = 0.02;
+
+/// **Warns when the pass's fills look poor**, so the user can look at why: the cohort's fills, all
+/// samples' checks pooled, wrong at more than [`POOR_FILL_SHARE`]; or samples whose own rate is
+/// above it beyond the chance of their few checked sites. On the founder simulator the pooled rule
+/// warned on both outbred cohorts (estimated 4.2% and 5.5%) and on no inbred one; the per-sample rule
+/// named 8 and 6 samples of 50 in the outbred cohorts and one sample in all the inbred ones, where a
+/// plain share above 2% named up to 10 samples of 50 in a cohort whose true fill error was 1.5%. A
+/// run where no sample was checked — at 1× — says nothing here.
+fn warn_of_poor_fills(
+    checks: &[(String, crate::neighbour_evidence::refine::FillCheck)],
+    table_note: &str,
+) {
+    let (checked, disagreed) = checks.iter().fold((0_u64, 0_u64), |(n, d), (_, check)| {
+        (n + u64::from(check.checked), d + u64::from(check.disagreed))
+    });
+    let poor: Vec<String> = checks
+        .iter()
+        .filter(|(_, check)| {
+            check.checked >= MIN_FILL_CHECK_SITES && check.wrong_share_at_least() > POOR_FILL_SHARE
+        })
+        .map(|(sample, check)| format!("{sample} ({} of {})", check.disagreed, check.checked))
+        .collect();
+    let pooled = if checked > 0 {
+        disagreed as f64 / checked as f64
+    } else {
+        0.0
+    };
+    if checked >= u64::from(MIN_FILL_CHECK_SITES) && pooled > POOR_FILL_SHARE {
+        tracing::warn!(
+            "the neighbour-evidence pass's fills look poor: where the samples' reads settle their \
+             genotype, the neighbours alone predicted it wrong at {:.1}% of {} sites, above {:.0}%. \
+             The pass is built for cohorts of inbred lines; in an outbred cohort, or one whose \
+             samples share few haplotypes, its fills are less reliable. Consider \
+             --neighbour-evidence off{table_note}",
+            100.0 * pooled,
+            run_output::with_thousands(checked),
+            100.0 * POOR_FILL_SHARE,
+        );
+    }
+    if !poor.is_empty() {
+        let shown = poor.len().min(10);
+        tracing::warn!(
+            "{} sample(s) whose fills look poor, wrong at more than {:.0}% of the sites checked \
+             beyond what chance explains — wrong of checked: {}{}{table_note}",
+            poor.len(),
+            100.0 * POOR_FILL_SHARE,
+            poor[..shown].join(", "),
+            if poor.len() > shown { ", …" } else { "" },
+        );
     }
 }
 
