@@ -11,6 +11,14 @@ re-called three ways, the templates differing only in what they carry:
   genotypes  each template sample's true genotype, unphased: shares 0, ½ or 1
   haplotypes each template sample's two true haplotypes as two templates, 32 in all
 
+  subtraction  each template sample's two haplotypes as phased from the data, by subtraction (the
+             owner's idea, 2026-11-02): one copy follows the sample's closest relatives along the
+             chromosome — a one-copy copying walk over their haplotypes — and the other copy is
+             what the sample's own genotype leaves once that copy is taken out, from its reads
+             and, without reads, its inbreeding and the cohort's frequencies. Round one copies
+             the relatives' GP; round two their round-one haplotypes. The target is left out of
+             every step that phases its templates, so its reads do not come back to it.
+
 plus the background template (the cohort's allele frequencies) in each. `genotypes` against
 `haplotypes` is what phasing alone is worth; `pvc` against `genotypes` what uncertain genotypes
 cost. Biallelic SNP PASS records matching a truth record only; segment and run lengths fixed at the
@@ -30,7 +38,8 @@ K = 16
 COMPARED = 500
 SEGMENT_BASES = 300_000.0
 RUN_BASES = 2_000_000.0
-ARMS = ('pvc', 'genotypes', 'haplotypes')
+ARMS = ('pvc', 'genotypes', 'haplotypes', 'subtraction')
+MISMATCH = 0.01
 
 
 def load(cell):
@@ -79,7 +88,8 @@ def informative(lik):
     return lik.max() - lik.min() > 1e-9
 
 
-def choose(records, target, n):
+def ranking(records, target, n):
+    """Every other sample, best template first, as pvc ranks them."""
     rows = [r for r in records if informative(r['lik'][target])]
     if len(rows) > COMPARED:
         rows = [rows[i * len(rows) // COMPARED] for i in range(COMPARED)]
@@ -91,10 +101,101 @@ def choose(records, target, n):
         d = sum(0.5 * np.abs(r['shares'][target] - r['shares'][other]).sum() for r in shared)
         mean = (d + 1) / (len(shared) + 2)
         scores.append((mean + 2 * math.sqrt(mean * (1 - mean) / (len(shared) + 3)), other))
-    return [o for _, o in sorted(scores)[:K]]
+    return [o for _, o in sorted(scores)]
 
 
-def template_rows(record, templates, arm):
+def choose(records, target, n, exclude=()):
+    return [o for o in RANKS[id(records)][target] if o not in exclude][:K]
+
+
+def one_copy_phase(rows, sample, template_alt, inbreeding):
+    """The subtraction for one sample over one contig's records `rows`. `template_alt` is a
+    (sites, T) array of each template's probability of carrying the alternative. Copy one copies
+    one template at a time (switching as one copy of the pass's walk does); copy two is drawn
+    given copy one — the same allele with probability F, else from the cohort's frequency — and
+    the sample's genotype likelihood ties the two. Returns (copy one's, copy two's) probability of
+    carrying the alternative at each record."""
+    n, T = template_alt.shape
+    q = np.stack([1 - template_alt, template_alt], axis=2) * (1 - MISMATCH) + MISMATCH / 2
+    f = min(max(inbreeding, 1e-4), 1 - 1e-4)
+    E = np.empty((n, 2))
+    second = np.empty(n)  # P(copy two alt | copy one alt-or-not) mixed below
+    given = np.empty((n, 2))
+    for i, r in enumerate(rows):
+        l0, l1, l2 = r['lik'][sample]
+        L = np.array([[l0, l1], [l1, l2]])
+        pi = np.array([1 - r['af'], r['af']])
+        for a in range(2):
+            cond = (1 - f) * pi + f * np.eye(2)[a]
+            joint = L[a] * cond
+            E[i, a] = joint.sum()
+            given[i, a] = joint[1] / joint.sum()
+    e = np.einsum('tka,ta->tk', q, E)
+    pos = np.array([r['pos'] for r in rows], dtype=float)
+    fwd = np.empty((n, T))
+    prev = None
+    for i in range(n):
+        if prev is None:
+            cur = np.full(T, 1 / T)
+        else:
+            keep = math.exp(-(pos[i] - pos[i - 1]) / SEGMENT_BASES)
+            cur = keep * prev + (1 - keep) / T
+        cur = cur * e[i]
+        cur /= cur.sum()
+        fwd[i] = prev = cur
+    bwd = np.ones((n, T))
+    for i in range(n - 2, -1, -1):
+        keep = math.exp(-(pos[i + 1] - pos[i]) / SEGMENT_BASES)
+        b = bwd[i + 1] * e[i + 1]
+        cur = keep * b + (1 - keep) * b.sum() / T
+        bwd[i] = cur / cur.sum()
+    post = fwd * bwd
+    post /= post.sum(axis=1, keepdims=True)
+    # copy one's allele given the template and the sample's own evidence, averaged over templates
+    alt_given_k = q[:, :, 1] * E[:, 1][:, None] / np.einsum('tka,ta->tk', q, E)
+    first = (post * alt_given_k).sum(axis=1)
+    second = (1 - first) * given[:, 0] + first * given[:, 1]
+    return first, second
+
+
+def subtraction_haplotypes(cell, target, wanted):
+    """Phased haplotypes, by contig, of the samples `wanted`, built without `target`."""
+    samples, records, inbreeding = DATA[cell]
+    n = len(samples)
+    by_contig = CONTIGS[cell]
+    rank = RANKS[id(records)]
+    # round one: every sample but the target, copying its relatives' GP
+    round_one = {}
+    needed = set(wanted)
+    for w in wanted:
+        needed.update(o for o in rank[w] if o != target)
+    for t in needed:
+        if t == target:
+            continue
+        templates = [o for o in rank[t] if o != target][:K]
+        out = {}
+        for contig, rows in by_contig.items():
+            alt = np.array([[r['shares'][o][1] for o in templates] for r in rows])
+            out[contig] = one_copy_phase(rows, t, alt, inbreeding[t])
+        round_one[t] = out
+    # round two: the wanted samples, copying their relatives' round-one haplotypes
+    result = {}
+    for t in wanted:
+        templates = [o for o in rank[t] if o != target][:K]
+        out = {}
+        for contig, rows in by_contig.items():
+            alt = np.column_stack([round_one[o][contig][c] for o in templates for c in (0, 1)])
+            out[contig] = one_copy_phase(rows, t, alt, inbreeding[t])
+        result[t] = out
+    return result
+
+
+def template_rows(record, templates, arm, phased=None, index=None):
+    if arm == 'subtraction':
+        rows = [np.array([1 - phased[t][record['contig']][c][index], phased[t][record['contig']][c][index]])
+                for t in templates for c in (0, 1)]
+        rows.append(background_shares([record['af']]))
+        return np.array(rows)
     if arm == 'pvc':
         rows = [record['shares'][t] for t in templates]
     elif arm == 'genotypes':
@@ -110,16 +211,16 @@ def solve(args):
     cell, target = args
     samples, records, inbreeding = DATA[cell]
     templates = choose(records, target, len(samples))
-    by_contig = {}
-    for r in records:
-        by_contig.setdefault(r['contig'], []).append(r)
+    by_contig = CONTIGS[cell]
+    phased = subtraction_haplotypes(cell, target, templates)
     counts = {}
     for arm in ARMS:
         c = dict(reads=0, calling_wrong=0, pass_wrong=0, missing=0, filled=0, filled_wrong=0)
         for rows in by_contig.values():
             sites = [(r['lik'][target], None, None) for r in rows]
             posteriors, _ = haplotypes(sites, [r['pos'] for r in rows],
-                                       [template_rows(r, templates, arm) for r in rows],
+                                       [template_rows(r, templates, arm, phased, i)
+                                        for i, r in enumerate(rows)],
                                        inbreeding[target], RUN_BASES, SEGMENT_BASES)
             for r, post in zip(rows, posteriors):
                 truth = tuple(sorted(r['truth'][target]))
@@ -140,12 +241,19 @@ def solve(args):
 
 
 DATA = {}
+CONTIGS = {}
+RANKS = {}
 
 
 def main():
     cells = sys.argv[1:]
     for cell in cells:
         DATA[cell] = load(cell)
+        samples, records, _ = DATA[cell]
+        CONTIGS[cell] = {}
+        for r in records:
+            CONTIGS[cell].setdefault(r['contig'], []).append(r)
+        RANKS[id(records)] = [ranking(records, t, len(samples)) for t in range(len(samples))]
     jobs = [(cell, t) for cell in cells for t in range(len(DATA[cell][0]))]
     totals = {cell: {arm: {} for arm in ARMS} for cell in cells}
     with ProcessPoolExecutor(6, mp_context=multiprocessing.get_context('fork')) as pool:
