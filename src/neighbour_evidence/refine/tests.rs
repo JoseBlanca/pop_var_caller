@@ -447,7 +447,9 @@ fn the_phased_window_matches_the_python_reference() {
     use crate::neighbour_evidence::records::SampleColumns;
     let text = include_str!("../testdata/phased_window.txt");
     let mut header: Vec<&str> = Vec::new();
-    let mut inputs: Vec<(u64, f64, Vec<Option<(Vec<u32>, Vec<f64>)>>)> = Vec::new();
+    // Each record: position, alternative frequency, and each sample's PL and GP, or absent.
+    type Columns = Vec<Option<(Vec<u32>, Vec<f64>)>>;
+    let mut inputs: Vec<(u64, f64, Columns)> = Vec::new();
     let mut expected: Vec<(usize, usize, Vec<f64>)> = Vec::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
