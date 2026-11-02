@@ -30,6 +30,9 @@ use super::expected_counts::{
     CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs, ScoredDistinctRows,
     concentration_stopped_inside_its_search, expected_counts_by_distinct_rows,
 };
+use super::tract_exclusion::{
+    self, StratumTractsLeftOut, StutterTailOutcome, StutterTailRule, TractExclusion, TractsLeftOut,
+};
 use super::*;
 use crate::parameter_estimation::joint::slippage_curve::PenalisedPoint;
 use crate::parameter_estimation::progress;
@@ -694,25 +697,110 @@ fn fit_one_period(
     fit: &PenalisedFitConfig,
     round_ended: &dyn Fn(usize, f64),
 ) -> PenalisedPeriodFit {
-    let Some(mut period) = fitted_period(classes, homozygote_excess, fit, round_ended) else {
-        return PenalisedPeriodFit {
-            classes: vec![None; classes.len()],
-            curves: None,
-            rounds: 0,
-            last_change: 0.0,
-            composite_log_likelihood: 0.0,
-            expectation_seconds: 0.0,
-            maximisation_seconds: 0.0,
-            strength_search_seconds: 0.0,
-            rounds_choosing_strength: 0,
-            pair_seconds: 0.0,
-            pair_alternations: 0,
-            rounds_per_counting: Vec::new(),
-            class_rounds_counted: 0,
-            error_seconds: 0.0,
-            undetermined_errors: None,
-        };
+    let Some(period) = fitted_period(classes, homozygote_excess, fit, round_ended) else {
+        return no_period_fit(classes);
     };
+    finished_period(period, classes, homozygote_excess, fit)
+}
+
+/// **One motif length fitted, its stutter-tail tracts left out in rounds** (spec
+/// `parameter_prepass_ssr.md` §4.6.1): fit without standard errors, test every class's tracts
+/// against the numbers just fitted ([`tract_exclusion::tracts_in_the_stutter_tail`]), remove the
+/// flagged ones from `strata`, and fit again, until a test flags none or `rule.max_rounds` rounds
+/// have removed tracts. Standard errors are computed on the last fit only.
+///
+/// `indices` are the motif length's classes in `strata`. **A tract removed stays out**, which is
+/// what makes the rounds end. Each refit starts afresh, so the answer does not depend on where the
+/// round before stopped.
+fn fit_one_period_leaving_out_the_stutter_tail(
+    strata: &mut [StratumEvidence],
+    indices: &[usize],
+    homozygote_excess: &[f64],
+    fit: &PenalisedFitConfig,
+    rule: &StutterTailRule,
+    round_ended: &dyn Fn(usize, f64),
+) -> (PenalisedPeriodFit, StutterTailOutcome) {
+    let mut outcome = StutterTailOutcome {
+        tracts: 0,
+        rounds: 0,
+        settled: true,
+    };
+    loop {
+        let classes: Vec<&StratumEvidence> = indices.iter().map(|&index| &strata[index]).collect();
+        let Some(period) = fitted_period(&classes, homozygote_excess, fit, round_ended) else {
+            return (no_period_fit(&classes), outcome);
+        };
+        let flagged: Vec<(usize, Vec<usize>)> = classes
+            .iter()
+            .enumerate()
+            .filter_map(|(class, evidence)| {
+                let point = period
+                    .class_at_point
+                    .iter()
+                    .position(|at| *at == Some(class))?;
+                let tracts = tract_exclusion::tracts_in_the_stutter_tail(
+                    evidence,
+                    homozygote_excess,
+                    period.slippage[point],
+                    fit.allele_span,
+                    rule,
+                );
+                (!tracts.is_empty()).then_some((class, tracts))
+            })
+            .collect();
+        if flagged.is_empty() || outcome.rounds == rule.max_rounds {
+            outcome.settled = flagged.is_empty();
+            return (
+                finished_period(period, &classes, homozygote_excess, fit),
+                outcome,
+            );
+        }
+        drop(classes);
+        outcome.rounds += 1;
+        for (class, tracts) in flagged {
+            let evidence = &mut strata[indices[class]];
+            let mut flagged = tracts.into_iter().peekable();
+            let mut index = 0;
+            evidence.tracts.retain(|_| {
+                let keep = flagged.next_if_eq(&index).is_none();
+                index += 1;
+                keep
+            });
+            let removed = (index - evidence.tracts.len()) as u64;
+            evidence.tracts_in_stutter_tail += removed;
+            outcome.tracts += removed;
+        }
+    }
+}
+
+/// **A motif length's fit when no class of it has reads**: every class unfitted, no curves.
+fn no_period_fit(classes: &[&StratumEvidence]) -> PenalisedPeriodFit {
+    PenalisedPeriodFit {
+        classes: vec![None; classes.len()],
+        curves: None,
+        rounds: 0,
+        last_change: 0.0,
+        composite_log_likelihood: 0.0,
+        expectation_seconds: 0.0,
+        maximisation_seconds: 0.0,
+        strength_search_seconds: 0.0,
+        rounds_choosing_strength: 0,
+        pair_seconds: 0.0,
+        pair_alternations: 0,
+        rounds_per_counting: Vec::new(),
+        class_rounds_counted: 0,
+        error_seconds: 0.0,
+        undetermined_errors: None,
+    }
+}
+
+/// **A fitted motif length with its standard errors**, when `fit` asks for them.
+fn finished_period(
+    mut period: Period,
+    classes: &[&StratumEvidence],
+    homozygote_excess: &[f64],
+    fit: &PenalisedFitConfig,
+) -> PenalisedPeriodFit {
     let started = Instant::now();
     let (errors, undetermined_errors) = if fit.standard_errors {
         period.standard_errors(classes, homozygote_excess, fit)
@@ -837,17 +925,30 @@ fn fitted_period(
 ///   where one has no reads do not panic: each comes back, the one without reads refused.
 /// - When the stutter prior's settings cannot be used
 ///   ([`PenalisedFitConfig::stutter_prior_problem`]) and there is a class to fit.
+///
+/// # Tracts left out
+///
+/// **`exclusion` says which tracts the fit leaves out, and it changes `strata`** (spec
+/// `parameter_prepass_ssr.md` §4.6.1). Its depth rule runs first, over every class at once
+/// ([`tract_exclusion::leave_out_deep_tracts`]). Its stutter-tail rule runs between fits of each
+/// motif length: fit, test every tract against the numbers just fitted, remove the flagged ones,
+/// fit again, until a round flags none or the rule's rounds run out. Standard errors are computed
+/// once, on the last fit. Each class's evidence counts what each rule removed
+/// ([`StratumEvidence::tracts_too_deep`], [`StratumEvidence::tracts_in_stutter_tail`]), and the
+/// log says it per motif length.
 #[must_use]
 pub fn fit_repeat_tracts(
-    strata: &[StratumEvidence],
+    strata: &mut [StratumEvidence],
     homozygote_excess: &[f64],
     config: &PenalisedFitConfig,
-) -> Vec<StratumOutcome> {
+    exclusion: &TractExclusion,
+) -> (Vec<StratumOutcome>, TractsLeftOut) {
     if strata.is_empty() {
         return fit_repeat_tracts_logging(
             strata,
             homozygote_excess,
             config,
+            exclusion,
             &mut |line| progress::note(format!("repeat-tract fit: {}", line.text())),
             &|_, _, _| {},
         );
@@ -856,15 +957,19 @@ pub fn fit_repeat_tracts(
         "repeat-tract fit: {}",
         run_log::opening_line(strata, config)
     ));
-    let outcomes = fit_repeat_tracts_logging(
+    let fitted = fit_repeat_tracts_logging(
         strata,
         homozygote_excess,
         config,
+        exclusion,
         &mut |line| match line {
             run_log::Line::StepEnded(text) => {
                 stage.always(|into| format!("repeat-tract fit: {text}; {into}"));
             }
             run_log::Line::Detail(text) => progress::detail(format!("repeat-tract fit: {text}")),
+            run_log::Line::Warning(text) => {
+                tracing::warn!("estimating: repeat-tract fit: {text}");
+            }
         },
         // Checking the clock once a round costs nothing beside a round, which scores every
         // class's reads; the line is only built when a minute has passed.
@@ -878,7 +983,25 @@ pub fn fit_repeat_tracts(
         },
     );
     stage.always(|into| format!("repeat-tract fit: done; {into}"));
-    outcomes
+    fitted
+}
+
+#[cfg(test)]
+/// **[`fit_repeat_tracts`] with neither rule of [`TractExclusion`]**, on a copy of `strata`: every
+/// tract the guard kept is fitted. For the tests of the fit itself.
+#[must_use]
+pub fn fit_repeat_tracts_keeping_every_tract(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    config: &PenalisedFitConfig,
+) -> Vec<StratumOutcome> {
+    fit_repeat_tracts(
+        &mut strata.to_vec(),
+        homozygote_excess,
+        config,
+        &TractExclusion::none(),
+    )
+    .0
 }
 
 /// [`fit_repeat_tracts`], each line of its run's log handed to `log` as soon as it is known: a
@@ -886,17 +1009,24 @@ pub fn fit_repeat_tracts(
 /// and with no class at all the one line saying so. `round_ended` is told after every round of a
 /// motif length's fit its motif length, the rounds run so far and that round's largest change.
 fn fit_repeat_tracts_logging(
-    strata: &[StratumEvidence],
+    strata: &mut [StratumEvidence],
     homozygote_excess: &[f64],
     config: &PenalisedFitConfig,
+    exclusion: &TractExclusion,
     log: &mut dyn FnMut(run_log::Line),
     round_ended: &dyn Fn(u8, usize, f64),
-) -> Vec<StratumOutcome> {
+) -> (Vec<StratumOutcome>, TractsLeftOut) {
+    let mut left_out = TractsLeftOut {
+        exclusion: *exclusion,
+        typical_depth: None,
+        stutter_tail_by_period: Vec::new(),
+        by_stratum: Vec::new(),
+    };
     if strata.is_empty() {
         log(run_log::Line::Detail(run_log::no_classes_line()));
-        return Vec::new();
+        return (Vec::new(), left_out);
     }
-    for evidence in strata {
+    for evidence in strata.iter() {
         assert_eq!(
             evidence.groups, 1,
             "period {} at {} repeats: the evidence declares {} slippage groups, and the \
@@ -905,6 +1035,13 @@ fn fit_repeat_tracts_logging(
             evidence.stratum.period, evidence.stratum.reference_repeats, evidence.groups
         );
         evidence.check_libraries();
+    }
+    if let Some(rule) = &exclusion.depth {
+        let deep = tract_exclusion::leave_out_deep_tracts(strata, rule);
+        left_out.typical_depth = deep.typical_depth;
+        log(run_log::Line::StepEnded(run_log::deep_tracts_line(
+            &deep, rule,
+        )));
     }
     let mut classes_of_each_period: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
     for (index, evidence) in strata.iter().enumerate() {
@@ -915,11 +1052,36 @@ fn fit_repeat_tracts_logging(
     }
     let mut outcomes: Vec<Option<StratumOutcome>> = vec![None; strata.len()];
     for indices in classes_of_each_period.values() {
+        let period = strata[indices[0]].stratum.period;
+        let round_ended = |round, change| round_ended(period, round, change);
+        let fit = match &exclusion.stutter_tail {
+            None => {
+                let classes: Vec<&StratumEvidence> =
+                    indices.iter().map(|&index| &strata[index]).collect();
+                fit_one_period(&classes, homozygote_excess, config, &round_ended)
+            }
+            Some(rule) => {
+                let (fit, tail) = fit_one_period_leaving_out_the_stutter_tail(
+                    strata,
+                    indices,
+                    homozygote_excess,
+                    config,
+                    rule,
+                    &round_ended,
+                );
+                log(run_log::Line::StepEnded(run_log::stutter_tail_line(
+                    period, &tail, rule,
+                )));
+                left_out.stutter_tail_by_period.push((period, tail));
+                fit
+            }
+        };
         let classes: Vec<&StratumEvidence> = indices.iter().map(|&index| &strata[index]).collect();
-        let period = classes[0].stratum.period;
-        let fit = fit_one_period(&classes, homozygote_excess, config, &|round, change| {
-            round_ended(period, round, change);
-        });
+        if exclusion.depth.is_some() || exclusion.stutter_tail.is_some() {
+            for line in run_log::heavy_exclusion_lines(&classes) {
+                log(run_log::Line::Warning(line));
+            }
+        }
         let (period_outcomes, lines) = outcomes_and_lines_of_a_motif_length(&classes, fit, config);
         for line in lines {
             log(line);
@@ -935,7 +1097,8 @@ fn fit_repeat_tracts_logging(
     if let Some(line) = run_log::withheld_errors_line(&outcomes) {
         log(run_log::Line::Detail(line));
     }
-    outcomes
+    left_out.by_stratum = strata.iter().map(StratumTractsLeftOut::of).collect();
+    (outcomes, left_out)
 }
 
 /// **One motif length's fit as each class's [`StratumOutcome`] and the run log's lines for it**:
@@ -1728,6 +1891,9 @@ impl Period {
                             groups: evidence.groups,
                             libraries: Arc::clone(&evidence.libraries),
                             tracts_over_guard_threshold: 0,
+                            reads_crossing_tracts_over_guard_threshold: 0,
+                            tracts_too_deep: 0,
+                            tracts_in_stutter_tail: 0,
                             reads_reaching_not_crossing: 0,
                             guard_reads: 0,
                             bases_compared: 0,
@@ -3403,7 +3569,7 @@ mod tests {
         ];
         let excess = [0.3; 12];
         let config = a_narrow_production_fit();
-        let outcomes = fit_repeat_tracts(&strata, &excess, &config);
+        let outcomes = fit_repeat_tracts_keeping_every_tract(&strata, &excess, &config);
 
         assert_eq!(outcomes.len(), strata.len());
         for (outcome, evidence) in outcomes.iter().zip(&strata) {
@@ -3485,7 +3651,8 @@ mod tests {
         let strata: Vec<StratumEvidence> = (8..=10)
             .map(|repeats| a_drawn_class(1, repeats, 40, 1, 10, 20 + repeats))
             .collect();
-        let outcomes = fit_repeat_tracts(&strata, &[0.3], &a_narrow_production_fit());
+        let outcomes =
+            fit_repeat_tracts_keeping_every_tract(&strata, &[0.3], &a_narrow_production_fit());
         for outcome in &outcomes {
             let StratumOutcome::Fitted(fit) = outcome else {
                 panic!("every class has reads: {outcome:?}");
@@ -3522,7 +3689,8 @@ mod tests {
             // loci, 0.11 under the line, so a change to the fit's arithmetic can tip it over.
             a_drawn_class(2, 12, 8, 12, 8, 35),
         ];
-        let outcomes = fit_repeat_tracts(&strata, &[0.3; 12], &a_narrow_production_fit());
+        let outcomes =
+            fit_repeat_tracts_keeping_every_tract(&strata, &[0.3; 12], &a_narrow_production_fit());
         let fits: Vec<&StratumFit> = outcomes
             .iter()
             .map(|outcome| match outcome {
@@ -3935,7 +4103,7 @@ mod tests {
                 .expect("every locus holds two samples, so the fit reports an estimate");
             assert!(estimate >= 1e4 / 1.01, "{estimate}");
         }
-        let outcomes = fit_repeat_tracts(&strata, &[0.0; 40], &config);
+        let outcomes = fit_repeat_tracts_keeping_every_tract(&strata, &[0.0; 40], &config);
         for outcome in &outcomes {
             let StratumOutcome::Fitted(fit) = outcome else {
                 panic!("every class has reads");
@@ -3956,7 +4124,11 @@ mod tests {
     fn evidence_with_two_slippage_groups_is_refused() {
         let mut evidence = a_drawn_class(1, 8, 5, 2, 3, 61);
         evidence.groups = 2;
-        let _ = fit_repeat_tracts(&[evidence], &[0.3; 2], &a_narrow_production_fit());
+        let _ = fit_repeat_tracts_keeping_every_tract(
+            &[evidence],
+            &[0.3; 2],
+            &a_narrow_production_fit(),
+        );
     }
 
     /// **Setting the window rescales the first floor to one draw a class**, and at production's
@@ -4569,7 +4741,7 @@ mod tests {
         );
         assert!((class.slippage.fall_off - 0.05).abs() < 1e-3, "{class:?}");
 
-        let outcomes = fit_repeat_tracts(
+        let outcomes = fit_repeat_tracts_keeping_every_tract(
             std::slice::from_ref(&evidence),
             &[0.99],
             &a_narrow_production_fit(),
@@ -4742,7 +4914,7 @@ mod tests {
             },
             ..a_narrow_production_fit()
         };
-        let _ = fit_repeat_tracts(&[evidence], &[0.0], &config);
+        let _ = fit_repeat_tracts_keeping_every_tract(&[evidence], &[0.0], &config);
     }
 
     /// **The error rule of spec §2.10.4 and §7**: a shorter share whose class has fewer slipped
@@ -4858,7 +5030,7 @@ mod tests {
             "{repeats_slipped} repeats slipped"
         );
 
-        let outcomes = fit_repeat_tracts(
+        let outcomes = fit_repeat_tracts_keeping_every_tract(
             std::slice::from_ref(&evidence),
             &[0.9],
             &a_narrow_production_fit(),
@@ -4923,7 +5095,7 @@ mod tests {
         // The same through the whole fit: the lone class of 10 loci × 3 reads, five of its reads
         // slipped by one repeat, keeps its slip rate's error.
         let evidence = a_lone_class_of_reads(10, &[(0, -1), (2, 1), (4, -1), (6, 1), (8, -1)]);
-        let outcomes = fit_repeat_tracts(
+        let outcomes = fit_repeat_tracts_keeping_every_tract(
             std::slice::from_ref(&evidence),
             &[0.99],
             &a_narrow_production_fit(),

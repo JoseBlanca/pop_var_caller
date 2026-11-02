@@ -113,7 +113,9 @@ On simulated cohorts with known truth, 1 to 2,000 samples, 3 to 300 reads a samp
 - **No sample subsets.** Main's fit grows a subset of samples per class to bound its cost
   (`SampleSubsets`, `ssr_fit.rs:1139`); this fit uses every sample, within budget.
 - **It does not change** the census, how loci are selected or guarded, the substitution rate inside
-  tracts, or the SNP/indel half of the fit.
+  tracts, or the SNP/indel half of the fit. *Since 2026-11-02 two more rules leave tracts out
+  around it — one before it, by depth, and one between rounds of it, by off-length reads; both are
+  in [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.6.1.*
 - **It does not correct** the bias against long alleles from reads that must cross the whole tract
   (`str_allele_window.md` §5.3), nor widen the ±8 recording.
 

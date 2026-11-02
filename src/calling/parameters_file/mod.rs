@@ -103,6 +103,10 @@
 //! duplicated_share = { value = 1.543e-2, separately_determined = false }
 //! …
 //!
+//! [repeat_tracts_left_out]         # informational: the tracts the stutter fit did not learn from
+//! typical_depth = 40.6
+//! by_stratum = [ … one row a class: fitted, over_guard_threshold, too_deep, in_stutter_tail … ]
+//!
 //! [repeat_tracts]                  # §3.7
 //! fallback_between_locus_share = { value = 0.09090909090909091, warrant = "defaulted" }
 //! slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
@@ -244,7 +248,13 @@ use serde::{Deserialize, Serialize};
 /// build reads an earlier file's `defaulted` 0.20, and its run takes today's built-in, as
 /// `defaulted` asks. A version-5 build refuses a version-6 file, whose `defaulted` 0.07 it would
 /// otherwise refuse as a changed number.
-pub const FORMAT_VERSION: u32 = 6;
+///
+/// **Version 7** adds a third informational table, `[repeat_tracts_left_out]`: the tracts the
+/// repeat-tract fit left out because their reads come from more copies than the reference holds,
+/// by depth and by the stutter tail (`doc/devel/ng/spec/parameter_prepass_ssr.md` §4.6.1). No run
+/// reads it. A version-6 build refuses a version-7 file that carries it; this build reads a
+/// version-6 file with the table absent.
+pub const FORMAT_VERSION: u32 = 7;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -588,6 +598,11 @@ pub struct ParametersFile {
     /// of it (`parameter_prepass_joint_fit.md` §2.1.3). Absent where the run did not fit the class,
     /// and in a file written before version 4.
     pub duplicated_positions: Option<FittedDuplicatedPositions>,
+    /// **The tracts the repeat-tract fit left out, and why** — informational: a calling run reads
+    /// none of it (`parameter_prepass_ssr.md` §4.6.1). Absent where the file was not written by a
+    /// fit, and in a file written before version 7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_tracts_left_out: Option<RepeatTractsLeftOut>,
     /// How often a read slips a repeat, and what lengths a tract's chromosomes are spread over
     /// (spec §3.7).
     pub repeat_tracts: RepeatTracts,
@@ -1113,6 +1128,80 @@ pub struct FittedDuplicatedPositions {
     pub carrier_shape_a: PairedNumber,
     pub carrier_shape_b: InformationalNumber,
     pub share_with_carriers_above_stated_frequency: InformationalNumber,
+}
+
+/// **`[repeat_tracts_left_out]`: the tracts the repeat-tract fit did not learn stutter from**, and
+/// why (`parameter_prepass_ssr.md` §4.6.1). Informational: a calling run reads none of it, and
+/// every left-out tract is still called.
+///
+/// Two rules leave a tract out besides the guard: its reads far exceed what one copy gives (the
+/// depth rule), or far more of them sit off both alleles of the genotype each sample's reads favour than
+/// its class's slip rate allows (the stutter-tail rule). Either marks a tract whose reads come from
+/// more copies than the reference holds, which the fit could only explain as slippage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeatTractsLeftOut {
+    /// **How many reads the typical tract would have, summed over samples, if every read reaching
+    /// it crossed it**: what the depth rule compares a tract with. Absent where the rule did not run
+    /// or no read crossed a tract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typical_depth: Option<f64>,
+    /// The depth rule's settings; absent where it did not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_rule: Option<DepthRuleSettings>,
+    /// The stutter-tail rule's settings; absent where it did not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stutter_tail_rule: Option<StutterTailRuleSettings>,
+    /// Per motif length the stutter-tail rule ran on, its rounds and whether it settled.
+    pub stutter_tail_by_period: Vec<StutterTailPeriodRow>,
+    /// One row a class: the tracts the fit read and the tracts each rule left out.
+    pub by_stratum: Vec<TractsLeftOutRow>,
+}
+
+/// The depth rule's settings as the run used them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DepthRuleSettings {
+    /// A tract is left out above this many times what one copy gives…
+    pub times_expected: f64,
+    /// …or above the count one copy reaches by chance less than this often, if that is larger.
+    pub chance: f64,
+}
+
+/// The stutter-tail rule's settings as the run used them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StutterTailRuleSettings {
+    /// A tract is left out when its off-length reads are at least this many times what its class's
+    /// slip rate predicts…
+    pub times_rate: f64,
+    /// …and that many or more would occur by slippage less than this often.
+    pub chance: f64,
+    /// At most this many rounds of leaving tracts out and refitting.
+    pub max_rounds: u64,
+}
+
+/// What the stutter-tail rule did at one motif length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StutterTailPeriodRow {
+    pub period: u8,
+    /// Rounds that left a tract out.
+    pub rounds: u64,
+    /// Whether the last fit's test flagged none. False when the rounds ran out first.
+    pub settled: bool,
+}
+
+/// One class's tracts: how many the fit read, and how many each rule left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TractsLeftOutRow {
+    pub period: u8,
+    pub reference_repeats: u64,
+    pub fitted: u64,
+    pub over_guard_threshold: u64,
+    pub too_deep: u64,
+    pub in_stutter_tail: u64,
 }
 
 /// **A number of an informational table**: its value, and its standard error where the fit gives
@@ -1983,6 +2072,40 @@ mod tests {
                     value: 2.6e-2,
                     standard_error: None,
                 },
+            }),
+            // One motif length settled and one stopped by the rounds, so both values of
+            // `settled` are written.
+            repeat_tracts_left_out: Some(RepeatTractsLeftOut {
+                typical_depth: Some(40.625),
+                depth_rule: Some(DepthRuleSettings {
+                    times_expected: 2.0,
+                    chance: 0.001,
+                }),
+                stutter_tail_rule: Some(StutterTailRuleSettings {
+                    times_rate: 2.5,
+                    chance: 0.002,
+                    max_rounds: 10,
+                }),
+                stutter_tail_by_period: vec![
+                    StutterTailPeriodRow {
+                        period: 1,
+                        rounds: 2,
+                        settled: true,
+                    },
+                    StutterTailPeriodRow {
+                        period: 5,
+                        rounds: 10,
+                        settled: false,
+                    },
+                ],
+                by_stratum: vec![TractsLeftOutRow {
+                    period: 5,
+                    reference_repeats: 9,
+                    fitted: 50,
+                    over_guard_threshold: 1,
+                    too_deep: 7,
+                    in_stutter_tail: 2,
+                }],
             }),
             repeat_tracts: RepeatTracts {
                 // **`fitted_here`, and the value is the median it says it is.** This fixture
@@ -3080,9 +3203,9 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_six() {
-        assert_eq!(FORMAT_VERSION, 6);
-        assert_eq!(a_file_using_every_shape().format_version, 6);
+    fn the_format_version_this_build_writes_is_seven() {
+        assert_eq!(FORMAT_VERSION, 7);
+        assert_eq!(a_file_using_every_shape().format_version, 7);
     }
 
     /// **A version-3 file reads, with both informational tables absent** — the fixture with its
@@ -3093,11 +3216,12 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// know, so the written text of either table, put in a file whose shape lacks it, is refused
     /// naming the key.
     #[test]
-    fn a_version_three_file_reads_without_the_tables_and_a_version_seven_file_is_refused() {
+    fn a_version_three_file_reads_without_the_tables_and_a_version_eight_file_is_refused() {
         let mut version_three = a_file_using_every_shape();
         version_three.format_version = 3;
         version_three.ordinary_site_prior.fitted_density = None;
         version_three.duplicated_positions = None;
+        version_three.repeat_tracts_left_out = None;
         version_three
             .repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
@@ -3113,10 +3237,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         read.validate()
             .expect("a version-3 file passes the checks a run applies");
 
-        let mut version_seven = a_file_using_every_shape();
-        version_seven.format_version = 7;
-        let read = ParametersFile::from_toml(&version_seven.to_toml())
-            .expect("a version-7 file with this build's keys parses");
+        let mut version_eight = a_file_using_every_shape();
+        version_eight.format_version = 8;
+        let read = ParametersFile::from_toml(&version_eight.to_toml())
+            .expect("a version-8 file with this build's keys parses");
         assert!(matches!(
             read.validate(),
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"
@@ -3126,6 +3250,7 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         for header in [
             "[ordinary_site_prior.fitted_density]\n",
             "[duplicated_positions]\n",
+            "[repeat_tracts_left_out]\n",
         ] {
             assert_eq!(written.matches(header).count(), 1, "{header}");
             let with_an_unknown_key =

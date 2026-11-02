@@ -1,4 +1,4 @@
-format_version = 6
+format_version = 7
 ploidy = 2
 
 [fitted_from]
@@ -239,6 +239,36 @@ standard_error = 0.522
 
 [duplicated_positions.share_with_carriers_above_stated_frequency]
 value = 0.026
+
+[repeat_tracts_left_out]
+typical_depth = 40.625
+
+[repeat_tracts_left_out.depth_rule]
+times_expected = 2.0
+chance = 0.001
+
+[repeat_tracts_left_out.stutter_tail_rule]
+times_rate = 2.5
+chance = 0.002
+max_rounds = 10
+
+[[repeat_tracts_left_out.stutter_tail_by_period]]
+period = 1
+rounds = 2
+settled = true
+
+[[repeat_tracts_left_out.stutter_tail_by_period]]
+period = 5
+rounds = 10
+settled = false
+
+[[repeat_tracts_left_out.by_stratum]]
+period = 5
+reference_repeats = 9
+fitted = 50
+over_guard_threshold = 1
+too_deep = 7
+in_stutter_tail = 2
 
 [repeat_tracts.fallback_between_locus_share]
 value = 0.22222222222222224

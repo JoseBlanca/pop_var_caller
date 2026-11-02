@@ -422,6 +422,72 @@ impl ParametersFile {
                 &an_informational_number(&duplicated.share_with_carriers_above_stated_frequency),
             );
         }
+        // **A section of its own, since calling reads none of it**; absent where no fit wrote it.
+        if let Some(left_out) = &self.repeat_tracts_left_out {
+            section(&mut out, "repeat_tracts_left_out");
+            note(
+                &mut out,
+                &[
+                    "The repeat tracts the stutter fit did not learn from, and why. Informational: a calling run reads none of it, every tract left out here is still called, and editing it changes nothing.",
+                    "",
+                    "A tract whose reads come from more copies than the reference holds shows reads at lengths no genotype of two alleles explains, and the fit could only explain them as slippage, which inflates its class's slip rate. Two rules leave such tracts out, beside the guard (`over_guard_threshold`: more than one read in ten of those differing from the reference differs by a non-whole number of repeats). **The depth rule** (`too_deep`) leaves out a tract whose crossing reads, summed over samples, exceed `depth_rule.times_expected` times what one copy gives, or the count one copy reaches by chance less than `depth_rule.chance` of the time where that is larger. What one copy gives is `typical_depth` — the reads the typical tract would have if every read reaching it crossed it — times the share of reaching reads that cross a tract of that class. **The stutter-tail rule** (`in_stutter_tail`) leaves out a tract where the reads off both alleles of the genotype each sample's reads favour, summed over samples, are at least `stutter_tail_rule.times_rate` times what the class's slip rate predicts and that many would occur by slippage less than `stutter_tail_rule.chance` of the time. It runs in rounds, refitting each motif length after each, until a round leaves nothing out (`settled = true`) or `stutter_tail_rule.max_rounds` rounds have run.",
+                    "",
+                    "`fitted` is how many of a class's tracts its slip rate was fitted from. A class with `fitted = 0` and tracts left out has no slippage row of its own.",
+                ],
+            );
+            if let Some(depth) = left_out.typical_depth {
+                scalar(&mut out, "typical_depth", &a_toml_float(depth));
+            }
+            if let Some(rule) = &left_out.depth_rule {
+                scalar(
+                    &mut out,
+                    "depth_rule",
+                    &format!(
+                        "{{ times_expected = {}, chance = {} }}",
+                        a_toml_float(rule.times_expected),
+                        a_toml_float(rule.chance)
+                    ),
+                );
+            }
+            if let Some(rule) = &left_out.stutter_tail_rule {
+                scalar(
+                    &mut out,
+                    "stutter_tail_rule",
+                    &format!(
+                        "{{ times_rate = {}, chance = {}, max_rounds = {} }}",
+                        a_toml_float(rule.times_rate),
+                        a_toml_float(rule.chance),
+                        rule.max_rounds
+                    ),
+                );
+            }
+            one_a_line(
+                &mut out,
+                "stutter_tail_by_period",
+                left_out.stutter_tail_by_period.iter().map(|row| {
+                    format!(
+                        "{{ period = {}, rounds = {}, settled = {} }}",
+                        row.period, row.rounds, row.settled
+                    )
+                }),
+            );
+            one_a_line(
+                &mut out,
+                "by_stratum",
+                left_out.by_stratum.iter().map(|row| {
+                    format!(
+                        "{{ period = {}, reference_repeats = {}, fitted = {}, \
+                         over_guard_threshold = {}, too_deep = {}, in_stutter_tail = {} }}",
+                        row.period,
+                        row.reference_repeats,
+                        row.fitted,
+                        row.over_guard_threshold,
+                        row.too_deep,
+                        row.in_stutter_tail
+                    )
+                }),
+            );
+        }
 
         section(&mut out, "repeat_tracts");
         let tracts = &self.repeat_tracts;

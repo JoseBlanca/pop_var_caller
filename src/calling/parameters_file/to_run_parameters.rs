@@ -931,7 +931,8 @@ pub(super) mod tests {
         .with_what_the_data_determine(
             file.ordinary_site_prior.fitted_density.clone(),
             file.duplicated_positions.clone(),
-        );
+        )
+        .with_repeat_tracts_left_out(file.repeat_tracts_left_out.clone());
         assert_eq!(written, file);
     }
 
@@ -1012,7 +1013,8 @@ pub(super) mod tests {
         .with_what_the_data_determine(
             read.ordinary_site_prior.fitted_density.clone(),
             read.duplicated_positions.clone(),
-        );
+        )
+        .with_repeat_tracts_left_out(read.repeat_tracts_left_out.clone());
         assert_eq!(written.to_toml(), text);
     }
 
@@ -2270,7 +2272,8 @@ mod the_north_star_round_trip {
         .with_what_the_data_determine(
             file.ordinary_site_prior.fitted_density.clone(),
             file.duplicated_positions.clone(),
-        );
+        )
+        .with_repeat_tracts_left_out(file.repeat_tracts_left_out.clone());
         assert_eq!(again, file);
         assert_eq!(
             back.parameters.ssr_slippage_fits().at(ReadGroupId(0), 2, 6),

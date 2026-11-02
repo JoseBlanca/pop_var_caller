@@ -895,6 +895,13 @@ than a number to tune). That is the same collapse the modal origin produced, fro
 A locus that is a collapsed duplication is not the same thing as a locus carrying a long allele, but
 it fails the fit in the same place: **the model has nowhere to put it.**
 
+> **⚠ AMENDED 2026-11-02 (owner).** The paragraph below forbids dropping loci that fit badly. The
+> fit now leaves out two kinds of tract by a hard rule — those far deeper than one copy gives, and
+> those with far more off-length reads than their stratum's slip rate allows — and §4.6.1 says what
+> the rules are and why the two arguments below do not apply to them. The paragraph stands as the
+> argument against what §4.6.1 still does not do: trimming by heterozygosity, or by how badly a
+> tract fits in general.
+
 **What must not be done about it, whatever the measurement says: dropping the loci that fit badly.**
 A rule that scores each locus against the fitted model and discards the worst is thresholding on
 the data and then counting what survives, which is the exact bias this whole step exists to remove
@@ -922,6 +929,253 @@ non-whole number of copies, pooled over a stratum (§4.1); a collapsed duplicati
 whole copies, and one locus in a thousand behaving strangely is invisible in a stratum-wide ratio.
 The two diagnostics answer different questions: *is this model right for these tracts* against *are
 these all the tracts this model was told they were*.
+
+### 4.6.1 Leaving duplicated tracts out of the stutter fit — ADDED 2026-11-02 (owner's ruling)
+
+**The fit now leaves out a tract whose reads come from more copies than the reference holds**, by
+two rules: the tract has far more reads than one copy gives, or far more reads at lengths its
+genotype does not explain than its stratum's slip rate allows. A left-out tract is still called; it
+only stops teaching the fit what slippage looks like. This section is the rule, and the paragraphs
+above are the reason it is needed.
+
+**What it fixes, measured on HG002 chr20.** About 100 of chr20's tracts with a 5-base motif are
+(GGAAT)n or a rotation of it, inside a satellite III array at chr20:28.6–31.25 Mb. GRCh38 holds one
+copy of sequence the genome holds many times, so the array averages 75 reads a position at 30×
+against 24 to 31 on the rest of chr20, and its reads map at MAPQ 60 because the mapper has nowhere
+else to put them. Copies of different lengths put the reads of one tract at several lengths, and
+the model has one place for that: slippage (the paragraphs above). Fitted on all of chr20 at 30×, a
+5-base motif of 9 copies comes out at **23 reads in 100 slipping**, and of 14 copies at **51 in
+100**. With the array removed by hand the same two strata come out at 0.7 and 3.3, and at tracts
+GIAB confidently calls homozygous, no read in 29 loci of 3- to 6-base motifs is off-length at all.
+(Full record: `doc/devel/reports/ng_str_inside_errors_2026-11-02.md` §9–11, on branch
+`str-inside-errors`.)
+
+**What the owner ruled, 2026-11-02.**
+
+- Leave suspicious tracts out of the stutter fit with a **stringent, simple rule**. Losing some good
+  tracts is acceptable: the genome has plenty to fit from.
+- **Two signals**: a tract's read count against the run's, and its place in its stratum's stutter
+  distribution.
+- **Never by heterozygosity at the repeat.** Stutter makes a locus look heterozygous, so a rule
+  that drops apparently heterozygous tracts would take out the stutteriest ones and drag every rate
+  down.
+- **Do not reuse the hidden-duplication filter.** That filter runs at calling, after the fit, and
+  has a harder job: keep every real locus. It drops 62 of the 147 loci it scores inside the array.
+
+#### Why this does not contradict §4.6's prohibition
+
+The prohibition gives two arguments against dropping tracts that fit badly. Neither applies to these
+rules, for different reasons.
+
+1. **"It would remove real long alleles before artefacts."** The tail rule counts only reads that
+   sit off **both** alleles of the genotype that sample's reads favour, and that genotype may place
+   an allele anywhere in the fit's support, ±9 repeats. A real long allele is
+   one of the two alleles, so its reads are never counted against the tract. What is counted is what
+   no diploid genotype explains: a third or fourth length, or more reads one slip away than the rate
+   predicts.
+2. **"Thresholding on the data and then counting what survives is biased."** It is, by about how
+   much of the distribution's body the threshold cuts. A heterozygosity rule cuts into the body:
+   ordinary stuttering tracts look heterozygous. This rule cuts only the far tail: a tract is left
+   out when its off-length reads are both more than twice the stratum's rate and improbable at that
+   rate, one chance in 1,000 or less. On a tract the model describes, that happens to fewer than 1
+   tract in 1,000 per round. **Measured at HG002's confident homozygous tracts with 10 to 68 reads**:
+   off-length reads spread from tract to tract as a binomial does — observed variance 0.65 to 1.15
+   times the binomial's — and no tract lies beyond P = 0.001. So in human the far tail is not where
+   ordinary tracts that slip more than average sit. The remaining bias is measured directly in §10's
+   check 10: on the stuttering simulation, which has no duplications, the rule must remove almost
+   nothing and move no rate.
+
+   **That measurement is one human genome, and it does not carry to plants** (owner, 2026-11-02).
+   Plant genomes carry far more structural variation than mammalian ones, so two things may differ
+   there: more tracts are collapsed duplications, and ordinary tracts may spread more from tract to
+   tract than a binomial does. The first is what the rule is for. The second would make it cut real
+   stutter. **So the share a rule removes is never assumed small: it is reported per stratum, and
+   the fit warns when either rule removes more than 1 tract in 10 of a stratum.** §10's check 10
+   repeats the binomial-spread measurement on the tomato cohort before the rule is trusted there.
+
+   *The first argument matters less than it reads* (owner, 2026-11-02). Every class's allele-length
+   shares are free parameters of the fit, so losing a few tracts with long alleles moves those
+   shares a little and the stutter curves hardly at all. It would matter only if the rule removed a
+   large share of a stratum, which the warning above reports.
+3. **The depth rule does not threshold on the fit at all.** How many reads cross a tract does not
+   depend on how they slipped, so removing deep tracts costs precision and cannot bias a rate.
+
+**The aberrant-locus class above is not built.** It stays the principled alternative — a class the
+model carries, with a fitted weight — if a hard rule fails one of §10's checks. The owner chose the
+hard rule because it is simpler, and the price, a few good tracts, is affordable.
+
+#### The order things happen in
+
+1. **The guard**, as today ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md)
+   §3.3): a tract where more than one read in ten of those differing from the reference differs by
+   a non-whole number of repeats.
+2. **The depth rule**, once, over every remaining tract. It needs no fitted number.
+3. **The fit**, as [`str_penalised_fit.md`](str_penalised_fit.md) specifies.
+4. **The tail rule, in rounds.** Test every remaining tract against the fitted numbers; leave out
+   the flagged ones; refit each motif length that lost a tract; test again. Stop when a round flags
+   none, or after **10 rounds**, and report a motif length stopped by the limit as not settled.
+
+A tract left out stays out: a later round never brings it back, which is what guarantees the rounds
+end.
+
+**Why rounds, and not one test.** A stratum's rate is inflated by its own outliers, so in the first
+round they do not look improbable. In the one-round prototype, hexanucleotides stayed at 4 to 11
+slips in 100 against 0 at confident tracts. Each round tests against a rate with the last round's
+outliers gone.
+
+#### Rule 1: far more reads than one copy gives
+
+**The idea.** Reads from copies the reference lacks pile up on the copy it has, so a duplicated
+tract is deeper than the run's typical tract. The prototype compared each tract's overlapping reads
+with twice the median over all tracts.
+
+**What the fit has, and the correction it needs.** The census keeps, per tract, only the reads that
+**cross** it — the ones that report a length (offsets, and the guard's non-whole reads). It keeps
+the reads that reach a tract without crossing it only as one count per stratum
+(`SsrEvidence::covering_not_crossing`). Fewer reads cross a long tract than a short one at the same
+depth: a 70-base tract is crossed by far fewer 150-base reads than a 20-base one. Comparing crossing
+reads with one run-wide median would therefore let a duplicated long tract through. At the satellite
+array's 5-base motifs of 9 to 14 copies, 45 to 70 bases long, that is where the rule matters.
+
+So each stratum's crossing count is put on a common scale first:
+
+- **the stratum's crossing share** `c` — of the reads that reached the stratum's tracts, the share
+  that crossed: crossing reads over crossing plus reaching-but-not-crossing, summed over the
+  stratum's tracts, samples and read groups. Every tract in a stratum is the same length, so one
+  share serves all of them. A duplicated tract adds reads to both counts, so it barely moves the
+  share.
+- **the run's typical depth** `D` — the median over every tract left after the guard of its
+  crossing reads divided by its stratum's `c`. In words: how many reads the typical tract would have
+  if every read reaching it crossed it. Strata where no read crossed (`c = 0`) are left out of the
+  median and of the rule; nothing in them is fitted anyway.
+- **a tract's expected count** if it is one copy: `c × D`.
+
+**The rule.** Leave the tract out when its crossing reads exceed **the larger of** twice its
+expected count and the count one copy exceeds by chance only once in 1,000 (the Poisson 0.999
+quantile at mean `c × D`). The second term is what makes the cutoff adapt to coverage:
+
+| a tract's expected crossing reads | cutoff, as a multiple of it | which term sets it |
+|---:|---:|---|
+| 3 | 3.3× | chance |
+| 5 | 2.6× | chance |
+| 10 | 2.1× | chance |
+| 15 and up | 2.0× | twice |
+
+At 5×, twice the median left out 2,274 of chr20's 46,442 tracts (5 in 100), mostly by chance; three
+times left out 232 and still brought the 5-base rates down to 1.3–3.2 in 100. The chance term lands
+between the two, at 2.6×.
+
+**Counts summed over samples and read groups.** A duplication is in every sample's genome, so it is
+in every sample's reads; summing restores the depth a single sample at 3× does not have. Every
+sample holds every tract, so the sum is comparable from tract to tract whatever each sample's depth.
+
+**Two known limits.**
+
+- **A one-copy duplication carried on one chromosome adds only half again**: 1.5× the expected
+  count, below the cutoff. The tail rule is what catches that tract, if its extra copy differs in
+  length.
+- **The census caps a tract at 1,000 reads per sample and read group** (`ReadCap`), and a capped
+  tract cannot look deeper than the cap. So the rule goes blind for a single sample above about 500
+  reads a tract. In a cohort each sample is capped separately, so the summed count is unaffected.
+
+#### Rule 2: far more off-length reads than the stratum's rate allows
+
+**The idea.** A tract whose reads come from copies of several lengths shows reads at lengths no
+genotype of two alleles explains, far more of them than slippage at its stratum's rate would put
+there.
+
+**The test, for one tract, at one round's fitted numbers.**
+
+1. **For each sample with reads at the tract, the genotype its reads favour**: the genotype under
+   which the class's current stutter makes the sample's reads likeliest, **with no prior**. Two
+   lengths in one sample are then always two alleles, so neither a heterozygote nor a tract
+   polymorphic between samples is counted as stutter.
+
+   *Changed after measurement, 2026-11-02 (owner).* The version first approved used the fit's own
+   weights: that likelihood times a prior from the class's allele-length shares, its between-locus
+   share and the sample's homozygote excess. On tomato2's 59 inbred accessions at about 3× that
+   left out 438 tracts, 86 to 90 in 100 of them polymorphic between accessions: the prior is the
+   class's, not the tract's, so an accession showing a length rare in its class in one read was
+   given the class's common genotype, and its read counted as stutter. With no prior the rule left
+   out 3, and the calls on HG002 at 30× and 5× and on both stuttering simulations were identical
+   ([`../../reports/ng_stutter_fit_outliers_2026-11-02.md`](../../reports/ng_stutter_fit_outliers_2026-11-02.md)
+   §5, §7). **What it costs**: a duplication whose copies put exactly two lengths in a sample looks
+   heterozygous, so at a few reads a sample the tail rule sees only a third length, and the depth
+   rule is what catches the rest. A prior from the tract's own allele frequencies across samples
+   would keep both properties; the owner chose not to build it.
+2. **Count that sample's off-length reads**: its reads whose length bucket is neither allele's. The
+   end buckets saturate, so a read and an allele both at or beyond four repeats from the reference
+   share a bucket and the read is not counted.
+3. **Sum over samples**: `N` crossing reads and `K` off-length reads at the tract.
+4. **Leave the tract out when both hold**:
+   - `K` is at least **twice** what the rate predicts: `K ≥ 2 × level × N`, where `level` is the
+     class's fitted share of reads that slip;
+   - `K` is improbable at that rate: `P(X ≥ K) < 0.001` for `X ~ Binomial(N, level)`.
+
+**Why the test leans towards keeping a tract.** A read from one allele that slips onto the other
+allele's length is not counted, so on a correctly described tract `K` falls short of `level × N` on
+average and the binomial overstates the chance of a large `K` being stutter. The penalised fit
+scores every library at one stutter today, so one rate serves all of a tract's reads. If stutter per
+library returns, use the read-weighted mean rate: a sum of reads with different rates is less spread
+than a binomial at their mean (Hoeffding 1956), so the test stays on the side of keeping.
+
+**Why both conditions, and not only the probability.** The probability alone grows ever stricter as
+reads accumulate. Summed over a few thousand samples, a tract has thousands of reads, and a binomial
+test would then flag a real tract that slips 1.5 times its stratum's rate, at a P far below 0.001.
+Real tracts do differ somewhat from their stratum. Leaving the most slippery of them out would bias
+the rate down, which is the prohibition's argument again. Requiring at least twice the rate bounds
+that. At a few reads the probability is the stricter of the two; at thousands, the factor of two
+is. **The factor of two is not measured at the cohort end**: §10's check 10 says where that is
+missing.
+
+**Counts summed over samples, for the same reason as depth.** At 3× a single sample's 3 reads can
+almost never be improbable. A duplication puts its extra lengths in every sample, so 50 samples'
+150 reads can be — when a sample shows a third length, since two lengths in one sample are read as
+two alleles (step 1).
+
+#### What each end of the range gets
+
+| input | depth rule | tail rule |
+|---|---|---|
+| one sample, 3× | cutoff 3.3×: a satellite array at 2.8× passes | 3 reads: flags only a tract with 2 or 3 reads off both alleles where the rate is a few in 100 |
+| one sample, 30× | 2.0×: catches the satellite array | catches a tract whose extra lengths reach a few reads |
+| one sample, 300× | 2.0×; blind above about 500 reads a tract (the cap) | the factor of two binds |
+| 50 samples, 3× each | 150 reads summed: 2.0× | 150 reads summed, but only a third length in a sample counts: a duplication of two lengths is left to the depth rule |
+| thousands of samples | 2.0× on the summed count | the factor of two binds; measured nowhere yet |
+
+A single low-coverage sample is the weak case: the rules remove little there, and a duplication can
+reach the fit. That is accepted; what the rules must not do there is remove good tracts in numbers.
+
+#### What the fit reports
+
+**In the parameters file, a section of its own, `[repeat_tracts_left_out]`** — informational, like
+`[duplicated_positions]`: a calling run reads none of it. It holds:
+
+- **once per run**: the typical depth `D`, both rules' settings, and per motif length how many tail
+  rounds ran and whether the last flagged none;
+- **one row per stratum**: how many tracts the fit used, and how many each of the guard, the depth
+  rule and the tail rule left out (`by_stratum`).
+
+**A stratum every tract of which was left out has no slippage row**, as any stratum with no reads;
+its row in `by_stratum` is what says why. The section is format 7 of the parameters file; a file
+written before it has no such section, and a calling run that reads a file carries the section into
+the file it writes back. *Built as a section rather than as columns on the slippage rows because a
+stratum emptied by the rules has no slippage row to carry them.*
+
+**In the run log**, at the default level: one line for the depth rule with `D` and its count, one
+line per motif length with the tail rule's count and rounds, a warning naming every stratum the rules
+emptied, and a warning naming every stratum where either rule removed more than 1 tract in 10. The second warning is there because §4.6.1's argument against bias holds only while
+the rules cut a small share, and that share has been measured only in human.
+
+#### What it does not change
+
+- **Calling.** A left-out tract is still a locus, called with the fitted numbers. The
+  hidden-duplication filter still runs at calling and still decides which calls to keep.
+- **The substitution rate.** Its two counts are kept per stratum, not per tract, so they cannot
+  leave a tract out, and the guard already keeps them for the same reason: the rate is a property of
+  the sequence read, not of which tracts the slippage fit kept.
+- **Which tracts the census records.** Nothing upstream of the fit changes, and no census needs
+  regenerating.
 
 ---
 
@@ -1743,3 +1997,27 @@ walks each cohort.
    its fitted allele spectrum instead of into slippage and the two failures need different fixes.
    A run that reports "no bias at q = 0.001" without saying what the emitted allele frequencies did
    has answered half the question.
+10. **The rules of §4.6.1 remove duplicated tracts and nothing else** — ADDED 2026-11-02. Each is
+    measured on calls as well as rates, from the first working version.
+    - **HG002 chr20 at 30×**: the 5-base rates at about 1 to 3 slips in 100; homopolymer rates
+      within the confident-tract band (2.0, 4.6 and 9.4 in 100 below 12, 12–17 and 18 or more
+      copies); errors touching an STR tract no worse than the prototype's 108 missed and 118 false,
+      and over all of chr20 no worse than the depth-only prototype's 842 and 374.
+    - **HG002 chr20 at 5×**: the rates come down as at 30×, and calls get no worse.
+    - **The stuttering simulation**, one sample at 30× and 50 inbred samples at 3×: no
+      duplications, so the rules must leave out almost nothing, and the fitted rates and the errors
+      must not move. A rule that lowers a rate there is cutting real stutter.
+    - **The tomato cohort (tomato2, 59 accessions at about 3×)**, because plants carry more
+      structural variation than the human genome these rules were designed on. Two measurements.
+      *How much the rules remove*, per stratum, and whether the removed tracts look like
+      duplications — deep, or with reads at three or more lengths in many accessions — or are spread
+      thinly across ordinary tracts. *Whether ordinary tracts spread as a binomial*: the accessions
+      are inbred, so at tracts where every accession's reads agree on one length, off-length reads
+      are stutter alone; their tract-to-tract variance against the binomial's is the plant
+      counterpart of HG002's 0.65–1.15. If it is well above one, the factor of two and the 0.001
+      need revisiting before the rules are trusted on plants.
+    - **A test that fails without each piece**: the depth rule's stratum correction, its
+      chance term, the tail rule's genotype, its sum over samples, its factor of two, and the rounds.
+    - **Not measured, and named so it is not mistaken for measured**: the factor of two at
+      thousands of samples. No dataset here has that many; a drawn cohort whose tracts' rates vary
+      from tract to tract is the check that would.
