@@ -47,8 +47,9 @@ fn a_flat_sample_needs_evidence_on_both_sides_or_a_contig_end() {
 ///   calling errors are single wrong reads, and a template's allele, blurred by the 1% mismatch
 ///   rate, can outweigh a read only when many templates agree.
 /// - At records where it has none — which calling writes `./.`, its prior's guess wrong about a
-///   quarter of the time — the pass calls at least 95 in 100 and is wrong at most a third as often
-///   as that guess (on seed 5: 1,970 wrong of 32,941 called, against the guess's 8,871).
+///   quarter of the time — the pass calls at least half, those whose `GQ` reaches 10, and is wrong
+///   at most once in a hundred calls (on seed 5: 43 wrong of 18,883 called of 32,958, against the
+///   guess's 8,871; without the `GQ` floor it called 32,941 and was wrong at 1,970).
 #[test]
 fn the_pass_fixes_errors_and_fills_sites_without_reads_on_an_inbred_cohort() {
     let cohort = test_cohort(SHAPE);
@@ -89,7 +90,7 @@ fn the_pass_fixes_errors_and_fills_sites_without_reads_on_an_inbred_cohort() {
         "with reads: calling {calling_errors} wrong, the pass {pass_errors}, of {with_reads}"
     );
     assert!(
-        filled * 100 >= without_reads * 95 && filled_wrong * 3 < guessed_wrong,
+        filled * 2 >= without_reads && filled_wrong * 100 <= filled,
         "without reads: {filled} of {without_reads} called, {filled_wrong} wrong; \
          the prior's guess {guessed_wrong} wrong"
     );
@@ -97,7 +98,8 @@ fn the_pass_fixes_errors_and_fills_sites_without_reads_on_an_inbred_cohort() {
 
 /// **A sample that stops having reads is withheld once no evidence brackets the site** (§4.2):
 /// sample 0 has no reads from record 1,000 on, so every one of its records from there is `./.`
-/// with the pass's posterior as its `GP`, while the samples around it are still called.
+/// with the pass's posterior as its `GP`, while the samples around it are still called. Before
+/// record 1,000 every record where it has reads is called, and most where it has none.
 #[test]
 fn a_sample_without_evidence_on_both_sides_is_withheld() {
     let cohort = test_cohort(CohortShape {
@@ -125,13 +127,22 @@ fn a_sample_without_evidence_on_both_sides_is_withheld() {
         .filter(|record| record.outcomes[0] == Outcome::Called)
         .count();
     assert!(
-        called_before > 990,
+        called_before > 800,
         "{called_before} of 999 called before the reads stop"
     );
     assert!(
-        refined[1_000..]
+        cohort.records[..999]
             .iter()
-            .all(|record| record.outcomes[1] == Outcome::Called)
+            .zip(&refined[..999])
+            .filter(|(record, _)| record.row(0) == SampleRow::Informative)
+            .all(|(_, refined)| refined.outcomes[0] == Outcome::Called)
+    );
+    assert!(
+        cohort.records[1_000..]
+            .iter()
+            .zip(&refined[1_000..])
+            .filter(|(record, _)| record.row(1) == SampleRow::Informative)
+            .all(|(_, refined)| refined.outcomes[1] == Outcome::Called)
     );
 }
 

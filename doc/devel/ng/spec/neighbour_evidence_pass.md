@@ -301,7 +301,12 @@ with a genotype only if it has an informative record within one segment length `
 the site** (on one side, where the contig ends within `S` on the other — at a contig's right end only
 when the header gives its length); a record at the same position counts on neither side, since it
 shares the site's reads rather than bracketing it; otherwise it stays `./.` and
-its `GP` is the pass's posterior, as calling writes a prior. *This narrows ruling Q1 to the cases its
+its `GP` is the pass's posterior, as calling writes a prior. **And only if the call's `GQ` is at
+least 10** (owner, 2026-11-02): below it the sample stays `./.` with the pass's posterior as `GP`. On
+the founder simulator at 1×, calls without reads below `GQ` 10 were wrong 28 times in 100, mostly a
+common alternative called homozygous in a sample carrying the reference; evidence nearby that does
+not say which samples a sample copies leaves its posterior near the cohort's frequency
+(`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1). *This narrows ruling Q1 to the cases its
 reason covers; the owner's to confirm, §11 Q1.*
 
 ---
@@ -489,6 +494,11 @@ Each with the recommendation it was ruled on. Q1–Q3 and Q5–Q8 as recommended
    prototype fixed about 25,500 wrong genotypes at true non-reference sites and made about 2,800 true
    reference genotypes non-reference (report §5.2). **Ruled: judge by the net, measured per depth, and refuse a
    default that adds more false non-reference calls than it removes errors in any depth class.**
+   **Restated by the owner, 2026-11-02:** a `./.` is not an error, and it is not a good outcome
+   either. The aim is as little missing data as possible without filling it with wrong genotypes,
+   so the pass is judged per depth by two numbers side by side: the share of `./.` it fills, and
+   how many of the genotypes it fills are wrong — with, where samples have reads, the errors it
+   removes against those it adds.
 6. **No template carries the haplotype** — an introgression, a private lineage, 10 samples from 64
    founders. The mismatch rate is the only escape, so the pass imputes the nearest template's allele
    with confidence (07 §2.7 cites 18% heterozygous error in under-represented ancient genomes).

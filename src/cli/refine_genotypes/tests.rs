@@ -109,7 +109,7 @@ fn a_calling_vcf_is_refined_and_a_refined_one_refused() {
         .expect("the input reads")
         .matches("./.")
         .count();
-    assert!(text.matches("./.").count() * 10 < no_calls_in);
+    assert!(text.matches("./.").count() * 2 < no_calls_in);
 
     let again = run_refine_genotypes(&args(
         output.clone(),

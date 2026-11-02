@@ -12,10 +12,9 @@ the rest are listed in §5 and still running.*
   quarter (an outbred cohort) to seven in eight (four founders).
 - **Where samples have no reads, it calls nearly every site, and at 1× a third of those calls are
   wrong** — almost all homozygous for a common alternative, at `GQ` below 10.
-- **Dropping calls without reads below `GQ` 10 removes most of that damage**, and the pass then adds
-  fewer false non-reference calls than it removes errors in every cell measured — if a `./.` at a
-  true non-reference genotype counts as an error, as the evaluation report counted it. Decisions 1
-  and 2.
+- **Dropping calls without reads below `GQ` 10 removes most of that damage** (ruled, built): the
+  pass then fills a quarter to nine tenths of the missing genotypes, wrong at most 3.5 times in 100
+  — except with 10 samples at 1×, where one fill in six is wrong (decision 2).
 - **The pass helps outbred and half-inbred cohorts that descend from 16 founders** — 4,934 wrong
   genotypes become 3,773 at inbreeding 0 — so the `auto` rule's median-inbreeding condition turns it
   off where it works. Decision 3, pending the 64-founder cells.
@@ -80,7 +79,7 @@ calibrated as calls with them.
 
 ## 4. Decisions
 
-### Decision 1 — no genotype at a site without reads below `GQ` 10. I recommend it.
+### Decision 1 — no genotype at a site without reads below `GQ` 10. *Ruled yes by the owner, 2026-11-02; built (`NO_READ_MIN_GENOTYPE_QUALITY` in `refine.rs`).*
 
 Today a sample with flat `PL` is written with the pass's genotype whenever it has an informative
 record within `S` on both sides (§4.2, your ruling on §11 Q1). The proposal adds one condition: the
@@ -102,22 +101,34 @@ or below calling's own count at 3×. A floor of 20 cuts false calls little furth
 gives up most recoveries (at 50 samples and 1×, 605 → 3). Either way it is one comparison in
 `refine.rs`, made where the no-read rule is.
 
-### Decision 2 — Q5's balance counts a `./.` at a true non-reference genotype as an error. I recommend it.
+### Decision 2 — how the balance is judged. *Restated by the owner, 2026-11-02.*
 
-Your Q5 ruling refuses a default that "adds more false non-reference calls than it removes errors in
-any depth class". Whether a `./.` is an error decides the 1× cells:
+The draft of this section asked whether a `./.` at a true non-reference genotype counts as an
+error. The owner's answer: **a `./.` is not an error, and it is not a good outcome either.** The aim
+is as little missing data as possible without filling it with wrong genotypes. So each depth is
+judged by how much missing data the pass fills and how many of the fills are wrong, beside what it
+does where samples have reads. With the `GQ` 10 floor:
 
-| cell, with the floor of decision 1 | errors removed / false non-reference added: `./.` not an error | `./.` at a true non-reference genotype an error |
-|---|---|---|
-| 16 founders, 50 samples, 1× | −10 / 22 — refused | 595 / 22 |
-| 16 founders, 10 samples, 1× | 2 / 44 — refused | 215 / 44 |
-| every 3× and 10× cell | passes | passes |
+| cell | `./.` before | filled | of them wrong | where samples have reads: wrong, calling → pass |
+|---|---|---|---|---|
+| 4 founders, 50 samples, 3× | 1,952 | 1,810 (93%) | 0 | 228 → 32 |
+| 16 founders, F 0, 50 samples, 3× | 2,444 | 694 (28%) | 24 (3.5%) | 4,934 → 3,773 |
+| 16 founders, F 0.5, 50 samples, 3× | 2,643 | 1,816 (69%) | 33 (1.8%) | 2,595 → 1,173 |
+| 16 founders, F 0.8, 50 samples, 3× | 2,538 | 2,117 (83%) | 14 (0.7%) | 1,245 → 374 |
+| 16 founders, 10 samples, 1× | 955 | 301 (32%) | 47 (16%) | 46 → 44 |
+| 16 founders, 10 samples, 3× | 402 | 154 (38%) | 5 (3%) | 88 → 51 |
+| 16 founders, 50 samples, 1× | 2,570 | 632 (25%) | 16 (2.5%) | 57 → 67 |
+| 16 founders, 50 samples, 3× | 2,674 | 2,409 (90%) | 6 (0.25%) | 281 → 90 |
+| 10× cells | 1 and 5 | 0 and 5 | 0 | 19 → 6, 29 → 6 |
 
-The evaluation report counted it as an error ("at sites where the shallow accession had no read, 85%
-of true non-reference genotypes wrong today", spec §1), and it is what a user of the VCF loses: a
-variant the sample carries and the file does not say. Counted that way, with decision 1, every cell
-measured passes Q5, the 1× ones included. Counted the other way, the pass must be off at 1× however
-it is tuned, since at 1× it removes almost no errors where samples have reads.
+**One corner fills with wrong data: 10 samples at 1×**, where one fill in six is wrong although each
+claims `GQ` 10 or more — the floor of 20 does no better there (120 filled, 19 wrong). Everywhere else
+a fill is wrong at most 3.5 times in 100, and in the inbred cohorts of 50 under 1 in 100. That
+corner's `GQ` overstates its certainty, so no `GQ` floor fixes it; what does is the open question.
+The 64-founder cell at 10 samples, still running, shows whether it is the small cohort or the low
+depth; a second seed of the 10-sample cells shows whether it is this draw. *Counts above are the
+written `GQ` after allele subsetting; the built floor reads the posterior before it, which moves a
+handful of calls.*
 
 ### Decision 3 — the `auto` rule's inbreeding condition. I recommend deciding after the 64-founder cells.
 

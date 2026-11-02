@@ -9,7 +9,8 @@
 //!
 //! **A sample whose reads said nothing at a record is called there only with evidence nearby**
 //! (§4.2): an informative record of its own within one segment length `S` on each side, or on one
-//! side where the contig ends within `S` on the other. Without that its posterior is the cohort's
+//! side where the contig ends within `S` on the other — and only if the call's `GQ` is at least
+//! [`NO_READ_MIN_GENOTYPE_QUALITY`]. Without that its posterior is the cohort's
 //! frequency reached through its templates — a confident `0/0` with nothing behind it — and it
 //! stays `./.`, with the posterior as its `GP`.
 
@@ -21,9 +22,17 @@ use super::fit::SampleFit;
 use super::model::{WalkSite, walk};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::choose_templates;
+use crate::calling::quality::score_best_genotype;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
 pub const MISMATCH: f64 = 0.01;
+
+/// **The least `GQ` a sample whose reads said nothing is written with a genotype at** (§4.2, owner
+/// 2026-11-02): below it, a one-in-ten chance of being wrong, the sample stays `./.` with the pass's
+/// posterior as `GP`. On the founder simulator at 1× the calls below it were wrong 28 times in 100,
+/// most of them a common alternative called homozygous where the sample carries the reference
+/// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1).
+pub const NO_READ_MIN_GENOTYPE_QUALITY: f32 = 10.0;
 
 /// **What the pass did to one sample at one record.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,8 +42,8 @@ pub enum Outcome {
     Unchanged,
     /// Re-called: written with the argmax of the new posterior.
     Called,
-    /// Re-called without evidence of its own nearby (§4.2): written `./.`, the new posterior as
-    /// its `GP`.
+    /// Re-called without reads, and without evidence of its own nearby or below
+    /// [`NO_READ_MIN_GENOTYPE_QUALITY`] (§4.2): written `./.`, the new posterior as its `GP`.
     Withheld,
 }
 
@@ -194,7 +203,9 @@ fn refine_sample(
                     record.position,
                     reach,
                     contig_length,
-                ) {
+                ) && score_best_genotype(&result.posteriors[site]).1.get()
+                    >= NO_READ_MIN_GENOTYPE_QUALITY
+                {
                     Outcome::Called
                 } else {
                     Outcome::Withheld
