@@ -536,8 +536,9 @@ pub fn report_neighbour_evidence(finished: &FinishedVcf, vcf_path: &Path) {
             .map(|&(rate, sample)| format!("{sample} {}", percent(rate)))
             .collect();
         tracing::info!(
-            "fill check — each sample's no-read calls tried at the sites where its reads settle \
-             its genotype, the neighbours' prediction against the reads: {} of {} samples checked \
+            "fill check — each sample's no-read calls tried at records hidden from the phasing \
+             rounds where its reads settle its genotype, the neighbours' prediction against the \
+             reads: {} of {} samples checked \
              at {MIN_FILL_CHECK_SITES} sites or more, wrong at a median of {} of sites (from {} to \
              {}; highest {}); {unmeasured} with fewer sites, not estimated. A best case: a site no \
              read reached can be harder{table_note}",
@@ -558,7 +559,7 @@ pub fn report_neighbour_evidence(finished: &FinishedVcf, vcf_path: &Path) {
 }
 
 /// **The fill error rate above which a run warns** (owner, 2026-11-02): over the whole cohort, or
-/// for a sample whose rate is plausibly above it ([`FillCheck::wrong_share_at_least`]).
+/// for a sample whose rate is plausibly above it ([`FillCheck::wrong_share_at_least`](crate::neighbour_evidence::refine::FillCheck::wrong_share_at_least)).
 pub const POOR_FILL_SHARE: f64 = 0.02;
 
 /// **Warns when the pass's fills look poor**, so the user can look at why: the cohort's fills, all

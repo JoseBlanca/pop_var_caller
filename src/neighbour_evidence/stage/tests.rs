@@ -41,7 +41,8 @@ fn the_header_line_states_the_decision() {
     assert_eq!(
         decision.as_header_value(),
         "<ran=yes,why=\"57 samples, median inbreeding 0.98\",templates=16,mismatch=0.01,\
-         core=2000000,margin=1000000,rounds=5,haplotype_templates=16>"
+         core=2000000,margin=1000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
+         hidden_share=0.05>"
     );
     let decision = decide(NeighbourEvidenceSwitch::Auto, &[0.0; 2], diploid());
     assert_eq!(

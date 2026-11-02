@@ -342,7 +342,7 @@ fn errors(
 /// **Phasing removes errors an outbred cohort's genotype templates cannot** (phasing spec §1): 30
 /// outbred samples from 4 founders at 3×, solved in one round and in [`PHASING_ROUNDS`]. A
 /// heterozygous template tells a copy only "either allele"; its haplotypes say which. The rounds
-/// leave at most half the wrong genotypes where samples have reads (on seed 5: 867 against 2,795).
+/// leave at most half the wrong genotypes where samples have reads (on seed 5: 1,015 against 2,795, with up to 50 records a sample hidden for the fill check).
 #[test]
 fn phasing_removes_errors_on_an_outbred_cohort() {
     let shape = CohortShape {
@@ -405,7 +405,7 @@ fn phasing_does_not_depend_on_the_thread_count() {
 }
 
 /// **With phasing the fill check runs at hidden records only** (phasing spec §4.1): no sample is
-/// checked at more than [`HIDDEN_RECORDS_PER_SAMPLE`] records, and most samples at some.
+/// checked at more than [`HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW`] records, and most samples at some.
 #[test]
 fn phasing_checks_fills_at_hidden_records_only() {
     let cohort = test_cohort(CohortShape {
@@ -427,7 +427,7 @@ fn phasing_checks_fills_at_hidden_records_only() {
         solved
             .checks
             .iter()
-            .all(|check| check.checked as usize <= HIDDEN_RECORDS_PER_SAMPLE)
+            .all(|check| check.checked as usize <= HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW)
     );
     let checked = solved
         .checks
@@ -451,6 +451,7 @@ fn the_phased_window_matches_the_python_reference() {
     type Columns = Vec<Option<(Vec<u32>, Vec<f64>)>>;
     let mut inputs: Vec<(u64, f64, Columns)> = Vec::new();
     let mut expected: Vec<(usize, usize, Vec<f64>)> = Vec::new();
+    let mut hidden_lines: Vec<Vec<usize>> = Vec::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         match fields[0] {
@@ -471,6 +472,12 @@ fn the_phased_window_matches_the_python_reference() {
                     })
                     .collect(),
             )),
+            "hidden" => hidden_lines.push(
+                fields[2..]
+                    .iter()
+                    .map(|x| x.parse::<usize>().expect("a record"))
+                    .collect::<Vec<usize>>(),
+            ),
             "posterior" => expected.push((
                 fields[1].parse().expect("a record"),
                 fields[2].parse().expect("a sample"),
@@ -512,7 +519,7 @@ fn the_phased_window_matches_the_python_reference() {
         &mut fits,
         MAX_TEMPLATES,
         NoReadRule::default(),
-        Phasing { rounds, window_key },
+        Phasing::new(rounds, window_key),
     );
     assert!(
         expected.len() > 1_000,
@@ -536,4 +543,97 @@ fn the_phased_window_matches_the_python_reference() {
         worst < 1e-9,
         "largest difference from the reference: {worst:e}"
     );
+    // The records each sample hid are the reference's.
+    let layout = WindowLayout::new(&records, &(0..records.len()));
+    for (sample, expected_hidden) in hidden_lines.iter().enumerate() {
+        let drawn = if choose_templates(&records, sample, MAX_TEMPLATES).is_some() {
+            draw_hidden_records(&records, &layout, sample, window_key)
+        } else {
+            Vec::new()
+        };
+        assert_eq!(&drawn, expected_hidden, "sample {sample}'s hidden records");
+    }
 }
+
+/// **A record no walk uses, inserted mid-window, changes no other record's phased result**: the
+/// window solve keeps record indices and site positions apart (they coincide in windows where every
+/// record is a site, as in every other test here). From the code review of 2026-11-02.
+#[test]
+fn a_non_site_record_changes_no_other_phased_record() {
+    use crate::neighbour_evidence::records::SampleColumns;
+    let cohort = test_cohort(CohortShape {
+        records: 600,
+        inbred: false,
+        ..SHAPE
+    });
+    let pl = [0_u32, 10, 40];
+    let gp = [0.9, 0.09, 0.01];
+    let mut columns: Vec<Option<SampleColumns<'_>>> = vec![None; SHAPE.samples];
+    columns[0] = Some(SampleColumns {
+        phred_likelihoods: &pl,
+        genotype_posteriors: &gp,
+    });
+    let at = 50;
+    let extra = SiteRecord::new(cohort.records[at].position, &[0.1], &columns);
+    assert!(!extra.is_site());
+    let mut with_extra = cohort.records.clone();
+    with_extra.insert(at, extra);
+    let solve = |records: &[SiteRecord]| {
+        let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.05)).collect();
+        refine_window_in_rounds(
+            records,
+            0..records.len(),
+            None,
+            &mut fits,
+            MAX_TEMPLATES,
+            NoReadRule::default(),
+            Phasing::rounds_for(17),
+        )
+    };
+    let plain = solve(&cohort.records);
+    let extended = solve(&with_extra);
+    let mut kept = extended.records.clone();
+    kept.remove(at);
+    assert_eq!(plain.records, kept);
+    assert_eq!(plain.checks, extended.checks);
+}
+
+/// **A phased window's posteriors, to the last bit** (code review 2026-11-02, float portability):
+/// the 1e-9 reference test cannot see a one-bit difference between platforms' arithmetic, which
+/// would change the written `GP`. This hash of every posterior's bits was recorded on macOS arm64;
+/// the same test on Linux x86-64 must give it too. A deliberate change to the pass's arithmetic
+/// re-records it.
+#[test]
+fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
+    let cohort = test_cohort(CohortShape {
+        records: 400,
+        inbred: false,
+        ..SHAPE
+    });
+    let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.05)).collect();
+    let solved = refine_window_in_rounds(
+        &cohort.records,
+        0..cohort.records.len(),
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+        Phasing::rounds_for(window_key(3, 1_000)),
+    );
+    // FNV-1a over every posterior's bits, record by record.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for record in &solved.records {
+        for value in &record.posteriors {
+            for byte in value.to_bits().to_le_bytes() {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    assert_eq!(
+        hash, RECORDED_POSTERIOR_BITS,
+        "the posteriors' bits are {hash:#018x}"
+    );
+}
+
+/// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
+const RECORDED_POSTERIOR_BITS: u64 = 0x7ec3_2e53_3730_7761;

@@ -81,7 +81,7 @@ pub fn choose_templates(
 /// informative sites, at most [`AGREEMENT_RECORDS`] of them spread evenly by record order (§3.3).
 /// Empty when it has none.
 #[must_use]
-pub fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usize> {
+pub(crate) fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usize> {
     let informative: Vec<usize> = (0..records.len())
         .filter(|&index| {
             records[index].is_site() && records[index].row(sample) == SampleRow::Informative
@@ -101,8 +101,9 @@ pub fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usize> {
 ///
 /// A haplotype's score is the rate at which it carries an allele the sample's genotype lacks — at
 /// each record `Σ_a h(a) · P(genotype without a)`, `h` the haplotype and the genotype probabilities
-/// the sample's posterior from the previous round, `previous(record)` — summed over the `compared`
-/// records where the haplotype's sample is informative too, and scored by
+/// the sample's posterior from the previous round, `previous_posteriors`, one per `compared` record
+/// in its order — summed over the `compared` records where the haplotype's sample is informative
+/// too, and scored by
 /// [`disagreement_bound`]. Each other sample offers its better haplotype (copy 0 on a tie); the
 /// offers are ranked by score, then sample, then copy. `haplotype(other, copy, record)` reads the
 /// previous round's haplotypes.
@@ -110,11 +111,11 @@ pub fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usize> {
 /// One of each sample because without it the slots fill with copies of the commonest haplotype:
 /// 871 wrong genotypes against 689 on the prototype's first cohort (spec §2.3).
 #[must_use]
-pub fn choose_haplotypes<'a>(
+pub(crate) fn choose_haplotypes<'a>(
     records: &[SiteRecord],
     sample: usize,
     compared: &[usize],
-    previous: &dyn Fn(usize) -> &'a [f64],
+    previous_posteriors: &[Vec<f64>],
     haplotype: &dyn Fn(usize, usize, usize) -> &'a [f64],
     max_templates: usize,
 ) -> Vec<(usize, usize)> {
@@ -124,11 +125,16 @@ pub fn choose_haplotypes<'a>(
     let samples = records[first].sample_count();
     let mut pairs = GenotypePairs::default();
     // P(genotype without a) at each compared record, for every allele.
+    assert_eq!(
+        compared.len(),
+        previous_posteriors.len(),
+        "one previous posterior a compared record"
+    );
     let lacking: Vec<Vec<f64>> = compared
         .iter()
-        .map(|&index| {
+        .zip(previous_posteriors)
+        .map(|(&index, posterior)| {
             let alleles = records[index].allele_count;
-            let posterior = previous(index);
             (0..alleles)
                 .map(|allele| {
                     pairs

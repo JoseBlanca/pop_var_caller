@@ -21,7 +21,8 @@ use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
 use super::records::SiteRecord;
 use super::refine::{
-    FillCheck, MISMATCH, NoReadRule, PHASING_ROUNDS, Phasing, refine_window_in_rounds,
+    FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
+    PHASING_ROUNDS, Phasing, refine_window_in_rounds, window_key,
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
@@ -67,7 +68,9 @@ impl NeighbourEvidenceDecision {
         if self.ran {
             format!(
                 "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},\
-                 rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES}>",
+                 rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES},\
+                 hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
+                 hidden_share={MAX_HIDDEN_SHARE}>",
                 self.sizes.core_bases, self.sizes.margin_bases
             )
         } else {
@@ -249,6 +252,13 @@ impl NeighbourEvidenceStage {
                 let contig_length = self
                     .contig
                     .and_then(|contig| self.contig_lengths.get(contig.0 as usize).copied());
+                // The window's contig and its first core site's position key its draws: they depend
+                // on the window alone, not on what else the run called.
+                let first_core = &self.sites[core_sites.start - self.first_site];
+                let key = window_key(
+                    self.contig.map_or(0, |contig| contig.0),
+                    first_core.position,
+                );
                 let solved = refine_window_in_rounds(
                     &self.sites
                         [window_sites.start - self.first_site..window_sites.end - self.first_site],
@@ -257,8 +267,7 @@ impl NeighbourEvidenceStage {
                     &mut self.fits,
                     MAX_TEMPLATES,
                     NoReadRule::default(),
-                    // The run-wide number of the core's first site keys the window's draws.
-                    Phasing::rounds_for(core_sites.start as u64),
+                    Phasing::rounds_for(key),
                 );
                 for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
                     *sum += check;

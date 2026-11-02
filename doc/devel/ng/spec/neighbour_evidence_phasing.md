@@ -137,7 +137,9 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 - **Round 1 is the pass as now — decided.** The prototype's alternatives were the subtraction (one
   copy follows relatives, the other is what the genotype leaves) and Beagle; both were measured as
   *templates* and lost, neither was tried as a *start*. Starting from the pass as now makes round 1
-  a check: its posteriors must be the current pass's, record for record.
+  a check: without phasing (`R` = 1) its posteriors must be the current pass's, record for record.
+  With phasing, round 1 differs from today's pass at the records hidden for the fill check (§4.1),
+  where it reads a flat likelihood — and only there.
 
 ### 2.3 Templates
 
@@ -241,9 +243,12 @@ gains `rounds=R` and `haplotype_templates=16`, so a reader can tell which model 
 those where its reads are informative** (owner, 2026-11-02, §10 Q4; the numbers set at the Rust
 build): drawn at random among the window's core records where the sample's reads are informative, from
 §5's generator. At a hidden record the sample is treated as having no reads in every round — its
-walk and its path read a flat likelihood there — so none of its reads at that record reach any
-template's haplotype, and its averaged neighbours-only prediction there is what a real `./.` would
-be filled with: no reads at the record, reads around it.
+walk and its path read a flat likelihood there — so its own walk never sees them, and its averaged
+neighbours-only prediction there is close to what a real `./.` would be filled with: no reads at
+the record, reads around it. *Close, not equal:* in round 1 the other samples copy its `GP` shares,
+which calling made from those reads, and carry them into their round-1 haplotypes. Masking those
+shares too was measured (code review 2026-11-02, 6,000 hidden records on the crate's test cohorts:
+prediction errors 144 → 141, 34 → 43, 9 → 17) and showed no systematic effect, so the `GP` stays.
 
 - **The fill check runs at hidden records only:** where the sample's own evidence settles its
   genotype and the §4.2 rules would write the prediction, the prediction's genotype against the
@@ -293,19 +298,29 @@ five rounds about 6.5. Choosing haplotypes each round adds `N · 2 · 500` compa
 window: at 3,000 samples and the 1,800 windows of pass §6, about 5 core-hours over four rounds. At
 that cohort size the windows are at their floor — a 0.5-Mb core in a 1.5-Mb window — so every record
 is walked three times, not the two pass §6 counted: the pass costs about 33 core-hours, and with
-phasing about 213 — on the run's 30 threads, about 7 hours. The owner (2026-11-02): parallelising over segments of the genome
-answers what remains.
+phasing about 213 — on the run's 30 threads, about 7 hours. The owner (2026-11-02): parallelising
+over segments of the genome answers what remains.
 Today windows are solved one after another inside the writer and samples in parallel within a
 window (pass §2.3), which keeps every thread busy once a window has as many samples as threads;
 windows solved in parallel are the next step if a cohort is smaller than that (§9). **The cost
-estimate is arithmetic, not a measurement** — the first Rust build measures it (§8).
+above is arithmetic; what the first Rust build measured** (code review, 2026-11-02, the crate's test
+cohort on one thread): five rounds cost 3.8–5.6 times one round with the fit frozen, and 1.45 times
+with round 1's parameter fit included (120 samples, 2,000 records: 23.0 s against 33.4 s) — the fit's
+twelve grid walks dominate a first window. The haplotype choice first ran at about 30 ns a
+comparison, against the 0.3 ns the arithmetic assumed, from two binary searches per comparison —
+about 500 core-hours at 3,000 samples; the searches are now table lookups, not yet re-measured.
 
 **Memory.** Three new holdings, and one the pass already had uncounted.
 - *The haplotype store*: two haplotypes a sample a record, **`A − 1` probabilities each** (the last
   allele's is one minus the rest), as `f32` — 8 bytes a biallelic sample-record; two copies live at
   once (the round being read and the round being written), 16 bytes, against the 40 a window holds
   today (pass §6). **At absent rows the store holds `1/A`**, written when the store is filled, so a
-  reader never has to ask; a sample's own walk overwrites only its walked records.
+  reader never has to ask; a sample's own walk overwrites only its walked records. *Built as two
+  flat `f64` rows a sample with all `A` probabilities a copy* — 32 bytes a biallelic sample-record a
+  copy, 64 for the two — the `A − 1`, `f32` form deferred to the performance work. Each sample writes
+  its own row of the round being written from its own thread, so no second copy of every sample's
+  haplotypes is held at a round's end (the first build held one, about 80–110 bytes a sample-record;
+  code review 2026-11-02).
 - *The round accumulators*: running sums, per sample and core record, of the posterior, the
   prediction and the background-copy probability — 7 numbers biallelic, as `f32` 28 bytes a core
   sample-record. The previous round's posterior is kept **only at each sample's at most 500
@@ -325,9 +340,11 @@ sample-records), so a smaller budget cannot shrink it: the window holds about 11
 **Determinism.** The draw is random. Each sample's path in each round reads uniforms from a
 SplitMix64 generator (the crate has no random-number dependency; it already uses hand-written
 SplitMix64, e.g. `src/cli/estimate_contamination.rs:1005`) seeded by mixing a constant, **the
-run-wide number of the window's first core site** (the stage numbers sites from the run's first,
-`stage.rs:130`; a position or a per-contig index would repeat across contigs), the sample's index
-and the round. Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
+window's key — its contig's number and its first core site's position** (`refine::window_key`), the
+sample's index and the round. The key depends on the window alone, so a region's genotypes are the
+same whether it is called alone or with other contigs; the first build keyed by the run-wide number
+of the window's first site, which changed a contig's draws with the contigs called before it (code
+review, 2026-11-02). Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
 fixed order — autozygous states first, then pair states row by row — as `phaser.py` orders them.
 Nothing depends on threads or on solving order, and rounds are synchronous (§2.1 step 3), so the
 result is the same at 1 and 30 threads. **The seed is a constant in the code, not an option.**

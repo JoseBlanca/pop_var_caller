@@ -192,7 +192,7 @@ fn a_round_takes_each_samples_better_haplotype_once() {
     let records = window_of(4, |_, _| &HOMOZYGOUS_ALTERNATIVE);
     let compared = compared_records(&records, 0);
     assert_eq!(compared.len(), 400.min(AGREEMENT_RECORDS));
-    let homozygous_alternative = [0.0, 0.0, 1.0];
+    let homozygous_alternative = vec![vec![0.0, 0.0, 1.0]; compared.len()];
     let reference = [1.0, 0.0];
     let alternative = [0.0, 1.0];
     let haplotype = |other: usize, copy: usize, _: usize| -> &[f64] {
@@ -205,7 +205,7 @@ fn a_round_takes_each_samples_better_haplotype_once() {
         &records,
         0,
         &compared,
-        &|_| &homozygous_alternative,
+        &homozygous_alternative,
         &haplotype,
         3,
     );
@@ -214,7 +214,7 @@ fn a_round_takes_each_samples_better_haplotype_once() {
         &records,
         0,
         &compared,
-        &|_| &homozygous_alternative,
+        &homozygous_alternative,
         &haplotype,
         1,
     );

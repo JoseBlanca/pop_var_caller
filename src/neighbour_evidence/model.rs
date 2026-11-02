@@ -206,7 +206,7 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
 
 /// **One haplotype pair at one site**: each copy's probability of carrying each allele, `A`
 /// numbers a copy.
-pub type HaplotypePair = [Vec<f64>; 2];
+pub(crate) type HaplotypePair = [Vec<f64>; 2];
 
 /// **The walk, and one state path drawn from it with the two haplotypes along it**
 /// (`neighbour_evidence_phasing.md` §2.1). The walk is [`walk`]'s, unchanged. The path is drawn
@@ -218,9 +218,10 @@ pub type HaplotypePair = [Vec<f64>; 2];
 ///
 /// # Panics
 ///
-/// As [`walk`].
+/// As [`walk`]; and if every state at a site has zero weight — every genotype's likelihood zero
+/// there, which a likelihood row normalised to its largest value never is.
 #[must_use]
-pub fn walk_and_draw(
+pub(crate) fn walk_and_draw(
     sites: &[WalkSite<'_>],
     templates: usize,
     parameters: WalkParameters,
@@ -229,6 +230,7 @@ pub fn walk_and_draw(
     let (result, drawn) = walk_with_draw(sites, templates, parameters, Some(uniforms));
     (
         result,
+        // PANIC-FREE: `walk_with_draw` draws whenever it is given a stream, as it is here.
         drawn.expect("a stream was given, so a path was drawn"),
     )
 }
@@ -246,6 +248,12 @@ fn walk_with_draw(
     parameters: WalkParameters,
     uniforms: Option<&mut Uniforms>,
 ) -> (WalkResult, Option<Vec<HaplotypePair>>) {
+    assert!(
+        sites
+            .windows(2)
+            .all(|pair| pair[0].position <= pair[1].position),
+        "a walk's sites must not descend in position"
+    );
     let share = parameters.autozygous_share;
     assert!(
         share > 0.0 && share < 1.0 && templates > 0,
@@ -510,7 +518,7 @@ fn walk_with_draw(
 }
 
 /// The backward draw and the re-estimation of [`walk_and_draw`].
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // the forward walk's parts the draw reads, and the stream
 fn draw_haplotypes(
     sites: &[WalkSite<'_>],
     terms: &[SiteTerms],

@@ -7,7 +7,8 @@
 //! `doc/devel/ng/research/neighbour_evidence/phaser_reference.py` implements the same stream, so the
 //! Rust pass and the Python prototype can be compared exactly.
 
-/// The constant every seed starts from.
+/// The constant every seed starts from. `phaser_reference.py`'s `SEED` must equal it, and its
+/// purpose numbers must equal [`StreamPurpose`]'s, or the reference test fails.
 const SEED: u64 = 0x6E65_6967_6862_6F75;
 
 /// **What a stream is for**, mixed into its seed so two purposes never share one.
@@ -26,8 +27,8 @@ pub struct Uniforms {
 }
 
 impl Uniforms {
-    /// The stream for `purpose`, keyed by `window` (the run-wide number of the window's first core
-    /// site), `sample` and `round` (0 for [`StreamPurpose::HiddenRecords`]).
+    /// The stream for `purpose`, keyed by `window` (the window's key,
+    /// `refine::window_key`), `sample` and `round` (0 for [`StreamPurpose::HiddenRecords`]).
     #[must_use]
     pub fn new(purpose: StreamPurpose, window: u64, sample: usize, round: usize) -> Self {
         let purpose = match purpose {
