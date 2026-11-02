@@ -220,3 +220,44 @@ fn a_round_takes_each_samples_better_haplotype_once() {
     );
     assert_eq!(chosen, vec![(1, 1)]);
 }
+
+/// **The haplotype choice at three alleles** (code review 2026-11-02): sample 0's previous genotype
+/// is 2/2, so a haplotype lacks nothing only where it carries allele 2. Sample 1's copy 0 carries
+/// allele 2 and its copy 1 allele 0; sample 2 carries allele 1 on both. Sample 1 offers copy 0 and
+/// comes first.
+#[test]
+fn the_haplotype_choice_reads_every_allele() {
+    use crate::neighbour_evidence::records::SampleColumns;
+    let informative = [60_u32, 60, 60, 30, 30, 0];
+    let posteriors = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let records: Vec<SiteRecord> = (0..50)
+        .map(|record| {
+            let columns: Vec<Option<SampleColumns<'_>>> = (0..3)
+                .map(|_| {
+                    Some(SampleColumns {
+                        phred_likelihoods: &informative,
+                        genotype_posteriors: &posteriors,
+                    })
+                })
+                .collect();
+            SiteRecord::new(1 + record * 100, &[0.2, 0.3], &columns)
+        })
+        .collect();
+    let compared = compared_records(&records, 0);
+    let previous = vec![posteriors.to_vec(); compared.len()];
+    let allele = |carried: usize| -> [f64; 3] {
+        let mut shares = [0.0; 3];
+        shares[carried] = 1.0;
+        shares
+    };
+    let (two, zero, one) = (allele(2), allele(0), allele(1));
+    let haplotype = |other: usize, copy: usize, _: usize| -> &[f64] {
+        match (other, copy) {
+            (1, 0) => &two,
+            (1, 1) => &zero,
+            _ => &one,
+        }
+    };
+    let chosen = choose_haplotypes(&records, 0, &compared, &previous, &haplotype, 2);
+    assert_eq!(chosen, vec![(1, 0), (2, 0)]);
+}

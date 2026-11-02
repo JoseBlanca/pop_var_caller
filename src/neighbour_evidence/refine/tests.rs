@@ -438,7 +438,8 @@ fn phasing_checks_fills_at_hidden_records_only() {
 }
 
 /// **The phased window matches the Python reference to 1e-9** (phasing spec §8.1): the window
-/// `phaser_reference.py` drew and solved — 8 samples, 300 records, some flat and some absent — with
+/// `phaser_reference.py` drew and solved — 20 samples, so more candidates than the 16 template slots, and 500 records,
+/// some flat and some absent — with
 /// the same random stream, state order, hidden records and haplotype choice, every sample's fit
 /// frozen at the reference's grid point. Every written posterior agrees, so a disagreement is a bug,
 /// not the seed.
@@ -637,3 +638,150 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
 
 /// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
 const RECORDED_POSTERIOR_BITS: u64 = 0x7ec3_2e53_3730_7761;
+
+/// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
+/// round went unnoticed): two rounds and five leave every sample's fit in the same state, since
+/// rounds 2 on read the parameters round 1 chose.
+#[test]
+fn only_round_one_fits() {
+    let cohort = test_cohort(CohortShape {
+        records: 500,
+        inbred: false,
+        ..SHAPE
+    });
+    let fits_after = |rounds: usize| {
+        let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.05)).collect();
+        let _ = refine_window_in_rounds(
+            &cohort.records,
+            0..cohort.records.len(),
+            None,
+            &mut fits,
+            MAX_TEMPLATES,
+            NoReadRule::default(),
+            Phasing::new(rounds, 9),
+        );
+        format!("{fits:?}")
+    };
+    assert_eq!(fits_after(2), fits_after(5));
+}
+
+/// **The fill check compares the neighbours' prediction, not the posterior, with the settled
+/// genotype** (code review 2026-11-02: feeding it the posterior went unnoticed): every sample is
+/// homozygous for the reference everywhere, except sample 0, whose deep reads settle the
+/// alternative homozygote at one record. Its neighbours there predict the reference, so its check
+/// counts exactly one disagreement; the posterior, which holds its reads, would count none.
+#[test]
+fn the_fill_check_compares_the_neighbours_prediction() {
+    use crate::neighbour_evidence::records::SampleColumns;
+    let reference = ([0_u32, 30, 60], [1.0, 0.0, 0.0]);
+    let alternative = ([90_u32, 45, 0], [0.0, 0.0, 1.0]);
+    let samples = 6;
+    let odd = 100;
+    let records: Vec<SiteRecord> = (0..200)
+        .map(|record| {
+            let columns: Vec<Option<SampleColumns<'_>>> = (0..samples)
+                .map(|sample| {
+                    let (pl, gp) = if sample == 0 && record == odd {
+                        &alternative
+                    } else {
+                        &reference
+                    };
+                    Some(SampleColumns {
+                        phred_likelihoods: pl,
+                        genotype_posteriors: gp,
+                    })
+                })
+                .collect();
+            SiteRecord::new(1 + record as u64 * 200, &[0.1], &columns)
+        })
+        .collect();
+    let mut fits: Vec<SampleFit> = (0..samples).map(|_| SampleFit::new(0.95)).collect();
+    let solved = refine_window(
+        &records,
+        0..records.len(),
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+    );
+    assert!(solved.checks[0].checked > 100, "{:?}", solved.checks[0]);
+    assert_eq!(solved.checks[0].disagreed, 1, "{:?}", solved.checks[0]);
+}
+
+/// **At most [`HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW`] records a sample are hidden, and at most
+/// [`MAX_HIDDEN_SHARE`] of its informative core records** (code review 2026-11-02: neither limit was
+/// reached by a test): a window where every record is informative hides 50 of 3,000 and 20 of 400.
+#[test]
+fn hidden_records_respect_both_limits() {
+    for (records, expected) in [(3_000, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW), (400, 20)] {
+        let cohort = test_cohort(CohortShape {
+            records,
+            depth: 30.0,
+            ..SHAPE
+        });
+        let layout = WindowLayout::new(&cohort.records, &(0..records));
+        let hidden = draw_hidden_records(&cohort.records, &layout, 0, 5);
+        assert_eq!(hidden.len(), expected, "{records} records");
+        assert!(hidden.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+}
+
+/// **A phased window of two or three samples runs**, every template slot that exists filled, and
+/// writes finite posteriors (code review 2026-11-02: no phased test below 30 samples).
+#[test]
+fn a_phased_window_of_a_few_samples_runs() {
+    for samples in [2, 3] {
+        let cohort = test_cohort(CohortShape {
+            samples,
+            founders: 2,
+            records: 400,
+            inbred: false,
+            ..SHAPE
+        });
+        let mut fits: Vec<SampleFit> = (0..samples).map(|_| SampleFit::new(0.05)).collect();
+        let solved = refine_window_in_rounds(
+            &cohort.records,
+            0..cohort.records.len(),
+            None,
+            &mut fits,
+            MAX_TEMPLATES,
+            NoReadRule::default(),
+            Phasing::rounds_for(1),
+        );
+        assert!(
+            solved
+                .records
+                .iter()
+                .all(|record| record.posteriors.iter().all(|value| value.is_finite()))
+        );
+        assert!(
+            solved
+                .records
+                .iter()
+                .any(|record| record.outcomes.contains(&Outcome::Called))
+        );
+    }
+}
+
+/// **A window cannot be solved in no rounds.**
+#[test]
+#[should_panic(expected = "at least one round")]
+fn phasing_refuses_zero_rounds() {
+    let _ = Phasing::new(0, 0);
+}
+
+/// **A window's key tells windows apart by contig and by position**, so two windows never share
+/// draws (code review 2026-11-02: replacing the stage's key with a constant went unnoticed).
+#[test]
+fn window_keys_differ_by_contig_and_position() {
+    let keys = [
+        window_key(0, 1),
+        window_key(0, 2_000_001),
+        window_key(1, 1),
+        window_key(1, 2_000_001),
+        window_key(24, 248_956_422),
+    ];
+    for (index, key) in keys.iter().enumerate() {
+        assert!(!keys[index + 1..].contains(key), "{keys:?}");
+    }
+}

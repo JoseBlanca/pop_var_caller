@@ -281,3 +281,63 @@ fn the_re_estimation_subtracts_a_known_haplotype() {
     let [first, second] = copies_along(State::Autozygous(0), &blurred, &only_alternative, 2);
     assert!((first[1] - 1.0).abs() < 1e-12 && (second[1] - 1.0).abs() < 1e-12);
 }
+
+/// **At three alleles a path still follows the only template that fits** (code review 2026-11-02:
+/// nothing tested phasing beyond two alleles): a sample homozygous for allele 2, one template
+/// carrying allele 2 and one carrying allele 0, no mismatch — both copies carry allele 2 at every
+/// site, the genotype table's six genotypes read in VCF order.
+#[test]
+fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
+    use crate::neighbour_evidence::random::{StreamPurpose, Uniforms};
+    // 0/0, 0/1, 1/1, 0/2, 1/2, 2/2
+    let likelihoods = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let shares = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+    let sites: Vec<WalkSite<'_>> = (0..30)
+        .map(|index| WalkSite {
+            position: 1 + index * 1_000,
+            allele_count: 3,
+            likelihoods: &likelihoods,
+            template_shares: &shares,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.5,
+        mismatch: 0.0,
+    };
+    for seed in 0..10 {
+        let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
+        let (_, haplotypes) = walk_and_draw(&sites, 2, parameters, &mut uniforms);
+        for pair in &haplotypes {
+            for copy in pair {
+                assert_eq!(copy.len(), 3);
+                assert!((copy[2] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
+            }
+        }
+    }
+}
+
+/// **The re-estimation at three alleles**: copy one on a template carrying allele 1, copy two on a
+/// template even over the three, and reads allowing only the genotype 1/2 — copy two carries
+/// allele 2 with probability `(1/3)·(1 − ε·2/3) / ((1/3)·(1 − ε·2/3) + (1/3)·(ε/3))`, given copy
+/// one's allele 1, and allele 1 when copy one drew allele 2 instead; computed here.
+#[test]
+fn the_re_estimation_at_three_alleles() {
+    let mismatch: f64 = 0.03;
+    let carrying_one = [mismatch / 3.0, 1.0 - 2.0 * mismatch / 3.0, mismatch / 3.0];
+    let even = [1.0 / 3.0; 3];
+    let blurred: Vec<f64> = carrying_one.iter().chain(&even).copied().collect();
+    // Symmetric 3×3 likelihood: only the pair {1, 2}.
+    let mut by_alleles = [0.0; 9];
+    by_alleles[3 + 2] = 1.0;
+    by_alleles[2 * 3 + 1] = 1.0;
+    let [first, second] = copies_along(State::Pair(0, 1), &blurred, &by_alleles, 3);
+    let one_then_two = carrying_one[1] * even[2];
+    let two_then_one = carrying_one[2] * even[1];
+    let total = one_then_two + two_then_one;
+    assert!((first[1] - one_then_two / total).abs() < 1e-12);
+    assert!((second[2] - one_then_two / total).abs() < 1e-12);
+    assert!((second[1] - two_then_one / total).abs() < 1e-12);
+    assert!(first[0].abs() < 1e-12 && second[0].abs() < 1e-12);
+}

@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hmm import haplotypes, stays  # noqa: E402
 
-SAMPLES, RECORDS, FOUNDERS = 8, 300, 3
+SAMPLES, RECORDS, FOUNDERS = 20, 500, 4
 SPACING = 500
 SEGMENT, RUN, SHARE, MISMATCH = 300_000.0, 300_000.0, 0.5, 0.01
 CHOSEN = 1 * 6 + 3            # SEGMENT_GRID[1], RUN_GRID[3], segment-major
@@ -305,6 +305,7 @@ for round_ in range(1, ROUNDS + 1):
                     sums[s][i] += posts[s][i]
 
 # ---- the fixture ---------------------------------------------------------------------------------
+print(f'# python {sys.version.split()[0]} numpy {np.__version__}')
 print(f'window {SAMPLES} {RECORDS} {SHARE} {CHOSEN} {ROUNDS} {WINDOW_KEY}')
 for i in range(RECORDS):
     columns = []

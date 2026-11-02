@@ -341,10 +341,13 @@ sample-records), so a smaller budget cannot shrink it: the window holds about 11
 SplitMix64 generator (the crate has no random-number dependency; it already uses hand-written
 SplitMix64, e.g. `src/cli/estimate_contamination.rs:1005`) seeded by mixing a constant, **the
 window's key — its contig's number and its first core site's position** (`refine::window_key`), the
-sample's index and the round. The key depends on the window alone, so a region's genotypes are the
-same whether it is called alone or with other contigs; the first build keyed by the run-wide number
-of the window's first site, which changed a contig's draws with the contigs called before it (code
-review, 2026-11-02). Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
+sample's index and the round. The key depends on the window alone, so a window's draws do not
+change with what else the run called; the first build keyed by the run-wide number of the window's
+first site, which changed a contig's draws with the contigs called before it (code review,
+2026-11-02). *The genotypes still can*: each sample's walk parameters are fitted on the run's first
+windows and then frozen (pass §3.5), so calling a contig alone or after others fits them on
+different windows. That predates phasing.
+Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
 fixed order — autozygous states first, then pair states row by row — as `phaser.py` orders them.
 Nothing depends on threads or on solving order, and rounds are synchronous (§2.1 step 3), so the
 result is the same at 1 and 30 threads. **The seed is a constant in the code, not an option.**
@@ -401,9 +404,11 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
 
 ## 8. How we know it works
 
-1. **Exact agreement with the prototype.** `phaser.py` gains §5's SplitMix64 stream and state order;
-   on a small cohort (10 samples, 2,000 records) the Rust haplotypes and posteriors agree with it to
-   1e-9 after `R` rounds. This, not a statistical tolerance, is what tells a bug from chance.
+1. **Exact agreement with the prototype.** `phaser_reference.py` uses §5's SplitMix64 stream and
+   state order; on a drawn window (built: 20 samples — more than the 16 template slots — and 500
+   records, biallelic) the Rust posteriors and hidden records agree with it to 1e-9 after `R`
+   rounds. Records with more than two alleles are covered by unit tests of the draw, the
+   re-estimation and the haplotype choice, not by the reference. This, not a statistical tolerance, is what tells a bug from chance.
 2. **The prototype's numbers, reproduced** on the founder-grid cells above, with the prototype run
    under the Rust pass's own rules and fitted parameters (to be added to `phaser.py`): wrong-genotype
    counts within a tenth, judged against the seed spread (about 5%, §1).
