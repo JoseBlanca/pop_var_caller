@@ -201,6 +201,13 @@ evidence gathered as `estimate-parameters` gathers it, the depth rule applied):
 |---|---|---|---|---|
 | tomato2, 59 accessions at about 3 reads | 59 | 773,836 | 9,199 (84 rows each) | 61,474 (12.6 rows each) |
 | stuttering simulation, 50 samples at 3 reads | 50 | 127,804 | 9,723 (13 rows each) | 58,261 (2.2 rows each) |
+| kimura's tomato cohort, 2,169 samples, median 11 reads | 2,655 | 119,072,017 | 4,795,352 (25 rows each) | 35,042,058 (3.4 rows each) |
+
+*The kimura row (2026-11-02) was counted with the code just before main's reference checksum changed
+(`b626ead2`'s parent), because its psps predate that change, and without the depth rule, which that
+code lacks; on tomato2 the depth rule left out 240 tracts, so the counts would move little.* By motif
+length the ratio runs from 6.6 (dinucleotides) to 11.3 (tetranucleotides); the largest class, a
+homopolymer at 13 repeats, holds 2.69 million keyed rows against 332,000 pooled.
 
 So **keying by read group scores 6.7 times as many rows a round on tomato2 and 6.0 times on the
 simulation**, the same in every motif length to within 4.7 and 8.2 times. The expectation step is
@@ -209,14 +216,13 @@ today's. Today's repeat-tract fit takes 38 s on tomato2 (Mac, the duplicated-tra
 with every round keyed, about four minutes, if the loop needs as many rounds as today. *An estimate
 from the row counts, measured in §8.7.*
 
-**At thousands of read groups the speed-up shrinks further, and the measurement above cannot say by
-how much.** A read group on tomato2 holds about 1,040 distinct rows over every class; if that holds at
-kimura's scale, 2,169 read groups hold about 2.3 million keyed rows against 66 million rows with reads,
-still about 29 rows each, but against a pooled table that at 2,169 samples is unmeasured. **What is
+**At thousands of read groups the cost is the same factor**: 7.3 on kimura's cohort, against 6.7 on
+tomato2, because the pooled table there already repeats a row only 25 times, not 84. **What it
+costs in memory**: a scored row holds one number a genotype, 190 at ±9, so the largest kimura class
+holds about 4 GB of scored keyed rows against about 0.5 GB pooled, one class at a time. **What is
 built**: the exact keyed table. **What is measured, on kimura** (free for a couple of days, owner
-2026-11-02): the keyed and pooled row counts with the counting tool above, before any fit code is
-written, and then the fit's time against the penalised fit's goal of one hour (`str_penalised_fit.md`
-§1.3, goal 4). **If it misses the goal**, the fallback is to round each multiplier to a grid of 1%
+2026-11-02): the fit's time against the penalised fit's goal of one hour (`str_penalised_fit.md`
+§1.3, goal 4), which at seven times today's rounds it may miss. **If it misses the goal**, the fallback is to round each multiplier to a grid of 1%
 steps for the expectation step only, so that rows are keyed by the grid value and every read group
 within 1% shares rows; a 1% step is well below a homopolymer multiplier's error at 3 reads (about 5%,
 §3.6). That changes numbers by the rounding, so it is the owner's to approve, after the measurement,
