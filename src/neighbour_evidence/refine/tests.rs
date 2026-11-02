@@ -98,6 +98,58 @@ fn the_pass_fixes_errors_and_fills_sites_without_reads_on_an_inbred_cohort() {
     );
 }
 
+/// **A sample without reads that is probably copying the background is withheld** (§4.2): with the
+/// limit, every no-read call copies the background with probability at most the limit, and each
+/// call the limit removes is one that copied it more; the walk itself does not change. 10 samples
+/// from 8 founders, so some haplotypes have no other sample to copy.
+#[test]
+fn a_no_read_call_copying_the_background_is_withheld() {
+    let shape = CohortShape {
+        samples: 10,
+        founders: 8,
+        ..SHAPE
+    };
+    let cohort = test_cohort(shape);
+    let refine = |no_read| {
+        let mut fits: Vec<SampleFit> = (0..shape.samples).map(|_| SampleFit::new(0.95)).collect();
+        refine_window(
+            &cohort.records,
+            0..cohort.records.len(),
+            None,
+            &mut fits,
+            MAX_TEMPLATES,
+            no_read,
+        )
+        .records
+    };
+    let limited = refine(NoReadRule::default());
+    let unlimited = refine(NoReadRule {
+        max_background_copy: None,
+        ..NoReadRule::default()
+    });
+    let mut removed = 0;
+    for ((record, with_limit), without) in cohort.records.iter().zip(&limited).zip(&unlimited) {
+        assert_eq!(with_limit.posteriors, without.posteriors);
+        for sample in 0..shape.samples {
+            let background = with_limit.background_copy[sample];
+            match (with_limit.outcomes[sample], without.outcomes[sample]) {
+                (Outcome::Called, Outcome::Called) => {}
+                (Outcome::Withheld, Outcome::Called) => {
+                    assert!(background > NO_READ_MAX_BACKGROUND_COPY);
+                    removed += 1;
+                }
+                (same, other) => assert_eq!(same, other),
+            }
+            if with_limit.outcomes[sample] == Outcome::Called
+                && record.row(sample) == SampleRow::Flat
+            {
+                assert!(background <= NO_READ_MAX_BACKGROUND_COPY);
+            }
+        }
+    }
+    assert!(removed > 0, "the limit withheld nothing");
+}
+
 /// **A sample that stops having reads is withheld once no evidence brackets the site** (§4.2):
 /// sample 0 has no reads from record 1,000 on, so every one of its records from there is `./.`
 /// with the pass's posterior as its `GP`, while the samples around it are still called. Before

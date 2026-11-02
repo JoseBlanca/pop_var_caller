@@ -309,6 +309,15 @@ not say which samples a sample copies leaves its posterior near the cohort's fre
 (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1). *This narrows ruling Q1 to the cases its
 reason covers; the owner's to confirm, §11 Q1.*
 
+**And only if the sample is copying the background template there with probability at most 0.1**
+(owner, 2026-11-02): the walk's posterior probability that the autozygous state copies the
+background, or either copy of a pair does (§3.3). Where no other sample carries the sample's
+haplotype, the call is the cohort's frequency again, however confident its `GQ`. On the founder
+simulator's inbred cohorts, the calls this withholds between 0.1 and 0.5 were wrong 13 times in 165,
+and those above 0.5 85 times in 719, against 1 to 2 in 100 for the calls kept; at 10 samples and 1×
+the limit keeps 101 of 294 calls, 2 of them wrong, from 47 (same report, the background-copy
+section).
+
 ---
 
 ## 5. When it runs

@@ -41,11 +41,23 @@ pub const NO_READ_MIN_GENOTYPE_QUALITY: f32 = 10.0;
 /// read a site, where no single genotype ever is confident.
 pub const CONTRADICTION_LIKELIHOOD_RATIO: f64 = 10.0;
 
+/// **The most probable a sample without reads may be copying the background template** — copying no
+/// sampled haplotype (§3.3) — and still be written with a genotype (§4.2, owner 2026-11-02). Where
+/// no other sample carries its haplotype the call is the cohort's allele frequency, not a copy. On
+/// the founder simulator's inbred cohorts, the fills with the probability between 0.1 and 0.5 were
+/// wrong 13 times in 165, against 1 to 2 in 100 for the fills kept; at 10 samples and 1×, the limit
+/// keeps 101 of 294 fills with 2 wrong, from 47
+/// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`).
+pub const NO_READ_MAX_BACKGROUND_COPY: f64 = 0.1;
+
 /// **When a sample without reads at a record is written with a genotype** (§4.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoReadRule {
     /// The least `GQ` the pass's call must reach.
     pub min_genotype_quality: f32,
+    /// The most probable the sample may be copying the background template at the record.
+    /// `None` applies no such limit.
+    pub max_background_copy: Option<f64>,
     /// The most a sample's neighbours may disagree with its own confident genotypes in the window
     /// — `disagreed / checked` of its [`NeighbourCheck`] — before every no-read call of the sample
     /// in the window is withheld. `None` applies no such limit.
@@ -56,6 +68,7 @@ impl Default for NoReadRule {
     fn default() -> Self {
         Self {
             min_genotype_quality: NO_READ_MIN_GENOTYPE_QUALITY,
+            max_background_copy: Some(NO_READ_MAX_BACKGROUND_COPY),
             max_neighbour_disagreement: None,
         }
     }
@@ -90,8 +103,9 @@ pub enum Outcome {
     Unchanged,
     /// Re-called: written with the argmax of the new posterior.
     Called,
-    /// Re-called without reads, and without evidence of its own nearby or below
-    /// [`NO_READ_MIN_GENOTYPE_QUALITY`] (§4.2): written `./.`, the new posterior as its `GP`.
+    /// Re-called without reads, and without evidence of its own nearby, below
+    /// [`NO_READ_MIN_GENOTYPE_QUALITY`] or above [`NO_READ_MAX_BACKGROUND_COPY`] (§4.2): written
+    /// `./.`, the new posterior as its `GP`.
     Withheld,
 }
 
@@ -291,6 +305,9 @@ fn refine_sample(
                     )
                     && score_best_genotype(&result.posteriors[site]).1.get()
                         >= no_read.min_genotype_quality
+                    && no_read
+                        .max_background_copy
+                        .is_none_or(|most| result.last_template_copy[site] <= most)
                 {
                     Outcome::Called
                 } else {
