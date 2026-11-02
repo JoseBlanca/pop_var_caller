@@ -135,9 +135,9 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 both have reads, a pessimistic score), from `GP`, and each contributes both its haplotypes:
 `2K + 1` templates with the background, 33 at `K` = 16. The prototype ran exactly this.
 
-**Choosing haplotypes instead of samples is OPEN** (§10 Q2): taking the 16 best haplotypes of all
-`2(N − 1)` would keep the walk's cost as it is now, but has not been measured, and needs a
-haplotype-to-genotype distance the code does not have. Confirm before code.
+**Choosing 16 haplotypes instead of 16 samples is being measured** (§10 Q2, ruled: adopt it if within
+a tenth): taking the 16 best of all `2(N − 1)` haplotypes keeps the walk's cost as it is now, and
+needs a haplotype-to-genotype distance the code does not have.
 
 ### 2.4 What does not change
 
@@ -184,7 +184,7 @@ The averaged quantities replace the single walk's, everywhere the pass uses them
 
 Each is the mean of rounds 2 to `R`. A no-read call's `GQ` floor, the evidence-nearby rule and the
 background limit are applied once, to the means. The header's `##neighbourEvidence=` line gains
-`phasing=yes|no` and `rounds=R`.
+`rounds=R`.
 
 ---
 
@@ -225,11 +225,10 @@ output is a function of the input.
 ## 6. When it runs
 
 - **Only when the pass runs** (pass §5).
-- **`--phase-templates auto|on|off`**, default `auto`. **What `auto` decides is OPEN** (§10 Q1):
-  phasing costs about 23 times the pass and gains nothing in an inbred cohort (row 7: 121 against
-  113 wrong, against perfect phasing's 109). The leaning: on when at least a tenth of the samples
-  have inbreeding below 0.8, from the parameters file — a number to set from §8's measurements,
-  not yet measured. Confirm before code.
+- **Always, with no option of its own — ruled** (owner, 2026-11-02, §10 Q1): "if we commit to the
+  phasing model we'll use that model", and the command line stays as it is. An inbred cohort pays
+  the cost for a small gain (row 7: 121 against 113 wrong); performance is to be worked on once the
+  model runs, not by switching it off.
 - **Diploid only**, as the pass.
 
 ---
@@ -302,13 +301,12 @@ output is a function of the input.
 
 ---
 
-## 10. Open questions — the owner's to rule
+## 10. Questions — ruled by the owner, 2026-11-02
 
-- **Q1. What `auto` decides** (§6). Leaning: on when at least a tenth of the samples have inbreeding
-  below 0.8. The cost is about 23 times the pass and the gain in an inbred cohort nil. Confirm before
-  code; §8.5 and the tomato test can move the numbers.
-- **Q2. 16 sample templates (32 haplotypes) or 16 haplotype templates** (§2.3). The first is
-  measured and costs 3.8 times a walk; the second costs as now and is unmeasured. Leaning: measure
-  the second in the prototype before the Rust build — a day — and take it if it is within a tenth.
-- **Q3. `R`** — 5, from one cohort (§2.2). Leaning: keep 5 and measure 3 and 8 on the 200-sample
-  cells.
+- **Q1. When phasing runs** (§6). *Ruled: always, whenever the pass runs, with no option.* The
+  leaning offered — on when a tenth of the samples have inbreeding below 0.8 — was declined to keep
+  the command line simple; performance is to be optimised instead.
+- **Q2. 16 sample templates (32 haplotypes) or 16 haplotype templates** (§2.3). *Ruled: measure the
+  second in the prototype and adopt it if its wrong-genotype counts are within a tenth of the
+  first's.* It costs as now; the first costs 3.8 times a walk.
+- **Q3. `R`** (§2.2). *Ruled: keep 5; measure 3 and 8 on the 200-sample cells.*
