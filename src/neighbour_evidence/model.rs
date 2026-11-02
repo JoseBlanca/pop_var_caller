@@ -320,7 +320,6 @@ fn walk_with_draw(
         forward_pairs.push(pairs);
     }
 
-    let mut genotype_pairs = genotype_pairs;
     let drawn = uniforms.map(|uniforms| {
         draw_haplotypes(
             sites,
