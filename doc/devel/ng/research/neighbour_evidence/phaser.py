@@ -3,7 +3,10 @@ each sample's two haplotypes as its templates' contribution, scored on founder_g
 against the simulator's truth.
 
 usage: uv run --with numpy python phaser.py [--rounds R] [--haplotypes 16 [--one-per-sample]]
-                                           [--hide N] <cell dir> [...]
+                                           [--hide N] [--dump DIR] <cell dir> [...]
+
+--dump DIR writes each round's haplotypes, with the truth, to DIR/<cell>.round<r>.pickle, for
+phase_accuracy.py.
 
 Each sample carries two haplotypes, soft: at each record, each copy's probability of carrying the
 alternative. Round 1 starts every template sample's two haplotypes at its GP allele share, so the
@@ -281,9 +284,12 @@ def main():
     args = sys.argv[1:]
     rounds = 4
     hide = 0
+    dump = None
     while args[0].startswith('--'):
         if args[0] == '--rounds':
             rounds = int(args[1])
+        elif args[0] == '--dump':
+            dump = args[1]
         elif args[0] == '--hide':
             hide = int(args[1])
         elif args[0] == '--haplotypes':
@@ -323,6 +329,15 @@ def main():
                     new_haps[target] = new
                     posts[target] = post
             HAPS[cell] = new_haps
+            if dump:
+                import pickle
+                os.makedirs(dump, exist_ok=True)
+                name_ = os.path.basename(os.path.normpath(cell))
+                with open(os.path.join(dump, f'{name_}.round{round_index}.pickle'), 'wb') as fh:
+                    pickle.dump({'haplotypes': new_haps,
+                                 'records': [[(r['pos'], r['truth']) for r in rows]
+                                             for rows in pc.CONTIGS[cell].values()],
+                                 'contigs': list(pc.CONTIGS[cell].keys())}, fh)
             PREVIOUS = posts
             print(row(name, str(round_index), score(cell, posts)), flush=True)
             # the average over rounds from the second on: the first is the pass as now
