@@ -10,6 +10,7 @@
 //! (`doc/devel/ng/research/neighbour_evidence/hmm.py`, `haplotypes`), checked against it to 1e-9 by
 //! this module's tests.
 
+use super::random::{Uniforms, pick};
 use crate::calling::genotype_table::{GenotypeIdx, GenotypeTable};
 use crate::float;
 use crate::types::Ploidy;
@@ -200,6 +201,51 @@ fn persistence(gap: f64, parameters: &WalkParameters) -> (f64, f64, f64) {
 /// not strictly between 0 and 1.
 #[must_use]
 pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters) -> WalkResult {
+    walk_with_draw(sites, templates, parameters, None).0
+}
+
+/// **One haplotype pair at one site**: each copy's probability of carrying each allele, `A`
+/// numbers a copy.
+pub type HaplotypePair = [Vec<f64>; 2];
+
+/// **The walk, and one state path drawn from it with the two haplotypes along it**
+/// (`neighbour_evidence_phasing.md` §2.1). The walk is [`walk`]'s, unchanged. The path is drawn
+/// backwards from the last site, each state given the one after it and the forward probabilities,
+/// one uniform a site from `uniforms`, the states in the order autozygous `0..K` then pairs row by
+/// row. Along the path, copy one carries allele `a` and copy two `b` with probability
+/// `∝ q̃_{k₁}(a) · q̃_{k₂}(b) · L({a, b})` in a pair state and `∝ q̃_k(a) · L({a, a})`, `a = b`, in
+/// an autozygous one; each copy's haplotype is that joint's margin.
+///
+/// # Panics
+///
+/// As [`walk`].
+#[must_use]
+pub fn walk_and_draw(
+    sites: &[WalkSite<'_>],
+    templates: usize,
+    parameters: WalkParameters,
+    uniforms: &mut Uniforms,
+) -> (WalkResult, Vec<HaplotypePair>) {
+    let (result, drawn) = walk_with_draw(sites, templates, parameters, Some(uniforms));
+    (
+        result,
+        drawn.expect("a stream was given, so a path was drawn"),
+    )
+}
+
+/// A state of the walk: autozygous on one template, or a pair of templates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Autozygous(usize),
+    Pair(usize, usize),
+}
+
+fn walk_with_draw(
+    sites: &[WalkSite<'_>],
+    templates: usize,
+    parameters: WalkParameters,
+    uniforms: Option<&mut Uniforms>,
+) -> (WalkResult, Option<Vec<HaplotypePair>>) {
     let share = parameters.autozygous_share;
     assert!(
         share > 0.0 && share < 1.0 && templates > 0,
@@ -273,6 +319,20 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
         forward_autozygous.push(autozygous);
         forward_pairs.push(pairs);
     }
+
+    let mut genotype_pairs = genotype_pairs;
+    let drawn = uniforms.map(|uniforms| {
+        draw_haplotypes(
+            sites,
+            &terms,
+            &forward_autozygous,
+            &forward_pairs,
+            k,
+            &parameters,
+            &mut genotype_pairs,
+            uniforms,
+        )
+    });
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
     let mut posteriors = vec![Vec::new(); sites.len()];
@@ -438,13 +498,161 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
         neighbour_predictions[index] = prediction;
     }
 
-    WalkResult {
-        posteriors,
-        neighbour_predictions,
-        autozygous: autozygous_probability,
-        last_template_copy,
-        log_likelihood,
+    (
+        WalkResult {
+            posteriors,
+            neighbour_predictions,
+            autozygous: autozygous_probability,
+            last_template_copy,
+            log_likelihood,
+        },
+        drawn,
+    )
+}
+
+/// The backward draw and the re-estimation of [`walk_and_draw`].
+#[allow(clippy::too_many_arguments)]
+fn draw_haplotypes(
+    sites: &[WalkSite<'_>],
+    terms: &[SiteTerms],
+    forward_autozygous: &[Vec<f64>],
+    forward_pairs: &[Vec<f64>],
+    k: usize,
+    parameters: &WalkParameters,
+    genotype_pairs: &mut GenotypePairs,
+    uniforms: &mut Uniforms,
+) -> Vec<HaplotypePair> {
+    let k_f = k as f64;
+    let mut weights = vec![0.0; k + k * k];
+    let mut states = Vec::with_capacity(sites.len());
+    for index in (0..sites.len()).rev() {
+        match states.last() {
+            None => {
+                weights[..k].copy_from_slice(&forward_autozygous[index]);
+                weights[k..].copy_from_slice(&forward_pairs[index]);
+            }
+            Some(&next) => {
+                let gap = (sites[index + 1].position - sites[index].position) as f64;
+                let (keep, stay_autozygous, stay_other) = persistence(gap, parameters);
+                match next {
+                    State::Pair(next_first, next_second) => {
+                        for (weight, value) in
+                            weights[..k].iter_mut().zip(&forward_autozygous[index])
+                        {
+                            *weight = value * (1.0 - stay_autozygous) / (k_f * k_f);
+                        }
+                        for first in 0..k {
+                            for second in 0..k {
+                                let mut transition = (1.0 - keep) * (1.0 - keep) / (k_f * k_f);
+                                if first == next_first {
+                                    transition += keep * (1.0 - keep) / k_f;
+                                }
+                                if second == next_second {
+                                    transition += keep * (1.0 - keep) / k_f;
+                                }
+                                if first == next_first && second == next_second {
+                                    transition += keep * keep;
+                                }
+                                weights[k + first * k + second] = forward_pairs[index]
+                                    [first * k + second]
+                                    * stay_other
+                                    * transition;
+                            }
+                        }
+                    }
+                    State::Autozygous(next_template) => {
+                        for (template, (weight, value)) in weights[..k]
+                            .iter_mut()
+                            .zip(&forward_autozygous[index])
+                            .enumerate()
+                        {
+                            let mut transition = (1.0 - keep) / k_f;
+                            if template == next_template {
+                                transition += keep;
+                            }
+                            *weight = value * stay_autozygous * transition;
+                        }
+                        for (weight, value) in weights[k..].iter_mut().zip(&forward_pairs[index]) {
+                            *weight = value * (1.0 - stay_other) / k_f;
+                        }
+                    }
+                }
+            }
+        }
+        let picked = pick(&weights, uniforms.next_uniform());
+        states.push(if picked < k {
+            State::Autozygous(picked)
+        } else {
+            State::Pair((picked - k) / k, (picked - k) % k)
+        });
     }
+    states.reverse();
+
+    sites
+        .iter()
+        .zip(terms)
+        .zip(&states)
+        .map(|((site, site_terms), &state)| {
+            let alleles = site.allele_count;
+            let mut by_alleles = vec![0.0; alleles * alleles];
+            for (&(first, second), &likelihood) in
+                genotype_pairs.of(alleles).iter().zip(site.likelihoods)
+            {
+                by_alleles[first * alleles + second] = likelihood;
+                by_alleles[second * alleles + first] = likelihood;
+            }
+            copies_along(state, &site_terms.blurred, &by_alleles, alleles)
+        })
+        .collect()
+}
+
+/// **The two copies' haplotypes at one site, given the state the path is in there**: the joint of
+/// copy one's allele `a` and copy two's `b`, `q̃_{k₁}(a) · q̃_{k₂}(b) · L({a, b})` in a pair state
+/// and `q̃_k(a) · L({a, a})` on the diagonal in an autozygous one, normalised; each copy is its
+/// margin. `blurred` holds the templates' blurred shares, `by_alleles` the likelihood as a
+/// symmetric `A × A` matrix. Where every pair is ruled out each copy is flat.
+fn copies_along(
+    state: State,
+    blurred: &[f64],
+    by_alleles: &[f64],
+    alleles: usize,
+) -> HaplotypePair {
+    let mut joint = vec![0.0; alleles * alleles];
+    match state {
+        State::Pair(first, second) => {
+            for a in 0..alleles {
+                for b in 0..alleles {
+                    joint[a * alleles + b] = blurred[first * alleles + a]
+                        * blurred[second * alleles + b]
+                        * by_alleles[a * alleles + b];
+                }
+            }
+        }
+        State::Autozygous(template) => {
+            for a in 0..alleles {
+                joint[a * alleles + a] =
+                    blurred[template * alleles + a] * by_alleles[a * alleles + a];
+            }
+        }
+    }
+    let total: f64 = joint.iter().sum();
+    if total <= 0.0 {
+        // Every allele pair ruled out — the state's emission was zero (§3.6's guard).
+        return [
+            vec![1.0 / alleles as f64; alleles],
+            vec![1.0 / alleles as f64; alleles],
+        ];
+    }
+    let mut first_copy = vec![0.0; alleles];
+    let mut second_copy = vec![0.0; alleles];
+    for a in 0..alleles {
+        for b in 0..alleles {
+            let value = joint[a * alleles + b] / total;
+            first_copy[a] += value;
+            second_copy[b] += value;
+        }
+    }
+    [first_copy, second_copy]
 }
 
 /// Row and column sums of a `k × k` matrix stored row by row.

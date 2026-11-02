@@ -228,3 +228,56 @@ fn a_zero_emission_state_contributes_nothing() {
         assert!((posterior[1] - 1.0).abs() < 1e-12, "{posterior:?}");
     }
 }
+
+/// **A path follows the only template that fits** (phasing spec §8.3): with no mismatch, a sample
+/// homozygous for the alternative at every site, one template carrying the alternative and the
+/// other carrying the reference, every drawn state copies the first, so both copies carry the
+/// alternative everywhere — at any seed.
+#[test]
+fn a_drawn_path_follows_the_only_template_that_fits() {
+    use crate::neighbour_evidence::random::{StreamPurpose, Uniforms};
+    let likelihoods = [0.0, 0.0, 1.0];
+    let shares = [0.0, 1.0, 1.0, 0.0];
+    let sites: Vec<WalkSite<'_>> = (0..40)
+        .map(|index| WalkSite {
+            position: 1 + index * 1_000,
+            allele_count: 2,
+            likelihoods: &likelihoods,
+            template_shares: &shares,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.5,
+        mismatch: 0.0,
+    };
+    for seed in 0..20 {
+        let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
+        let (_, haplotypes) = walk_and_draw(&sites, 2, parameters, &mut uniforms);
+        for pair in &haplotypes {
+            for copy in pair {
+                assert!((copy[1] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
+            }
+        }
+    }
+}
+
+/// **The re-estimation is the owner's subtraction as a special case** (phasing spec §8.3): copy one
+/// on a homozygous-reference template, copy two on a template even between the alleles, and reads
+/// that allow only the heterozygote give copy one the reference and copy two the alternative, each
+/// with probability `1 − ε/2`.
+#[test]
+fn the_re_estimation_subtracts_a_known_haplotype() {
+    let mismatch = 0.01;
+    let blurred = [1.0 - mismatch / 2.0, mismatch / 2.0, 0.5, 0.5];
+    let only_heterozygous = [0.0, 1.0, 1.0, 0.0];
+    let [first, second] = copies_along(State::Pair(0, 1), &blurred, &only_heterozygous, 2);
+    assert!((first[0] - (1.0 - mismatch / 2.0)).abs() < 1e-12);
+    assert!((second[1] - (1.0 - mismatch / 2.0)).abs() < 1e-12);
+    // Autozygous on the reference template, with reads that allow only the alternative homozygote:
+    // the blur alone carries it.
+    let only_alternative = [0.0, 0.0, 0.0, 1.0];
+    let [first, second] = copies_along(State::Autozygous(0), &blurred, &only_alternative, 2);
+    assert!((first[1] - 1.0).abs() < 1e-12 && (second[1] - 1.0).abs() < 1e-12);
+}

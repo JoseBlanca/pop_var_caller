@@ -2,6 +2,7 @@
 //! the samples it shares stretches of chromosome with (`doc/devel/ng/spec/neighbour_evidence_pass.md`).
 //!
 //! - [`model`] — one sample's walk along a window: the copying model with an autozygous state (§3).
+//! - [`random`] — the seeded uniforms phasing draws from (phasing spec §5).
 //! - [`records`] — one record as the pass holds it: each sample's likelihoods and allele shares,
 //!   and the background template's shares (§3.2, §3.3).
 //! - [`templates`] — which other samples a sample copies from in a window (§3.3).
@@ -15,6 +16,7 @@
 pub mod fit;
 pub mod line;
 pub mod model;
+pub mod random;
 pub mod records;
 pub mod refine;
 pub mod stage;
