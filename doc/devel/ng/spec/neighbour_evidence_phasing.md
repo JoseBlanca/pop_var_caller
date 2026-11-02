@@ -28,19 +28,21 @@ walk. Nothing about the walk changes; what a template carries does.
 **What the prototype measured** (Python reference model, 50 samples, founder simulator; wrong
 genotypes where samples have reads):
 
-| cohort | calling | pass as now | **prototype phaser** | Beagle 5.5 | perfect phasing |
-|---|---|---|---|---|---|
-| 10 at 30× + 40 at 3×, inbreeding 0.5, 16 founders | 2,187 | 1,106 | **699** | 787 | 392 |
-| same, inbreeding 0.8 | 1,053 | 409 | **305** | 310 | 251 |
-| same, inbreeding 0.8, 64 founders | 1,080 | 729 | **707** | 715 | 617 |
-| all 3×, inbreeding 0.5, 16 founders | 2,595 | 1,339 | **906** | 1,154 | 472 |
-| all 3×, inbreeding 0.8, 16 founders | 1,245 | 515 | **433** | 458 | 320 |
-| all 3×, outbred, 16 founders | 4,934 | 3,971 | **3,352** | 3,755 | 591 |
-| all 3×, inbreeding 0.95, 16 founders | 281 | 121 | 113 | 115 | 109 |
-| all 3×, outbred, 64 founders | 5,308 | 4,934 | **5,069** | 5,263 | 3,003 |
+| cohort | calling | pass as now | **phaser, 16 haplotype templates** (adopted) | phaser, 32 | Beagle 5.5 | perfect phasing |
+|---|---|---|---|---|---|---|
+| 10 at 30× + 40 at 3×, inbreeding 0.5, 16 founders | 2,187 | 1,106 | **689** | 699 | 787 | 392 |
+| same, inbreeding 0.8 | 1,053 | 409 | **322** | 305 | 310 | 251 |
+| same, inbreeding 0.8, 64 founders | 1,080 | 729 | **695** | 707 | 715 | 617 |
+| all 3×, inbreeding 0.5, 16 founders | 2,595 | 1,339 | **865** | 906 | 1,154 | 472 |
+| all 3×, inbreeding 0.8, 16 founders | 1,245 | 515 | **369** | 433 | 458 | 320 |
+| all 3×, outbred, 16 founders | 4,934 | 3,971 | **3,126** | 3,352 | 3,755 | 591 |
+| all 3×, inbreeding 0.95, 16 founders | 281 | 121 | 115 | 113 | 115 | 109 |
+| all 3×, outbred, 64 founders | 5,308 | 4,934 | 4,933 | 5,069 | 5,263 | 3,003 |
 
-And the `./.` it fills, first cohort: 1,589 of 2,116 at 0.8% wrong; the pass as now 1,260 at 1.5%,
-Beagle's haplotypes 1,636 at 1.9%. The model's lengths are fixed at the simulator's and the pass's
+The `./.` it fills, first cohort: 1,485 of 2,116 at 0.8% wrong; with 32 templates 1,589 at 0.8%; the
+pass as now 1,260 at 1.5%; Beagle's haplotypes 1,636 at 1.9%. In the outbred cohorts the 16
+templates fill fewer and far more reliably: 764 at 1.7% wrong against 953 at 4.8% (16 founders),
+579 at 5.4% against 733 at 8.7% (64). The model's lengths are fixed at the simulator's and the pass's
 rules for leaving a sample `./.` are not applied, so the numbers compare columns; they are not the
 pass's own. The 64-founder cohorts give each haplotype one or two carriers among 50 samples; the
 owner's point (2026-11-02) is that what matters is carriers per haplotype, which thousands of
@@ -83,12 +85,13 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 
 ### 2.1 In words
 
-1. **Start from what the pass does now.** Each sample's two haplotypes start as its allele shares
-   from `GP`, the same for both copies. Round 1 is therefore the pass as now, with each template
-   counted twice.
+1. **Round 1 is the pass as now**, exactly: each sample's `K` template samples (chosen as now, pass
+   §3.3) contribute their `GP` allele shares. Each sample's two haplotypes then start from its
+   path, as in every round.
 2. **Each round, for each sample:**
-   - its templates are the two haplotypes of each of its `K` template samples (chosen once per
-     window, as now, §2.3), plus the background template — `2K + 1` templates;
+   - from round 2 its templates are `K` *haplotypes* of other samples — the `K` whose alleles its
+     genotype lacks least, at most one of each sample (§2.3) — plus the background template, so
+     the walk has as many templates as the pass has now;
    - the walk gives its genotype posterior at every record, as now;
    - **one path is drawn** through the walk's states, backwards from the last record, each state
      drawn given the one after it and the forward probabilities;
@@ -121,23 +124,34 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 - **Average the posterior over rounds 2 to `R`, not take the last — decided, measured.** Samples
   phase each other, so an error can reinforce itself round to round: on the first cohort the last
   round's fills drifted from 1.4% wrong (round 3) to 2.8% (round 8), while the average stayed at
-  0.8–1.1%. Round 1 is left out because it is the pass without phasing.
-- **`R` = 5: a starting value**, from one cohort: the average over rounds 2–5 was 699 wrong, 2–7
-  696, 2–8 712. Not measured elsewhere.
-- **Round 1 from `GP` shares, both copies the same — decided.** The prototype's alternatives were
-  the subtraction (one copy follows relatives, the other is what the genotype leaves) and Beagle;
-  both were measured as *templates* and lost, neither was tried as a *start*. Starting from the
-  pass as now makes round 1 a check: it must reproduce the pass's current output.
+  0.8–1.1% (32 templates; with 16, 1.9% for round 5 alone against 0.8% averaged). Round 1 is left out because it is the pass without phasing.
+- **`R` = 5: a starting value**, from one cohort with 32 templates: the average over rounds 2–5 was
+  699 wrong, 2–7 696, 2–8 712. Rounds 3 and 8 are to be measured on the 200-sample cells (§10 Q3).
+- **Round 1 is the pass as now — decided.** The prototype's alternatives were the subtraction (one
+  copy follows relatives, the other is what the genotype leaves) and Beagle; both were measured as
+  *templates* and lost, neither was tried as a *start*. Starting from the pass as now makes round 1
+  a check: its posteriors must be the current pass's, record for record.
 
 ### 2.3 Templates
 
-**The `K` template samples are chosen once per window as now** (pass §3.3: least disagreement where
-both have reads, a pessimistic score), from `GP`, and each contributes both its haplotypes:
-`2K + 1` templates with the background, 33 at `K` = 16. The prototype ran exactly this.
+**Round 1: `K` = 16 template samples, as the pass chooses them now** (pass §3.3), each contributing
+its `GP` allele shares.
 
-**Choosing 16 haplotypes instead of 16 samples is being measured** (§10 Q2, ruled: adopt it if within
-a tenth): taking the 16 best of all `2(N − 1)` haplotypes keeps the walk's cost as it is now, and
-needs a haplotype-to-genotype distance the code does not have.
+**From round 2: 16 haplotypes, re-chosen every round, at most one of each sample — decided, measured
+(§10 Q2).** A haplotype's score against the sample is a disagreement rate: at each record, the
+probability that the haplotype carries an allele the sample's genotype lacks — for a biallelic
+record `x · P(0/0) + (1 − x) · P(1/1)`, `x` the haplotype's alternative probability and the genotype
+the sample's posterior from the previous round; in general `Σ_a h(a) · P(genotype without a)`. It
+is summed over the sample's informative records (at most 500, spread evenly, as now) where the
+haplotype's sample is informative too, and scored pessimistically as the pass scores samples (the
+Beta mean plus two standard deviations). Each candidate sample offers its better-scoring haplotype;
+the 16 best samples' offers are the templates.
+
+- *Why at most one of each sample:* without it the 16 slots fill with copies of the commonest
+  haplotype — many inbred samples carry it twice — and the variety a heterozygous sample needs is
+  lost: 871 wrong against 689 on the first cohort of §1.
+- *Why not both haplotypes of 16 samples:* measured (the "32" column of §1), within a tenth of the
+  adopted rule everywhere, but a walk with 33 templates costs 3.8 times one with 17.
 
 ### 2.4 What does not change
 
@@ -158,10 +172,10 @@ replace the previous round's.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the walk | `model::walk` (`model.rs:202`) | unchanged; called with `2K + 1` templates whose shares are haplotype probabilities |
+| the walk | `model::walk` (`model.rs:202`) | unchanged; called with `K + 1` templates, from round 2 haplotype probabilities |
 | the forward probabilities a path is drawn from | `forward_autozygous`, `forward_pairs` inside `walk` (`model.rs:226–274`), dropped at its end | **must be returned** (or the draw done inside `walk`) — the one change to `model.rs` |
 | the transitions a backward draw needs | the forward step's arithmetic (`model.rs:236–270`, `persistence`) | the draw uses the same transition, read backwards: given the next state, each current state's weight is its forward probability times the transition into the next |
-| template choice | `templates::choose_templates` | unchanged: samples chosen from `GP`, each expanded to two haplotypes |
+| template choice | `templates::choose_templates` | round 1, unchanged; from round 2 a new function choosing haplotypes (§2.3), reusing its record sampling and its pessimistic score (`templates::disagreement_bound`) |
 | a template's shares at a record | `SiteRecord::template_shares` (`records.rs:184`), from `GP` | round 1 only; later rounds read the window's haplotype store (§5) |
 | the background template | `SiteRecord::background_shares` | unchanged, last |
 | the genotype pairs of a record | `model::GenotypePairs` | the re-estimation's `L({a, b})` reads the sample's likelihood at the genotype index of `{a, b}` |
@@ -190,11 +204,13 @@ background limit are applied once, to the means. The header's `##neighbourEviden
 
 ## 5. Cost, memory, determinism
 
-**Time.** A walk's cost grows with the square of its templates: 33² against 17² states, 3.8 times.
-Drawing a path is one more backward sweep, about the cost of the backward walk; the re-estimation
-is `A²` a record. So a round is about 4.5 of today's walks and five rounds about 23. The pass's own
-estimate at 3,000 samples is 21 core-hours (pass §6); with phasing about 480 — on the run's 30
-threads, 16 hours. The owner (2026-11-02): parallelising over segments of the genome answers it.
+**Time.** A walk has as many templates as now. Drawing a path is one more backward sweep, about a
+third of a walk; the re-estimation is `A²` a record. So a round is about 1.3 of today's walks and
+five rounds about 6.5. Choosing haplotypes each round adds `N · 2 · 500` comparisons a sample a
+window: at 3,000 samples and the 1,800 windows of pass §6, about 5 core-hours over four rounds. The
+pass's own estimate at 3,000 samples is 21 core-hours (pass §6); with phasing about 140 — on the
+run's 30 threads, under 5 hours. The owner (2026-11-02): parallelising over segments of the genome
+answers what remains.
 Today windows are solved one after another inside the writer and samples in parallel within a
 window (pass §2.3), which keeps every thread busy once a window has as many samples as threads;
 windows solved in parallel are the next step if a cohort is smaller than that (§9). **The cost
@@ -207,12 +223,10 @@ estimate is arithmetic, not a measurement** — the first Rust build measures it
   about 72 bytes a biallelic sample-record. **The window budget (`budget_sample_records`,
   `windows.rs`) must fall to about 55% of its value to keep the same memory**, about 66 million
   sample-records; at 3,000 samples the window reaches its 500-kb floor sooner.
-- *A walk's forward vectors*, kept for the backward walk and now for the draw: `T² + T` numbers a
-  record — 1,122 at 33 templates. As `f64` over a 40,000-record window, **360 MB a sample, one per
-  thread: 10.8 GB at 30 threads.** Today's 17 templates need 98 MB. Storing them as `f32` halves it;
-  keeping only every `√n`-th record's vector and recomputing between them (checkpointing) brings it
-  to megabytes at about one more forward sweep. **Which is a decision for the arch doc; the spec's
-  requirement is that a thread's walk fits in a few hundred MB at 30 threads.**
+- *A walk's forward vectors*, kept for the backward walk and now also for the draw: as now, `T² + T`
+  numbers a record at 17 templates — 98 MB a sample as `f64` over a 40,000-record window, one per
+  thread, 2.9 GB at 30 threads. The draw needs them after the backward walk, so they live slightly
+  longer, not larger.
 
 **Determinism.** The draw is random. Each sample's path in each round is drawn from a generator
 seeded by the run's fixed seed, the sample's index, the round, and the window's first core record —
@@ -235,10 +249,11 @@ output is a function of the input.
 
 ## 7. Traps
 
-- **The walk must not see a template twice by accident.** An inbred template's two haplotypes are
-  near-identical; the walk treats them as two templates, which is correct (the prototype did) but
-  doubles their prior weight against an outbred template's two distinct haplotypes. That is the
-  prototype's behaviour and what was measured; do not "fix" it by merging without measuring (§9).
+- **The haplotype choice reads the previous round's posterior, not this round's**, and the
+  previous round's haplotypes: every sample of round `r` chooses from round `r − 1`, so the choice
+  is the same at any thread count and any order.
+- **Ties in the haplotype score** break by sample index, then copy (0 before 1), as the prototype's
+  sort does.
 - **The draw reads the forward probabilities with the transition reversed.** Given the state at
   `i + 1`, the weight of state `s` at `i` is `forward_i(s) · P(s → state_{i+1})`. For a pair state
   `(k₁, k₂)` that transition has three terms (both copies keep, one keeps, neither), plus the
@@ -253,9 +268,8 @@ output is a function of the input.
   `t` with `s`'s, so `s`'s reads return to it through `t` in the next round. The averaging over
   rounds keeps it from compounding in the measurements; the prototype did not leave the target out,
   and the Beagle comparison did (one run per target). Measured as part of §8, not removed.
-- **Round 1 must reproduce today's pass exactly**, record for record, with each template doubled —
-  the walk with a template counted twice is not the same walk (prior weights differ), so "exactly"
-  means *the prototype's round 1*, not today's Rust output. Check against `phaser.py`.
+- **Round 1 must reproduce today's pass exactly**, record for record: the same templates, the same
+  walk. A difference there is a bug in the round loop, not in phasing.
 - **An absent template sample** (no column at a record) has shares `1/A` for both haplotypes, as
   now; a flat one (no reads) gets haplotypes from its own path like any other sample.
 - **Margins are phased in every window that reads them**, from scratch: the left margin of window
@@ -294,8 +308,6 @@ output is a function of the input.
   measured on tomato against the deep accessions.
 - **Windows solved in parallel**, for cohorts smaller than the thread count: the stage would hand
   windows to workers and reorder their lines. Home: pass §2.1's "a thread of its own" change.
-- **Merging near-identical haplotype templates** (an inbred template's two copies) to cut the state
-  count: a cost optimisation that changes the prior weights. Home: after §8.6 measures the cost.
 - **Viterbi instead of a drawn path**, and **starting from the subtraction**: unmeasured
   alternatives (§2.2). Home: the prototype, if §8 falls short.
 
@@ -307,6 +319,8 @@ output is a function of the input.
   leaning offered — on when a tenth of the samples have inbreeding below 0.8 — was declined to keep
   the command line simple; performance is to be optimised instead.
 - **Q2. 16 sample templates (32 haplotypes) or 16 haplotype templates** (§2.3). *Ruled: measure the
-  second in the prototype and adopt it if its wrong-genotype counts are within a tenth of the
-  first's.* It costs as now; the first costs 3.8 times a walk.
+  second and adopt it if within a tenth of the first.* **Resolved: 16 haplotype templates, at most
+  one of each sample.** Within a tenth on all eight cohorts of §1 and lower on five (on the first,
+  689 against 699 wrong); fills fewer but more reliable. The 16 best haplotypes without the
+  one-a-sample rule were 25% worse (871) and are not used.
 - **Q3. `R`** (§2.2). *Ruled: keep 5; measure 3 and 8 on the 200-sample cells.*

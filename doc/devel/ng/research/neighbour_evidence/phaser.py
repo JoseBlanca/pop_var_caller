@@ -2,7 +2,7 @@
 each sample's two haplotypes as its templates' contribution, scored on founder_grid.py cells
 against the simulator's truth.
 
-usage: uv run --with numpy python phaser.py [--rounds R] <cell dir> [<cell dir> ...]
+usage: uv run --with numpy python phaser.py [--rounds R] [--haplotypes 16] <cell dir> [...]
 
 Each sample carries two haplotypes, soft: at each record, each copy's probability of carrying the
 alternative. Round 1 starts every template sample's two haplotypes at its GP allele share, so the
@@ -16,6 +16,15 @@ walk is the pass as now, with each template counted twice. In every round, for e
   4. along that path, each copy's allele at each record is re-estimated from the followed
      templates' haplotypes and the sample's own genotype likelihood: P(copy one a, copy two b) ∝
      q̃_k1(a) · q̃_k2(b) · L(a, b), so a copy stays uncertain where its template and the reads are.
+
+With --haplotypes 16 (spec neighbour_evidence_phasing.md §10 Q2) the templates are the 16 best
+haplotypes of all other samples' instead of both haplotypes of the 16 best samples, so the walk has
+as many templates as the pass has now. Round 1 is then the pass as now exactly (16 samples, their GP
+shares, each once). From round 2 a haplotype's score is the pessimistic rate at which it carries an
+allele the sample's genotype lacks — x·P(0/0) + (1 − x)·P(1/1) per record, x its alternative
+probability, the genotype the previous round's posterior — over the sample's informative records
+(at most 500, spread evenly) where the haplotype's sample is informative too, the 16 lowest kept;
+with --one-per-sample, at most one haplotype of each sample.
 
 All samples are updated together at the end of a round, from one seed, so the result does not
 depend on the order or the threads. A drawn path, not the posterior's marginals, because the two
@@ -122,25 +131,69 @@ def draw_path(rows, target, q_sites, inbreeding, rng):
     return first, second
 
 
-def template_q(rows, templates, haps, contig):
-    """Per record, the (2·16 + 1, 2) blurred allele shares of the haplotype templates and the
-    background."""
+def template_q(rows, pairs, haps, contig):
+    """Per record, the blurred allele shares of the haplotype templates `pairs` — (sample, copy) —
+    and the background, last."""
     out = []
     for i, r in enumerate(rows):
-        alt = [haps[t][contig][c][i] for t in templates for c in (0, 1)]
+        alt = [haps[t][contig][c][i] for t, c in pairs]
         q = np.array([[1 - a, a] for a in alt] + [list(background_shares([r['af']]))])
         out.append(q * (1 - MISMATCH) + MISMATCH / 2)
     return out
+
+
+def choose_haplotypes(cell, target, previous):
+    """The 16 haplotypes (sample, copy) whose alleles the sample's genotype lacks least."""
+    samples, _, _ = pc.DATA[cell]
+    n = len(samples)
+    picked = [(contig, i) for contig, rows in pc.CONTIGS[cell].items()
+              for i, r in enumerate(rows) if pc.informative(r['lik'][target])]
+    if len(picked) > pc.COMPARED:
+        picked = [picked[j * len(picked) // pc.COMPARED] for j in range(pc.COMPARED)]
+    d = np.zeros((n, 2))
+    shared = np.zeros(n)
+    for contig, i in picked:
+        r = pc.CONTIGS[cell][contig][i]
+        p00, _, p11 = previous[contig][i]
+        for o in range(n):
+            if o == target or not pc.informative(r['lik'][o]):
+                continue
+            shared[o] += 1
+            for c in (0, 1):
+                x = HAPS[cell][o][contig][c][i]
+                d[o, c] += x * p00 + (1 - x) * p11
+    scored = []
+    for o in range(n):
+        if o == target:
+            continue
+        for c in (0, 1):
+            mean = (d[o, c] + 1) / (shared[o] + 2)
+            scored.append((mean + 2 * math.sqrt(mean * (1 - mean) / (shared[o] + 3)), o, c))
+    ranked = sorted(scored)
+    if ONE_PER_SAMPLE:
+        seen, kept = set(), []
+        for _, o, c in ranked:
+            if o not in seen:
+                seen.add(o)
+                kept.append((o, c))
+        return kept[:pc.K]
+    return [(o, c) for _, o, c in ranked[:pc.K]]
 
 
 def one_sample(args):
     cell, target, round_index = args
     samples, records, inbreeding = pc.DATA[cell]
     templates = pc.choose(records, target, len(samples))
+    if HAPLOTYPE_TEMPLATES is None:
+        pairs = [(t, c) for t in templates for c in (0, 1)]
+    elif round_index == 1:
+        pairs = [(t, 0) for t in templates]
+    else:
+        pairs = choose_haplotypes(cell, target, PREVIOUS[target])
     rng = np.random.default_rng([SEED, round_index, target])
     new, posts = {}, {}
     for contig, rows in pc.CONTIGS[cell].items():
-        q_sites = template_q(rows, templates, HAPS[cell], contig)
+        q_sites = template_q(rows, pairs, HAPS[cell], contig)
         # hmm.haplotypes blurs the shares itself, so it is given them unblurred
         raw = [(q - MISMATCH / 2) / (1 - MISMATCH) for q in q_sites]
         posteriors, _ = haplotypes([(r['lik'][target], None, None) for r in rows],
@@ -179,13 +232,25 @@ def row(name, label, c):
 
 
 HAPS = {}
+PREVIOUS = {}
+HAPLOTYPE_TEMPLATES = None
+ONE_PER_SAMPLE = False
 
 
 def main():
+    global HAPLOTYPE_TEMPLATES, PREVIOUS, ONE_PER_SAMPLE
     args = sys.argv[1:]
     rounds = 4
-    if args[0] == '--rounds':
-        rounds, args = int(args[1]), args[2:]
+    while args[0].startswith('--'):
+        if args[0] == '--rounds':
+            rounds = int(args[1])
+        elif args[0] == '--haplotypes':
+            HAPLOTYPE_TEMPLATES = int(args[1])
+        elif args[0] == '--one-per-sample':
+            ONE_PER_SAMPLE = True
+            args = args[1:]
+            continue
+        args = args[2:]
     print('| cell | round | wrong where samples have reads, calling → pass | missing | filled (GQ ≥ 10) | of them wrong |')
     print('|---|---|---|---|---|---|')
     for cell in args:
@@ -208,6 +273,7 @@ def main():
                     new_haps[target] = new
                     posts[target] = post
             HAPS[cell] = new_haps
+            PREVIOUS = posts
             print(row(name, str(round_index), score(cell, posts)), flush=True)
             # the average over rounds from the second on: the first is the pass as now
             if round_index >= 2:
