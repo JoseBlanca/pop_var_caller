@@ -161,3 +161,87 @@ fn every_line_comes_out_once_in_order() {
     let (_, one_thread, _) = run_stage(1);
     assert_eq!(output, one_thread);
 }
+
+/// **Blocks join across windows, and the phase stays right across them** (phase output spec
+/// §2.4, §7.3): an outbred cohort at 4× on a 1-Mb contig, windows of 200 kb with 200-kb margins.
+/// Every `PS` is the position of its block's first record; some blocks run across a window's
+/// boundary; and the links inside blocks — across boundaries too — are right: when written, 9
+/// wrong in 5,494, and 29 links crossed a boundary, none wrong.
+#[test]
+fn blocks_join_across_windows() {
+    let cohort = test_cohort(CohortShape {
+        samples: 20,
+        founders: 4,
+        records: 2_000,
+        spacing: 500,
+        segment_bases: 300_000.0,
+        inbred: false,
+        depth: 4.0,
+        read_error: 0.01,
+        seed: 13,
+        silent_from: None,
+    });
+    let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+    decision.sizes = WindowSizes {
+        core_bases: 200_000,
+        margin_bases: 200_000,
+        margin_floor_bases: 200_000,
+        budget_sample_records: 120_000_000,
+    };
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![1_000_000]);
+    let mut output = Vec::new();
+    for (index, line) in cohort.lines.iter().enumerate() {
+        stage.push(
+            place(0, 1 + index as u64 * 500),
+            line.clone().into_bytes(),
+            &mut output,
+        );
+    }
+    stage.finish(&mut output);
+
+    let (mut links, mut flips, mut crossing, mut crossing_flips) = (0, 0, 0, 0);
+    for sample in 0..20 {
+        // (position, right, PS) of every phased column of the sample.
+        let mut phased: Vec<(u64, bool, u64)> = Vec::new();
+        for (place, line) in &output {
+            let line = String::from_utf8_lossy(line);
+            let fields: Vec<&str> = line.split('\t').collect();
+            assert!(fields[8].ends_with(":PS"), "{}", fields[8]);
+            let column: Vec<&str> = fields[9 + sample].split(':').collect();
+            let Some(genotype) = column[0].split_once('|') else {
+                assert_eq!(*column.last().expect("PS"), ".");
+                continue;
+            };
+            let position = place.at.position.0;
+            let [copy_0, _] = cohort.truth_copies[((position - 1) / 500) as usize][sample];
+            let block: u64 = column.last().expect("PS").parse().expect("a PS");
+            phased.push((position, genotype.0 == copy_0.to_string(), block));
+        }
+        let mut first_of: std::collections::HashMap<u64, u64> = Default::default();
+        for &(position, _, block) in &phased {
+            first_of.entry(block).or_insert(position);
+        }
+        assert!(
+            first_of.iter().all(|(block, first)| block == first),
+            "every PS is its block's first position"
+        );
+        for pair in phased.windows(2) {
+            let ((before, was_right, before_block), (after, right, block)) = (pair[0], pair[1]);
+            if before_block == block {
+                links += 1;
+                flips += usize::from(was_right != right);
+                // Window cores start at 1 and every 200 kb after.
+                if (before - 1) / 200_000 != (after - 1) / 200_000 {
+                    crossing += 1;
+                    crossing_flips += usize::from(was_right != right);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{flips} flips in {links} links; {crossing} links cross a window boundary, \
+         {crossing_flips} of them flips"
+    );
+    assert!(crossing > 0, "some block runs across a window's boundary");
+    assert!(flips * 100 <= links, "{flips} flips in {links} links");
+}

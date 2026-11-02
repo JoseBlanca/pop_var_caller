@@ -224,3 +224,151 @@ fn the_pair_entries_are_in_order() {
     assert_eq!(pairs.entry(2, 1, 2, 3), 9);
     assert_eq!(pairs.entries(), 10);
 }
+
+/// A window's phase as [`SamplePhase::phased`] gives it: `(site, copy 0's allele, block)` for the
+/// phased sites of a biallelic window.
+fn window_phase(n: usize, phased: &[(usize, usize, u64)]) -> Vec<Option<WrittenPhase>> {
+    let mut out = vec![None; n];
+    for &(site, first, block) in phased {
+        out[site] = Some(WrittenPhase {
+            first,
+            second: 1 - first,
+            block,
+        });
+    }
+    out
+}
+
+/// **A window joins the last written block where three shared records agree** (spec §2.4): sites
+/// 0–3 are the margin, 4–7 the core. The last block wrote copy 0 = allele 1 at sites 1–3; this
+/// window agrees — the core keeps the block's `PS` and orientation — or agrees reversed, and the
+/// core is swapped as a whole.
+#[test]
+fn a_window_joins_where_three_shared_records_agree() {
+    let positions = positions(8);
+    let in_core = |site: usize| site >= 4;
+    let written = [(1, 1), (2, 1), (3, 1)];
+    let window = window_phase(
+        8,
+        &[
+            (1, 1, 1_001),
+            (2, 1, 1_001),
+            (3, 1, 1_001),
+            (4, 0, 1_001),
+            (6, 1, 1_001),
+        ],
+    );
+    let out = written_in_core(&window, in_core, &positions, Some((77, &written)));
+    assert_eq!(out[..4], [None; 4], "the margin is not written");
+    assert_eq!(
+        out[4],
+        Some(WrittenPhase {
+            first: 0,
+            second: 1,
+            block: 77
+        })
+    );
+    assert_eq!(
+        out[6],
+        Some(WrittenPhase {
+            first: 1,
+            second: 0,
+            block: 77
+        })
+    );
+
+    let reversed = window_phase(
+        8,
+        &[
+            (1, 0, 1_001),
+            (2, 0, 1_001),
+            (3, 0, 1_001),
+            (4, 0, 1_001),
+            (6, 1, 1_001),
+        ],
+    );
+    let out = written_in_core(&reversed, in_core, &positions, Some((77, &written)));
+    assert_eq!(
+        out[4],
+        Some(WrittenPhase {
+            first: 1,
+            second: 0,
+            block: 77
+        })
+    );
+    assert_eq!(
+        out[6],
+        Some(WrittenPhase {
+            first: 0,
+            second: 1,
+            block: 77
+        })
+    );
+}
+
+/// **No join without three agreeing records in the block that reaches the core**: the windows
+/// disagreeing at one record, only two shared records, or the shared records in a block that ends
+/// before the core — each core block is then named by its first core record, and a core block of
+/// one record is unphased.
+#[test]
+fn a_window_does_not_join_without_agreement() {
+    let positions = positions(8);
+    let in_core = |site: usize| site >= 4;
+    let written = [(1, 1), (2, 1), (3, 1)];
+    let named_by_core = |out: &[Option<WrittenPhase>]| {
+        assert_eq!(out[4].map(|phase| phase.block), Some(4_001));
+        assert_eq!(out[6].map(|phase| phase.block), Some(4_001));
+    };
+    let mixed = window_phase(
+        8,
+        &[
+            (1, 1, 1_001),
+            (2, 0, 1_001),
+            (3, 1, 1_001),
+            (4, 0, 1_001),
+            (6, 1, 1_001),
+        ],
+    );
+    named_by_core(&written_in_core(
+        &mixed,
+        in_core,
+        &positions,
+        Some((77, &written)),
+    ));
+    let two = window_phase(
+        8,
+        &[(2, 1, 2_001), (3, 1, 2_001), (4, 0, 2_001), (6, 1, 2_001)],
+    );
+    named_by_core(&written_in_core(
+        &two,
+        in_core,
+        &positions,
+        Some((77, &written)),
+    ));
+    let ends_before = window_phase(
+        8,
+        &[
+            (1, 1, 1_001),
+            (2, 1, 1_001),
+            (3, 1, 1_001),
+            (4, 0, 4_001),
+            (6, 1, 4_001),
+        ],
+    );
+    named_by_core(&written_in_core(
+        &ends_before,
+        in_core,
+        &positions,
+        Some((77, &written)),
+    ));
+
+    // One core record: phased only as part of a joined block.
+    let lone = window_phase(
+        8,
+        &[(1, 1, 1_001), (2, 1, 1_001), (3, 1, 1_001), (5, 0, 1_001)],
+    );
+    let joined = written_in_core(&lone, in_core, &positions, Some((77, &written)));
+    assert_eq!(joined[5].map(|phase| phase.block), Some(77));
+    let alone = written_in_core(&lone, in_core, &positions, None);
+    assert_eq!(alone[5], None);
+}

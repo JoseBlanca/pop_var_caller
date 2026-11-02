@@ -341,5 +341,106 @@ impl SamplePhase {
     }
 }
 
+/// **How many shared records join two windows' blocks** (spec §2.4, soft): the records of the
+/// last written block nearest the core boundary that the new window also phases. With 3, no join
+/// was wrong in 57 on four simulated cohorts; 2 added 13 joins, none wrong
+/// (`phase_blocks_check_2026-11-02.md`).
+pub const JOIN_RECORDS: usize = 3;
+
+/// **One record of a sample's last written block, as the next window sees it**: the record's index
+/// in the window, and the allele the earlier window wrote on copy 0, and on copy 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JoinRecord {
+    pub record: usize,
+    pub first: usize,
+    pub second: usize,
+}
+
+/// **A sample's last written block** (spec §2.4): its `PS` and its records inside the window's
+/// left margin, ascending.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastBlock {
+    pub block: u64,
+    pub records: Vec<JoinRecord>,
+}
+
+/// **The phase a window writes in its core** (spec §2.4, §2.5), from `phased` — [`SamplePhase::phased`]
+/// over the window's core and the last written block's margin records, each named by its first
+/// record's position. `in_core(site)` says which sites the window writes; `last` is the last
+/// written block, its `PS` and, per margin site of it, the allele written on copy 0.
+///
+/// The window's block that holds its first phased core record continues the last written block —
+/// keeps its `PS`, its orientation swapped as a whole if need be — when the last
+/// [`JOIN_RECORDS`] of the block's margin records the window phases all lie in that block and the
+/// two windows' relative orientation is the same at all of them. Every other block is named by
+/// its first core record's position, and a block with one core record is written unphased.
+pub(super) fn written_in_core(
+    phased: &[Option<WrittenPhase>],
+    in_core: impl Fn(usize) -> bool,
+    positions: &[u64],
+    last: Option<(u64, &[(usize, usize)])>,
+) -> Vec<Option<WrittenPhase>> {
+    let first_core = (0..phased.len()).find(|&site| in_core(site) && phased[site].is_some());
+    let joined: Option<(u64, bool)> = match (last, first_core) {
+        (Some((_, written)), Some(first_core)) => {
+            // PANIC-FREE: `first_core` is a phased site.
+            let block = phased[first_core].expect("phased").block;
+            let shared: Vec<(WrittenPhase, usize)> = written
+                .iter()
+                .filter_map(|&(site, first)| phased[site].map(|phase| (phase, first)))
+                .collect();
+            let nearest = &shared[shared.len().saturating_sub(JOIN_RECORDS)..];
+            let same: Vec<bool> = nearest
+                .iter()
+                .map(|(phase, first)| phase.first == *first)
+                .collect();
+            (nearest.len() == JOIN_RECORDS
+                && nearest.iter().all(|(phase, _)| phase.block == block)
+                && same.iter().all(|&same_way| same_way == same[0]))
+            .then(|| (block, !same[0]))
+        }
+        _ => None,
+    };
+    let mut core_members: std::collections::HashMap<u64, Vec<usize>> = Default::default();
+    for site in (0..phased.len()).filter(|&site| in_core(site)) {
+        if let Some(phase) = phased[site] {
+            core_members.entry(phase.block).or_default().push(site);
+        }
+    }
+    let mut out = vec![None; phased.len()];
+    for (block, sites) in core_members {
+        match joined {
+            Some((joined_block, swap)) if joined_block == block => {
+                // PANIC-FREE: a join needs a last written block.
+                let (written_block, _) = last.expect("a join has a last block");
+                for site in sites {
+                    let phase = phased[site].expect("a member is phased");
+                    let (first, second) = if swap {
+                        (phase.second, phase.first)
+                    } else {
+                        (phase.first, phase.second)
+                    };
+                    out[site] = Some(WrittenPhase {
+                        first,
+                        second,
+                        block: written_block,
+                    });
+                }
+            }
+            _ if sites.len() >= 2 => {
+                let named = positions[sites[0]];
+                for site in sites {
+                    out[site] = phased[site].map(|phase| WrittenPhase {
+                        block: named,
+                        ..phase
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;

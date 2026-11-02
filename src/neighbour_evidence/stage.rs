@@ -19,11 +19,13 @@
 use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
-use super::phase::{EXTRA_PATHS_PER_ROUND, LEAN_MIN, MIN_PATH_AGREEMENT};
+use super::phase::{
+    EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, MIN_PATH_AGREEMENT, WrittenPhase,
+};
 use super::records::SiteRecord;
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
-    PHASING_ROUNDS, Phasing, refine_window_in_rounds, window_key,
+    PHASING_ROUNDS, Phasing, RefinedRecord, refine_window_joined, window_key,
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
@@ -159,6 +161,15 @@ struct HeldLine {
     site: Option<usize>,
 }
 
+/// **A sample's last written block** (phase output spec §2.4): its `PS`, and its records written
+/// within a margin of the last core's end — run-wide site number, position, the alleles on copy 0
+/// and copy 1 — ascending.
+#[derive(Clone, Debug)]
+struct WrittenBlock {
+    block: u64,
+    records: Vec<(usize, u64, usize, usize)>,
+}
+
 /// **The pass, fed one line at a time.**
 pub struct NeighbourEvidenceStage {
     samples: usize,
@@ -181,6 +192,9 @@ pub struct NeighbourEvidenceStage {
     tally: RewriteTally,
     /// Each sample's fill check, summed over the cores solved so far.
     fill_checks: Vec<FillCheck>,
+    /// Each sample's last written block on the current contig, kept across windows that write no
+    /// phase for it (phase output spec §2.4).
+    last_blocks: Vec<Option<WrittenBlock>>,
 }
 
 impl NeighbourEvidenceStage {
@@ -207,6 +221,7 @@ impl NeighbourEvidenceStage {
             pairs: GenotypePairs::default(),
             tally: RewriteTally::default(),
             fill_checks: vec![FillCheck::default(); decision.inbreeding_by_sample.len()],
+            last_blocks: vec![None; decision.inbreeding_by_sample.len()],
         }
     }
 
@@ -254,6 +269,8 @@ impl NeighbourEvidenceStage {
         self.first_site = self.next_site;
         self.core_start = 0;
         self.contig = None;
+        // A block never crosses a contig.
+        self.last_blocks.fill(None);
     }
 
     /// Solves every window whose lines have all arrived (or all of them, when the contig is
@@ -284,7 +301,29 @@ impl NeighbourEvidenceStage {
                     self.contig.map_or(0, |contig| contig.0),
                     first_core.position,
                 );
-                let solved = refine_window_in_rounds(
+                // Each sample's last written block, at its records in this window's left margin.
+                let joins: Vec<Option<LastBlock>> = self
+                    .last_blocks
+                    .iter()
+                    .map(|last| {
+                        last.as_ref().map(|last| LastBlock {
+                            block: last.block,
+                            records: last
+                                .records
+                                .iter()
+                                .filter(|&&(site, ..)| {
+                                    (window_sites.start..core_sites.start).contains(&site)
+                                })
+                                .map(|&(site, _, first, second)| JoinRecord {
+                                    record: site - window_sites.start,
+                                    first,
+                                    second,
+                                })
+                                .collect(),
+                        })
+                    })
+                    .collect();
+                let solved = refine_window_joined(
                     &self.sites
                         [window_sites.start - self.first_site..window_sites.end - self.first_site],
                     core_sites.start - window_sites.start..core_sites.end - window_sites.start,
@@ -293,10 +332,12 @@ impl NeighbourEvidenceStage {
                     MAX_TEMPLATES,
                     NoReadRule::default(),
                     Phasing::rounds_for(key).with_min_path_agreement(self.min_path_agreement),
+                    &joins,
                 );
                 for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
                     *sum += check;
                 }
+                self.remember_last_blocks(core_sites.start, &solved.records);
                 solved.records
             };
             for held in &mut self.held[plan.core_start..plan.core_end] {
@@ -317,6 +358,42 @@ impl NeighbourEvidenceStage {
             }
             self.core_start = plan.core_end;
             self.forget_what_no_window_reads();
+        }
+    }
+
+    /// **Updates each sample's last written block** from a core's records, the first being site
+    /// number `first_site`: the block of its last phased record, extended where it continues the
+    /// one before, and cut to the records within a margin of that record — further back, no later
+    /// window's margin reaches.
+    fn remember_last_blocks(&mut self, first_site: usize, core: &[RefinedRecord]) {
+        for (sample, last) in self.last_blocks.iter_mut().enumerate() {
+            let phased: Vec<(usize, u64, WrittenPhase)> = core
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, record)| {
+                    record.phases[sample].map(|phase| {
+                        let site = first_site + offset;
+                        (site, self.sites[site - self.first_site].position, phase)
+                    })
+                })
+                .collect();
+            let Some(&(_, end, final_phase)) = phased.last() else {
+                continue;
+            };
+            let block = final_phase.block;
+            let mut records = match last.take() {
+                Some(previous) if previous.block == block => previous.records,
+                _ => Vec::new(),
+            };
+            records.extend(
+                phased
+                    .iter()
+                    .filter(|(.., phase)| phase.block == block)
+                    .map(|&(site, position, phase)| (site, position, phase.first, phase.second)),
+            );
+            let reach = end.saturating_sub(self.sizes.margin_bases);
+            records.retain(|&(_, position, ..)| position >= reach);
+            *last = Some(WrittenBlock { block, records });
         }
     }
 

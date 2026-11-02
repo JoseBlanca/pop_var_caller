@@ -36,7 +36,8 @@ use super::model::{
     walk_and_draw_paths,
 };
 use super::phase::{
-    EXTRA_PATHS_PER_ROUND, MIN_PATH_AGREEMENT, PairLayout, SamplePhase, WrittenPhase,
+    EXTRA_PATHS_PER_ROUND, LastBlock, MIN_PATH_AGREEMENT, PairLayout, SamplePhase, WrittenPhase,
+    written_in_core,
 };
 use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
@@ -519,6 +520,38 @@ pub fn refine_window_in_rounds(
     no_read: NoReadRule,
     phasing: Phasing,
 ) -> WindowRefinement {
+    refine_window_joined(
+        records,
+        core,
+        contig_length,
+        fits,
+        max_templates,
+        no_read,
+        phasing,
+        &[],
+    )
+}
+
+/// **[`refine_window_in_rounds`], its phase joined to what earlier windows wrote** (phase output
+/// spec §2.4): `last_blocks` holds, per sample, its last written block — its `PS` and its records
+/// in this window's left margin — or is empty when nothing was written before.
+///
+/// # Panics
+///
+/// As [`refine_window`]; and if `last_blocks` is neither empty nor one entry per sample, or names a
+/// record that is not a site of the window's left margin.
+#[allow(clippy::too_many_arguments)] // the window, the run's settings, and what came before
+#[must_use]
+pub fn refine_window_joined(
+    records: &[SiteRecord],
+    core: Range<usize>,
+    contig_length: Option<u64>,
+    fits: &mut [SampleFit],
+    max_templates: usize,
+    no_read: NoReadRule,
+    phasing: Phasing,
+    last_blocks: &[Option<LastBlock>],
+) -> WindowRefinement {
     assert!(
         records
             .windows(2)
@@ -527,6 +560,10 @@ pub fn refine_window_in_rounds(
     );
     let samples = records.first().map_or(0, SiteRecord::sample_count);
     assert_eq!(fits.len(), samples, "one fit a sample");
+    assert!(
+        last_blocks.is_empty() || last_blocks.len() == samples,
+        "one last block a sample, or none"
+    );
     let layout = WindowLayout::new(records, &core);
     let allele_counts: Vec<usize> = layout
         .record_of_site
@@ -604,6 +641,7 @@ pub fn refine_window_in_rounds(
                 &layout,
                 &pairs,
                 sample,
+                last_blocks.get(sample).and_then(Option::as_ref),
                 state,
                 averaged,
                 phasing,
@@ -856,6 +894,7 @@ fn final_solution(
     layout: &WindowLayout,
     pairs_layout: &PairLayout,
     sample: usize,
+    last_block: Option<&LastBlock>,
     state: &SampleRounds,
     averaged: f64,
     phasing: Phasing,
@@ -950,7 +989,8 @@ fn final_solution(
             .push((index, outcome, solution.posteriors.len(), background));
         solution.posteriors.extend_from_slice(&posterior);
     }
-    // The phase, at the heterozygotes called in the core (phase output spec §2.2, §2.3).
+    // The phase, at the heterozygotes called in the core and the last written block's records in
+    // the margin, joined to that block where they agree (phase output spec §2.2–§2.4).
     let phases = match &state.phase {
         Some(phase) => {
             let positions: Vec<u64> = layout
@@ -958,12 +998,38 @@ fn final_solution(
                 .iter()
                 .map(|&index| records[index].position)
                 .collect();
-            phase.phased(
+            let written: Vec<(usize, usize)> = last_block
+                .map(|block| {
+                    block
+                        .records
+                        .iter()
+                        .map(|record| {
+                            let site = layout.site(record.record);
+                            assert!(
+                                !layout.core_sites.contains(&site),
+                                "a last block's record is in the margin"
+                            );
+                            heterozygotes[site] = Some((
+                                record.first.min(record.second),
+                                record.first.max(record.second),
+                            ));
+                            (site, record.first)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let phased = phase.phased(
                 pairs_layout,
                 &heterozygotes,
                 &positions,
                 parameters.segment_bases,
                 phasing.min_path_agreement,
+            );
+            written_in_core(
+                &phased,
+                |site| layout.core_sites.binary_search(&site).is_ok(),
+                &positions,
+                last_block.map(|block| (block.block, written.as_slice())),
             )
         }
         None => vec![None; layout.sites()],
