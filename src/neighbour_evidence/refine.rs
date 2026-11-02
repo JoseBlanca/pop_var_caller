@@ -103,13 +103,16 @@ pub struct RefinedRecord {
     /// Each sample's new genotype posterior, `genotype_count` numbers a sample in the genotype
     /// table's order; meaningful only where the outcome is not [`Outcome::Unchanged`].
     pub posteriors: Vec<f64>,
+    /// Each sample's probability of copying the background template here — of having no sampled
+    /// haplotype to copy (§3.3); meaningful only where the outcome is not [`Outcome::Unchanged`].
+    pub background_copy: Vec<f64>,
 }
 
 /// One sample's posteriors at the core's sites.
 struct SampleSolution {
-    /// Index into the window's records, the outcome, and where the posterior starts in
-    /// `posteriors`.
-    sites: Vec<(usize, Outcome, usize)>,
+    /// Index into the window's records, the outcome, where the posterior starts in `posteriors`,
+    /// and the probability of copying the background there.
+    sites: Vec<(usize, Outcome, usize, f64)>,
     posteriors: Vec<f64>,
     check: NeighbourCheck,
 }
@@ -161,6 +164,7 @@ pub fn refine_window(
         .map(|record| RefinedRecord {
             outcomes: vec![Outcome::Unchanged; samples],
             posteriors: vec![0.0; samples * record.genotype_count()],
+            background_copy: vec![0.0; samples],
         })
         .collect();
     let mut checks = vec![NeighbourCheck::default(); samples];
@@ -169,10 +173,11 @@ pub fn refine_window(
             continue;
         };
         checks[sample] = solution.check;
-        for &(record, outcome, start) in &solution.sites {
+        for &(record, outcome, start, background) in &solution.sites {
             let genotypes = records[record].genotype_count();
             let out = &mut refined[record - core.start];
             out.outcomes[sample] = outcome;
+            out.background_copy[sample] = background;
             out.posteriors[sample * genotypes..(sample + 1) * genotypes]
                 .copy_from_slice(&solution.posteriors[start..start + genotypes]);
         }
@@ -293,9 +298,12 @@ fn refine_sample(
                 }
             }
         };
-        solution
-            .sites
-            .push((index, outcome, solution.posteriors.len()));
+        solution.sites.push((
+            index,
+            outcome,
+            solution.posteriors.len(),
+            result.last_template_copy[site],
+        ));
         solution
             .posteriors
             .extend_from_slice(&result.posteriors[site]);

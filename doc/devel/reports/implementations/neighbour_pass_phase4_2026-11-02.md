@@ -150,8 +150,29 @@ cell by re-running the pass over the cell's saved calls (`examples/ng_neighbour_
 - **Not the cause**: how many samples have reads at the record. In the 10-sample 1× cohort, fills
   where under 60% of the samples have reads are wrong 29 times in 151, and elsewhere 18 in 138.
 
-Next: the simulator records which founder each copy of each sample copied, which says directly
-whether the wrong fills copy the wrong samples or the right samples with wrong genotypes (§11 Q4).
+**The cause, from the simulator's ancestry.** In the 10-sample 1× cohort, 37 of the 47 wrong fills
+sit where no other sample carries the filled sample's founder, and 7 more where the samples that do
+have no reads at that record; where a relative with reads exists, 3 of 143 fills are wrong. The
+sample has no real template there.
+
+**The statistic that follows: the probability the sample copies the background template** — the
+template that stands for "no sampled haplotype" (§3.3) — which the walk now reports at every site
+(`WalkResult::last_template_copy`). Withholding a no-read call where it is above 0.5 — where the
+sample more likely than not has nothing to copy (`score_background_copy.py`):
+
+| cohort | fills kept, wrong: as built | with the limit at 0.5 |
+|---|---|---|
+| 16 founders, 10 samples, 1× | 294, 47 (16%) | 136, 6 (4.4%) |
+| 16 founders, 50 samples, 1× | 561, 14 (2.5%) | 561, 14 |
+| 16 founders, 50 samples, 3× | 2,392, 5 | 2,354, 1 |
+| 16 founders, 200 samples, 3× | 9,455, 21 | 9,347, 16 |
+| 64 founders, 50 samples, 3× | 1,698, 33 (1.9%) | 1,377, 6 (0.4%) |
+| 64 founders, F 0, 10 samples, 3× | 40, 7 | 11, 2 |
+
+It catches the inbred cohorts' wrong fills and leaves the good 1× ones alone. It does not rescue the
+outbred ones, which `auto` keeps the pass off for. Limits of 0.1 to 0.3 do a little better in the
+10-sample 1× cohort (101 fills, 2 wrong at 0.1) and cost a few percent of fills elsewhere; 0.5 is
+the one with a meaning of its own. *Built, off by default; the owner's to switch on.*
 
 ### Decision 3 — the `auto` rule's inbreeding condition. *Settled by the 64-founder cells: keep it.*
 

@@ -55,6 +55,10 @@ pub struct WalkResult {
     pub neighbour_predictions: Vec<Vec<f64>>,
     /// The probability the sample is autozygous at each site.
     pub autozygous: Vec<f64>,
+    /// **The probability that a copy copies the last template** at each site — at least one of the
+    /// two, or the one an autozygous state copies. The window solve puts the background template
+    /// last (§3.3), so this is the chance the sample has no sampled haplotype to copy there.
+    pub last_template_copy: Vec<f64>,
     /// The log-likelihood of the sample's evidence over the window under these parameters — what
     /// the parameter grid is chosen by (§3.5).
     pub log_likelihood: f64,
@@ -274,6 +278,7 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
     let mut posteriors = vec![Vec::new(); sites.len()];
     let mut neighbour_predictions = vec![Vec::new(); sites.len()];
     let mut autozygous_probability = vec![0.0; sites.len()];
+    let mut last_template_copy = vec![0.0; sites.len()];
     let mut backward_autozygous = vec![1.0; k];
     let mut backward_pairs = vec![1.0; k * k];
     let mut pairs_of_alleles = genotype_pairs;
@@ -359,6 +364,21 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
             .map(|state| forward_pairs[index][state] * backward_pairs[state])
             .sum();
         autozygous_probability[index] = both_autozygous / (both_autozygous + both_pairs);
+        let last = k - 1;
+        let with_last: f64 = forward_autozygous[index][last] * backward_autozygous[last]
+            + (0..k)
+                .map(|other| {
+                    let row =
+                        forward_pairs[index][last * k + other] * backward_pairs[last * k + other];
+                    let column = if other == last {
+                        0.0
+                    } else {
+                        forward_pairs[index][other * k + last] * backward_pairs[other * k + last]
+                    };
+                    row + column
+                })
+                .sum::<f64>();
+        last_template_copy[index] = with_last / (both_autozygous + both_pairs);
 
         // The pair states' weight on each ordered allele pair, Q̃ᵀ · W · Q̃ (§3.6): first each
         // first-copy template's weight spread over the second copy's alleles (K² · A), then over
@@ -422,6 +442,7 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
         posteriors,
         neighbour_predictions,
         autozygous: autozygous_probability,
+        last_template_copy,
         log_likelihood,
     }
 }

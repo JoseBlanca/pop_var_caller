@@ -182,7 +182,7 @@ fn main() -> ExitCode {
     let mut out = BufWriter::new(std::fs::File::create(&args[3]).expect("the output"));
     writeln!(
         out,
-        "contig\tpos\tref\talt\tsample\trow\tcalling_gt\toutcome\tpass_gt\tpass_probability\tchecked\tdisagreed"
+        "contig\tpos\tref\talt\tsample\trow\tcalling_gt\toutcome\tpass_gt\tpass_probability\tchecked\tdisagreed\tbackground_copy"
     )
     .expect("write");
     let mut windows = 0;
@@ -237,14 +237,15 @@ fn main() -> ExitCode {
                     };
                     writeln!(
                         out,
-                        "{}\t{}\t{}\t{}\t{name}\t{row}\t{}\t{outcome_text}\t{pass_gt}\t{probability:.4}\t{}\t{}",
+                        "{}\t{}\t{}\t{}\t{name}\t{row}\t{}\t{outcome_text}\t{pass_gt}\t{probability:.4}\t{}\t{}\t{:.4}",
                         kept.contig,
                         kept.record.position,
                         kept.reference,
                         kept.alternatives,
                         kept.calls[sample],
                         checks[sample].checked,
-                        checks[sample].disagreed
+                        checks[sample].disagreed,
+                        result.background_copy[sample]
                     )
                     .expect("write");
                 }
