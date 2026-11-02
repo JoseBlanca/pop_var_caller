@@ -11,6 +11,10 @@
 # first for cohorts that mix projects, and with them depths:
 #   cut -f1,3 catalogue.tsv | shuf --random-source=<(yes) > cohort.tsv
 #
+# Psps made already: give each sample one line, `sample<TAB>path.psp`, and CATALOG, the repeat
+# catalog they were made with. Nothing is generated then, REGIONS is unused, and calling covers the
+# ground the psps cover — the whole genome, if that is what they hold.
+#
 # Environment: REGIONS (a BED; default all of SL4.0ch01), THREADS (default 16), PVC (the binary;
 # default the newer of target/release/pvc and target-container/release/pvc), MASK_SHARE (0.02),
 # PYTHON (default `uv run python`).
@@ -49,7 +53,7 @@ if [[ -z ${REGIONS:-} ]]; then
     printf 'SL4.0ch01\t0\t%s\n' "$length" > "$work/regions.bed"
     REGIONS=$work/regions.bed
 fi
-catalog=$work/catalog.parquet
+catalog=${CATALOG:-$work/catalog.parquet}
 [[ -e $catalog ]] || "$PVC" repeat-catalog --reference "$reference" --output "$catalog" \
     --log "$work/logs/catalog.log" --force
 
@@ -60,6 +64,16 @@ mapfile -t samples < <(cut -f1 "$cohort" | awk '!seen[$0]++' | head -n "$largest
 
 # One psp per sample, in a directory of its own: generate-psps names it by the files' @RG SM, which
 # need not be the name cohort.tsv gives. generate-psps is one thread, so THREADS samples run at once.
+psp_of() {
+    local sample=$1 name path
+    while IFS=$'\t' read -r name path; do
+        if [[ $name == "$sample" && $path == *.psp ]]; then
+            echo "$path"
+            return
+        fi
+    done < "$cohort"
+    ls "$work/psps/$sample"/*.psp
+}
 make_psp() {
     local sample=$1 name path
     local alignments=()
@@ -73,6 +87,7 @@ make_psp() {
 }
 for sample in "${samples[@]}"; do
     [[ -e $work/psps/$sample/done ]] && continue
+    awk -F"\t" -v s="$sample" '$1 == s && $2 ~ /\.psp$/ { found = 1 } END { exit !found }' "$cohort" && continue
     while (( $(jobs -rp | wc -l) >= threads )); do
         wait -n
     done
@@ -87,7 +102,7 @@ for size in ${sizes//,/ }; do
     mkdir -p "$run"
     psps=()
     for sample in "${samples[@]:0:size}"; do
-        psps+=(--psp "$(ls "$work/psps/$sample"/*.psp)")
+        psps+=(--psp "$(psp_of "$sample")")
     done
     [[ -e $run/params.toml ]] || "$PVC" estimate-parameters --reference "$reference" \
         --catalog "$catalog" "${psps[@]}" --threads "$threads" --output "$run/params.toml" \
