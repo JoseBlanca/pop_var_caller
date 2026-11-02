@@ -225,9 +225,8 @@ re-estimation) and its round loop.
 The averaged quantities replace the single walk's, everywhere the pass uses them:
 
 - **the genotype posterior** → `GT`, `GQ`, `GP` (pass §4.1);
-- **the neighbours-only prediction** → the fill check's comparison (pass §4.3) — **OPEN** (§10 Q4):
-  with phasing the prediction is no longer free of the sample's own reads (§7), and the check's
-  estimate stops tracking the true fill error;
+- **the neighbours-only prediction** → the fill check (pass §4.3), **but only at hidden records**
+  (§4.1): elsewhere, with phasing, the prediction is no longer free of the sample's own reads (§7);
 - **the background-copy probability** → the no-read limit of 0.1 (pass §4.2). With haplotype
   templates "copying the background" keeps its meaning: no sampled haplotype matches.
 
@@ -235,6 +234,48 @@ Each is the mean of rounds 2 to `R`. A no-read call's `GQ` floor, the evidence-n
 background limit are applied once, to the means; neither was applied in the prototype, so their
 values are unmeasured with haplotype templates (§8.10). The header's `##neighbourEvidence=` line
 gains `rounds=R` and `haplotype_templates=16`, so a reader can tell which model made the file.
+
+### 4.1 The fill check, on hidden records
+
+**Before round 1, 20 records of each sample in each window are hidden** (owner, 2026-11-02, §10 Q4):
+drawn at random among the window's core records where the sample's reads are informative, from
+§5's generator. At a hidden record the sample is treated as having no reads in every round — its
+walk and its path read a flat likelihood there — so none of its reads at that record reach any
+template's haplotype, and its averaged neighbours-only prediction there is what a real `./.` would
+be filled with: no reads at the record, reads around it.
+
+- **The fill check runs at hidden records only:** where the sample's own evidence settles its
+  genotype and the §4.2 rules would write the prediction, the prediction's genotype against the
+  settled one. Nothing else about pass §4.3 changes — the table, the log, the 30-site floor, the
+  warnings.
+- **The genotype written at a hidden record** is the averaged prediction times the sample's own
+  likelihood there, renormalised — a posterior like any other, its reads entering once.
+- **What it costs:** the sample's reads at a hidden record are missing from what other samples copy
+  there. At 20 records a window it is negligible (in tomato about 1 in 2,500 of a sample's records);
+  hiding 40 of a 2-Mb simulated cohort's roughly 1,000 records a sample moved its errors within the
+  seed spread, hiding 200 (a fifth) added about 30%.
+- **Why 20 a window and not a fixed rate:** a rate small enough to be free over a genome (1 in
+  1,000) gives a few-megabase run a handful of records a sample, and the check needs 30.
+
+Measured in the prototype (`phaser.py --hide 200`, hiding many for the measurement only), the
+check's estimate against the fills' true error:
+
+| cohort | true | check |
+|---|---|---|
+| 10 at 30× + 40 at 3×, inbreeding 0.5 | 1.1% | 0.6% |
+| same, inbreeding 0.8 | 0.7% | 0.4% |
+| same, 0.8, 64 founders | 2.5% | 1.5% |
+| all 3×, inbreeding 0.5 | 1.4% | 0.8% |
+| all 3×, inbreeding 0.8 | 0.6% | 0.6% |
+| all 3×, inbreeding 0.95 | 0.5% | 0.4% |
+| all 3×, outbred, 16 founders | 3.7% | 6.0% (133 records) |
+| all 3×, outbred, 64 founders | 6.8% | 11.8% (170) |
+
+Within a factor of two everywhere and in the right order: low where the partly inbred cohorts' fills
+are good, high where the outbred ones are poor. The echoed check of §7 read 10.2% against 1.7% on
+the outbred cohort. Its known biases: it reads low in partly inbred cohorts — a settled genotype at
+3× is mostly a homozygote, the easier fill — and high in outbred ones; at 3× in outbred samples few
+genotypes settle at all.
 
 ---
 
@@ -372,8 +413,10 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
 12. **Leave-the-target-out** on a few targets of one cell, against the run as built: the size of the
     circularity of §7 on the genotype.
 13. **Rounds 3 and 8** against 5 on the 200-sample cells (§10 Q3).
-14. **The fill check with phasing**, whichever way §10 Q4 is ruled: its estimate against the true
-    fill error on the cells of point 2, the outbred and 200-sample cells included.
+14. **The fill check on hidden records** (§4.1): its estimate against the true fill error on the cells
+    of point 2, the 200-sample cells included, at the production 20 a window — the prototype
+    measured it with 200 a sample; and that hiding 20 a window moves wrong-genotype counts by less
+    than the seed spread.
 
 ---
 
@@ -400,12 +443,9 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
   wrong — a difference within the seed spread); fills fewer but more reliable. The 16 best haplotypes without the
   one-a-sample rule were 25% worse (871) and are not used.
 - **Q3. `R`** (§2.2). *Ruled: keep 5; measure 3 and 8 on the 200-sample cells.*
-- **Q4. What the fill check compares with phasing on — OPEN** (§4, §7). Options: (a) round 1's
-  prediction, the pass as now — calibrated as now, but it describes the fills the pass would make
-  without phasing, overstating the phased fills' error (1.5% against 0.8% on the first cohort), so
-  more samples are warned of than need be; (b) the averaged prediction — matches on the first cohort
-  (0.86% against 0.81%) but read 10.2% against 1.7% on the outbred cohort, which would warn
-  wrongly in exactly the material this spec is for; (c) a prediction without the circularity, the
-  sample's own haplotype contribution left out of its templates — the honest measure, unbuilt and
-  costing about a round. Leaning: (a) now, which errs on the safe side, and (c) measured in the
-  prototype. Confirm before code.
+- **Q4. What the fill check compares with phasing on** (§4.1). The review found the averaged
+  prediction echoes the sample's own reads (§7). Offered: round 1's prediction, the averaged one, or
+  removing the echo at a cost of a round. *The owner's proposal, adopted after the prototype
+  measured it:* hide a few records of each sample from the start, so the echo never forms there,
+  and check only those — the hiding test of Beagle users, built in. 20 a window rather than the
+  proposed 1 in 1,000, so small runs get enough.

@@ -2,7 +2,8 @@
 each sample's two haplotypes as its templates' contribution, scored on founder_grid.py cells
 against the simulator's truth.
 
-usage: uv run --with numpy python phaser.py [--rounds R] [--haplotypes 16] <cell dir> [...]
+usage: uv run --with numpy python phaser.py [--rounds R] [--haplotypes 16 [--one-per-sample]]
+                                           [--hide N] <cell dir> [...]
 
 Each sample carries two haplotypes, soft: at each record, each copy's probability of carrying the
 alternative. Round 1 starts every template sample's two haplotypes at its GP allele share, so the
@@ -25,6 +26,15 @@ allele the sample's genotype lacks — x·P(0/0) + (1 − x)·P(1/1) per record,
 probability, the genotype the previous round's posterior — over the sample's informative records
 (at most 500, spread evenly) where the haplotype's sample is informative too, the 16 lowest kept;
 with --one-per-sample, at most one haplotype of each sample.
+
+With --hide N (the fill check without the echo, owner 2026-11-02): before round 1, N records where
+each sample's reads are informative are drawn at random, and at them the sample is treated as
+having no reads in every round — its walk and its path read a flat likelihood there. Its averaged
+neighbours-only prediction there therefore holds none of its own reads at that record, through any
+other sample's haplotype either, which is the situation of a real ./. . The fill check compares that
+prediction, where its GQ reaches 10, with the genotype the sample's own evidence settles (posterior
+≥ 0.999 from its reads, its inbreeding and the cohort frequency, as the pass's settled_genotype). The
+genotype scored there is the prediction times the sample's likelihood, renormalised.
 
 All samples are updated together at the end of a round, from one seed, so the result does not
 depend on the order or the threads. A drawn path, not the posterior's marginals, because the two
@@ -53,7 +63,7 @@ def lik_matrix(lik):
     return np.array([[l0, l1], [l1, l2]])
 
 
-def draw_path(rows, target, q_sites, inbreeding, rng):
+def draw_path(rows, target, q_sites, inbreeding, rng, liks):
     """One state path, drawn backwards from the forward probabilities; then each copy's
     probability of carrying the alternative along it."""
     f = min(max(inbreeding, 1e-4), 1 - 1e-4)
@@ -64,7 +74,7 @@ def draw_path(rows, target, q_sites, inbreeding, rng):
     prev_d = prev_p = None
     for i, r in enumerate(rows):
         q = q_sites[i]
-        M = lik_matrix(r['lik'][target])
+        M = lik_matrix(liks[i])
         Ms.append(M)
         e_pair = q @ M @ q.T
         e_desc = q @ np.diag(M)
@@ -196,20 +206,35 @@ def one_sample(args):
         q_sites = template_q(rows, pairs, HAPS[cell], contig)
         # hmm.haplotypes blurs the shares itself, so it is given them unblurred
         raw = [(q - MISMATCH / 2) / (1 - MISMATCH) for q in q_sites]
-        posteriors, _ = haplotypes([(r['lik'][target], None, None) for r in rows],
+        hidden = HIDDEN.get(cell, {}).get(target, set())
+        liks = [np.ones(3) if (contig, i) in hidden else r['lik'][target] for i, r in enumerate(rows)]
+        posteriors, _ = haplotypes([(lik, None, None) for lik in liks],
                                    [r['pos'] for r in rows], raw, inbreeding[target],
                                    pc.RUN_BASES, pc.SEGMENT_BASES)
         posts[contig] = np.array(posteriors)
-        new[contig] = draw_path(rows, target, q_sites, inbreeding[target], rng)
+        new[contig] = draw_path(rows, target, q_sites, inbreeding[target], rng, liks)
     return target, posts, new
 
 
 def score(cell, posts):
     """Counts over every sample, from each sample's genotype posteriors `posts[target][contig]`."""
-    counts = dict(reads=0, calling_wrong=0, pass_wrong=0, missing=0, filled=0, filled_wrong=0)
+    counts = dict(reads=0, calling_wrong=0, pass_wrong=0, missing=0, filled=0, filled_wrong=0,
+                  checked=0, disagreed=0)
+    samples, _, inbreeding = pc.DATA[cell]
     for target, by_contig in posts.items():
+        hidden = HIDDEN.get(cell, {}).get(target, set())
         for contig, rows in pc.CONTIGS[cell].items():
-            for r, post in zip(rows, by_contig[contig]):
+            for i, (r, post) in enumerate(zip(rows, by_contig[contig])):
+                if (contig, i) in hidden:
+                    # the fill check: the clean prediction against the settled genotype
+                    settled = settled_genotype(r['lik'][target], r['af'], inbreeding[target])
+                    best_prediction = int(np.argmax(post))
+                    if (settled is not None
+                            and -10 * math.log10(max(1 - post[best_prediction], 1e-10)) >= 10):
+                        counts['checked'] += 1
+                        counts['disagreed'] += best_prediction != settled
+                    post = post * r['lik'][target]
+                    post = post / post.sum()
                 truth = tuple(sorted(r['truth'][target]))
                 best = int(np.argmax(post))
                 genotype = [(0, 0), (0, 1), (1, 1)][best]
@@ -225,13 +250,27 @@ def score(cell, posts):
     return counts
 
 
+def settled_genotype(lik, af, inbreeding):
+    """The genotype index the sample's own evidence settles (posterior ≥ 0.999), or None."""
+    p, f = af, min(max(inbreeding, 0.0), 1.0)
+    prior = np.array([f * (1 - p) + (1 - f) * (1 - p) ** 2, 2 * (1 - f) * p * (1 - p),
+                      f * p + (1 - f) * p * p])
+    joint = prior * lik
+    total = joint.sum()
+    best = int(np.argmax(joint))
+    return best if total > 0 and joint[best] >= 0.999 * total else None
+
+
 def row(name, label, c):
     share = f" ({100 * c['filled_wrong'] / c['filled']:.1f}%)" if c['filled'] else ''
+    check = (f" | {c['disagreed']} of {c['checked']} ({100 * c['disagreed'] / c['checked']:.1f}%)"
+             if c.get('checked') else ' | ')
     return (f"| {name} | {label} | {c['calling_wrong']:,} → {c['pass_wrong']:,} of {c['reads']:,} | "
-            f"{c['missing']:,} | {c['filled']:,} | {c['filled_wrong']:,}{share} |")
+            f"{c['missing']:,} | {c['filled']:,} | {c['filled_wrong']:,}{share}{check} |")
 
 
 HAPS = {}
+HIDDEN = {}
 PREVIOUS = {}
 HAPLOTYPE_TEMPLATES = None
 ONE_PER_SAMPLE = False
@@ -241,9 +280,12 @@ def main():
     global HAPLOTYPE_TEMPLATES, PREVIOUS, ONE_PER_SAMPLE
     args = sys.argv[1:]
     rounds = 4
+    hide = 0
     while args[0].startswith('--'):
         if args[0] == '--rounds':
             rounds = int(args[1])
+        elif args[0] == '--hide':
+            hide = int(args[1])
         elif args[0] == '--haplotypes':
             HAPLOTYPE_TEMPLATES = int(args[1])
         elif args[0] == '--one-per-sample':
@@ -251,8 +293,8 @@ def main():
             args = args[1:]
             continue
         args = args[2:]
-    print('| cell | round | wrong where samples have reads, calling → pass | missing | filled (GQ ≥ 10) | of them wrong |')
-    print('|---|---|---|---|---|---|')
+    print('| cell | round | wrong where samples have reads, calling → pass | missing | filled (GQ ≥ 10) | of them wrong | fill check: wrong of checked |')
+    print('|---|---|---|---|---|---|---|')
     for cell in args:
         pc.DATA[cell] = pc.load(cell)
         samples, records, _ = pc.DATA[cell]
@@ -264,6 +306,14 @@ def main():
                           for contig, rows in pc.CONTIGS[cell].items()}
                       for t in range(len(samples))}
         name = os.path.basename(os.path.normpath(cell))
+        HIDDEN[cell] = {}
+        if hide:
+            for t in range(len(samples)):
+                candidates = [(contig, i) for contig, rows in pc.CONTIGS[cell].items()
+                              for i, r in enumerate(rows) if pc.informative(r['lik'][t])]
+                rng = np.random.default_rng([SEED, 999, t])
+                chosen = rng.choice(len(candidates), size=min(hide, len(candidates)), replace=False)
+                HIDDEN[cell][t] = {candidates[j] for j in chosen}
         summed = None
         for round_index in range(1, rounds + 1):
             posts, new_haps = {}, {}
