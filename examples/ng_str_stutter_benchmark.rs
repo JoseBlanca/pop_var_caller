@@ -112,6 +112,8 @@
 //! | `design` | `pcr` | `clean`, `pcr_free`, `pcr`, `heavy` or `one_outlier` (spec §4.1) |
 //! | `samples` | 1 | how many samples are sequenced |
 //! | `depth` | 30 | reads a position, both mates counted, averaged over the genome |
+//! | `deep_samples` | 0 | how many samples, the first by name, are sequenced at `deep_depth` instead of `depth` |
+//! | `deep_depth` | 30 | the reads a position of the `deep_samples` |
 //! | `segments_per_period` | 500 | STR segments of each motif length |
 //! | `bundles` | 500 | STR bundles, all motif lengths together; `0` lays none and leaves every other output as it was without them |
 //! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle as before hard shapes existed, byte for byte |
@@ -577,6 +579,9 @@ struct Settings {
     design: Design,
     samples: usize,
     depth: f64,
+    /// How many samples, the first by name, are sequenced at `deep_depth` instead of `depth`.
+    deep_samples: usize,
+    deep_depth: f64,
     segments_per_period: usize,
     bundles: usize,
     /// The share of bundles laid in a hard shape ([`draw_hard_bundle_shape`]); the rest are laid
@@ -602,6 +607,8 @@ impl Default for Settings {
             design: Design::Pcr,
             samples: 1,
             depth: 30.0,
+            deep_samples: 0,
+            deep_depth: 30.0,
             segments_per_period: 500,
             bundles: DEFAULT_BUNDLES,
             hard_bundle_share: DEFAULT_HARD_BUNDLE_SHARE,
@@ -635,6 +642,8 @@ impl Settings {
                 "design" => settings.design = Design::parse(value)?,
                 "samples" => settings.samples = number()? as usize,
                 "depth" => settings.depth = number()?,
+                "deep_samples" => settings.deep_samples = number()? as usize,
+                "deep_depth" => settings.deep_depth = number()?,
                 "segments_per_period" => settings.segments_per_period = number()? as usize,
                 "bundles" => settings.bundles = number()? as usize,
                 "hard_bundle_share" => settings.hard_bundle_share = number()?,
@@ -663,6 +672,12 @@ impl Settings {
         }
         if settings.depth.is_nan() || settings.depth <= 0.0 {
             return Err(format!("depth must be above zero, got {}", settings.depth));
+        }
+        if settings.deep_depth.is_nan() || settings.deep_depth <= 0.0 {
+            return Err(format!(
+                "deep_depth must be above zero, got {}",
+                settings.deep_depth
+            ));
         }
         if !(0.0..=1.0).contains(&settings.hard_bundle_share) {
             return Err(format!(
@@ -3470,7 +3485,8 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
     write_tables(out_dir, &cohort)?;
 
     let genome_len: usize = cohort.contigs.iter().map(|one| one.bases.len()).sum();
-    let fragments = (settings.depth * genome_len as f64 / (2 * READ_LEN) as f64).round() as usize;
+    let fragments_at =
+        |depth: f64| (depth * genome_len as f64 / (2 * READ_LEN) as f64).round() as usize;
     let next = AtomicUsize::new(0);
     let threads = settings.threads.min(settings.samples);
     let counts: Vec<(usize, SampleCounts)> = std::thread::scope(|scope| {
@@ -3484,7 +3500,13 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
                             return Ok(done);
                         }
                         let seed = sample_seed(settings.seed, sample);
-                        let one = sequence_sample(&cohort, sample, fragments, seed, out_dir)?;
+                        let depth = if sample < settings.deep_samples {
+                            settings.deep_depth
+                        } else {
+                            settings.depth
+                        };
+                        let one =
+                            sequence_sample(&cohort, sample, fragments_at(depth), seed, out_dir)?;
                         done.push((sample, one));
                     }
                 })
@@ -3565,8 +3587,11 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
         cohort.generic.iter().filter(|one| one.is_snp()).count()
     );
     println!(
-        "fragments a sample  : {fragments} ({} reads)",
-        2 * fragments
+        "fragments a sample  : {} ({} reads); the {} deep samples {}",
+        fragments_at(settings.depth),
+        2 * fragments_at(settings.depth),
+        settings.deep_samples,
+        fragments_at(settings.deep_depth)
     );
     println!("stutter events      : {stutter_events} over all samples");
     println!("settings            : {settings:?}");

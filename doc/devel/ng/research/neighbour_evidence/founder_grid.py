@@ -4,6 +4,8 @@ cell, called by pvc with the pass off and on, scored against the simulator's tru
 usage: uv run python founder_grid.py <work dir> <cell> [<cell> ...]
        uv run python founder_grid.py --rescore <cell dir> [<cell dir> ...]
        a cell is founders,inbreeding,samples,depth  e.g. 16,0.95,50,3
+       a mixed-depth cell's depth is shallow+deepxcount  e.g. 16,0.95,50,3+30x10: the first ten
+       samples (sim000 to sim009) at 30x, the rest at 3x
 
 Each cell's files go in <work dir>/f<founders>_F<inbreeding>_n<samples>_d<depth>/; a cell whose
 score.json exists is skipped. Needs, on PATH or by absolute path below: minimap2, samtools, and the
@@ -107,12 +109,17 @@ def cell(work, spec):
     d = os.path.join(work, name)
     if os.path.exists(os.path.join(d, 'score.json')):
         return
+    deep = ''
+    if '+' in depth:
+        depth, deep_part = depth.split('+')
+        deep_depth, deep_samples = deep_part.split('x')
+        deep = f'deep_samples={deep_samples} deep_depth={deep_depth} '
     os.makedirs(d, exist_ok=True)
     log = os.path.join(d, 'driver.log')
     timings = {}
     began = time.time()
     if not os.path.exists(os.path.join(d, 'sim', 'truth.vcf.gz')):
-        run(f'{SIMULATOR} {d}/sim samples={samples} depth={depth} founders={founders} '
+        run(f'{SIMULATOR} {d}/sim samples={samples} depth={depth} {deep}founders={founders} '
             f'inbreeding={inbreeding} {GENOME} design=pcr_free threads={THREADS} seed=20261102', log)
         run(f'samtools faidx {d}/sim/reference.fa && bgzip -f {d}/sim/truth.vcf', log)
     timings['simulate'] = time.time() - began
@@ -152,7 +159,8 @@ def cell(work, spec):
         tally = [line.strip() for line in handle if 'neighbour-evidence pass:' in line]
     with open(os.path.join(d, 'score.json'), 'w') as handle:
         json.dump({'cell': name, 'founders': int(founders), 'inbreeding': float(inbreeding),
-                   'samples': int(samples), 'depth': float(depth), 'counts': count, 'gq': gq,
+                   'samples': int(samples), 'depth': float(depth), 'deep': deep.strip(),
+                   'counts': count, 'gq': gq,
                    'timings': timings, 'pass_log': tally}, handle, indent=1)
     print(name, 'done', flush=True)
 
