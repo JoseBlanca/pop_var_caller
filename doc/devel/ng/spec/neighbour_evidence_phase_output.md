@@ -17,8 +17,9 @@ the alignment hides exactly the switches the rule was meant to catch; the rule n
 round's own, unaligned phase (§2.3). The confidence threshold is now the prototype's measured rule,
 not a looser one that only resembled it (§2.2). The join of windows is defined per sample over the
 last written block (§2.4). Repeat counts follow the phased `GT` (§3), an already-phased input is
-refused (§3), multi-allelic records keep their rounds' haplotypes (§2.1), and the phase is written
-only when the pass runs by its own decision (§6). §7 is rebuilt so it can decide §9.
+refused (§3), multi-allelic records keep their rounds' haplotypes (§2.1), and §7 is rebuilt so it
+can decide §9. The owner then ruled §9: the stricter link rule, and no cohort gate — one ceiling on
+flips inside blocks for every cohort instead (§6, §7.1).
 
 ---
 
@@ -62,7 +63,7 @@ gave clearly better genotypes.
 **The blocks of §2.3 lower the flips but do not remove them.** Measured by the review on the same
 rounds, the flips left inside blocks are 0.54% on the first cohort and 5.4% on the 64-founder one
 (§2.3). The rounds share a switch error that every round makes together a third to two thirds of the
-time, and no comparison between rounds can see it. §6 and §9 Q1 deal with what that means on diverse
+time, and no comparison between rounds can see it. §6 and §7.1 deal with what that means on diverse
 cohorts.
 
 ### 1.1 Goals
@@ -201,11 +202,13 @@ rule.)
 agreement. The rounds are not independent — each copies the haplotypes the round before drew — and
 such shared switches are a third to two thirds of the flips (31 of 93 on the first cohort, 87 of 141
 on the 64-founder one). More rounds or a stricter link rule shorten the blocks without reaching
-them. Two stricter variants were measured by the review; which to use is §9 Q1:
+them.
 
-- **every round leans at both records** (by at least 0.5, its own unaligned lean): first cohort 16
-  flips in 4,827 links (0.33%) at a block N50 of 16 records; 64-founder 48 in 1,361 (3.5%);
-- the same with **9 rounds** for the phase: 64-founder 23 in 1,149 (2.0%) at a block N50 of 8.
+**The rule adopted (owner, 2026-11-02, "for now, we'll see how it works") is the stricter one:
+every averaged round also leans by at least 0.5 — its own, unaligned lean — at both records of the
+link.** Measured by the review: first cohort 16 flips in 4,827 links (0.33%) at a block N50 of 16
+records, against 31 (0.54%) at 39 with agreement alone; 64-founder 48 in 1,361 (3.5%). With 9 rounds
+for the phase, 64-founder 23 in 1,149 (2.0%) at a block N50 of 8.
 
 A stricter `LEAN_MIN` is **not** a lever on the block rule — above 0.75 no round can disagree — but
 it is one on which records are phased.
@@ -278,8 +281,7 @@ at the `POS` of the record before it.
   this block; records of a sample with the same PS are phased together">`; `GT`'s description
   (`src/vcf/header.rs:610`, "Genotype, unphased") becomes "Genotype; phased (|) where PS is set,
   unphased (/) elsewhere" when the phase is written. `##neighbourEvidence=` — built by
-  `NeighbourEvidenceDecision::as_header_value` (`stage.rs:66–79`) — gains `phase=yes|no` and
-  `lean_min=0.5`.
+  `NeighbourEvidenceDecision::as_header_value` (`stage.rs:66–79`) — gains `lean_min=0.5`.
 - **`refine-genotypes`** writes the same, as it shares the stage, but builds its own header from the
   input's lines (`refine_genotypes.rs:164–200`), so the `GT` and `PS` declarations are added there
   too.
@@ -301,7 +303,7 @@ at the `POS` of the record before it.
 | a record's result | `RefinedRecord` | gains, per sample, the orientation (copy 0's allele of the pair) or none, and the block's `PS` |
 | the window's join | `stage::NeighbourEvidenceStage` | keeps, per sample, the last written block (§2.4) across windows; passes it into the solve; updates it from what the window writes |
 | the line | `line::rewrite_line` | writes `|`, `PS`, and the repeat counts in `GT` order, through the allele renumbering |
-| the header | `vcf/header.rs`, `stage.rs` (`as_header_value`), `cli/refine_genotypes.rs` | `PS`, `GT`'s description, `phase`, `lean_min`; the refusal of a phased input |
+| the header | `vcf/header.rs`, `stage.rs` (`as_header_value`), `cli/refine_genotypes.rs` | `PS`, `GT`'s description, `lean_min`; the refusal of a phased input |
 
 **Memory**, per sample and window: a consensus row the size of one store buffer (8 bytes a
 biallelic record), and two bits a round at every record (a byte at `R` = 5). At 3,000 samples and a
@@ -339,16 +341,18 @@ operations a record — small beside a walk.
 
 ## 6. When it runs
 
-The phase is written **only when the pass runs by its own decision** (`--neighbour-evidence auto`
-deciding yes: at least ten samples and median inbreeding at least 0.5; `stage.rs`, `decide`). With
-`--neighbour-evidence on` on a cohort that decision would refuse, the genotypes are refined and
-`GT` stays unphased; the header says `phase=no`. There is no separate option.
+Whenever the pass runs, with no option and **no gate on the cohort** (owner, 2026-11-02): pvc is a
+general tool, and the phase is written only where it is confident, so the confidence rule — not a
+judgement about the cohort — decides how much is written. A cohort that phases badly must come out
+with few, short blocks, not with wrong ones.
 
-**Why.** Round agreement measures how much the draw varies, not whether the model is right. On 10
-outbred samples at 3× (64 founders) the prototype phased 3% of true heterozygotes, and 34 of the 85
-links inside blocks flipped (40%) under either link test: every round agreed on a near-random phase.
-That cohort is below the decision, so this rule keeps it unphased. The 64-founder inbred cohort is
-above it and still leaves 3.5% to 5.4% flips inside blocks (§2.3); what to do there is §9 Q2.
+**This is a requirement on the rule, and the rule does not meet it yet.** Round agreement measures
+how much the draw varies, not whether the model is right, and a switch all rounds share passes it
+(§2.3). Measured, links the rule calls confident are wrong 0.33% of the time on the first cohort and
+3.5% on the 64-founder one; on 10 outbred samples at 3× (64 founders) 34 of 85 links inside blocks
+flipped (40%) under the plain agreement test — every round agreed on a near-random phase. So
+"confident" does not yet mean the same thing on every cohort. §7.1 sets one ceiling for all cohorts,
+and the Rust build waits until the rule meets it on each.
 
 ---
 
@@ -363,7 +367,13 @@ above it and still leaves 3.5% to 5.4% flips inside blocks (§2.3); what to do t
    - joins: run `phaser.py` on two overlapping halves of a contig and apply §2.4 — the share of joins
      that continue a block, and the flips at joins against the flips inside one window;
    - deep and shallow samples reported apart, and fills apart.
-   The rule is kept if the flips inside blocks are at most a third of the flips with no block rule.
+   **The rule passes if the flips inside blocks are at most 1% on every cohort** — one ceiling,
+   whatever the cohort, because "confident" must mean the same everywhere (§6). A cohort may phase
+   few records; it may not phase them wrongly. Where a cohort misses the ceiling, the rule is made
+   stricter by a signal that tightens on its own where the phase is poor, never by excluding the
+   cohort. Candidates, each measured before chosen: several paths drawn per round from the same
+   forward pass (independent given the round's templates, so a switch they share is the model's,
+   not the draw's); a higher lean at the link's records; more rounds for the phase.
 2. **The Rust build against the truth** on the same cohorts: the same figures against the prototype
    and Beagle, scored also with `whatshap compare` against the simulator's truth VCF (switch errors
    and block lengths per sample, read from `PS`) — which checks the format through an independent
@@ -396,7 +406,17 @@ above it and still leaves 3.5% to 5.4% flips inside blocks (§2.3); what to do t
 
 ---
 
-## 9. Open questions — the owner's to rule, with leanings
+## 9. Questions ruled
+
+Both questions were ruled by the owner on 2026-11-02:
+
+- **Q1. How strict is a link?** The stricter rule — every round leans at both records — "for now,
+  we'll see how it works" (§2.3).
+- **Q2. Phase on a diverse cohort where blocks still flip?** No cohort gate: pvc is a general tool,
+  and writing only confident phase must handle every cohort by itself (§6). The ceiling of §7.1
+  enforces it.
+
+The questions as they were put follow, for the record.
 
 Settled by the review and adopted (no ruling needed): the link test on unaligned rounds (§2.3), the
 threshold as the prototype's `|w − w′| ≥ 0.5` (§2.2), the join over the last written block with
@@ -417,5 +437,4 @@ repeat counts in `GT` order and the refusal of a phased input (§3), the running
   unaligned test, so more samples help); write it only above a stated sample count; or require a
   stricter `LEAN_MIN`. **Leaning: write it, by §6's rule, and decide on a sample count only if §7.1
   on 64 founders at 50 and 200 samples, outbred included, shows the flips do not fall with samples.**
-  The owner's own cohort — thousands of accessions, part outbred — is closer to the 200-sample cell
-  than to the 50-sample ones.
+  (Not adopted: the owner ruled out any cohort gate, §6.)
