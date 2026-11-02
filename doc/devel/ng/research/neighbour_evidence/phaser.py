@@ -1,0 +1,226 @@
+"""A prototype phaser for the neighbour-evidence pass: rounds of the pass's own copying walk, with
+each sample's two haplotypes as its templates' contribution, scored on founder_grid.py cells
+against the simulator's truth.
+
+usage: uv run --with numpy python phaser.py [--rounds R] <cell dir> [<cell dir> ...]
+
+Each sample carries two haplotypes, soft: at each record, each copy's probability of carrying the
+alternative. Round 1 starts every template sample's two haplotypes at its GP allele share, so the
+walk is the pass as now, with each template counted twice. In every round, for each sample:
+
+  1. its 16 template samples — chosen once, as pvc chooses them — give 32 haplotype templates, plus
+     the background template (the cohort's frequencies);
+  2. the walk gives its genotype posterior at every record (what the pass would write);
+  3. one path through the states is drawn from the walk's forward probabilities, backwards — which
+     template each copy follows at each record, or the one both copies follow where autozygous;
+  4. along that path, each copy's allele at each record is re-estimated from the followed
+     templates' haplotypes and the sample's own genotype likelihood: P(copy one a, copy two b) ∝
+     q̃_k1(a) · q̃_k2(b) · L(a, b), so a copy stays uncertain where its template and the reads are.
+
+All samples are updated together at the end of a round, from one seed, so the result does not
+depend on the order or the threads. A drawn path, not the posterior's marginals, because the two
+copies are symmetric in the walk: averaged, each copy's marginal is the same and the phase is lost.
+
+Scored as phasing_ceiling.py: biallelic SNP records matching a truth record, the sample's genotype
+from the round's posterior; the walk's lengths fixed at the simulator's, and the pass's rules for
+leaving a sample ./. not applied. The target's own reads phase its templates here, as they would
+in the pass — the comparison with Beagle, run without the target, is slightly in the phaser's favour.
+"""
+import math, multiprocessing, os, sys
+from concurrent.futures import ProcessPoolExecutor
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import phasing_ceiling as pc  # noqa: E402
+from hmm import background_shares, haplotypes, stays  # noqa: E402
+
+MISMATCH = 0.01
+SEED = 20261102
+
+
+def lik_matrix(lik):
+    l0, l1, l2 = lik
+    return np.array([[l0, l1], [l1, l2]])
+
+
+def draw_path(rows, target, q_sites, inbreeding, rng):
+    """One state path, drawn backwards from the forward probabilities; then each copy's
+    probability of carrying the alternative along it."""
+    f = min(max(inbreeding, 1e-4), 1 - 1e-4)
+    n = len(rows)
+    T = q_sites[0].shape[0]
+    pos = [r['pos'] for r in rows]
+    fwd_d, fwd_p, Ms = [], [], []
+    prev_d = prev_p = None
+    for i, r in enumerate(rows):
+        q = q_sites[i]
+        M = lik_matrix(r['lik'][target])
+        Ms.append(M)
+        e_pair = q @ M @ q.T
+        e_desc = q @ np.diag(M)
+        if prev_d is None:
+            d = np.full(T, f / T)
+            p = np.full((T, T), (1 - f) / (T * T))
+        else:
+            gap = pos[i] - pos[i - 1]
+            s_d, s_n = stays(gap, f, pc.RUN_BASES)
+            keep = math.exp(-gap / pc.SEGMENT_BASES)
+            mass_d, mass_p = prev_d.sum(), prev_p.sum()
+            d_in = keep * prev_d + (1 - keep) * mass_d / T
+            rows_, cols = prev_p.sum(axis=1), prev_p.sum(axis=0)
+            p_in = (keep * keep * prev_p + keep * (1 - keep) * (rows_[:, None] + cols[None, :]) / T
+                    + (1 - keep) ** 2 * mass_p / (T * T))
+            d = s_d * d_in + (1 - s_n) * mass_p / T
+            p = s_n * p_in + (1 - s_d) * mass_d / (T * T)
+        d = d * e_desc
+        p = p * e_pair
+        s = d.sum() + p.sum()
+        d, p = d / s, p / s
+        fwd_d.append(d); fwd_p.append(p)
+        prev_d, prev_p = d, p
+
+    def pick(w_d, w_p):
+        flat = np.concatenate([w_d, w_p.ravel()])
+        flat = flat / flat.sum()
+        index = rng.choice(len(flat), p=flat)
+        return ('d', index) if index < T else ('p', divmod(index - T, T))
+
+    states = [None] * n
+    states[-1] = pick(fwd_d[-1], fwd_p[-1])
+    for i in range(n - 2, -1, -1):
+        gap = pos[i + 1] - pos[i]
+        s_d, s_n = stays(gap, f, pc.RUN_BASES)
+        keep = math.exp(-gap / pc.SEGMENT_BASES)
+        kind, k = states[i + 1]
+        if kind == 'p':
+            k1, k2 = k
+            w_p = np.full((T, T), (1 - keep) ** 2 / (T * T))
+            w_p[k1, :] += keep * (1 - keep) / T
+            w_p[:, k2] += keep * (1 - keep) / T
+            w_p[k1, k2] += keep * keep
+            w_p = fwd_p[i] * s_n * w_p
+            w_d = fwd_d[i] * (1 - s_d) / (T * T)
+        else:
+            w_d = np.full(T, (1 - keep) / T)
+            w_d[k] += keep
+            w_d = fwd_d[i] * s_d * w_d
+            w_p = fwd_p[i] * (1 - s_n) / T
+        states[i] = pick(w_d, w_p)
+
+    first = np.empty(n)
+    second = np.empty(n)
+    for i, (kind, k) in enumerate(states):
+        q, M = q_sites[i], Ms[i]
+        if kind == 'p':
+            joint = np.outer(q[k[0]], q[k[1]]) * M
+        else:
+            joint = np.diag(q[k] * np.diag(M))
+        joint = joint / joint.sum()
+        first[i] = joint[1, :].sum()
+        second[i] = joint[:, 1].sum()
+    return first, second
+
+
+def template_q(rows, templates, haps, contig):
+    """Per record, the (2·16 + 1, 2) blurred allele shares of the haplotype templates and the
+    background."""
+    out = []
+    for i, r in enumerate(rows):
+        alt = [haps[t][contig][c][i] for t in templates for c in (0, 1)]
+        q = np.array([[1 - a, a] for a in alt] + [list(background_shares([r['af']]))])
+        out.append(q * (1 - MISMATCH) + MISMATCH / 2)
+    return out
+
+
+def one_sample(args):
+    cell, target, round_index = args
+    samples, records, inbreeding = pc.DATA[cell]
+    templates = pc.choose(records, target, len(samples))
+    rng = np.random.default_rng([SEED, round_index, target])
+    new, posts = {}, {}
+    for contig, rows in pc.CONTIGS[cell].items():
+        q_sites = template_q(rows, templates, HAPS[cell], contig)
+        # hmm.haplotypes blurs the shares itself, so it is given them unblurred
+        raw = [(q - MISMATCH / 2) / (1 - MISMATCH) for q in q_sites]
+        posteriors, _ = haplotypes([(r['lik'][target], None, None) for r in rows],
+                                   [r['pos'] for r in rows], raw, inbreeding[target],
+                                   pc.RUN_BASES, pc.SEGMENT_BASES)
+        posts[contig] = np.array(posteriors)
+        new[contig] = draw_path(rows, target, q_sites, inbreeding[target], rng)
+    return target, posts, new
+
+
+def score(cell, posts):
+    """Counts over every sample, from each sample's genotype posteriors `posts[target][contig]`."""
+    counts = dict(reads=0, calling_wrong=0, pass_wrong=0, missing=0, filled=0, filled_wrong=0)
+    for target, by_contig in posts.items():
+        for contig, rows in pc.CONTIGS[cell].items():
+            for r, post in zip(rows, by_contig[contig]):
+                truth = tuple(sorted(r['truth'][target]))
+                best = int(np.argmax(post))
+                genotype = [(0, 0), (0, 1), (1, 1)][best]
+                if r['called'][target] is not None:
+                    counts['reads'] += 1
+                    counts['calling_wrong'] += r['called'][target] != truth
+                    counts['pass_wrong'] += genotype != truth
+                else:
+                    counts['missing'] += 1
+                    if -10 * math.log10(max(1 - post[best], 1e-10)) >= 10:
+                        counts['filled'] += 1
+                        counts['filled_wrong'] += genotype != truth
+    return counts
+
+
+def row(name, label, c):
+    share = f" ({100 * c['filled_wrong'] / c['filled']:.1f}%)" if c['filled'] else ''
+    return (f"| {name} | {label} | {c['calling_wrong']:,} → {c['pass_wrong']:,} of {c['reads']:,} | "
+            f"{c['missing']:,} | {c['filled']:,} | {c['filled_wrong']:,}{share} |")
+
+
+HAPS = {}
+
+
+def main():
+    args = sys.argv[1:]
+    rounds = 4
+    if args[0] == '--rounds':
+        rounds, args = int(args[1]), args[2:]
+    print('| cell | round | wrong where samples have reads, calling → pass | missing | filled (GQ ≥ 10) | of them wrong |')
+    print('|---|---|---|---|---|---|')
+    for cell in args:
+        pc.DATA[cell] = pc.load(cell)
+        samples, records, _ = pc.DATA[cell]
+        pc.CONTIGS[cell] = {}
+        for r in records:
+            pc.CONTIGS[cell].setdefault(r['contig'], []).append(r)
+        pc.RANKS[id(records)] = [pc.ranking(records, t, len(samples)) for t in range(len(samples))]
+        HAPS[cell] = {t: {contig: (np.array([r['shares'][t][1] for r in rows]),) * 2
+                          for contig, rows in pc.CONTIGS[cell].items()}
+                      for t in range(len(samples))}
+        name = os.path.basename(os.path.normpath(cell))
+        summed = None
+        for round_index in range(1, rounds + 1):
+            posts, new_haps = {}, {}
+            with ProcessPoolExecutor(6, mp_context=multiprocessing.get_context('fork')) as pool:
+                for target, post, new in pool.map(one_sample, [(cell, t, round_index)
+                                                               for t in range(len(samples))]):
+                    new_haps[target] = new
+                    posts[target] = post
+            HAPS[cell] = new_haps
+            print(row(name, str(round_index), score(cell, posts)), flush=True)
+            # the average over rounds from the second on: the first is the pass as now
+            if round_index >= 2:
+                if summed is None:
+                    summed = {t: {c: p.copy() for c, p in by.items()} for t, by in posts.items()}
+                else:
+                    for t, by in posts.items():
+                        for c, p in by.items():
+                            summed[t][c] += p
+                averaged = {t: {c: p / (round_index - 1) for c, p in by.items()}
+                            for t, by in summed.items()}
+                print(row(name, f'mean of 2–{round_index}', score(cell, averaged)), flush=True)
+
+
+if __name__ == '__main__':
+    main()
