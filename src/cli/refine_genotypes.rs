@@ -247,7 +247,7 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
             .map_err(write_error)?;
     }
     let finished = writer.finish().map_err(write_error)?;
-    calling_run::log_neighbour_evidence(&finished);
+    calling_run::report_neighbour_evidence(&finished, &args.output);
     tracing::info!(
         "done: {} records written to {} in {}",
         run_output::with_thousands(finished.records_written),

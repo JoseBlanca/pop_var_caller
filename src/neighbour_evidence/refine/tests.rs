@@ -260,3 +260,42 @@ fn the_result_does_not_depend_on_the_thread_count() {
     };
     assert_eq!(solve(1), solve(4));
 }
+
+/// **Each sample's fill check counts its fills and tries the rest where its evidence settles it**
+/// (`FillCheck`): on a drawn inbred cohort at 3×, `filled` is the sample's no-read calls written,
+/// the check runs at many sites, and the neighbours' prediction there disagrees with the settled
+/// genotype at most once in twenty — the true fill error rate of this cohort is far lower.
+#[test]
+fn the_fill_check_counts_the_fills_and_tries_the_settled_sites() {
+    let shape = CohortShape {
+        depth: 3.0,
+        ..SHAPE
+    };
+    let cohort = test_cohort(shape);
+    let mut fits: Vec<SampleFit> = (0..shape.samples).map(|_| SampleFit::new(0.95)).collect();
+    let solved = refine_window(
+        &cohort.records,
+        0..cohort.records.len(),
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+    );
+    for (sample, check) in solved.checks.iter().enumerate() {
+        let filled = cohort
+            .records
+            .iter()
+            .zip(&solved.records)
+            .filter(|(record, refined)| {
+                record.row(sample) == SampleRow::Flat && refined.outcomes[sample] == Outcome::Called
+            })
+            .count();
+        assert_eq!(check.filled as usize, filled, "sample {sample}");
+    }
+    let checked: u32 = solved.checks.iter().map(|check| check.checked).sum();
+    let disagreed: u32 = solved.checks.iter().map(|check| check.disagreed).sum();
+    assert!(
+        checked > 10_000 && disagreed * 20 <= checked,
+        "{disagreed} of {checked} checked sites disagreed"
+    );
+}

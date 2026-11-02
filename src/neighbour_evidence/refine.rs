@@ -10,16 +10,21 @@
 //! **A sample whose reads said nothing at a record is called there only with evidence nearby**
 //! (§4.2): an informative record of its own within one segment length `S` on each side, or on one
 //! side where the contig ends within `S` on the other — and only if the call's `GQ` is at least
-//! [`NO_READ_MIN_GENOTYPE_QUALITY`]. Without that its posterior is the cohort's
-//! frequency reached through its templates — a confident `0/0` with nothing behind it — and it
-//! stays `./.`, with the posterior as its `GP`.
+//! [`NO_READ_MIN_GENOTYPE_QUALITY`] and it is not probably copying the background
+//! ([`NO_READ_MAX_BACKGROUND_COPY`]). Without that its posterior is the cohort's frequency reached
+//! through its templates — a confident `0/0` with nothing behind it — and it stays `./.`, with the
+//! posterior as its `GP`.
+//!
+//! **Each sample's fills are checked on its own data** ([`FillCheck`]): at the core's records
+//! where its reads settle its genotype, the genotype its neighbours alone predict — what it would
+//! be written with had it no reads there — is compared with the reads'.
 
 use std::ops::Range;
 
 use rayon::prelude::*;
 
 use super::fit::SampleFit;
-use super::model::{WalkSite, walk};
+use super::model::{GenotypePairs, WalkSite, walk};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::choose_templates;
 use crate::calling::quality::score_best_genotype;
@@ -34,12 +39,13 @@ pub const MISMATCH: f64 = 0.01;
 /// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1).
 pub const NO_READ_MIN_GENOTYPE_QUALITY: f32 = 10.0;
 
-/// **When a sample's reads contradict its neighbours** at a site: the reads are at least this many
-/// times less likely under the neighbours' prediction than under the genotype that fits them best.
-/// One read showing an allele the neighbours rule out does it; so does a deep heterozygote the
-/// neighbours call homozygous. A ratio, not a confident own genotype, so the check works at one
-/// read a site, where no single genotype ever is confident.
-pub const CONTRADICTION_LIKELIHOOD_RATIO: f64 = 10.0;
+/// **When a sample's own evidence settles its genotype**, for [`FillCheck`]: the genotype's
+/// posterior from its reads and the prior calling uses — the cohort's allele frequencies and the
+/// sample's inbreeding — is at least this, `GQ` 30. The prior has to be in it: at 3× the reads alone
+/// never tell a homozygote from a heterozygote with confidence (ten reads of one allele are needed
+/// for a ratio of a thousand), and a check that needs them never runs on the shallow samples, the
+/// ones that are filled.
+pub const SETTLED_POSTERIOR: f64 = 0.999;
 
 /// **The most probable a sample without reads may be copying the background template** — copying no
 /// sampled haplotype (§3.3) — and still be written with a genotype (§4.2, owner 2026-11-02). Where
@@ -58,10 +64,6 @@ pub struct NoReadRule {
     /// The most probable the sample may be copying the background template at the record.
     /// `None` applies no such limit.
     pub max_background_copy: Option<f64>,
-    /// The most a sample's neighbours may disagree with its own confident genotypes in the window
-    /// — `disagreed / checked` of its [`NeighbourCheck`] — before every no-read call of the sample
-    /// in the window is withheld. `None` applies no such limit.
-    pub max_neighbour_disagreement: Option<f64>,
 }
 
 impl Default for NoReadRule {
@@ -69,30 +71,43 @@ impl Default for NoReadRule {
         Self {
             min_genotype_quality: NO_READ_MIN_GENOTYPE_QUALITY,
             max_background_copy: Some(NO_READ_MAX_BACKGROUND_COPY),
-            max_neighbour_disagreement: None,
         }
     }
 }
 
-/// **How well a sample's neighbours predict it in a window**, the evidence for trusting what they
-/// say where it has no reads. At every site where the sample has reads and the neighbours alone
-/// would make a call the [`NoReadRule`] keeps (their prediction's `GQ` at least its floor), the
-/// reads are checked against the prediction: `disagreed` counts the sites where they contradict it
-/// ([`CONTRADICTION_LIKELIHOOD_RATIO`]). `disagreed / checked` then estimates how often the sample's
-/// no-read calls in this window are wrong, measured on its own data.
+/// **One sample's fills, and how often a fill would be wrong, measured on its own data** — the
+/// test of hiding genotypes the reads settled and asking the pass for them, done at every such
+/// record at no cost: the walk's prediction without the sample's own reads at a record is what a
+/// no-read call there would be written with.
+///
+/// `checked` counts the core's records where the sample's own evidence settles its genotype
+/// ([`SETTLED_POSTERIOR`]) and the [`NoReadRule`] would write the prediction as a call —
+/// evidence on both sides, `GQ` at the floor, the background below its limit; `disagreed` those
+/// where the prediction's genotype is not the reads'. `disagreed / checked` estimates the sample's
+/// fill error rate where it had reads to spare — a best case, since a site no read reached can be
+/// harder. `filled` counts its no-read calls written.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NeighbourCheck {
+pub struct FillCheck {
+    pub filled: u32,
     pub checked: u32,
     pub disagreed: u32,
 }
 
-/// **The pass's result over one window's core**: each record's, and each sample's check.
+impl std::ops::AddAssign for FillCheck {
+    fn add_assign(&mut self, other: Self) {
+        self.filled += other.filled;
+        self.checked += other.checked;
+        self.disagreed += other.disagreed;
+    }
+}
+
+/// **The pass's result over one window's core**: each record's, and each sample's fill check.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowRefinement {
     /// One per core record, in order.
     pub records: Vec<RefinedRecord>,
-    /// One per sample; zero for a sample not re-called in the window.
-    pub checks: Vec<NeighbourCheck>,
+    /// One per sample, over the core; zero for a sample not re-called in the window.
+    pub checks: Vec<FillCheck>,
 }
 
 /// **What the pass did to one sample at one record.**
@@ -128,14 +143,14 @@ struct SampleSolution {
     /// and the probability of copying the background there.
     sites: Vec<(usize, Outcome, usize, f64)>,
     posteriors: Vec<f64>,
-    check: NeighbourCheck,
+    check: FillCheck,
 }
 
 /// **Solves one window**: `records` is the whole window, `core` the indices of the records it
 /// writes, `contig_length` the contig's length if the header gives it (for §4.2's rule at the
 /// contig's end), `fits` one per sample, updated while the samples are still fitting, `no_read`
 /// when a sample without reads is written with a genotype. Returns one [`RefinedRecord`] per core
-/// record, in order, and each sample's [`NeighbourCheck`].
+/// record, in order, and each sample's [`FillCheck`] over the core.
 ///
 /// # Panics
 ///
@@ -181,7 +196,7 @@ pub fn refine_window(
             background_copy: vec![0.0; samples],
         })
         .collect();
-    let mut checks = vec![NeighbourCheck::default(); samples];
+    let mut checks = vec![FillCheck::default(); samples];
     for (sample, solution) in solutions.iter().enumerate() {
         let Some(solution) = solution else {
             continue;
@@ -260,32 +275,28 @@ fn refine_sample(
         MISMATCH,
     );
     let result = walk(&sites, walk_templates, parameters);
+    let mut pairs = GenotypePairs::default();
     let reach = parameters.segment_bases as u64;
 
-    // The neighbours against the sample's own confident genotypes, over the whole window.
-    let mut check = NeighbourCheck::default();
-    for (site, &index) in walked.iter().enumerate() {
-        if records[index].row(sample) != SampleRow::Informative {
-            continue;
-        }
-        let prediction = &result.neighbour_predictions[site];
-        if score_best_genotype(prediction).1.get() < no_read.min_genotype_quality {
-            continue;
-        }
-        let own = sites[site].likelihoods;
-        let best = own.iter().copied().fold(0.0, f64::max);
-        let under_prediction: f64 = prediction.iter().zip(own).map(|(p, l)| p * l).sum();
-        check.checked += 1;
-        check.disagreed += u32::from(under_prediction * CONTRADICTION_LIKELIHOOD_RATIO < best);
-    }
-    let neighbours_trusted = no_read.max_neighbour_disagreement.is_none_or(|most| {
-        check.checked > 0 && f64::from(check.disagreed) <= most * f64::from(check.checked)
-    });
+    // Whether a no-read call at `site`, with genotype posterior `posterior`, is written. For a
+    // sample with reads there, `posterior` is the neighbours' prediction and the rule asks whether
+    // it would have been; the record's own position counts on neither side of it.
+    let would_write = |site: usize, posterior: &[f64]| {
+        has_evidence_nearby(
+            &informative_positions,
+            sites[site].position,
+            reach,
+            contig_length,
+        ) && score_best_genotype(posterior).1.get() >= no_read.min_genotype_quality
+            && no_read
+                .max_background_copy
+                .is_none_or(|most| result.last_template_copy[site] <= most)
+    };
 
     let mut solution = SampleSolution {
         sites: Vec::new(),
         posteriors: Vec::new(),
-        check,
+        check: FillCheck::default(),
     };
     for (site, &index) in walked.iter().enumerate() {
         if !core.contains(&index) {
@@ -294,21 +305,26 @@ fn refine_sample(
         let record = &records[index];
         let outcome = match record.row(sample) {
             SampleRow::Absent => continue,
-            SampleRow::Informative => Outcome::Called,
-            SampleRow::Flat => {
-                if neighbours_trusted
-                    && has_evidence_nearby(
-                        &informative_positions,
-                        record.position,
-                        reach,
-                        contig_length,
-                    )
-                    && score_best_genotype(&result.posteriors[site]).1.get()
-                        >= no_read.min_genotype_quality
-                    && no_read
-                        .max_background_copy
-                        .is_none_or(|most| result.last_template_copy[site] <= most)
+            SampleRow::Informative => {
+                let prediction = &result.neighbour_predictions[site];
+                let walk_site = &sites[site];
+                let frequencies =
+                    &walk_site.template_shares[templates.len() * walk_site.allele_count..];
+                if let Some(settled) = settled_genotype(
+                    walk_site.likelihoods,
+                    frequencies,
+                    parameters.autozygous_share,
+                    pairs.of(walk_site.allele_count),
+                ) && would_write(site, prediction)
                 {
+                    solution.check.checked += 1;
+                    solution.check.disagreed += u32::from(argmax(prediction) != settled);
+                }
+                Outcome::Called
+            }
+            SampleRow::Flat => {
+                if would_write(site, &result.posteriors[site]) {
+                    solution.check.filled += 1;
                     Outcome::Called
                 } else {
                     Outcome::Withheld
@@ -326,6 +342,45 @@ fn refine_sample(
             .extend_from_slice(&result.posteriors[site]);
     }
     Some(solution)
+}
+
+/// The genotype a sample's own evidence settles ([`SETTLED_POSTERIOR`]), or `None`: its reads'
+/// `likelihoods` times the prior of the allele `frequencies` at inbreeding `inbreeding` — a
+/// homozygote `F·p + (1 − F)·p²`, a heterozygote `2·(1 − F)·p·q` — with `pairs` each genotype's
+/// two alleles.
+fn settled_genotype(
+    likelihoods: &[f64],
+    frequencies: &[f64],
+    inbreeding: f64,
+    pairs: &[(usize, usize)],
+) -> Option<usize> {
+    let joint: Vec<f64> = pairs
+        .iter()
+        .zip(likelihoods)
+        .map(|(&(first, second), &likelihood)| {
+            let prior = if first == second {
+                inbreeding * frequencies[first]
+                    + (1.0 - inbreeding) * frequencies[first] * frequencies[first]
+            } else {
+                2.0 * (1.0 - inbreeding) * frequencies[first] * frequencies[second]
+            };
+            prior * likelihood
+        })
+        .collect();
+    let total: f64 = joint.iter().sum();
+    let best = argmax(&joint);
+    (total > 0.0 && joint[best] >= SETTLED_POSTERIOR * total).then_some(best)
+}
+
+/// The index of the largest value, the first among equals.
+fn argmax(values: &[f64]) -> usize {
+    (0..values.len()).fold(0, |best, index| {
+        if values[index] > values[best] {
+            index
+        } else {
+            best
+        }
+    })
 }
 
 /// **§4.2's rule for a sample whose reads said nothing at `position`**: an informative record of

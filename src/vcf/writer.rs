@@ -33,6 +33,7 @@ use super::VcfRecord;
 use super::encode::record_line;
 use super::header::{VcfHeaderMetadata, header_text};
 use crate::neighbour_evidence::line::RewriteTally;
+use crate::neighbour_evidence::refine::FillCheck;
 use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
 use crate::types::{GenomePosition, Ploidy, Position};
 
@@ -95,12 +96,15 @@ pub struct VcfWriter {
 
 /// **What a finished file holds**: the records written, and what the neighbour-evidence pass did
 /// when it ran.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinishedVcf {
     /// Record lines in the file.
     pub records_written: u64,
     /// The pass's counts, when it ran.
     pub neighbour_evidence: Option<RewriteTally>,
+    /// Each sample's fill check, by name in the VCF's sample order, when the pass ran; empty
+    /// otherwise.
+    pub fill_checks: Vec<(String, FillCheck)>,
 }
 
 impl VcfWriter {
@@ -330,9 +334,17 @@ impl VcfWriter {
     /// If any of the flush, the bgzf terminator, the `fsync`s or the rename fails.
     pub fn finish(mut self) -> Result<FinishedVcf, VcfWriteError> {
         let mut neighbour_evidence = None;
+        let mut fill_checks = Vec::new();
         if let Some(stage) = self.neighbour_evidence.as_mut() {
             stage.finish(&mut self.released);
             neighbour_evidence = Some(stage.tally());
+            fill_checks = self
+                .metadata
+                .sample_names()
+                .iter()
+                .cloned()
+                .zip(stage.fill_checks().iter().copied())
+                .collect();
             self.write_released()?;
         }
         let records_written = self.records_written;
@@ -340,6 +352,7 @@ impl VcfWriter {
         Ok(FinishedVcf {
             records_written,
             neighbour_evidence,
+            fill_checks,
         })
     }
 }

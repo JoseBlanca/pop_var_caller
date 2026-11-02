@@ -20,7 +20,7 @@ use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
 use super::records::SiteRecord;
-use super::refine::{MISMATCH, NoReadRule, refine_window};
+use super::refine::{FillCheck, MISMATCH, NoReadRule, refine_window};
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
 use crate::types::{ContigId, Ploidy};
@@ -149,6 +149,8 @@ pub struct NeighbourEvidenceStage {
     core_start: usize,
     pairs: GenotypePairs,
     tally: RewriteTally,
+    /// Each sample's fill check, summed over the cores solved so far.
+    fill_checks: Vec<FillCheck>,
 }
 
 impl NeighbourEvidenceStage {
@@ -173,6 +175,7 @@ impl NeighbourEvidenceStage {
             core_start: 0,
             pairs: GenotypePairs::default(),
             tally: RewriteTally::default(),
+            fill_checks: vec![FillCheck::default(); decision.inbreeding_by_sample.len()],
         }
     }
 
@@ -180,6 +183,12 @@ impl NeighbourEvidenceStage {
     #[must_use]
     pub fn tally(&self) -> RewriteTally {
         self.tally
+    }
+
+    /// Each sample's fill check so far, in the VCF's sample order.
+    #[must_use]
+    pub fn fill_checks(&self) -> &[FillCheck] {
+        &self.fill_checks
     }
 
     /// **Takes one line**, its place already checked against the line before it by the writer,
@@ -237,7 +246,7 @@ impl NeighbourEvidenceStage {
                 let contig_length = self
                     .contig
                     .and_then(|contig| self.contig_lengths.get(contig.0 as usize).copied());
-                refine_window(
+                let solved = refine_window(
                     &self.sites
                         [window_sites.start - self.first_site..window_sites.end - self.first_site],
                     core_sites.start - window_sites.start..core_sites.end - window_sites.start,
@@ -245,8 +254,11 @@ impl NeighbourEvidenceStage {
                     &mut self.fits,
                     MAX_TEMPLATES,
                     NoReadRule::default(),
-                )
-                .records
+                );
+                for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
+                    *sum += check;
+                }
+                solved.records
             };
             for held in &mut self.held[plan.core_start..plan.core_end] {
                 let line = std::mem::take(&mut held.line);

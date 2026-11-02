@@ -477,8 +477,16 @@ pub fn round_shape_for(
     )
 }
 
-/// **What the neighbour-evidence pass did**, one line in the log, when it ran.
-pub fn log_neighbour_evidence(finished: &FinishedVcf) {
+/// **The fewest checked sites a sample's fill disagreement rate is stated from**: below it, the
+/// table gives the counts and the log counts the sample as not measured. At 30 sites a rate of one
+/// in ten is known to within about a factor of two.
+pub const MIN_FILL_CHECK_SITES: u32 = 30;
+
+/// **Reports what the neighbour-evidence pass did**, when it ran: its counts in the log, and each
+/// sample's fill check (`FillCheck`) — summarised in the log, and in full in a table beside the VCF,
+/// `<vcf name>.fill_check.tsv`, unless the VCF went to standard output. A table that cannot be
+/// written is a warning, not a failed run: the VCF is already whole.
+pub fn report_neighbour_evidence(finished: &FinishedVcf, vcf_path: &Path) {
     let Some(tally) = finished.neighbour_evidence else {
         return;
     };
@@ -495,6 +503,100 @@ pub fn log_neighbour_evidence(finished: &FinishedVcf) {
         run_output::with_thousands(tally.records_dropped),
         run_output::with_thousands(tally.repeat_counts_unknown),
     );
+
+    let mut rates: Vec<(f64, &str)> = finished
+        .fill_checks
+        .iter()
+        .filter(|(_, check)| check.checked >= MIN_FILL_CHECK_SITES)
+        .map(|(sample, check)| {
+            (
+                f64::from(check.disagreed) / f64::from(check.checked),
+                sample.as_str(),
+            )
+        })
+        .collect();
+    rates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let table = fill_check_table_path(vcf_path);
+    let table_note = table.as_ref().map_or(String::new(), |path| {
+        format!("; each sample in {}", path.display())
+    });
+    let unmeasured = finished.fill_checks.len() - rates.len();
+    if rates.is_empty() {
+        tracing::info!(
+            "fill check: no sample had {MIN_FILL_CHECK_SITES} sites where its reads settle its \
+             genotype and its neighbours would have filled it, so no fill error rate is \
+             estimated{table_note}"
+        );
+    } else {
+        let percent = |rate: f64| format!("{:.1}%", 100.0 * rate);
+        let worst: Vec<String> = rates
+            .iter()
+            .rev()
+            .take(3)
+            .map(|&(rate, sample)| format!("{sample} {}", percent(rate)))
+            .collect();
+        tracing::info!(
+            "fill check — each sample's no-read calls tried at the sites where its reads settle \
+             its genotype, the neighbours' prediction against the reads: {} of {} samples checked \
+             at {MIN_FILL_CHECK_SITES} sites or more, wrong at a median of {} of sites (from {} to \
+             {}; highest {}); {unmeasured} with fewer sites, not estimated. A best case: a site no \
+             read reached can be harder{table_note}",
+            rates.len(),
+            finished.fill_checks.len(),
+            percent(rates[rates.len() / 2].0),
+            percent(rates[0].0),
+            percent(rates[rates.len() - 1].0),
+            worst.join(", "),
+        );
+    }
+    if let Some(path) = table
+        && let Err(error) = write_fill_check_table(&path, &finished.fill_checks)
+    {
+        tracing::warn!("fill check: could not write {}: {error}", path.display());
+    }
+}
+
+/// `<vcf name without .vcf, .vcf.gz or .vcf.bgz>.fill_check.tsv` beside the VCF; `None` when the VCF
+/// went to standard output.
+fn fill_check_table_path(vcf_path: &Path) -> Option<PathBuf> {
+    if vcf_path.as_os_str() == "-" {
+        return None;
+    }
+    let name = vcf_path.file_name()?.to_string_lossy().into_owned();
+    let lower = name.to_ascii_lowercase();
+    let stem = [".vcf.gz", ".vcf.bgz", ".vcf"]
+        .iter()
+        .find(|suffix| lower.ends_with(*suffix))
+        .map_or(name.as_str(), |suffix| &name[..name.len() - suffix.len()]);
+    Some(vcf_path.with_file_name(format!("{stem}.fill_check.tsv")))
+}
+
+fn write_fill_check_table(
+    path: &Path,
+    checks: &[(String, crate::neighbour_evidence::refine::FillCheck)],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(
+        out,
+        "sample\tfilled\tsites_checked\tfills_wrong_there\twrong_share"
+    )?;
+    for (sample, check) in checks {
+        let share = if check.checked >= MIN_FILL_CHECK_SITES {
+            format!(
+                "{:.4}",
+                f64::from(check.disagreed) / f64::from(check.checked)
+            )
+        } else {
+            ".".to_string()
+        };
+        writeln!(
+            out,
+            "{sample}\t{}\t{}\t{}\t{share}",
+            check.filled, check.checked, check.disagreed
+        )?;
+    }
+    out.flush()
 }
 
 /// **`--neighbour-evidence`'s three values** (`neighbour_evidence_pass.md` §5, ruled §9 Q3).

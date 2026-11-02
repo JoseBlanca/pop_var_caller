@@ -793,9 +793,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives
     // it left uncalled, so neither calling's count nor the filter's is the file's.
     let finished = finished_straight
-        .or_else(|| filtered.as_ref().map(|run| run.finished))
+        .or_else(|| filtered.as_ref().map(|run| run.finished.clone()))
         .expect("the calls were written by one of the two paths");
-    calling_run::log_neighbour_evidence(&finished);
+    calling_run::report_neighbour_evidence(&finished, &args.output);
     let records = finished.records_written;
     tracing::info!(
         "done: {} records written to {} in {}",

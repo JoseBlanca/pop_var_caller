@@ -151,11 +151,24 @@ What a record contributes depends on what it carries:
 
 ### 3.3 The templates
 
-For each sample and window, the `K = min(16, N − 1)` other samples whose allele shares agree best with
-its own, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the sample's informative records
-in the window — on a fixed sample of at most 500 of them, spread evenly over them by record order
-(the `i`-th of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and
-weighs the whole window, not its left margin. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
+For each sample and window, the `K = min(16, N − 1)` other samples that disagree with it least,
+**judged only where both have reads, with more data preferred between two that disagree about as
+little** (owner, 2026-11-02). The records compared are the sample's informative records in the
+window — a fixed sample of at most 500 of them, spread evenly over them by record order (the `i`-th
+of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and weighs the whole
+window, not its left margin. Of those, a candidate is compared at the `n` where it is informative
+too; at each, the two disagree by `½ Σ_a |q_self(a) − q_other(a)|`, from 0 to 1, summing to `d`. The
+candidate's score is the mean of the disagreement rate's Beta(`d + 1`, `n − d + 1`) posterior plus
+two of its standard deviations — pessimistic, so a rate measured on few records scores worse — and
+the `K` lowest are the templates. Ties break by sample order.
+
+Why only where both have reads: a sample without reads carries the cohort's frequency, and counting
+that as disagreement would rank a shallow close relative below a deep distant one. On the founder
+simulator the change from the earlier rule, which did count it, moved fills and errors by at most a
+dozen genotypes in any cohort, uniform or mixed in depth (10 samples at 30× among 40 at 3× or 5×; 5
+among 15), because a 3× sample has reads at about 95% of records and the earlier rule's charge for
+the rest was small. It is kept as the rule that says what it measures; where it should matter — 1×
+shallow samples among deep ones, cohorts far larger than `K` — is not measured. **The sample itself is never a template.** `K` = 16 was
 what the prototype ran; how accuracy and cost move with `K` is a measurement (§8).
 
 **A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
@@ -317,6 +330,30 @@ simulator's inbred cohorts, the calls this withholds between 0.1 and 0.5 were wr
 and those above 0.5 85 times in 719, against 1 to 2 in 100 for the calls kept; at 10 samples and 1×
 the limit keeps 101 of 294 calls, 2 of them wrong, from 47 (same report, the background-copy
 section).
+
+### 4.3 Each sample's fills, checked on its own data
+
+The test of hiding genotypes the reads settled and asking the pass for them is done for every
+sample at every such record, at no cost (owner, 2026-11-02): the walk's prediction without the
+sample's own reads at a record is what a no-read call there would be written with. At each core
+record where the sample's own evidence settles its genotype — posterior at least 0.999 from its
+reads and calling's prior, the cohort's allele frequencies and its inbreeding — and where the §4.2
+rules would have written the prediction as a call, the prediction's genotype is compared with the
+settled one. The prior has to be in "settled": at 3× reads alone never tell a homozygote from a
+heterozygote with confidence, and a check that needed them ran on no shallow sample — the samples
+that are filled.
+
+The run reports, for each sample, the no-read calls written, the records checked and how many the
+prediction got wrong: in a table beside the VCF, `<name>.fill_check.tsv`, and summarised in the log,
+with the share given only for samples checked at 30 records or more. It is a best case — a record
+no read reached can be harder than one where the sample had reads.
+
+On the founder simulator (`validate_fill_check.py`): at 3× the cohort's estimated fill error rate
+against its true one was 1.10% against 1.52%, 0.63% against 0.49%, 0.13% against 0.15%, and on the
+outbred cohorts 4.16% against 2.90% and 5.52% against 4.55%; samples reported at 0–0.5% were truly
+wrong at 0.17% of their fills, at 2–5% at 1.5%. At 1× almost no sample has a settled genotype and
+the share is not given — the corner where fills are worst (2–2.5% wrong) goes unestimated, and the
+log says so.
 
 ---
 
