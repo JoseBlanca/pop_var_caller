@@ -246,14 +246,15 @@ ng_main_defaults() {
     mapfile -t args < <(alignments)
     "$MAIN_BIN" call-from-alignments --reference "$reference" --catalog "$out/main_catalog.parquet" \
         "${args[@]}" --regions "$out/confident.bed" --defaults --threads "$threads" \
-        --output "$out/ng_main_defaults.vcf" > "$out/ng_main_defaults.log" 2>&1
+        --output "$out/ng_main_defaults.vcf" --log "$out/ng_main_defaults.pvc.log" \
+        > "$out/ng_main_defaults.log" 2>&1
 }
 
 # ng_main_called_with <name> <parameters file>
 ng_main_called_with() {
     "$MAIN_BIN" call-from-psps --reference "$reference" --catalog "$out/main_catalog.parquet" \
         --psp "$out/psps_main" --parameters "$2" --threads "$threads" \
-        --output "$out/$1.vcf" > "$out/$1.log" 2>&1
+        --output "$out/$1.vcf" --log "$out/$1.pvc.log" > "$out/$1.log" 2>&1
 }
 
 gatk_one() {
