@@ -322,15 +322,28 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
 
         // The state posterior with this site's own emission divided back out, so the sample's
         // likelihood enters once, below (§3.6).
+        //
+        // **A state whose emission is exactly zero contributes zero**, not 0/0. It happens where the
+        // reads rule out every genotype the state allows — a deep heterozygote's homozygous
+        // likelihoods underflow to 0 at 30× — and then each of the emission's non-negative terms,
+        // q̃ · q̃ · L(g), is zero, so the state adds nothing to any genotype whatever its weight.
+        let without_emission = |both: f64, emission: f64| {
+            if emission > 0.0 { both / emission } else { 0.0 }
+        };
         let state_autozygous: Vec<f64> = (0..k)
             .map(|state| {
-                forward_autozygous[index][state] * backward_autozygous[state]
-                    / site_terms.autozygous[state]
+                without_emission(
+                    forward_autozygous[index][state] * backward_autozygous[state],
+                    site_terms.autozygous[state],
+                )
             })
             .collect();
         let state_pairs: Vec<f64> = (0..k * k)
             .map(|state| {
-                forward_pairs[index][state] * backward_pairs[state] / site_terms.pairs[state]
+                without_emission(
+                    forward_pairs[index][state] * backward_pairs[state],
+                    site_terms.pairs[state],
+                )
             })
             .collect();
         let both_autozygous: f64 = (0..k)
