@@ -61,10 +61,10 @@ fn ties_break_by_sample_order_and_never_choose_the_sample() {
     assert_eq!(choose_templates(&records, 2, 16), Some(vec![0, 1, 3, 4]));
 }
 
-/// **An absent sample is a template of equal shares**: half a copy's difference from a homozygous
-/// sample at every record, so it ranks between a sample that agrees and one that disagrees.
+/// **An absent sample shares no record, so it ranks last**: after one that agrees and even after
+/// one that disagrees everywhere, whose rate is at least measured.
 #[test]
-fn an_absent_sample_compares_as_equal_shares() {
+fn an_absent_sample_ranks_last() {
     fn never(_: usize) -> bool {
         false
     }
@@ -72,7 +72,68 @@ fn an_absent_sample_compares_as_equal_shares() {
         true
     }
     let records = window(&[Some(never), Some(always), None, Some(never)], 10);
-    assert_eq!(choose_templates(&records, 0, 3), Some(vec![3, 2, 1]));
+    assert_eq!(choose_templates(&records, 0, 3), Some(vec![3, 1, 2]));
+}
+
+const FLAT: ([u32; 3], [f64; 3]) = ([0, 0, 0], [0.5, 0.0, 0.5]);
+
+/// A window of 400 records where `column(sample, record)` gives each sample's `PL` and `GP`.
+fn window_of(
+    samples: usize,
+    column: impl Fn(usize, usize) -> &'static ([u32; 3], [f64; 3]),
+) -> Vec<SiteRecord> {
+    (0..400)
+        .map(|record| {
+            let columns: Vec<Option<SampleColumns<'_>>> = (0..samples)
+                .map(|sample| {
+                    let (phred, posteriors) = column(sample, record);
+                    Some(SampleColumns {
+                        phred_likelihoods: phred,
+                        genotype_posteriors: posteriors,
+                    })
+                })
+                .collect();
+            SiteRecord::new(1 + record as u64 * 100, &[0.5], &columns)
+        })
+        .collect()
+}
+
+fn carrier(carries: bool) -> &'static ([u32; 3], [f64; 3]) {
+    if carries {
+        &HOMOZYGOUS_ALTERNATIVE
+    } else {
+        &HOMOZYGOUS_REFERENCE
+    }
+}
+
+/// **A shallow relative is judged where it has reads**: sample 1 agrees with sample 0 wherever it
+/// has reads, which is one record in five; sample 2 has reads everywhere and disagrees at one record
+/// in ten. Counting the records without reads as disagreement would put sample 2 first.
+#[test]
+fn a_shallow_relative_is_not_taken_for_a_distant_sample() {
+    let records = window_of(3, |sample, record| match sample {
+        0 => carrier(record % 2 == 0),
+        1 if record % 5 == 0 => carrier(record % 2 == 0),
+        1 => &FLAT,
+        _ => carrier((record % 2 == 0) != (record % 10 == 1)),
+    });
+    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+}
+
+/// **Between two that disagree about as little, the one with more data**: sample 1 agrees
+/// everywhere it has reads, one record in four; sample 2 has reads everywhere and disagrees at one
+/// record in a hundred. Sample 3, with reads everywhere and disagreeing at one in ten, is further than
+/// both.
+#[test]
+fn a_near_tie_goes_to_the_sample_with_more_data() {
+    let records = window_of(4, |sample, record| match sample {
+        0 => carrier(record % 2 == 0),
+        1 if record % 4 == 0 => carrier(record % 2 == 0),
+        1 => &FLAT,
+        2 => carrier((record % 2 == 0) != (record % 100 == 1)),
+        _ => carrier((record % 2 == 0) != (record % 10 == 1)),
+    });
+    assert_eq!(choose_templates(&records, 0, 3), Some(vec![2, 1, 3]));
 }
 
 /// **A sample with no informative record in the window has no templates**, so it is not
