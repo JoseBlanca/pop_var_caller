@@ -429,8 +429,24 @@ needs a check that does not come from the model's own draws (open, §9).
 
 - **A per-record phase quality** (`PQ`): the consensus's lean is one; whether users need it beside
   `PS` is for the owner once blocks exist. Home: a follow-up to this spec.
-- **Phase from reads** spanning two heterozygotes, to join blocks the population cannot. Home: its
-  own spec, if blocks prove short in deep samples.
+- **Phase from reads, through calling's chain ids** (owner, 2026-11-02: now or in a following stage).
+  A read or read pair that covers two heterozygotes shows which alleles sit together. Calling
+  already gives every read a chain id, and the psp stores one per observation
+  (`psp_chain_id_encoding.md`). But the pass reads only VCF lines, so the ids never reach it. This
+  is the one source of evidence that does not come from the copying model, which is what the outbred
+  cohorts need (§6). It would serve two ways: break a link the reads contradict, and keep a link the
+  population cannot phase. How much it can reach depends on how far apart a sample's heterozygotes
+  are, against fragments of about 350 bases:
+  - in the founder simulator, 8–9% of consecutive true heterozygotes of a sample lie within 500
+    bases, on every cohort, inbred or outbred (median gap 3.8 kb);
+  - in the tomato cohort's calls (62 accessions, pvc 5ffb2444), the five most heterozygous
+    accessions have a median of 117 bases between consecutive heterozygous SNPs, and 73% of the gaps
+    are within 350 bases. Some of those heterozygotes may be clustered false calls, which was not
+    checked.
+  So on real diverse material, reads may reach most links, and the simulator understates that.
+  Home: a following stage with its own spec. It needs a channel from calling to the pass: per sample,
+  the read evidence linking consecutive heterozygous records. First measure the reach on real psps:
+  the share of consecutive called heterozygotes with at least one read covering both, by depth.
 - **A run-level check of the phase**, like the fill check for genotypes: none exists, because the
   pass cannot see a switch all rounds share. The deep samples' read-backed phase could supply one.
   Home: with phase from reads.
@@ -446,8 +462,14 @@ Both questions were ruled by the owner on 2026-11-02:
 - **Q2. Phase on a diverse cohort where blocks still flip?** No cohort gate: pvc is a general tool,
   and writing only confident phase must handle every cohort by itself (§6). The ceiling of §7.1
   enforces it.
-- **The 1% ceiling** (owner): a parameter the user may want to set — added as an option if the
-  link confidence proves calibrated (§7.1).
+- **The 1% ceiling** (owner): a parameter the user may want to set. Measured (§7.1), the share of
+  disagreeing paths is not an error rate. The owner then ruled to expose it as a **quality proxy**
+  instead: `--phase-min-path-agreement`, the share of the 36 paths that must agree, and lean, at a
+  link. The default is 1 (all, the rule of §2.3); lowering it gives longer blocks with more wrong
+  links. The user page states the error rates measured for each kind of cohort, and says that 1 is
+  the strictest setting and still leaves outbred cohorts at 1.2% to 36% (§6).
+- **Read evidence through chain ids** (owner, 2026-11-02): now or later. Placed in a following stage
+  (§8), with its reach measured first.
 
 The questions as they were put follow, for the record.
 
