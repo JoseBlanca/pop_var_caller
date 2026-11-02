@@ -399,10 +399,11 @@ the file**, since the pass can drop records.
     1.5-Mb windows this cohort size needs (below) about 1,800 windows, 8 × 10¹² over the genome —
     about half an hour.
   - *The walks*: forward and backward cost about `2 · 3 · (K² + K)` ≈ 1,600 operations a sample a
-    record, and the posterior `K²·A + K·A²` ≈ 580; with every record walked twice (once in its core,
-    once in a neighbour's margin) about 4,400 a sample a record. Over 24 million records and 3,000
-    samples that is 3 × 10¹⁴ operations, **about 21 core-hours** at 4 × 10⁹ a second; at 57 samples,
-    25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
+    record, and the posterior `K²·A + K·A²` ≈ 580. Every record is walked in its core and in its
+    neighbours' margins: twice at the default sizes (a 2-Mb core, 1-Mb margins), three times at the
+    floor this cohort size reaches (0.5-Mb core and margins) — about 6,500 a sample a record. Over
+    24 million records and 3,000 samples that is 4.7 × 10¹⁴ operations, **about 33 core-hours** at
+    4 × 10⁹ a second; at 57 samples, at default sizes, 25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
 - **Three reads a position.** Where it helps: the prototype's gains are all at 1× and 3×.
 - **Three hundred reads.** The sample's own likelihood dominates every emission and the posterior is
   the calling's; the pass costs time and changes nearly nothing. It still runs if the switch says so:
@@ -415,8 +416,9 @@ twice that at three alleles, 400 at ten. At 3,000 samples and tomato's density a
 sample-records, about 5 GB biallelic — by shrinking the core first and the margins to their 500-kb
 floor; at 3,000 samples that is a 1.5-Mb window. Past the floor, at about 3,000 samples, the budget
 is exceeded rather than the margins shortened, and the run report says by how much. A walk keeps its
-forward vectors, `K² + K` numbers a record: as `f32`, 44 MB a sample over a 40,000-record window, one
-per thread.
+forward vectors, `K² + K` numbers a record, and its per-site terms for the backward sweep
+(`SiteTerms`, about as many): as `f64`, about 207 MB a sample over a 40,000-record window, one per
+thread.
 
 ---
 

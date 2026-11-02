@@ -44,7 +44,12 @@ pass as now 1,260 at 1.5%; Beagle's haplotypes 1,636 at 1.9%. In the outbred coh
 templates fill fewer and far more reliably: 764 at 1.7% wrong against 953 at 4.8% (16 founders),
 579 at 5.4% against 733 at 8.7% (64). The model's lengths are fixed at the simulator's and the pass's
 rules for leaving a sample `./.` are not applied, so the numbers compare columns; they are not the
-pass's own. The 64-founder cohorts give each haplotype one or two carriers among 50 samples; the
+pass's own. **They are biallelic SNP records only** (`phasing_ceiling.py` reads nothing else); the
+pass phases every record, indels and multi-allelic STR records included, and those are unmeasured
+(§8.9). The draw is random, so a cell moves with the seed: the first cohort gave 689, 724 and 687
+wrong at three seeds, a spread of about 5% (review I7). The adopted column is
+`uv run --with numpy python phaser.py --rounds 5 --haplotypes 16 --one-per-sample <cell>` on
+`tmp/founder_grid/<cell>` of the worktree. The 64-founder cohorts give each haplotype one or two carriers among 50 samples; the
 owner's point (2026-11-02) is that what matters is carriers per haplotype, which thousands of
 accessions supply — simulations of 200 samples from 64 founders, 40 of them at 30×, are running
 (§8).
@@ -54,7 +59,8 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 - Give the pass haplotype templates wherever samples are heterozygous, estimated inside the pass
   from what it already reads (`PL`, `GP`, allele frequencies, each sample's inbreeding).
 - Keep each haplotype allele's uncertainty: a copy is a probability per allele, not a hard allele.
-  This is what makes the fills more reliable than Beagle's in the table above.
+  The fills' greater reliability than Beagle's in the table above is consistent with this; no arm
+  isolates it (soft against hard haplotypes in the same phaser).
 - Change nothing where it cannot help: an inbred cohort's result must stay as it is (row 7).
 - Deterministic output, independent of thread count, as the pass is now.
 
@@ -117,14 +123,15 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
   the phase is gone. One path breaks the symmetry; it is what SHAPEIT and Beagle sample too. The
   path is drawn, not the single most likely (Viterbi): a drawn path lets successive rounds explore,
   and the prototype was built and measured that way; Viterbi was not measured.
-- **Soft haplotypes along the path, not hard alleles — decided, measured.** Beagle hands back hard
-  haplotypes and its fills were wrong at 1.9% against the prototype's 0.8% in the same cohort; a
-  copy that stays uncertain where neither its template nor the reads settle it does not pass a guess
-  on as a certainty.
+- **Soft haplotypes along the path, not hard alleles — decided.** A copy that stays uncertain where
+  neither its template nor the reads settle it does not pass a guess on as a certainty. Consistent
+  with Beagle's hard haplotypes filling at 1.9% wrong against the prototype's 0.8% in the same
+  cohort, but Beagle differs in more than hardness; soft against hard in this phaser is unmeasured.
 - **Average the posterior over rounds 2 to `R`, not take the last — decided, measured.** Samples
   phase each other, so an error can reinforce itself round to round: on the first cohort the last
   round's fills drifted from 1.4% wrong (round 3) to 2.8% (round 8), while the average stayed at
-  0.8–1.1% (32 templates; with 16, 1.9% for round 5 alone against 0.8% averaged). Round 1 is left out because it is the pass without phasing.
+  0.8–1.1% (32 templates; with 16, 2.1% for round 5 alone — 35 of 1,645 — against 0.8% averaged).
+  Round 1 is left out because it is the pass without phasing.
 - **`R` = 5: a starting value**, from one cohort with 32 templates: the average over rounds 2–5 was
   699 wrong, 2–7 696, 2–8 712. Rounds 3 and 8 are to be measured on the 200-sample cells (§10 Q3).
 - **Round 1 is the pass as now — decided.** The prototype's alternatives were the subtraction (one
@@ -147,6 +154,11 @@ haplotype's sample is informative too, and scored pessimistically as the pass sc
 Beta mean plus two standard deviations). Each candidate sample offers its better-scoring haplotype;
 the 16 best samples' offers are the templates.
 
+**A sample not walked in the window** — no informative record there, so no templates and no path
+(`templates.rs:46`, `refine.rs:243`) — **carries its `GP` allele shares as both haplotypes in every
+round**, the prototype's starting value, and is a candidate like any other. It scores worst (no
+shared records), but in a cohort of 17 samples or fewer every other sample is chosen.
+
 - *Why at most one of each sample:* without it the 16 slots fill with copies of the commonest
   haplotype — many inbred samples carry it twice — and the variety a heterozygous sample needs is
   lost: 871 wrong against 689 on the first cohort of §1.
@@ -156,8 +168,9 @@ the 16 best samples' offers are the templates.
 ### 2.4 What does not change
 
 The walk itself (pass §3.4–§3.6: emission, transitions, posterior, the zero-emission guard), the
-parameter fit (pass §3.5 — fitted in round 1, against genotype templates, and reused in later rounds
-unchanged), windows and their sizes (§5 below changes the budget), the rewriting of the line, the
+parameter fit (pass §3.5 — fitted in round 1, against genotype templates; later rounds read
+`SampleFit::parameters` and must not call `fit_window` again, which would add the window's
+log-likelihoods to its totals a second time, `fit.rs:122`), windows and their sizes (§5 below changes the budget), the rewriting of the line, the
 no-read rules (pass §4.2), and the fill check (pass §4.3).
 
 ---
@@ -185,6 +198,26 @@ replace the previous round's.
 The Python prototype is the oracle: `phaser.py`'s `draw_path` (the backward draw and the
 re-estimation) and its round loop.
 
+### 3.1 The interfaces the change needs
+
+- **`model::walk_and_draw(sites, templates, parameters, uniforms) -> (WalkResult, haplotypes)`**, a
+  second function beside `walk`, sharing its forward code. The draw needs the forward vectors, the
+  private `persistence` (`model.rs:183`) and the blurred shares in the private `SiteTerms`, so it
+  belongs inside `model.rs`; `walk` itself stays as it is, so the fit's grid walks (`fit.rs:112–121`)
+  do not carry vectors they never read. `uniforms` is the stream of §5's generator; the returned
+  haplotypes are two vectors of `A` probabilities a walked record.
+- **`refine_sample` splits in two.** *A round's solve*, per sample: its templates (round 1 as now,
+  later the haplotype choice), `walk_and_draw`, and back come the new haplotypes at every walked
+  record, the posterior at its compared records (for the next round's choice), and the posterior,
+  neighbours-only prediction and background-copy probability at core records (to accumulate). *The
+  final step*, per sample: the means over rounds 2 to `R`, then the no-read rules and the fill check
+  as `refine_sample` applies them now, building `SampleSolution` as now.
+- **The background's position** in a walk's shares is after the round's templates:
+  `settled_genotype`'s slice (`refine.rs:325`) uses the round's template count, not `templates.len()`
+  of round 1.
+- **`R` is an internal constant, and `R` = 1 means "write round 1"**, so the existing `refine.rs`
+  tests, run at `R` = 1, are §7's check that round 1 is today's pass.
+
 ---
 
 ## 4. What the pass writes, with phasing
@@ -192,13 +225,16 @@ re-estimation) and its round loop.
 The averaged quantities replace the single walk's, everywhere the pass uses them:
 
 - **the genotype posterior** → `GT`, `GQ`, `GP` (pass §4.1);
-- **the neighbours-only prediction** → the fill check's comparison (pass §4.3);
+- **the neighbours-only prediction** → the fill check's comparison (pass §4.3) — **OPEN** (§10 Q4):
+  with phasing the prediction is no longer free of the sample's own reads (§7), and the check's
+  estimate stops tracking the true fill error;
 - **the background-copy probability** → the no-read limit of 0.1 (pass §4.2). With haplotype
   templates "copying the background" keeps its meaning: no sampled haplotype matches.
 
 Each is the mean of rounds 2 to `R`. A no-read call's `GQ` floor, the evidence-nearby rule and the
-background limit are applied once, to the means. The header's `##neighbourEvidence=` line gains
-`rounds=R`.
+background limit are applied once, to the means; neither was applied in the prototype, so their
+values are unmeasured with haplotype templates (§8.10). The header's `##neighbourEvidence=` line
+gains `rounds=R` and `haplotype_templates=16`, so a reader can tell which model made the file.
 
 ---
 
@@ -207,32 +243,47 @@ background limit are applied once, to the means. The header's `##neighbourEviden
 **Time.** A walk has as many templates as now. Drawing a path is one more backward sweep, about a
 third of a walk; the re-estimation is `A²` a record. So a round is about 1.3 of today's walks and
 five rounds about 6.5. Choosing haplotypes each round adds `N · 2 · 500` comparisons a sample a
-window: at 3,000 samples and the 1,800 windows of pass §6, about 5 core-hours over four rounds. The
-pass's own estimate at 3,000 samples is 21 core-hours (pass §6); with phasing about 140 — on the
-run's 30 threads, under 5 hours. The owner (2026-11-02): parallelising over segments of the genome
+window: at 3,000 samples and the 1,800 windows of pass §6, about 5 core-hours over four rounds. At
+that cohort size the windows are at their floor — a 0.5-Mb core in a 1.5-Mb window — so every record
+is walked three times, not the two pass §6 counted: the pass costs about 33 core-hours, and with
+phasing about 213 — on the run's 30 threads, about 7 hours. The owner (2026-11-02): parallelising over segments of the genome
 answers what remains.
 Today windows are solved one after another inside the writer and samples in parallel within a
 window (pass §2.3), which keeps every thread busy once a window has as many samples as threads;
 windows solved in parallel are the next step if a cohort is smaller than that (§9). **The cost
 estimate is arithmetic, not a measurement** — the first Rust build measures it (§8).
 
-**Memory.**
-- *The haplotype store*: two haplotypes a sample a record, `A` probabilities each, as `f32` — 16
-  bytes a biallelic sample-record, against the 40 a window holds today (pass §6). Two copies of it
-  live at once (the round being read and the round being written): 32 bytes, so a window holds
-  about 72 bytes a biallelic sample-record. **The window budget (`budget_sample_records`,
-  `windows.rs`) must fall to about 55% of its value to keep the same memory**, about 66 million
-  sample-records; at 3,000 samples the window reaches its 500-kb floor sooner.
-- *A walk's forward vectors*, kept for the backward walk and now also for the draw: as now, `T² + T`
-  numbers a record at 17 templates — 98 MB a sample as `f64` over a 40,000-record window, one per
-  thread, 2.9 GB at 30 threads. The draw needs them after the backward walk, so they live slightly
-  longer, not larger.
+**Memory.** Three new holdings, and one the pass already had uncounted.
+- *The haplotype store*: two haplotypes a sample a record, **`A − 1` probabilities each** (the last
+  allele's is one minus the rest), as `f32` — 8 bytes a biallelic sample-record; two copies live at
+  once (the round being read and the round being written), 16 bytes, against the 40 a window holds
+  today (pass §6). **At absent rows the store holds `1/A`**, written when the store is filled, so a
+  reader never has to ask; a sample's own walk overwrites only its walked records.
+- *The round accumulators*: running sums, per sample and core record, of the posterior, the
+  prediction and the background-copy probability — 7 numbers biallelic, as `f32` 28 bytes a core
+  sample-record. The previous round's posterior is kept **only at each sample's at most 500
+  compared records**, which is all the haplotype choice reads.
+- *A walk*, per thread: the forward vectors (`T² + T` = 306 numbers a record at 17 templates) and
+  the per-site terms the walk keeps for the backward sweep (`SiteTerms`, `model.rs:212–222`: 340
+  numbers), as `f64` about 207 MB a sample over a 40,000-record window — **6.2 GB at 30 threads**.
+  The draw reads both after the backward sweep, so they live longer, not larger. This was already so
+  without phasing; pass §6 counted only the forward vectors.
 
-**Determinism.** The draw is random. Each sample's path in each round is drawn from a generator
-seeded by the run's fixed seed, the sample's index, the round, and the window's first core record —
-nothing that depends on threads or on solving order. Rounds are synchronous (§2.1 step 3), so the
-result is the same at 1 and 30 threads. **The seed is a constant in the code, not an option**; the
-output is a function of the input.
+At 3,000 samples the window is already at its floor (pass §6: about 39,000 records, 117 million
+sample-records), so a smaller budget cannot shrink it: the window holds about 117 million × 56 bytes
+≈ 6.6 GB, the accumulators about 1.1 GB over a 13,000-record core, and the walks 6.2 GB — about
+14 GB, against about 4.7 + 6.2 GB without phasing. Below about 2,000 samples, lowering
+`budget_sample_records` (`windows.rs`) to 70% of its value keeps a window's memory as it is now.
+
+**Determinism.** The draw is random. Each sample's path in each round reads uniforms from a
+SplitMix64 generator (the crate has no random-number dependency; it already uses hand-written
+SplitMix64, e.g. `src/cli/estimate_contamination.rs:1005`) seeded by mixing a constant, **the
+run-wide number of the window's first core site** (the stage numbers sites from the run's first,
+`stage.rs:130`; a position or a per-contig index would repeat across contigs), the sample's index
+and the round. Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
+fixed order — autozygous states first, then pair states row by row — as `phaser.py` orders them.
+Nothing depends on threads or on solving order, and rounds are synchronous (§2.1 step 3), so the
+result is the same at 1 and 30 threads. **The seed is a constant in the code, not an option.**
 
 ---
 
@@ -241,7 +292,7 @@ output is a function of the input.
 - **Only when the pass runs** (pass §5).
 - **Always, with no option of its own — ruled** (owner, 2026-11-02, §10 Q1): "if we commit to the
   phasing model we'll use that model", and the command line stays as it is. An inbred cohort pays
-  the cost for a small gain (row 7: 121 against 113 wrong); performance is to be worked on once the
+  the cost for a small gain (row 7: 121 against 115 wrong); performance is to be worked on once the
   model runs, not by switching it off.
 - **Diploid only**, as the pass.
 
@@ -264,14 +315,20 @@ output is a function of the input.
   twice.** The re-estimated haplotypes contain the sample's reads; when *another* sample copies
   them, that is evidence about the other sample. When the sample itself is re-called its own
   haplotypes are never its templates (a sample is never its own template, pass §3.3) — keep it so.
-- **But the circularity is larger than the pass's.** Sample `s` phases with `t`'s haplotypes, and
-  `t` with `s`'s, so `s`'s reads return to it through `t` in the next round. The averaging over
-  rounds keeps it from compounding in the measurements; the prototype did not leave the target out,
-  and the Beagle comparison did (one run per target). Measured as part of §8, not removed.
+- **But the circularity is larger than the pass's, and it reaches the fill check.** A shallow sample
+  `t` that follows `s`'s haplotype at a record re-estimates its own haplotype there as nearly `s`'s,
+  which `s`'s reads shaped; next round `s` picks that haplotype, because it disagrees with `s`'s
+  genotype least; and `s`'s neighbours-only prediction at that record echoes `s`'s own reads. For
+  the genotype the averaging over rounds keeps it from compounding in the measurements (the
+  prototype did not leave the target out; the Beagle comparison did). **For the fill check it
+  breaks the premise** — a prediction without the sample's reads: on the first cohort a single
+  phased round's true fill error stayed at 1.4% while the check's estimate fell to 0.65%; on the
+  outbred 3× cohort the averaged check read 10.2% against a true 1.7% (review I1). §10 Q4.
 - **Round 1 must reproduce today's pass exactly**, record for record: the same templates, the same
   walk. A difference there is a bug in the round loop, not in phasing.
-- **An absent template sample** (no column at a record) has shares `1/A` for both haplotypes, as
-  now; a flat one (no reads) gets haplotypes from its own path like any other sample.
+- **An absent template sample** (no column at a record) reads `1/A` from the store (§5); a sample
+  without reads at a record gets haplotypes there from its own path like any other record; a sample
+  without a walk in the window carries its `GP` shares (§2.3).
 - **Margins are phased in every window that reads them**, from scratch: the left margin of window
   `w + 1` was the core of window `w`. Re-using window `w`'s haplotypes there is tempting and wrong
   for determinism unless done identically at every thread count; leave it (§9).
@@ -280,24 +337,43 @@ output is a function of the input.
 
 ## 8. How we know it works
 
-1. **The prototype's numbers, reproduced.** On the founder-grid cells above, the Rust pass with
-   phasing gives wrong-genotype counts within a tenth of the prototype's averaged column, the
-   prototype run with the Rust pass's own rules and fitted parameters (to be added to `phaser.py`).
-2. **Unit tests:** the backward draw on a case where one template equals the sample (the path must
-   follow it everywhere, with any seed); the re-estimation on hand-computed values (a homozygous
-   template followed by copy one and a heterozygous likelihood gives copy two the other allele —
-   the owner's subtraction, as a special case); round 1 against the prototype's round 1 to 1e-9.
-3. **Invariance:** output byte-identical at 1, 4 and 30 threads.
-4. **No harm on inbred cohorts:** inbreeding 0.95 cells change by no more than the prototype's (121
-   → 113).
-5. **The ratio the owner pointed to:** 200 samples from 64 founders, 40 at 30×, inbreeding 0.5 and
+1. **Exact agreement with the prototype.** `phaser.py` gains §5's SplitMix64 stream and state order;
+   on a small cohort (10 samples, 2,000 records) the Rust haplotypes and posteriors agree with it to
+   1e-9 after `R` rounds. This, not a statistical tolerance, is what tells a bug from chance.
+2. **The prototype's numbers, reproduced** on the founder-grid cells above, with the prototype run
+   under the Rust pass's own rules and fitted parameters (to be added to `phaser.py`): wrong-genotype
+   counts within a tenth, judged against the seed spread (about 5%, §1).
+3. **Unit tests:**
+   - the backward draw with `mismatch` = 0, one template equal to the sample and every other
+     template and the background carrying the other allele: every drawn state is the autozygous
+     state on that template or the pair state on it twice, at any seed;
+   - the re-estimation on hand-computed values, the owner's subtraction as a special case: copy one
+     on a homozygous-reference template, copy two on a template uniform over the alleles, and a
+     likelihood allowing only the heterozygote give copy two the alternative with probability
+     `(1 − ε/2)·½ / ((1 − ε/2)·½ + (ε/2)·½)` = 1 − ε/2 for copy one's reference — computed in the test;
+   - round 1 against today's pass: the existing `refine.rs` tests at `R` = 1 (§3.1).
+4. **Invariance:** output byte-identical at 1, 4 and 30 threads.
+5. **No harm on inbred cohorts:** inbreeding 0.95 cells change by no more than the prototype's (121
+   → 115).
+6. **The ratio the owner pointed to:** 200 samples from 64 founders, 40 at 30×, inbreeding 0.5 and
    0.8 (running) — the case between the 50-sample cohorts and the owner's thousands.
-6. **Cost**, measured: time and peak memory against the pass without phasing, at 50, 200 and 500
+7. **Cost**, measured: time and peak memory against the pass without phasing, at 50, 200 and 500
    samples; extrapolated to 3,000.
-7. **Tomato, held out:** the tomato hiding test (`tomato_fill_test.sh`) on kimura, with and without
+8. **Tomato, held out:** the tomato hiding test (`tomato_fill_test.sh`) on kimura, with and without
    phasing, on a cohort including *pimpinellifolium* and *cerasiforme* accessions.
-8. **The fill check stays calibrated** with phasing: its estimated share against the true fill error
-   on the cells of point 1, as pass §4.3 measured.
+9. **Records other than biallelic SNPs:** a multi-allelic case and an STR record through the haplotype
+   choice's general formula and the re-estimation at `A` > 2 (unit), and the founder cells' indel
+   and STR records scored on and off (the prototype never read them).
+10. **The no-read rules with haplotype templates:** fills kept and their true error under the 0.1
+    background limit and the `GQ` 10 floor, phasing on against off; and wrong calls per `GQ` bin on
+    and off, since the sample's own reads now enter twice.
+11. **Edge cohorts:** 2, 3 and 17 samples (every sample a template); absent columns; a sample with
+    no informative record in a window (§2.3).
+12. **Leave-the-target-out** on a few targets of one cell, against the run as built: the size of the
+    circularity of §7 on the genotype.
+13. **Rounds 3 and 8** against 5 on the 200-sample cells (§10 Q3).
+14. **The fill check with phasing**, whichever way §10 Q4 is ruled: its estimate against the true
+    fill error on the cells of point 2, the outbred and 200-sample cells included.
 
 ---
 
@@ -320,7 +396,16 @@ output is a function of the input.
   the command line simple; performance is to be optimised instead.
 - **Q2. 16 sample templates (32 haplotypes) or 16 haplotype templates** (§2.3). *Ruled: measure the
   second and adopt it if within a tenth of the first.* **Resolved: 16 haplotype templates, at most
-  one of each sample.** Within a tenth on all eight cohorts of §1 and lower on five (on the first,
-  689 against 699 wrong); fills fewer but more reliable. The 16 best haplotypes without the
+  one of each sample.** Within a tenth on all eight cohorts of §1 (on the first, 689 against 699
+  wrong — a difference within the seed spread); fills fewer but more reliable. The 16 best haplotypes without the
   one-a-sample rule were 25% worse (871) and are not used.
 - **Q3. `R`** (§2.2). *Ruled: keep 5; measure 3 and 8 on the 200-sample cells.*
+- **Q4. What the fill check compares with phasing on — OPEN** (§4, §7). Options: (a) round 1's
+  prediction, the pass as now — calibrated as now, but it describes the fills the pass would make
+  without phasing, overstating the phased fills' error (1.5% against 0.8% on the first cohort), so
+  more samples are warned of than need be; (b) the averaged prediction — matches on the first cohort
+  (0.86% against 0.81%) but read 10.2% against 1.7% on the outbred cohort, which would warn
+  wrongly in exactly the material this spec is for; (c) a prediction without the circularity, the
+  sample's own haplotype contribution left out of its templates — the honest measure, unbuilt and
+  costing about a round. Leaning: (a) now, which errs on the safe side, and (c) measured in the
+  prototype. Confirm before code.
