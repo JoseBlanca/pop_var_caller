@@ -26,6 +26,8 @@ fn a_fittable_histogram() -> SampleHistogram {
         depth_bins,
         windows_folded: 4200,
         windows_under_the_floor: 0,
+        depth_summed: 0,
+        depth_rises: 0,
         counts,
     })
 }
@@ -226,6 +228,8 @@ fn each_way_a_sample_can_lose_its_model_is_kept_apart_from_the_others() {
             depth_bins: 40,
             windows_folded: 0,
             windows_under_the_floor: 0,
+            depth_summed: 0,
+            depth_rises: 0,
             counts: vec![0; 41],
         }),
     ];
@@ -343,6 +347,8 @@ fn a_gc_varying_histogram() -> SampleHistogram {
         depth_bins: depth_bins as u32,
         windows_folded: 600,
         windows_under_the_floor: 0,
+        depth_summed: 0,
+        depth_rises: 0,
         counts,
     })
 }
