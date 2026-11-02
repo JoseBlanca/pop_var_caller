@@ -2,6 +2,7 @@
 cell, called by pvc with the pass off and on, scored against the simulator's truth.
 
 usage: uv run python founder_grid.py <work dir> <cell> [<cell> ...]
+       uv run python founder_grid.py --rescore <cell dir> [<cell dir> ...]
        a cell is founders,inbreeding,samples,depth  e.g. 16,0.95,50,3
 
 Each cell's files go in <work dir>/f<founders>_F<inbreeding>_n<samples>_d<depth>/; a cell whose
@@ -81,6 +82,17 @@ def score(cell_dir):
             count[prefix + '_pass_nocall'] += a is None
             count[prefix + '_pass_wrong'] += a is not None and a != t
             count[prefix + '_pass_false_nonref'] += kind == 'ref' and a is not None and a != t
+            # What a GQ floor on calls made without reads would leave (a call below it written
+            # ./.): its true non-reference calls kept right, and its false non-reference calls.
+            if row == 'no_reads' and a is not None and quality is not None:
+                for floor in (10, 20):
+                    if quality >= floor:
+                        count[f'no_reads_floor{floor}_called'] += 1
+                        count[f'no_reads_floor{floor}_right_nonref'] += kind == 'nonref' and a == t
+                        count[f'no_reads_floor{floor}_false_nonref'] += kind == 'ref' and a != t
+                        count[f'no_reads_floor{floor}_wrong'] += a != t
+            if row == 'no_reads' and a is not None:
+                count['no_reads_right_nonref'] += kind == 'nonref' and a == t
             if a is not None and quality is not None:
                 for low, high in GQ_BINS:
                     if low <= quality <= high:
@@ -145,7 +157,20 @@ def cell(work, spec):
     print(name, 'done', flush=True)
 
 
+def rescore(cell_dir):
+    """Scores a finished cell again, keeping its timings and the pass's log lines."""
+    path = os.path.join(cell_dir, 'score.json')
+    record = json.load(open(path))
+    record['counts'], record['gq'] = score(cell_dir)
+    with open(path, 'w') as handle:
+        json.dump(record, handle, indent=1)
+
+
 if __name__ == '__main__':
+    if sys.argv[1] == '--rescore':
+        for cell_dir in sys.argv[2:]:
+            rescore(cell_dir)
+        sys.exit(0)
     work = os.path.abspath(sys.argv[1])
     for spec in sys.argv[2:]:
         cell(work, spec)
