@@ -2115,7 +2115,7 @@ comparisons one by one.
 - **Status:** reviewed, fixes applied (branch `neighbour-pass`, pushed; not merged)
 - **Spec:** [neighbour_evidence_pass.md](doc/devel/ng/spec/neighbour_evidence_pass.md), [neighbour_evidence_phasing.md](doc/devel/ng/spec/neighbour_evidence_phasing.md); **Research:** [phasing_for_the_pass_2026-11-02.md](doc/devel/ng/research/neighbour_evidence/phasing_for_the_pass_2026-11-02.md)
 - **Latest review:** [neighbour_evidence_phasing_2026-11-02.md](doc/devel/reports/reviews/neighbour_evidence_phasing_2026-11-02.md) (spec review: [neighbour_evidence_phasing_spec_review_2026-11-02.md](doc/devel/reports/reviews/neighbour_evidence_phasing_spec_review_2026-11-02.md))
-- **Open:** the `A − 1`, `f32` haplotype store; cost measured at 200–3,000 samples; the bit-exact test confirmed on Linux; the tomato run on kimura.
+- **Open:** cost measured at 200–3,000 samples; the bit-exact test confirmed on Linux; the tomato run on kimura.
 
 ---
 

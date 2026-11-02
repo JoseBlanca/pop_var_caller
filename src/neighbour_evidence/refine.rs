@@ -330,13 +330,15 @@ impl WindowLayout {
 
 /// **Every sample's two haplotypes at every site of a window** (phasing spec §5), double-buffered:
 /// a round reads [`HaplotypeStore::current`] and each sample writes its own row of `next`, which
-/// replaces `current` at the round's end. A row holds, site by site, copy 0's `A` allele
-/// probabilities then copy 1's; at a sample's absent rows it holds `1/A`.
+/// replaces `current` at the round's end. A row holds, site by site, copy 0's probabilities of the
+/// first `A − 1` alleles then copy 1's, as `f32` — the last allele's is one less the rest, read
+/// back as at least 0 — so a biallelic site costs 8 bytes a sample a buffer. At a sample's absent
+/// rows it holds `1/A`.
 struct HaplotypeStore {
     /// Where each site's two haplotypes start in a row; one past the last at the end.
     offsets: Vec<usize>,
-    current: Vec<Vec<f64>>,
-    next: Vec<Vec<f64>>,
+    current: Vec<Vec<f32>>,
+    next: Vec<Vec<f32>>,
 }
 
 impl HaplotypeStore {
@@ -346,14 +348,20 @@ impl HaplotypeStore {
         offsets.push(0);
         for &index in &layout.record_of_site {
             let last = offsets.last().copied().unwrap_or(0);
-            offsets.push(last + 2 * records[index].allele_count);
+            offsets.push(last + 2 * (records[index].allele_count - 1));
         }
-        let rows: Vec<Vec<f64>> = (0..samples)
+        let rows: Vec<Vec<f32>> = (0..samples)
             .map(|sample| {
                 let mut row = Vec::with_capacity(offsets[layout.sites()]);
                 for &index in &layout.record_of_site {
+                    let alleles = records[index].allele_count;
                     let start = row.len();
-                    row.extend(records[index].template_shares(sample));
+                    row.extend(
+                        records[index]
+                            .template_shares(sample)
+                            .take(alleles - 1)
+                            .map(|share| share as f32),
+                    );
                     row.extend_from_within(start..);
                 }
                 row
@@ -366,30 +374,42 @@ impl HaplotypeStore {
         }
     }
 
-    /// Copy `copy` of `sample`'s haplotype at `site`, from the round being read.
-    fn haplotype(&self, sample: usize, copy: usize, site: usize) -> &[f64] {
-        let alleles = (self.offsets[site + 1] - self.offsets[site]) / 2;
-        let start = self.offsets[site] + copy * alleles;
-        &self.current[sample][start..start + alleles]
+    /// Appends copy `copy` of `sample`'s haplotype at `site`, from the round being read, to `out`:
+    /// `A` allele probabilities.
+    fn haplotype_into(&self, sample: usize, copy: usize, site: usize, out: &mut Vec<f64>) {
+        let stored = (self.offsets[site + 1] - self.offsets[site]) / 2;
+        let start = self.offsets[site] + copy * stored;
+        let mut rest = 1.0;
+        for &probability in &self.current[sample][start..start + stored] {
+            let probability = f64::from(probability);
+            rest -= probability;
+            out.push(probability);
+        }
+        // f32 rounding can take the stored ones a hair past one.
+        out.push(rest.max(0.0));
     }
 
     /// Writes one sample's drawn haplotypes into its row of the round being written; `absent(site)`
     /// says where the sample has no column, which keeps `1/A`.
     fn write(
         offsets: &[usize],
-        row: &mut [f64],
+        row: &mut [f32],
         haplotypes: &[HaplotypePair],
         absent: impl Fn(usize) -> bool,
     ) {
         assert_eq!(haplotypes.len() + 1, offsets.len(), "one drawn pair a site");
         for (site, [first, second]) in haplotypes.iter().enumerate() {
-            let alleles = first.len();
+            let stored = first.len() - 1;
             let slot = &mut row[offsets[site]..offsets[site + 1]];
             if absent(site) {
-                slot.fill(1.0 / alleles as f64);
+                slot.fill(1.0 / first.len() as f32);
             } else {
-                slot[..alleles].copy_from_slice(first);
-                slot[alleles..].copy_from_slice(second);
+                for (out, &probability) in slot[..stored].iter_mut().zip(first) {
+                    *out = probability as f32;
+                }
+                for (out, &probability) in slot[stored..].iter_mut().zip(second) {
+                    *out = probability as f32;
+                }
             }
         }
     }
@@ -623,7 +643,7 @@ fn solve_round(
     records: &[SiteRecord],
     layout: &WindowLayout,
     store: &HaplotypeStore,
-    row: &mut [f64],
+    row: &mut [f32],
     sample: usize,
     state: &mut SampleRounds,
     fit: &mut SampleFit,
@@ -638,8 +658,9 @@ fn solve_round(
     let haplotype_templates: Vec<(usize, usize)> = if round == 1 {
         Vec::new()
     } else {
-        let haplotype = |other: usize, copy: usize, record: usize| -> &[f64] {
-            store.haplotype(other, copy, layout.site(record))
+        let haplotype = |other: usize, copy: usize, record: usize, out: &mut Vec<f64>| {
+            out.clear();
+            store.haplotype_into(other, copy, layout.site(record), out);
         };
         choose_haplotypes(
             records,
@@ -674,7 +695,7 @@ fn solve_round(
             }
         } else {
             for &(other, copy) in &haplotype_templates {
-                shares.extend_from_slice(store.haplotype(other, copy, site));
+                store.haplotype_into(other, copy, site, &mut shares);
             }
         }
         shares.extend(record.background_shares());

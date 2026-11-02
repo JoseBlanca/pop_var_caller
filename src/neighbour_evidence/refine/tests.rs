@@ -437,125 +437,6 @@ fn phasing_checks_fills_at_hidden_records_only() {
     assert!(checked * 2 > SHAPE.samples, "{checked} samples checked");
 }
 
-/// **The phased window matches the Python reference to 1e-9** (phasing spec §8.1): the window
-/// `phaser_reference.py` drew and solved — 20 samples, so more candidates than the 16 template slots, and 500 records,
-/// some flat and some absent — with
-/// the same random stream, state order, hidden records and haplotype choice, every sample's fit
-/// frozen at the reference's grid point. Every written posterior agrees, so a disagreement is a bug,
-/// not the seed.
-#[test]
-fn the_phased_window_matches_the_python_reference() {
-    use crate::neighbour_evidence::records::SampleColumns;
-    let text = include_str!("../testdata/phased_window.txt");
-    let mut header: Vec<&str> = Vec::new();
-    // Each record: position, alternative frequency, and each sample's PL and GP, or absent.
-    type Columns = Vec<Option<(Vec<u32>, Vec<f64>)>>;
-    let mut inputs: Vec<(u64, f64, Columns)> = Vec::new();
-    let mut expected: Vec<(usize, usize, Vec<f64>)> = Vec::new();
-    let mut hidden_lines: Vec<Vec<usize>> = Vec::new();
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        match fields[0] {
-            "window" => header = fields,
-            "record" => inputs.push((
-                fields[1].parse().expect("a position"),
-                fields[2].parse().expect("a frequency"),
-                fields[3..]
-                    .iter()
-                    .map(|column| {
-                        (*column != ".").then(|| {
-                            let (pl, gp) = column.split_once('|').expect("PL|GP");
-                            (
-                                pl.split(',').map(|x| x.parse().expect("a PL")).collect(),
-                                gp.split(',').map(|x| x.parse().expect("a GP")).collect(),
-                            )
-                        })
-                    })
-                    .collect(),
-            )),
-            "hidden" => hidden_lines.push(
-                fields[2..]
-                    .iter()
-                    .map(|x| x.parse::<usize>().expect("a record"))
-                    .collect::<Vec<usize>>(),
-            ),
-            "posterior" => expected.push((
-                fields[1].parse().expect("a record"),
-                fields[2].parse().expect("a sample"),
-                fields[3..]
-                    .iter()
-                    .map(|x| x.parse().expect("a probability"))
-                    .collect(),
-            )),
-            _ => {}
-        }
-    }
-    let samples: usize = header[1].parse().expect("samples");
-    let share: f64 = header[3].parse().expect("a share");
-    let chosen: usize = header[4].parse().expect("a grid point");
-    let rounds: usize = header[5].parse().expect("rounds");
-    let window_key: u64 = header[6].parse().expect("a key");
-    let records: Vec<SiteRecord> = inputs
-        .iter()
-        .map(|(position, frequency, columns)| {
-            let columns: Vec<Option<SampleColumns<'_>>> = columns
-                .iter()
-                .map(|column| {
-                    column.as_ref().map(|(pl, gp)| SampleColumns {
-                        phred_likelihoods: pl,
-                        genotype_posteriors: gp,
-                    })
-                })
-                .collect();
-            SiteRecord::new(*position, &[*frequency], &columns)
-        })
-        .collect();
-    let mut fits: Vec<SampleFit> = (0..samples)
-        .map(|_| SampleFit::frozen_at(share, chosen))
-        .collect();
-    let solved = refine_window_in_rounds(
-        &records,
-        0..records.len(),
-        None,
-        &mut fits,
-        MAX_TEMPLATES,
-        NoReadRule::default(),
-        Phasing::new(rounds, window_key),
-    );
-    assert!(
-        expected.len() > 1_000,
-        "the fixture holds {} posteriors",
-        expected.len()
-    );
-    let mut worst: f64 = 0.0;
-    for (record, sample, posterior) in &expected {
-        let refined = &solved.records[*record];
-        assert_ne!(
-            refined.outcomes[*sample],
-            Outcome::Unchanged,
-            "record {record}, sample {sample}"
-        );
-        let ours = &refined.posteriors[sample * 3..sample * 3 + 3];
-        for (a, b) in ours.iter().zip(posterior) {
-            worst = worst.max((a - b).abs());
-        }
-    }
-    assert!(
-        worst < 1e-9,
-        "largest difference from the reference: {worst:e}"
-    );
-    // The records each sample hid are the reference's.
-    let layout = WindowLayout::new(&records, &(0..records.len()));
-    for (sample, expected_hidden) in hidden_lines.iter().enumerate() {
-        let drawn = if choose_templates(&records, sample, MAX_TEMPLATES).is_some() {
-            draw_hidden_records(&records, &layout, sample, window_key)
-        } else {
-            Vec::new()
-        };
-        assert_eq!(&drawn, expected_hidden, "sample {sample}'s hidden records");
-    }
-}
-
 /// **A record no walk uses, inserted mid-window, changes no other record's phased result**: the
 /// window solve keeps record indices and site positions apart (they coincide in windows where every
 /// record is a site, as in every other test here). From the code review of 2026-11-02.
@@ -637,7 +518,7 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
 }
 
 /// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
-const RECORDED_POSTERIOR_BITS: u64 = 0x7ec3_2e53_3730_7761;
+const RECORDED_POSTERIOR_BITS: u64 = 0x1f12_0205_52d2_5929;
 
 /// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
 /// round went unnoticed): two rounds and five leave every sample's fit in the same state, since

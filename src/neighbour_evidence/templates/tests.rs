@@ -195,11 +195,12 @@ fn a_round_takes_each_samples_better_haplotype_once() {
     let homozygous_alternative = vec![vec![0.0, 0.0, 1.0]; compared.len()];
     let reference = [1.0, 0.0];
     let alternative = [0.0, 1.0];
-    let haplotype = |other: usize, copy: usize, _: usize| -> &[f64] {
-        match (other, copy) {
+    let haplotype = |other: usize, copy: usize, _: usize, out: &mut Vec<f64>| {
+        out.clear();
+        out.extend_from_slice(match (other, copy) {
             (1, 1) | (3, _) => &alternative,
             _ => &reference,
-        }
+        });
     };
     let chosen = choose_haplotypes(
         &records,
@@ -251,12 +252,13 @@ fn the_haplotype_choice_reads_every_allele() {
         shares
     };
     let (two, zero, one) = (allele(2), allele(0), allele(1));
-    let haplotype = |other: usize, copy: usize, _: usize| -> &[f64] {
-        match (other, copy) {
+    let haplotype = |other: usize, copy: usize, _: usize, out: &mut Vec<f64>| {
+        out.clear();
+        out.extend_from_slice(match (other, copy) {
             (1, 0) => &two,
             (1, 1) => &zero,
             _ => &one,
-        }
+        });
     };
     let chosen = choose_haplotypes(&records, 0, &compared, &previous, &haplotype, 2);
     assert_eq!(chosen, vec![(1, 0), (2, 0)]);

@@ -315,12 +315,13 @@ about 500 core-hours at 3,000 samples; the searches are now table lookups, not y
   allele's is one minus the rest), as `f32` — 8 bytes a biallelic sample-record; two copies live at
   once (the round being read and the round being written), 16 bytes, against the 40 a window holds
   today (pass §6). **At absent rows the store holds `1/A`**, written when the store is filled, so a
-  reader never has to ask; a sample's own walk overwrites only its walked records. *Built as two
-  flat `f64` rows a sample with all `A` probabilities a copy* — 32 bytes a biallelic sample-record a
-  copy, 64 for the two — the `A − 1`, `f32` form deferred to the performance work. Each sample writes
-  its own row of the round being written from its own thread, so no second copy of every sample's
-  haplotypes is held at a round's end (the first build held one, about 80–110 bytes a sample-record;
-  code review 2026-11-02).
+  reader never has to ask; a sample's own walk overwrites only its walked records. *Built so*
+  (owner, 2026-11-02, after a first build stored all `A` probabilities as `f64`, 64 bytes a biallelic
+  sample-record for the two buffers): on the simulated cohorts the change moved one genotype of
+  175,146 on the 200-sample cohort and none on three 50-sample ones. Each sample writes its own row
+  of the round being written from its own thread, so no second copy of every sample's haplotypes is
+  held at a round's end (the first build held one, about 80–110 bytes a sample-record; code review
+  2026-11-02).
 - *The round accumulators*: running sums, per sample and core record, of the posterior, the
   prediction and the background-copy probability — 7 numbers biallelic, as `f32` 28 bytes a core
   sample-record. The previous round's posterior is kept **only at each sample's at most 500
@@ -404,11 +405,13 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
 
 ## 8. How we know it works
 
-1. **Exact agreement with the prototype.** `phaser_reference.py` uses §5's SplitMix64 stream and
-   state order; on a drawn window (built: 20 samples — more than the 16 template slots — and 500
-   records, biallelic) the Rust posteriors and hidden records agree with it to 1e-9 after `R`
-   rounds. Records with more than two alleles are covered by unit tests of the draw, the
-   re-estimation and the haplotype choice, not by the reference. This, not a statistical tolerance, is what tells a bug from chance.
+1. **Exact agreement with the prototype — built, then retired.** `phaser_reference.py` uses §5's
+   SplitMix64 stream and state order; on a drawn window of 20 samples and 500 records the Rust
+   posteriors and hidden records agreed with it to 1e-9 through the first build and its code-review
+   fixes (5f242a4a). The `f32` store (§5) moves the Rust results in their last digits, and the owner
+   ruled the comparison no longer needed (2026-11-02): the test and its fixture are removed; the
+   script stays as the method's record. Records with more than two alleles are covered by unit tests
+   of the draw, the re-estimation and the haplotype choice. This, not a statistical tolerance, is what tells a bug from chance.
 2. **The prototype's numbers, reproduced** on the founder-grid cells above, with the prototype run
    under the Rust pass's own rules and fitted parameters (to be added to `phaser.py`): wrong-genotype
    counts within a tenth, judged against the seed spread (about 5%, §1).

@@ -96,6 +96,10 @@ pub(crate) fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usi
     }
 }
 
+/// **How [`choose_haplotypes`] reads a haplotype**: `(other sample, copy, record, out)` writes that
+/// copy's allele probabilities at the record into `out`, which it clears first.
+pub(crate) type HaplotypeReader<'a> = dyn Fn(usize, usize, usize, &mut Vec<f64>) + 'a;
+
 /// **The haplotypes sample `sample` copies from in a phasing round** (phasing spec §2.3), best
 /// first, as `(sample, copy)`: at most `max_templates`, at most one of each other sample.
 ///
@@ -105,18 +109,18 @@ pub(crate) fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usi
 /// in its order — summed over the `compared` records where the haplotype's sample is informative
 /// too, and scored by
 /// [`disagreement_bound`]. Each other sample offers its better haplotype (copy 0 on a tie); the
-/// offers are ranked by score, then sample, then copy. `haplotype(other, copy, record)` reads the
-/// previous round's haplotypes.
+/// offers are ranked by score, then sample, then copy. `haplotype(other, copy, record, out)` writes
+/// the previous round's haplotype into `out`, which it clears first.
 ///
 /// One of each sample because without it the slots fill with copies of the commonest haplotype:
 /// 871 wrong genotypes against 689 on the prototype's first cohort (spec §2.3).
 #[must_use]
-pub(crate) fn choose_haplotypes<'a>(
+pub(crate) fn choose_haplotypes(
     records: &[SiteRecord],
     sample: usize,
     compared: &[usize],
     previous_posteriors: &[Vec<f64>],
-    haplotype: &dyn Fn(usize, usize, usize) -> &'a [f64],
+    haplotype: &HaplotypeReader<'_>,
     max_templates: usize,
 ) -> Vec<(usize, usize)> {
     let Some(&first) = compared.first() else {
@@ -153,13 +157,15 @@ pub(crate) fn choose_haplotypes<'a>(
         .map(|other| {
             let mut shared = 0_usize;
             let mut disagreement = [0.0_f64; 2];
+            let mut carried = Vec::new();
             for (position, &index) in compared.iter().enumerate() {
                 if records[index].row(other) != SampleRow::Informative {
                     continue;
                 }
                 shared += 1;
                 for (copy, total) in disagreement.iter_mut().enumerate() {
-                    *total += haplotype(other, copy, index)
+                    haplotype(other, copy, index, &mut carried);
+                    *total += carried
                         .iter()
                         .zip(&lacking[position])
                         .map(|(carried, lacked)| carried * lacked)
