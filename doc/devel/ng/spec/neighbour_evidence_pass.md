@@ -45,15 +45,19 @@ pass must re-measure them (§8).
 
 ### 1.2 Non-goals
 
-- **Phasing.** The pass infers which samples a sample copies, not which of its alleles sit on one
-  chromosome; `GT` stays unphased.
+- **Writing phase.** `GT` stays unphased. The pass may phase samples to give each other haplotype
+  templates, as a means to the genotype — specified in
+  [`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md) (owner, 2026-11-02) — but writes
+  no phase.
 - **New loci.** A locus pvc did not build stays unbuilt; the pass changes genotypes only. On one
   tomato accession alone at 3×, 42% of the true non-reference genotypes were at such loci (report
   §5.2); that loss belongs to candidate generation, not here.
 - **Read linkage** — reads covering two sites. Left out by the owner's ruling (report §11).
-- **Outbred cohorts.** Using shared haplotypes there needs phased templates and repeated sweeps over
-  the cohort ([`07_decision`](../research/phasing_imputation/07_decision_separate_tool_and_route.md)
-  §2); this pass does neither and is off there (§5).
+- **Outbred cohorts, without phased templates.** Using shared haplotypes there needs phased templates
+  and repeated sweeps over the cohort
+  ([`07_decision`](../research/phasing_imputation/07_decision_separate_tool_and_route.md) §2); this
+  spec's pass does neither and is off there (§5). Partly outbred cohorts are what
+  [`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md) adds.
 
 ### 1.3 Vocabulary
 
