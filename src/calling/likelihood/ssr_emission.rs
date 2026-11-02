@@ -36,6 +36,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 use crate::alignment::StutterModel;
 use crate::alignment::emission::{BaseScores, Emission, FlatEmission};
 use crate::alignment::stutter::{MAX_PART_REPEAT_SLIP, MAX_WHOLE_REPEAT_SLIP};
+use crate::calling::likelihood::run_context::{ReadDirection, letters_after_runs};
 use crate::float;
 use crate::locus_generation::HeldFlank;
 use crate::parameter_estimation::Provenance;
@@ -197,6 +198,13 @@ pub struct SsrScoringContext<'a> {
     /// distinguishable in the run's output from one resting on a fit, without re-running
     /// anything.
     pub weakest_provenance: Provenance,
+    /// **The direction the reads being scored were sequenced in**, where the misread rate after a
+    /// long run applies ([`run_context`](super::run_context), `str_context_error.md`); `None`
+    /// scores every base at the fitted rate, as before. Set by the row for complete reads only.
+    pub read_direction: Option<ReadDirection>,
+    /// The locus's reference flanks, which a run reaching the candidate's first or last base may
+    /// begin in. Empty where `read_direction` is `None`.
+    pub flanks_for_run_context: (&'a [u8], &'a [u8]),
 }
 
 impl<'a> SsrScoringContext<'a> {
@@ -228,6 +236,8 @@ impl<'a> SsrScoringContext<'a> {
             run_substitution_rates: &[],
             fixed_substitution_rate: substitution_rate,
             weakest_provenance,
+            read_direction: None,
+            flanks_for_run_context: (&[], &[]),
         }
     }
 
@@ -282,6 +292,8 @@ impl<'a> SsrScoringContext<'a> {
             run_substitution_rates: &[],
             fixed_substitution_rate: substitution_rate,
             weakest_provenance,
+            read_direction: None,
+            flanks_for_run_context: (&[], &[]),
         }
     }
 
@@ -1239,6 +1251,20 @@ fn letters_against_stretching_followed_by(
     if !long_enough {
         return 0.0;
     }
+    // A complete read with a direction is compared base by base under the misread rate after a
+    // long run (`str_context_error.md`); it reaches no flank past the stretching.
+    if let Some(direction) = context.read_direction
+        && followed_by.is_empty()
+    {
+        return letters_after_runs(
+            observed,
+            stretching,
+            context.flanks_for_run_context,
+            direction,
+            context.substitution_rate,
+        )
+        .unwrap_or(0.0);
+    }
     let scores = substitution_scores(context);
     let total_ln: f64 = observed
         .iter()
@@ -1350,11 +1376,16 @@ struct MatchedPrefixLetters {
     sums: Vec<f64>,
     /// `letters[i]`: `exp(sums[i])`.
     letters: Vec<f64>,
+    /// **Where a complete read is compared under the misread rate after a long run**: its
+    /// direction and the locus's flanks ([`run_context`](super::run_context)). `None` after every
+    /// [`Self::prepare`], so only a caller that sets it gets it.
+    run_context: Option<(ReadDirection, Vec<u8>, Vec<u8>)>,
 }
 
 impl MatchedPrefixLetters {
     /// Make ready for comparisons of up to `longest` bases under the scores at `rate`.
     fn prepare(&mut self, rate: ErrorRate, longest: usize) {
+        self.run_context = None;
         let same_rate = self
             .rate
             .is_some_and(|kept| kept.get().to_bits() == rate.get().to_bits());
@@ -1388,6 +1419,17 @@ impl MatchedPrefixLetters {
         );
         if observation.len() != resized_candidate.len() {
             return 0.0;
+        }
+        if let Some((direction, left, right)) = &self.run_context {
+            let rate = self.rate.expect("set with the rate");
+            return letters_after_runs(
+                observation,
+                resized_candidate,
+                (left, right),
+                *direction,
+                rate,
+            )
+            .unwrap_or(0.0);
         }
         let scores = self.scores.expect("prepared before the first comparison");
         let agreed = agreeing_prefix_len(observation, resized_candidate);
@@ -1774,6 +1816,10 @@ fn bundle_emission(
     scratch
         .matched
         .prepare(context.substitution_rate, observation.len());
+    if let Some(direction) = context.read_direction {
+        let (left, right) = context.flanks_for_run_context;
+        scratch.matched.run_context = Some((direction, left.to_vec(), right.to_vec()));
+    }
 
     // Each run's stretch, split into whole copies and interruptions once for the whole walk.
     scratch.run_segments.resize_with(runs.len(), Vec::new);

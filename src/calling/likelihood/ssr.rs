@@ -66,6 +66,7 @@
 //! frozen.
 
 use super::ContaminationView;
+use super::run_context::{ReadDirection, SHORTEST_RUN_CHARGED, longest_run};
 use super::ssr_emission::{
     BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over,
 };
@@ -747,19 +748,32 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
             // copy carries is skipped rather than multiplied by zero, which is what keeps the
             // cost proportional to the ploidy rather than to the candidate count.
             let mut explained_by_this_genotype = 0.0;
+            let mut explained_for_reverse_reads = 0.0;
             for (candidate, &copies) in carried_copies.iter().enumerate() {
                 if copies == 0 {
                     continue;
                 }
                 explained_by_this_genotype +=
                     copy_share[copies as usize] * scratch.emission_at(position, candidate);
+                explained_for_reverse_reads +=
+                    copy_share[copies as usize] * scratch.reverse_emission_at(position, candidate);
             }
-            slot.0 += reads
-                * float::ln(
-                    from_this_individual * explained_by_this_genotype
+            let bracket = |explained: f64| {
+                float::ln(
+                    from_this_individual * explained
                         + from_the_junk_distribution
                         + from_the_contaminant,
-                );
+                )
+            };
+            // **Each strand's reads under their own emission where the two differ**
+            // (`str_context_error.md`); where they agree, the one sum as before, bit for bit.
+            if explained_by_this_genotype.to_bits() == explained_for_reverse_reads.to_bits() {
+                slot.0 += reads * bracket(explained_by_this_genotype);
+            } else {
+                let forward_reads = f64::from(observation.num_fwd.min(observation.num_obs));
+                slot.0 += forward_reads * bracket(explained_by_this_genotype)
+                    + (reads - forward_reads) * bracket(explained_for_reverse_reads);
+            }
         }
     }
 
@@ -808,87 +822,34 @@ fn fill_emissions<Model: SsrEmissionModel>(
             // still counts for that allele, at that price, rather than for nothing (HG002 at 30×:
             // two reads of an 11-`C` allele missing the base before the run, 2026-10-11).
             let context = contexts.of(observation.read_group, candidate);
-            let scored = if observation.flank_deletion == allele.flank_deletion {
-                model.emission(
-                    &observation.bases,
-                    allele,
-                    context,
-                    scratch.model_scratch_mut(),
-                )
-            } else {
-                let wider = crate::locus_generation::FlankDeletion {
-                    left: observation
-                        .flank_deletion
-                        .left
-                        .max(allele.flank_deletion.left),
-                    right: observation
-                        .flank_deletion
-                        .right
-                        .max(allele.flank_deletion.right),
+            // **Scored once per strand where a long run sits in or beside the candidate**
+            // (`str_context_error.md`): a read sequenced through the run misreads the bases after
+            // it, and only the reads of one strand were. Everywhere else one score serves both.
+            if a_run_may_reach_a_charged_length(allele) {
+                let scored_from = |direction| SsrScoringContext {
+                    read_direction: Some(direction),
+                    flanks_for_run_context: allele.reference_flanks,
+                    ..*context
                 };
-                let (read_over, allele_over) = &mut scratch.respelled;
-                let respelled = respelled_over(
-                    &observation.bases,
-                    observation.flank_deletion,
-                    wider,
-                    allele.reference_flanks,
-                    read_over,
-                )
-                .and_then(|()| {
-                    respelled_over(
-                        allele.bases,
-                        allele.flank_deletion,
-                        wider,
-                        allele.reference_flanks,
-                        allele_over,
-                    )
-                });
-                match respelled {
-                    Some(()) if read_over.len() == allele_over.len() => {
-                        let (read_over, allele_over) =
-                            (std::mem::take(read_over), std::mem::take(allele_over));
-                        let scored = model.emission(
-                            &read_over,
-                            &SsrCandidate {
-                                bases: &allele_over,
-                                // A bundle allele respelled over the wider extent carries the
-                                // flank bases it was given in front, and its runs move with it.
-                                bundle: allele.bundle.map(|bundle| BundleCandidate {
-                                    leading_flank_bases: bundle.leading_flank_bases
-                                        + u32::from(wider.left - allele.flank_deletion.left),
-                                    ..bundle
-                                }),
-                                ..*allele
-                            },
-                            context,
-                            scratch.model_scratch_mut(),
-                        );
-                        scratch.respelled = (read_over, allele_over);
-                        scored
-                    }
-                    _ => {
-                        let read_flank = i64::from(observation.flank_deletion.left)
-                            + i64::from(observation.flank_deletion.right);
-                        let allele_flank = i64::from(allele.flank_deletion.left)
-                            + i64::from(allele.flank_deletion.right);
-                        let flank_change = context
-                            .stutter
-                            .flank_length_change_probability(allele_flank - read_flank);
-                        if flank_change > 0.0 {
-                            flank_change
-                                * model.emission(
-                                    &observation.bases,
-                                    allele,
-                                    context,
-                                    scratch.model_scratch_mut(),
-                                )
-                        } else {
-                            0.0
-                        }
-                    }
-                }
-            };
-            scratch.set_emission(position, candidate, scored);
+                let forward = complete_emission(
+                    model,
+                    observation,
+                    allele,
+                    &scored_from(ReadDirection::Forward),
+                    scratch,
+                );
+                let reverse = complete_emission(
+                    model,
+                    observation,
+                    allele,
+                    &scored_from(ReadDirection::Reverse),
+                    scratch,
+                );
+                scratch.set_emission_by_strand(position, candidate, forward, reverse);
+            } else {
+                let scored = complete_emission(model, observation, allele, context, scratch);
+                scratch.set_emission(position, candidate, scored);
+            }
         }
     }
 
@@ -936,6 +897,106 @@ fn fill_emissions<Model: SsrEmissionModel>(
                 None => 0.5 * from(HeldFlank::Left) + 0.5 * from(HeldFlank::Right),
             };
             scratch.set_emission(position, candidate, scored);
+        }
+    }
+}
+
+/// Whether a run of one base in `allele`, or beside it in the locus's flanks, is one repeat short
+/// of the shortest run whose following bases are charged more — a whole-unit slip can lengthen it
+/// to that length in the stretching a read is compared with.
+fn a_run_may_reach_a_charged_length(allele: &SsrCandidate<'_>) -> bool {
+    let (left, right) = allele.reference_flanks;
+    let around: Vec<u8> = [left, allele.bases, right].concat();
+    longest_run(&around) + 1 >= SHORTEST_RUN_CHARGED
+}
+
+/// One complete observation scored against one candidate under `context` — over the wider of the
+/// two flank extents where they differ (see [`fill_emissions`]).
+fn complete_emission<Model: SsrEmissionModel>(
+    model: &Model,
+    observation: &SequenceObservation,
+    allele: &SsrCandidate<'_>,
+    context: &SsrScoringContext<'_>,
+    scratch: &mut SsrRowScratch<Model::Scratch>,
+) -> f64 {
+    if observation.flank_deletion == allele.flank_deletion {
+        model.emission(
+            &observation.bases,
+            allele,
+            context,
+            scratch.model_scratch_mut(),
+        )
+    } else {
+        let wider = crate::locus_generation::FlankDeletion {
+            left: observation
+                .flank_deletion
+                .left
+                .max(allele.flank_deletion.left),
+            right: observation
+                .flank_deletion
+                .right
+                .max(allele.flank_deletion.right),
+        };
+        let (read_over, allele_over) = &mut scratch.respelled;
+        let respelled = respelled_over(
+            &observation.bases,
+            observation.flank_deletion,
+            wider,
+            allele.reference_flanks,
+            read_over,
+        )
+        .and_then(|()| {
+            respelled_over(
+                allele.bases,
+                allele.flank_deletion,
+                wider,
+                allele.reference_flanks,
+                allele_over,
+            )
+        });
+        match respelled {
+            Some(()) if read_over.len() == allele_over.len() => {
+                let (read_over, allele_over) =
+                    (std::mem::take(read_over), std::mem::take(allele_over));
+                let scored = model.emission(
+                    &read_over,
+                    &SsrCandidate {
+                        bases: &allele_over,
+                        // A bundle allele respelled over the wider extent carries the
+                        // flank bases it was given in front, and its runs move with it.
+                        bundle: allele.bundle.map(|bundle| BundleCandidate {
+                            leading_flank_bases: bundle.leading_flank_bases
+                                + u32::from(wider.left - allele.flank_deletion.left),
+                            ..bundle
+                        }),
+                        ..*allele
+                    },
+                    context,
+                    scratch.model_scratch_mut(),
+                );
+                scratch.respelled = (read_over, allele_over);
+                scored
+            }
+            _ => {
+                let read_flank = i64::from(observation.flank_deletion.left)
+                    + i64::from(observation.flank_deletion.right);
+                let allele_flank =
+                    i64::from(allele.flank_deletion.left) + i64::from(allele.flank_deletion.right);
+                let flank_change = context
+                    .stutter
+                    .flank_length_change_probability(allele_flank - read_flank);
+                if flank_change > 0.0 {
+                    flank_change
+                        * model.emission(
+                            &observation.bases,
+                            allele,
+                            context,
+                            scratch.model_scratch_mut(),
+                        )
+                } else {
+                    0.0
+                }
+            }
         }
     }
 }
@@ -1196,6 +1257,38 @@ mod tests {
         ploidy: u8,
     ) -> Vec<LogProb> {
         score_row_at(fixture, observations, ploidy, DEFAULT_OUTLIER_WEIGHT)
+    }
+
+    /// **Three reads of one strand misreading the base after a long run do not make a variant**
+    /// (`str_context_error.md`; HG002 chr20:44,076,996). The reference is `A`×16 `G` `A`×10; three
+    /// forward reads, which reach the `G` after the sixteen `A`s, show it as an `A`. Scored per
+    /// strand, the misread is cheap on them and `0/0` beats `0/1`; the same three reads from the
+    /// reverse strand had not crossed the run and still make the sample `0/1`, as every read did
+    /// under the one fitted rate before.
+    #[test]
+    fn one_strand_s_misreads_after_a_long_run_do_not_make_a_variant() {
+        let mut fixture = Fixture::of(b"A", &[26, 27]);
+        fixture.candidate_bases[0] = [&[b'A'; 16][..], b"G", &[b'A'; 10]].concat();
+        let reference = fixture.candidate_bases[0].clone();
+        let mut reference_reads = spanning(&reference, 12);
+        reference_reads.num_fwd = 5;
+        let call = |misreads_forward: u32| {
+            let mut misreads = spanning(&[b'A'; 27], 3);
+            misreads.num_fwd = misreads_forward;
+            let row = score_row(&fixture, &[reference_reads.clone(), misreads], 2);
+            // Genotypes in table order: 0/0, 0/1, 1/1.
+            (row[0].0, row[1].0)
+        };
+        let (homozygous, heterozygous) = call(3);
+        assert!(
+            homozygous > heterozygous,
+            "forward misreads: 0/0 {homozygous} against 0/1 {heterozygous}"
+        );
+        let (homozygous, heterozygous) = call(0);
+        assert!(
+            heterozygous > homozygous,
+            "reverse reads: 0/0 {homozygous} against 0/1 {heterozygous}"
+        );
     }
 
     /// Whether no candidate at all can produce this observation — what makes a read *junk*
