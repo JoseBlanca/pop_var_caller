@@ -2362,6 +2362,19 @@ pub(crate) enum CurveData {
         counts: Vec<Vec<f64>>,
         reference: usize,
     },
+    /// **A slip rate whose reads come from read groups at different multipliers** (spec
+    /// `str_library_stutter.md` §3.3): at each point, each read group's multiplier with its slipped
+    /// and exactly-read reads, a read group's reads slipping at the point's rate times its
+    /// multiplier; and `successes` out of `trials` read at the rate itself, which carry the stutter
+    /// prior. The unbounded number is the logit of the rate.
+    /// **Built and tested, drawn by no run yet**: the fit draws its slip-rate curve through it in the
+    /// build step that fits the multipliers (`str_library_stutter.md` §10, step 4).
+    #[cfg_attr(not(test), allow(dead_code))]
+    MultipliedBinomial {
+        read_groups: Vec<Vec<MultipliedReads>>,
+        successes: Vec<f64>,
+        trials: Vec<f64>,
+    },
     /// A log-likelihood tabulated at each point over one unbounded number, on `grid` (ascending,
     /// evenly spaced); an empty table for a point with none. Read between the nodes by a cubic
     /// with the table's slopes, and held at the end node beyond them.
@@ -2369,6 +2382,68 @@ pub(crate) enum CurveData {
         grid: Vec<f64>,
         values: Vec<Vec<f64>>,
     },
+}
+
+/// **One read group's reads at one point of a [`CurveData::MultipliedBinomial`]**: its multiplier,
+/// and its expected slipped and exactly-read reads there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MultipliedReads {
+    pub multiplier: f64,
+    pub slipped: f64,
+    pub exact: f64,
+}
+
+/// **The log-likelihood of `slipped` out of `slipped + exact` reads at the logit `eta`**, with its
+/// slope and information in `eta`: `y·η − n·ln(1 + e^η)`, computed stably.
+fn binomial_at_logit(slipped: f64, trials: f64, eta: f64) -> (f64, f64, f64) {
+    let p = logistic(eta);
+    let ln_one_plus = if eta > 0.0 {
+        eta + float::ln_1p(float::exp(-eta))
+    } else {
+        float::ln_1p(float::exp(eta))
+    };
+    (
+        slipped * eta - trials * ln_one_plus,
+        slipped - trials * p,
+        trials * p * (1.0 - p),
+    )
+}
+
+/// **One read group's reads at a rate `p = logistic(eta)` times `multiplier`**, with the slope and
+/// information in `eta`: `S·ln(m p) + N·ln(1 − m p)`. Where `m p` reaches the ceiling the read
+/// group's rate is held there ([`read_group_level`]), so it adds its value and no slope.
+///
+/// With `λ = m p`: the slope is `S(1 − p) − N m p (1 − p) / (1 − λ)`, and the information
+/// `S p(1 − p) + N m p (1 − p) (1 − 2p + m p²) / (1 − λ)²`, which at `m = 1` is the binomial's
+/// `n p (1 − p)`.
+fn multiplied_at_logit(reads: MultipliedReads, eta: f64) -> (f64, f64, f64) {
+    let MultipliedReads {
+        multiplier,
+        slipped,
+        exact,
+    } = reads;
+    let p = logistic(eta);
+    let level = read_group_level(p, multiplier);
+    if level < multiplier * p {
+        // Held at the ceiling.
+        return (
+            slipped * float::ln(level) + exact * float::ln_1p(-level),
+            0.0,
+            0.0,
+        );
+    }
+    let ln_p = if eta > 0.0 {
+        -float::ln_1p(float::exp(-eta))
+    } else {
+        eta - float::ln_1p(float::exp(eta))
+    };
+    let value = slipped * (float::ln(multiplier) + ln_p) + exact * float::ln_1p(-level);
+    let spread = p * (1.0 - p);
+    let slope = slipped * (1.0 - p) - exact * multiplier * spread / (1.0 - level);
+    let information = slipped * spread
+        + exact * multiplier * spread * (1.0 - 2.0 * p + multiplier * p * p)
+            / ((1.0 - level) * (1.0 - level));
+    (value, slope, information)
 }
 
 impl CurveData {
@@ -2401,6 +2476,34 @@ impl CurveData {
                     float::ln_1p(float::exp(eta))
                 };
                 y * eta - n * ln_one_plus
+            }
+            CurveData::MultipliedBinomial {
+                read_groups,
+                successes,
+                trials,
+            } => {
+                let eta = values[0];
+                let (mut value, mut slope, mut info) = if trials[point] > 0.0 {
+                    binomial_at_logit(successes[point], trials[point], eta)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+                for reads in &read_groups[point] {
+                    let (v, g, i) = multiplied_at_logit(*reads, eta);
+                    value += v;
+                    slope += g;
+                    info += i;
+                }
+                gradient[0] = slope;
+                // Where read groups above one near the ceiling bend it the wrong way, a little
+                // information keeps the step finite, as for a table; the step halving keeps the
+                // climb honest.
+                information[0] = if read_groups[point].is_empty() {
+                    info
+                } else {
+                    info.max(1e-3)
+                };
+                value
             }
             CurveData::Multinomial { counts, reference } => {
                 let counts = &counts[point];
@@ -2483,6 +2586,16 @@ impl CurveData {
     fn has_counts(&self, point: usize) -> bool {
         match self {
             CurveData::Binomial { trials, .. } => trials[point] > 0.0,
+            CurveData::MultipliedBinomial {
+                read_groups,
+                trials,
+                ..
+            } => {
+                trials[point] > 0.0
+                    || read_groups[point]
+                        .iter()
+                        .any(|reads| reads.slipped + reads.exact > 0.0)
+            }
             CurveData::Multinomial { counts, .. } => counts[point].iter().sum::<f64>() > 0.0,
             CurveData::Tabulated { values, .. } => !values[point].is_empty(),
         }
@@ -4513,6 +4626,114 @@ mod tests {
 
     /// Counts of a straight line on the logit scale, from −3 to 3 across `points` points, 1,000
     /// trials each, so that the marginal likelihood favours the stiffest penalty searched.
+    /// **A point's value, slope and information under read groups at several multipliers are the
+    /// log-likelihood's own**, against central differences at slip rates from 0.2% to 30%; and **at
+    /// every multiplier one they are the binomial's of the summed reads**, to within rounding.
+    #[test]
+    fn a_multiplied_binomial_is_its_log_likelihood_and_at_one_the_binomial() {
+        let reads = |multiplier, slipped, exact| MultipliedReads {
+            multiplier,
+            slipped,
+            exact,
+        };
+        let data = CurveData::MultipliedBinomial {
+            read_groups: vec![vec![
+                reads(0.4, 3.0, 400.0),
+                reads(1.0, 10.0, 300.0),
+                reads(2.5, 25.0, 200.0),
+            ]],
+            successes: vec![0.1],
+            trials: vec![1.0],
+        };
+        let at = |eta: f64| {
+            let (mut gradient, mut information) = ([0.0], [0.0]);
+            let value = data.evaluate(0, &[eta], &mut gradient, &mut information);
+            (value, gradient[0], information[0])
+        };
+        for rate in [0.002_f64, 0.03, 0.3] {
+            let eta = (rate / (1.0 - rate)).ln();
+            let step = 1e-5;
+            let (_, slope, information) = at(eta);
+            let ((up, up_slope, _), (down, down_slope, _)) = (at(eta + step), at(eta - step));
+            let numeric_slope = (up - down) / (2.0 * step);
+            let numeric_information = -(up_slope - down_slope) / (2.0 * step);
+            assert!(
+                (slope - numeric_slope).abs() < 1e-5 * slope.abs().max(1.0),
+                "slope {slope} against {numeric_slope} at a rate of {rate}"
+            );
+            assert!(
+                (information - numeric_information).abs() < 1e-5 * information.abs().max(1.0),
+                "information {information} against {numeric_information} at a rate of {rate}"
+            );
+        }
+        // At multiplier one, two read groups and the prior are the binomial of the summed reads.
+        let at_one = CurveData::MultipliedBinomial {
+            read_groups: vec![vec![reads(1.0, 10.0, 300.0), reads(1.0, 4.0, 90.0)]],
+            successes: vec![0.1],
+            trials: vec![1.0],
+        };
+        let binomial = CurveData::Binomial {
+            successes: vec![14.1],
+            trials: vec![405.0],
+        };
+        for eta in [-6.0, -3.0, -1.0] {
+            let (mut g1, mut i1, mut g2, mut i2) = ([0.0], [0.0], [0.0], [0.0]);
+            let v1 = at_one.evaluate(0, &[eta], &mut g1, &mut i1);
+            let v2 = binomial.evaluate(0, &[eta], &mut g2, &mut i2);
+            for (a, b) in [(v1, v2), (g1[0], g2[0]), (i1[0], i2[0])] {
+                assert!(
+                    (a - b).abs() < 1e-9 * a.abs().max(1.0),
+                    "{a} against {b} at {eta}"
+                );
+            }
+        }
+    }
+
+    /// **With the multipliers held at their truth, a curve drawn through read groups' reads
+    /// recovers the class rates**, where the binomial of their pooled reads is biased by the mix of
+    /// read groups: five classes read by a typical read group and one slipping three times as
+    /// often, with twice the reads. The pooled rate is the reads' mix, about 2.3 times the typical
+    /// one; the multiplied curve's is the typical one, to within 0.1%.
+    #[test]
+    fn a_curve_through_read_groups_at_their_multipliers_recovers_the_class_rates() {
+        // On a straight logit line, from 1% to about 2.7%, so the bend penalty costs nothing.
+        let rates: Vec<f64> = (0..5)
+            .map(|class| logistic(-4.595 + 0.25 * class as f64))
+            .collect();
+        let (typical, stuttery) = (10_000.0, 20_000.0);
+        let read_groups = rates
+            .iter()
+            .map(|rate| {
+                vec![
+                    MultipliedReads {
+                        multiplier: 1.0,
+                        slipped: typical * rate,
+                        exact: typical * (1.0 - rate),
+                    },
+                    MultipliedReads {
+                        multiplier: 3.0,
+                        slipped: stuttery * 3.0 * rate,
+                        exact: stuttery * (1.0 - 3.0 * rate),
+                    },
+                ]
+            })
+            .collect();
+        let data = CurveData::MultipliedBinomial {
+            read_groups,
+            successes: vec![0.0; 5],
+            trials: vec![0.0; 5],
+        };
+        let mut curve = CurveState::new(5, 1);
+        let fitted = curve.refit(&data, &a_narrow_production_fit(), StrengthSearch::Wide);
+        for (logit, rate) in fitted.iter().zip(&rates) {
+            let got = logistic(*logit);
+            assert!(
+                (got / rate - 1.0).abs() < 1e-3,
+                "fitted {got} against the typical read group's {rate}"
+            );
+        }
+    }
+
     fn counts_on_a_line(points: usize) -> CurveData {
         let trials = vec![1000.0; points];
         let successes = (0..points)

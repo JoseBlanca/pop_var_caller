@@ -222,7 +222,9 @@ costs in memory**: a scored row holds one number a genotype, 190 at ±9, so the 
 holds about 4 GB of scored keyed rows against about 0.5 GB pooled, one class at a time. **What is
 built**: the exact keyed table. **What is measured, on kimura** (free for a couple of days, owner
 2026-11-02): the fit's time against the penalised fit's goal of one hour (`str_penalised_fit.md`
-§1.3, goal 4), which at seven times today's rounds it may miss. **If it misses the goal**, the fallback is to round each multiplier to a grid of 1%
+§1.3, goal 4), which at seven times today's rounds it may miss. *Owner, 2026-11-02:* measured as
+one round on part of the genome, on kimura's existing psps, which are not regenerated; so the
+timing runs on this branch's fit ported to the code those psps were walked with. **If it misses the goal**, the fallback is to round each multiplier to a grid of 1%
 steps for the expectation step only, so that rows are keyed by the grid value and every read group
 within 1% shares rows; a 1% step is well below a homopolymer multiplier's error at 3 reads (about 5%,
 §3.6). That changes numbers by the rounding, so it is the owner's to approve, after the measurement,

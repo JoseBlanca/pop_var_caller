@@ -61,6 +61,7 @@ use rayon::prelude::*;
 
 pub mod expected_counts;
 pub mod penalised_fit;
+pub mod read_group_stutter;
 pub mod tract_exclusion;
 
 use crate::float;
