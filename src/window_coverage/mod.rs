@@ -187,9 +187,10 @@ pub const DEPTH_RANGE_IN_MEDIANS: f64 = 10.0;
 /// so it costs nothing in the ordinary case while still refusing the near-empty windows those
 /// runs do have — 261 of the one-accession tomato store's windows hold fewer than 10 positions.
 /// The next candidate, 100, would silence 44 in 100 windows on short-interval ground, and nothing
-/// measured here says such a window is wrong: at 122 positions and 5.1 reads a position it is
-/// still a mean over about 630 reads, where spec §4's reason for windowing at all is that a
-/// *single* position at 3 reads cannot tell one copy from two. Whether a thin window's copy number
+/// measured here says such a window is wrong: at 122 positions and 5.1 reads a position it holds
+/// about 630 read bases — about five 150-base reads, since the positions share their reads — where
+/// spec §4's reason for windowing at all is that a *single* position at 3 reads cannot tell one
+/// copy from two. Whether a thin window's copy number
 /// is wrong is the hidden-duplication filter's own question and is measured on its branch.
 pub const MIN_WINDOW_POSITIONS: u32 = 50;
 
@@ -443,6 +444,12 @@ pub struct CoverageByGcHistogram {
     /// is one to trust less. Nothing downstream can recover the number: an absent window leaves
     /// no trace in any cell, by design.
     pub windows_under_the_floor: u64,
+    /// The depth summed over every position the sample reported, each once.
+    pub depth_summed: u64,
+    /// The rises in depth from each position to the next, summed: about one per read start.
+    /// With [`depth_summed`](Self::depth_summed) it gives the mean read span
+    /// ([`mean_read_span`](Self::mean_read_span)), which sets how noisy a window's mean depth is.
+    pub depth_rises: u64,
     /// Row-major `[gc_bin][depth_bin]` counts. Length is exactly `gc_bins * (depth_bins + 1)`.
     ///
     /// **A cell saturates at `u32::MAX` rather than wrapping.** One window is folded per
@@ -451,4 +458,20 @@ pub struct CoverageByGcHistogram {
     /// take. A saturated cell under-reports; a wrapped one would report a near-empty cell
     /// where the single-copy peak is, and the filter's fit anchors on exactly that mode.
     pub counts: Vec<u32>,
+}
+
+impl CoverageByGcHistogram {
+    /// **The mean number of positions one read covers**, as the depth summed over the rises in
+    /// depth — `None` when no depth rose at all.
+    ///
+    /// Each read adds one to the depth over its span, so the depth summed is the read bases, and
+    /// it rises by one where the read starts. Where a read ends at the step another starts the
+    /// rise is lost, so at high depth the span comes out long: at 300 reads a position and
+    /// 150-base reads about two reads start and two end at every step. That error never matters
+    /// where it occurs, because the window noise the span sets is then a thousandth of the
+    /// copy-number scatter (`paralog::coverage_model`'s `fit_sigma0`).
+    #[must_use]
+    pub fn mean_read_span(&self) -> Option<f64> {
+        (self.depth_rises > 0).then(|| self.depth_summed as f64 / self.depth_rises as f64)
+    }
 }

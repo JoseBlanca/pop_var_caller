@@ -31,6 +31,8 @@ fn a_fittable_histogram() -> SampleHistogram {
         depth_bins,
         windows_folded: 4200,
         windows_under_the_floor: 0,
+        depth_summed: 0,
+        depth_rises: 0,
         counts,
     })
 }
@@ -560,6 +562,8 @@ fn a_fittable_histogram_peaking_at(peak_bin: usize) -> SampleHistogram {
         depth_bins,
         windows_folded: 4200,
         windows_under_the_floor: 0,
+        depth_summed: 0,
+        depth_rises: 0,
         counts,
     })
 }
