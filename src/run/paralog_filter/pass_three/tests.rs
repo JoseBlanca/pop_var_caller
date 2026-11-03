@@ -21,6 +21,7 @@ use crate::paralog::{
     CalibrationConfig, ParalogCalibration, ParalogFdrCurve, ParalogPrior,
     calibrate_from_the_ratio_histogram,
 };
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::paralog_filter::{
     LrHistogramShape, ParalogVerdicts, SpillEntry, SpillFile, SpilledSample, WindowCoverage,
 };
@@ -52,7 +53,6 @@ fn a_record(contig: u32, position: u64, filter: &str) -> SpillEntry {
         )
         .into_bytes(),
         samples: vec![a_row()],
-        fragments: Default::default(),
     }
 }
 
@@ -135,7 +135,9 @@ fn a_spill_and_an_output(test_name: &str, entries: Vec<SpillEntry>) -> (SpillFil
     let _ = fs::remove_file(SpillFile::beside(&output).path());
     let mut spill = SpillFile::beside(&output);
     for entry in &entries {
-        spill.append(entry).expect("the entry is appended");
+        spill
+            .append(entry, &RecordFragments::default())
+            .expect("the entry is appended");
     }
     spill.finish_writing().expect("the spill is flushed");
     (spill, output)

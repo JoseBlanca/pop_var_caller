@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use super::{WhatTheOperatorAskedFor, fit_score_and_write_the_calls, what_to_tell_the_operator};
 use crate::paralog::CoverageFitConfig;
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::paralog_filter::{SpillEntry, SpillFile, SpilledSample, TargetFdr, WindowCoverage};
 use crate::types::{ContigId, InbreedingF, Ploidy, Position};
 use crate::vcf::{HeaderContig, VcfHeaderMetadata};
@@ -42,7 +43,6 @@ const ONE_COPY_DEPTH: f32 = 5.25;
 fn a_record(position: u64, samples: usize, depth: f32) -> SpillEntry {
     let columns: String = (0..samples).map(|_| "\t0/1:5,5".to_string()).collect();
     SpillEntry {
-        fragments: Default::default(),
         contig: ContigId(0),
         position: Position(position),
         is_repeat_tract: false,
@@ -93,7 +93,9 @@ fn a_spill_and_an_output(test_name: &str, entries: Vec<SpillEntry>) -> (SpillFil
     let _ = fs::remove_file(SpillFile::beside(&output).path());
     let mut spill = SpillFile::beside(&output);
     for entry in &entries {
-        spill.append(entry).expect("the entry is appended");
+        spill
+            .append(entry, &RecordFragments::default())
+            .expect("the entry is appended");
     }
     spill.finish_writing().expect("the spill is flushed");
     // **The calling pass is given something to measure.** `calling` is the interval from the

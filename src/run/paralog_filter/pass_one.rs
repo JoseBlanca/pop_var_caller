@@ -45,7 +45,6 @@ use super::{EncodedSpillEntry, SpillEntry, SpillError, SpillFile, SpillFileError
 pub fn entry_for(
     record: &VcfRecord,
     windows: &[WindowCoverage],
-    fragments: RecordFragments,
     contigs: &[HeaderContig],
     ploidy: Ploidy,
 ) -> SpillEntry {
@@ -84,7 +83,6 @@ pub fn entry_for(
         is_repeat_tract: record.is_repeat_tract(),
         line: record_line(record, contigs, ploidy).into_bytes(),
         samples,
-        fragments,
     }
 }
 
@@ -220,8 +218,10 @@ impl CalledRecordSink {
                 .write_record(record, fragments)
                 .map_err(PassOneError::Vcf),
             Self::ParkedOnTheSpill(sink) => {
-                let entry = entry_for(record, windows, fragments, &sink.contigs, sink.ploidy);
-                sink.spill.append(&entry).map_err(PassOneError::Spill)
+                let entry = entry_for(record, windows, &sink.contigs, sink.ploidy);
+                sink.spill
+                    .append(&entry, &fragments)
+                    .map_err(PassOneError::Spill)
             }
         }
     }
@@ -271,7 +271,7 @@ impl RecordPreparer {
         match self {
             Self::ForTheVcf => Ok(PreparedRecord::ForTheVcf(Box::new(record), fragments)),
             Self::ForTheSpill { contigs, ploidy } => {
-                EncodedSpillEntry::of(&entry_for(&record, windows, fragments, contigs, *ploidy))
+                EncodedSpillEntry::of(&entry_for(&record, windows, contigs, *ploidy), &fragments)
                     .map(PreparedRecord::ForTheSpill)
                     .map_err(PassOneError::SpillEntry)
             }

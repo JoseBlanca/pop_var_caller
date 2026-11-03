@@ -34,7 +34,10 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::spill::{EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillWriter};
+use super::spill::{
+    EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillReaderWithFragments, SpillWriter,
+};
+use crate::read_phase::fragments::RecordFragments;
 
 /// How many of a record's bytes sit in memory before they reach the kernel, on each side.
 ///
@@ -138,14 +141,19 @@ impl SpillFile {
         self.entries_written
     }
 
-    /// Append one entry, creating the file if this is the first.
+    /// Append one entry, with the record's fragments beside it, creating the file if this is the
+    /// first.
     ///
     /// # Errors
     ///
     /// If pass one has already ended, if something is already at the path, if the file cannot
     /// be created, or if the entry cannot be written. All name the path.
-    pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillFileError> {
-        let written = self.writer_to_append_to()?.append(entry);
+    pub fn append(
+        &mut self,
+        entry: &SpillEntry,
+        fragments: &RecordFragments,
+    ) -> Result<(), SpillFileError> {
+        let written = self.writer_to_append_to()?.append(entry, fragments);
         written.map_err(|source| SpillFileError::Write {
             path: self.path.clone(),
             source,
@@ -253,23 +261,25 @@ impl SpillFile {
     /// If [`Self::finish_writing`] has not been called — reading before the flush would see
     /// whatever had reached the disk — or if the file cannot be opened. Both name the path.
     pub fn read(&self) -> Result<SpillReader<BufReader<File>>, SpillFileError> {
-        self.open_reader(false)
+        Ok(SpillReader::new(self.open()?, self.entries_written))
     }
 
-    /// [`read`](Self::read), with each entry's fragments read too: pass three's cursor, which
+    /// [`read`](Self::read), with each entry's fragments beside it: pass three's cursor, which
     /// hands them to the writer beside the line (read phase spec §4). Pass two's steps over them.
     ///
     /// # Errors
     ///
     /// As [`read`](Self::read).
-    pub fn read_with_fragments(&self) -> Result<SpillReader<BufReader<File>>, SpillFileError> {
-        self.open_reader(true)
+    pub fn read_with_fragments(
+        &self,
+    ) -> Result<SpillReaderWithFragments<BufReader<File>>, SpillFileError> {
+        Ok(SpillReaderWithFragments::new(
+            self.open()?,
+            self.entries_written,
+        ))
     }
 
-    fn open_reader(
-        &self,
-        read_fragments: bool,
-    ) -> Result<SpillReader<BufReader<File>>, SpillFileError> {
+    fn open(&self) -> Result<BufReader<File>, SpillFileError> {
         if self.stage != Stage::Finished {
             return Err(SpillFileError::PassOneHasNotEnded {
                 path: self.path.clone(),
@@ -279,12 +289,7 @@ impl SpillFile {
             path: self.path.clone(),
             source,
         })?;
-        let source = BufReader::with_capacity(BUFFER_BYTES, file);
-        Ok(if read_fragments {
-            SpillReader::reading_fragments(source, self.entries_written)
-        } else {
-            SpillReader::new(source, self.entries_written)
-        })
+        Ok(BufReader::with_capacity(BUFFER_BYTES, file))
     }
 
     /// Give a failure that came off one of this file's readers the path it happened on.
