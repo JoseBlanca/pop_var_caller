@@ -193,11 +193,8 @@ pub struct NeighbourEvidenceStage {
     held: Vec<HeldLine>,
     /// The held lines' positions, kept beside them for the window planner.
     positions: Vec<u64>,
-    /// The held sites' walk records; `sites[0]` is site number `first_site`.
-    sites: Vec<SiteRecord>,
-    /// Each held site's fragments, beside `sites` (read phase spec §2.7): the reads the link test
-    /// reads. A line that is no site keeps none, since the pass phases only sites.
-    site_fragments: Vec<RecordFragments>,
+    /// The held sites, each with its fragments; the first is site number `first_site`.
+    sites: HeldSites,
     first_site: usize,
     next_site: usize,
     /// The first held line not yet written.
@@ -230,8 +227,7 @@ impl NeighbourEvidenceStage {
             contig: None,
             held: Vec::new(),
             positions: Vec::new(),
-            sites: Vec::new(),
-            site_fragments: Vec::new(),
+            sites: HeldSites::default(),
             first_site: 0,
             next_site: 0,
             core_start: 0,
@@ -277,8 +273,7 @@ impl NeighbourEvidenceStage {
         }
         self.contig = Some(place.at.contig);
         let site = site_of(&line, self.samples).map(|record| {
-            self.sites.push(record);
-            self.site_fragments.push(fragments);
+            self.sites.push(record, fragments);
             self.next_site += 1;
             self.next_site - 1
         });
@@ -294,7 +289,6 @@ impl NeighbourEvidenceStage {
         self.held.clear();
         self.positions.clear();
         self.sites.clear();
-        self.site_fragments.clear();
         self.first_site = self.next_site;
         self.core_start = 0;
         self.contig = None;
@@ -325,7 +319,7 @@ impl NeighbourEvidenceStage {
                     .and_then(|contig| self.contig_lengths.get(contig.0 as usize).copied());
                 // The window's contig and its first core site's position key its draws: they depend
                 // on the window alone, not on what else the run called.
-                let first_core = &self.sites[core_sites.start - self.first_site];
+                let first_core = &self.sites.records[core_sites.start - self.first_site];
                 let key = window_key(
                     self.contig.map_or(0, |contig| contig.0),
                     first_core.position,
@@ -354,9 +348,10 @@ impl NeighbourEvidenceStage {
                     .collect();
                 let in_window =
                     window_sites.start - self.first_site..window_sites.end - self.first_site;
+                let (records, fragments) = self.sites.window(in_window);
                 let solved = refine_window_with_reads(
-                    &self.sites[in_window.clone()],
-                    &self.site_fragments[in_window],
+                    records,
+                    Some(fragments),
                     core_sites.start - window_sites.start..core_sites.end - window_sites.start,
                     contig_length,
                     &mut self.fits,
@@ -409,7 +404,7 @@ impl NeighbourEvidenceStage {
                         let site = first_site + offset;
                         WrittenRecord {
                             site,
-                            position: self.sites[site - self.first_site].position,
+                            position: self.sites.records[site - self.first_site].position,
                             phase,
                         }
                     })
@@ -465,10 +460,42 @@ impl NeighbourEvidenceStage {
             .count();
         self.held.drain(..keep_from);
         self.positions.drain(..keep_from);
-        self.sites.drain(..sites_dropped);
-        self.site_fragments.drain(..sites_dropped);
+        self.sites.drop_first(sites_dropped);
         self.first_site += sites_dropped;
         self.core_start -= keep_from;
+    }
+}
+
+/// **The held sites' walk records and, beside each, its fragments** (read phase spec §2.7): the
+/// reads the link test reads. Two vectors, so a window hands the solve two slices without a copy,
+/// but changed only together, here, so one cannot drift a site from the other. A line that is no
+/// site keeps none, since the pass phases only sites.
+#[derive(Debug, Default)]
+struct HeldSites {
+    records: Vec<SiteRecord>,
+    fragments: Vec<RecordFragments>,
+}
+
+impl HeldSites {
+    fn push(&mut self, record: SiteRecord, fragments: RecordFragments) {
+        self.records.push(record);
+        self.fragments.push(fragments);
+    }
+
+    fn clear(&mut self) {
+        self.records.clear();
+        self.fragments.clear();
+    }
+
+    /// Forget the first `count` sites.
+    fn drop_first(&mut self, count: usize) {
+        self.records.drain(..count);
+        self.fragments.drain(..count);
+    }
+
+    /// The sites in `range`, as the window solve takes them.
+    fn window(&self, range: std::ops::Range<usize>) -> (&[SiteRecord], &[RecordFragments]) {
+        (&self.records[range.clone()], &self.fragments[range])
     }
 }
 

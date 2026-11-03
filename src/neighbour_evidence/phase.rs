@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use super::model::HaplotypePair;
 use crate::read_phase::fragments::FragmentAllele;
-use crate::read_phase::link::{GQ_MIN, Heterozygote, ReadLink, Relation, score_read_link};
+use crate::read_phase::link::{self, Heterozygote, ReadLink, Relation, score_read_link};
 
 /// **Paths drawn per averaged round besides the round's own** (spec §2.3): with 8, the 64-founder
 /// simulated cohort's links inside blocks were wrong 0.35% of the time, against 1.43% with 4
@@ -342,7 +342,7 @@ impl SamplePhase {
     /// **Reads change the link test between consecutive candidates** (read phase spec §2.7): a kept
     /// population link stands unless the reads contradict it at [`BREAK_MIN`](crate::read_phase::link::BREAK_MIN) or more, which
     /// breaks it; where the population kept no link, reads at [`LINK_MIN`](crate::read_phase::link::LINK_MIN) either way with `GQ` at
-    /// least [`GQ_MIN`] at both ends link the two, within `S`, and when their relation is the
+    /// least [`link::GQ_MIN`] at both ends link the two, within `S`, and when their relation is the
     /// opposite of the two consensus orientations the rest of the block is swapped as a whole.
     /// Then heterozygotes the consensus does not lean on are attached by reads, between two
     /// consecutive candidates — see [`attach_by_reads`].
@@ -399,63 +399,44 @@ impl SamplePhase {
         };
         // Each block's members, each with the orientation it is written in: whether copy 0 carries
         // the lower allele. A block's orientation is the consensus's, swapped as a whole where a
-        // read-made link said the consensus had it the wrong way round.
+        // read-made link said the consensus had it the wrong way round. While blocks are built
+        // every member is a candidate, and the open block's last one is kept beside them.
         let mut blocks: Vec<Vec<Member>> = Vec::new();
+        let mut last_candidate: Option<&Candidate> = None;
         let mut swapped = false;
         for candidate in &candidates {
-            let joined = blocks.last().and_then(|block| {
-                let last = &block[block.len() - 1];
-                let consensus = if last.candidate.towards_lower == candidate.towards_lower {
-                    Relation::Cis
-                } else {
-                    Relation::Trans
-                };
-                let by_reads = reads.link(
-                    last.site(),
-                    last.alleles(),
-                    candidate.site,
-                    candidate.alleles,
-                );
-                let confident = reads.confident(last.site()) && reads.confident(candidate.site);
-                if linked(&last.candidate, candidate) {
-                    if confident && by_reads.relation().is_some() {
-                        counts.population_links_reached += 1;
-                        counts.population_links_contradicted +=
-                            u32::from(by_reads.relation() != Some(consensus));
-                    }
-                    if by_reads.contradicts(consensus) {
-                        counts.population_links_broken += 1;
-                        None
-                    } else {
-                        Some(candidate.towards_lower ^ swapped)
-                    }
-                } else if confident && near(last.site(), candidate.site) {
-                    by_reads.relation().map(|relation| {
-                        counts.links_made_by_reads += 1;
-                        last.towards_lower ^ (relation == Relation::Trans)
+            let joined = blocks
+                .last()
+                .zip(last_candidate)
+                .and_then(|(block, last_candidate)| {
+                    let last = block[block.len() - 1];
+                    let link = link_to_next(
+                        linked(last_candidate, candidate),
+                        near(last.site, candidate.site),
+                        last_candidate,
+                        candidate,
+                        reads,
+                        &mut counts,
+                    )?;
+                    Some(match link {
+                        NextLink::Population => candidate.towards_lower ^ swapped,
+                        NextLink::ByReads(relation) => relation.carry(last.towards_lower),
                     })
-                } else {
-                    None
-                }
-            });
+                });
             match (joined, blocks.last_mut()) {
                 (Some(towards_lower), Some(block)) => {
                     swapped = candidate.towards_lower ^ towards_lower;
-                    block.push(Member {
-                        candidate: *candidate,
-                        towards_lower,
-                    });
+                    block.push(Member::of(candidate, towards_lower));
+                    last_candidate = Some(candidate);
                 }
                 // A broken link between two records at one position: the second stays unphased,
                 // so two blocks never share a PS (spec §2.3).
                 (None, Some(block))
-                    if positions[block[block.len() - 1].site()] == positions[candidate.site] => {}
+                    if positions[block[block.len() - 1].site] == positions[candidate.site] => {}
                 _ => {
                     swapped = false;
-                    blocks.push(vec![Member {
-                        candidate: *candidate,
-                        towards_lower: candidate.towards_lower,
-                    }]);
+                    blocks.push(vec![Member::of(candidate, candidate.towards_lower)]);
+                    last_candidate = Some(candidate);
                 }
             }
         }
@@ -467,39 +448,93 @@ impl SamplePhase {
             segment_bases,
             reads,
         );
-        for block in blocks.iter_mut().filter(|block| block.len() >= 2) {
-            block.sort_by_key(Member::site);
-            let phase_set = positions[block[0].site()];
-            for member in block.iter() {
-                let (a, b) = member.alleles();
-                let (copy_0_allele, copy_1_allele) =
-                    if member.towards_lower { (a, b) } else { (b, a) };
-                out[member.site()] = Some(WrittenPhase {
-                    copy_0_allele,
-                    copy_1_allele,
-                    phase_set,
-                });
-            }
-        }
+        written_phases(&mut blocks, positions, &mut out);
         (out, counts)
     }
 }
 
+/// **How a candidate is linked to the block's last candidate**, if it is.
+enum NextLink {
+    /// The population kept the link and the reads do not contradict it: the candidate takes the
+    /// consensus's orientation, swapped as the block is.
+    Population,
+    /// The population kept no link and the reads made one, with this relation to the last record.
+    ByReads(Relation),
+}
+
+/// **The link test between a block's last candidate and the next** (read phase spec §2.7), from
+/// whether the population kept the link (`population_linked`) and whether the two lie within
+/// the copying length (`near`). A kept population link stands unless the reads contradict it at
+/// [`BREAK_MIN`](crate::read_phase::link::BREAK_MIN) or more; where the population kept none,
+/// reads at [`LINK_MIN`](crate::read_phase::link::LINK_MIN) either way make one, within `S`, with
+/// `GQ` at least [`link::GQ_MIN`] at both ends. Counts what the reads did into `counts`.
+fn link_to_next(
+    population_linked: bool,
+    near: bool,
+    last: &Candidate,
+    next: &Candidate,
+    reads: &SiteReads<'_>,
+    counts: &mut PassReadCounts,
+) -> Option<NextLink> {
+    let consensus = Relation::between(last.towards_lower, next.towards_lower);
+    let by_reads = reads.link(last.site, last.alleles, next.site, next.alleles);
+    let confident = reads.is_confident(last.site) && reads.is_confident(next.site);
+    if population_linked {
+        if confident && by_reads.relation().is_some() {
+            counts.population_links_reached += 1;
+            counts.population_links_contradicted +=
+                u32::from(by_reads.relation() != Some(consensus));
+        }
+        if by_reads.contradicts(consensus) {
+            counts.population_links_broken += 1;
+            None
+        } else {
+            Some(NextLink::Population)
+        }
+    } else if confident && near {
+        let relation = by_reads.relation()?;
+        counts.links_made_by_reads += 1;
+        Some(NextLink::ByReads(relation))
+    } else {
+        None
+    }
+}
+
+/// **The blocks of two or more, written**: each member's alleles in its orientation, copy 0 first,
+/// and the block's phase set, its first record's position.
+fn written_phases(blocks: &mut [Vec<Member>], positions: &[u64], out: &mut [Option<WrittenPhase>]) {
+    for block in blocks.iter_mut().filter(|block| block.len() >= 2) {
+        block.sort_by_key(|member| member.site);
+        let phase_set = positions[block[0].site];
+        for member in block.iter() {
+            let (a, b) = member.alleles;
+            let (copy_0_allele, copy_1_allele) = if member.towards_lower { (a, b) } else { (b, a) };
+            out[member.site] = Some(WrittenPhase {
+                copy_0_allele,
+                copy_1_allele,
+                phase_set,
+            });
+        }
+    }
+}
+
 /// **One record of a block as it will be written**: the heterozygote, and whether copy 0 carries
-/// its lower allele. `candidate.towards_lower` is the consensus's; `towards_lower` the written one.
+/// its lower allele. A candidate's consensus data stay on its [`Candidate`]; a record attached by
+/// reads never had any.
 #[derive(Clone, Copy)]
 struct Member {
-    candidate: Candidate,
+    site: usize,
+    alleles: (usize, usize),
     towards_lower: bool,
 }
 
 impl Member {
-    fn site(&self) -> usize {
-        self.candidate.site
-    }
-
-    fn alleles(&self) -> (usize, usize) {
-        self.candidate.alleles
+    fn of(candidate: &Candidate, towards_lower: bool) -> Self {
+        Self {
+            site: candidate.site,
+            alleles: candidate.alleles,
+            towards_lower,
+        }
     }
 }
 
@@ -510,7 +545,7 @@ impl Member {
 #[derive(Default)]
 pub(crate) struct SiteReads<'a> {
     pub(crate) fragments: Vec<&'a [FragmentAllele]>,
-    pub(crate) qualities: Vec<Option<u32>>,
+    pub(crate) genotype_qualities: Vec<Option<u32>>,
 }
 
 impl SiteReads<'_> {
@@ -537,20 +572,21 @@ impl SiteReads<'_> {
         )
     }
 
-    /// Whether a link may rest on reads at `site`: its written `GQ` is at least [`GQ_MIN`].
-    fn confident(&self, site: usize) -> bool {
-        self.qualities
+    /// Whether a link may rest on reads at `site`: its written `GQ` is at least
+    /// [`link::GQ_MIN`], the floor for a link that rests on reads.
+    fn is_confident(&self, site: usize) -> bool {
+        self.genotype_qualities
             .get(site)
             .copied()
             .flatten()
-            .is_some_and(|quality| quality >= u32::from(GQ_MIN))
+            .is_some_and(|quality| quality >= u32::from(link::GQ_MIN))
     }
 }
 
 /// **What reads did to one sample's phase in one window** (read phase spec §2.7, §2.8).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PassReadCounts {
-    /// Population links reads reached at [`LINK_MIN`](crate::read_phase::link::LINK_MIN) or more, with `GQ` at least [`GQ_MIN`] at
+    /// Population links reads reached at [`LINK_MIN`](crate::read_phase::link::LINK_MIN) or more, with `GQ` at least [`link::GQ_MIN`] at
     /// both ends: the read check's denominator (§2.8).
     pub population_links_reached: u32,
     /// Of those, the ones the reads' relation contradicted: an estimate of how often population
@@ -565,12 +601,21 @@ pub struct PassReadCounts {
 }
 
 impl std::ops::AddAssign for PassReadCounts {
+    /// **Destructured**, so a count added to the struct fails to compile here rather than staying
+    /// zero in every total.
     fn add_assign(&mut self, other: Self) {
-        self.population_links_reached += other.population_links_reached;
-        self.population_links_contradicted += other.population_links_contradicted;
-        self.population_links_broken += other.population_links_broken;
-        self.links_made_by_reads += other.links_made_by_reads;
-        self.records_attached_by_reads += other.records_attached_by_reads;
+        let Self {
+            population_links_reached,
+            population_links_contradicted,
+            population_links_broken,
+            links_made_by_reads,
+            records_attached_by_reads,
+        } = other;
+        self.population_links_reached += population_links_reached;
+        self.population_links_contradicted += population_links_contradicted;
+        self.population_links_broken += population_links_broken;
+        self.links_made_by_reads += links_made_by_reads;
+        self.records_attached_by_reads += records_attached_by_reads;
     }
 }
 
@@ -578,7 +623,7 @@ impl std::ops::AddAssign for PassReadCounts {
 /// returning how many were attached.
 ///
 /// Between two consecutive candidates `p` and `q`, the heterozygotes that are not candidates and
-/// whose written `GQ` is at least [`GQ_MIN`] are taken in order as a chain from `p`, itself at
+/// whose written `GQ` is at least [`link::GQ_MIN`] are taken in order as a chain from `p`, itself at
 /// that `GQ`: each is attached when reads at [`LINK_MIN`](crate::read_phase::link::LINK_MIN) link it to the chain's previous record,
 /// with the reads' relation, and the chain stops at the first that is not. Where `p` and `q` are in
 /// one block, the chain's last record is tested against `q`, and a contradiction at [`BREAK_MIN`](crate::read_phase::link::BREAK_MIN)
@@ -592,66 +637,60 @@ fn attach_by_reads(
     segment_bases: f64,
     reads: &SiteReads<'_>,
 ) -> u32 {
-    // Each member's block, by site.
-    let mut block_of: BTreeMap<usize, (usize, bool)> = BTreeMap::new();
+    // Each member's block and written orientation, by site; and which sites are candidates.
+    let mut block_of: Vec<Option<(usize, bool)>> = vec![None; heterozygotes.len()];
     for (index, block) in blocks.iter().enumerate() {
         for member in block {
-            block_of.insert(member.site(), (index, member.towards_lower));
+            block_of[member.site] = Some((index, member.towards_lower));
         }
     }
-    let is_candidate: std::collections::BTreeSet<usize> =
-        candidates.iter().map(|candidate| candidate.site).collect();
+    let mut is_candidate = vec![false; heterozygotes.len()];
+    for candidate in candidates {
+        is_candidate[candidate.site] = true;
+    }
     let mut attached_count = 0;
     for pair in candidates.windows(2) {
         let (p, q) = (pair[0], pair[1]);
-        let Some(&(block, p_towards_lower)) = block_of.get(&p.site) else {
+        let Some((block, p_towards_lower)) = block_of[p.site] else {
             continue;
         };
-        if !reads.confident(p.site) {
+        if !reads.is_confident(p.site) {
             continue;
         }
         let mut chain: Vec<Member> = Vec::new();
-        let (mut previous_site, mut previous_alleles, mut previous_towards_lower) =
-            (p.site, p.alleles, p_towards_lower);
+        let mut previous = Member {
+            site: p.site,
+            alleles: p.alleles,
+            towards_lower: p_towards_lower,
+        };
         for site in p.site + 1..q.site {
             let Some(alleles) = heterozygotes[site] else {
                 continue;
             };
-            if is_candidate.contains(&site) || !reads.confident(site) {
+            if is_candidate[site] || !reads.is_confident(site) {
                 continue;
             }
-            let near = (positions[site] - positions[previous_site]) as f64 <= segment_bases;
+            let near = (positions[site] - positions[previous.site]) as f64 <= segment_bases;
             let Some(relation) = reads
-                .link(previous_site, previous_alleles, site, alleles)
+                .link(previous.site, previous.alleles, site, alleles)
                 .relation()
                 .filter(|_| near)
             else {
                 break;
             };
-            let towards_lower = previous_towards_lower ^ (relation == Relation::Trans);
-            chain.push(Member {
-                candidate: Candidate {
-                    site,
-                    alleles,
-                    bits: PathBits::default(),
-                    towards_lower,
-                },
-                towards_lower,
-            });
-            (previous_site, previous_alleles, previous_towards_lower) =
-                (site, alleles, towards_lower);
+            previous = Member {
+                site,
+                alleles,
+                towards_lower: relation.carry(previous.towards_lower),
+            };
+            chain.push(previous);
         }
-        if let (Some(last), Some(&(q_block, q_towards_lower))) =
-            (chain.last(), block_of.get(&q.site))
+        if let (Some(last), Some((q_block, q_towards_lower))) = (chain.last(), block_of[q.site])
             && q_block == block
         {
-            let implied = if last.towards_lower == q_towards_lower {
-                Relation::Cis
-            } else {
-                Relation::Trans
-            };
+            let implied = Relation::between(last.towards_lower, q_towards_lower);
             if reads
-                .link(last.site(), last.alleles(), q.site, q.alleles)
+                .link(last.site, last.alleles, q.site, q.alleles)
                 .contradicts(implied)
             {
                 chain.clear();

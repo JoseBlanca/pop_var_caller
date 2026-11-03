@@ -584,7 +584,7 @@ fn site_reads<'a>(
 ) -> SiteReads<'a> {
     SiteReads {
         fragments: fragments.iter().map(Vec::as_slice).collect(),
-        qualities: qualities.to_vec(),
+        genotype_qualities: qualities.to_vec(),
     }
 }
 
@@ -773,5 +773,118 @@ fn a_heterozygote_below_gq_30_is_never_attached_by_reads() {
         );
         assert_eq!(phased[1], None, "GQ {quality:?}");
         assert_eq!(counts.records_attached_by_reads, 0);
+    }
+}
+
+// ------------------------------------------- the limits on when reads may phase (review Mi6)
+
+/// The two-records fixture, phased with these fragments, every site at `GQ` 40 unless `quality`
+/// says otherwise, and the copying length `segment_bases`.
+fn attached_with(
+    at: &[(usize, &[(u32, u16)])],
+    quality: impl Fn(usize) -> Option<u32>,
+    segment_bases: f64,
+) -> (Vec<Option<WrittenPhase>>, PassReadCounts) {
+    let (pairs, phase) = with_two_records_the_consensus_does_not_lean_on();
+    let n = 5;
+    let (fragments, qualities) = read_fixture(n, at, quality);
+    phase.phase_heterozygotes(
+        &pairs,
+        &every_site_heterozygous(n),
+        &positions(n),
+        segment_bases,
+        PathAgreement::ALL,
+        &site_reads(&fragments, &qualities),
+    )
+}
+
+/// **Reads make no link beyond the copying length** (§2.7): sites 1,000 bases apart with `S` 500,
+/// so the population keeps no link; two good fragments say sites 1 and 2 are cis, and still no
+/// link is made. Kills a read-made link without the `S` limit (review mutant p1).
+#[test]
+fn reads_make_no_link_beyond_the_copying_length() {
+    let n = 4;
+    let paths: Vec<Vec<HaplotypePair>> = (0..5).map(|_| path(n, |_| false)).collect();
+    let (pairs, phase) = rounds(n, &paths);
+    let (fragments, qualities) =
+        read_fixture(n, &[(1, &[(7, 0), (8, 0)]), (2, &[(7, 0), (8, 0)])], |_| {
+            Some(40)
+        });
+    let (phased, counts) = phase.phase_heterozygotes(
+        &pairs,
+        &every_site_heterozygous(n),
+        &positions(n),
+        500.0,
+        PathAgreement::ALL,
+        &site_reads(&fragments, &qualities),
+    );
+    assert_eq!(written(&phased), vec![None; n]);
+    assert_eq!(counts.links_made_by_reads, 0);
+}
+
+/// **A heterozygote beyond the copying length is not attached** (§2.7): with `S` 500, two good
+/// fragments over sites 0 and 1, 1,000 bases apart, attach nothing. Kills attaching without the
+/// `S` limit (mutant p2).
+#[test]
+fn a_heterozygote_beyond_the_copying_length_is_not_attached() {
+    let (phased, counts) = attached_with(
+        &[(0, &[(1, 1), (2, 1)]), (1, &[(1, 1), (2, 1)])],
+        |_| Some(40),
+        500.0,
+    );
+    assert_eq!(phased[1], None);
+    assert_eq!(counts.records_attached_by_reads, 0);
+}
+
+/// **A chain stops at the first heterozygote reads do not link** (§2.7): fragments 1 and 2 cover
+/// sites 0 and 2 and not site 1, so the chain from 0 stops at 1 and site 2 is not attached, though
+/// the reads link it to 0. Kills the chain stepping over a site it could not link (mutant p3).
+#[test]
+fn a_chain_stops_at_the_first_heterozygote_reads_do_not_link() {
+    let (phased, counts) = attached_with(
+        &[(0, &[(1, 1), (2, 1)]), (2, &[(1, 1), (2, 1)])],
+        |_| Some(40),
+        300_000.0,
+    );
+    assert_eq!(written(&phased)[1..3], [None, None]);
+    assert_eq!(counts.records_attached_by_reads, 0);
+}
+
+/// **No chain grows from a candidate below `GQ` 30** (§2.7): site 0 at `GQ` 29, two good
+/// fragments over sites 0 and 1; site 1 is not attached. Kills attaching from `p` without its
+/// `GQ` check (mutant p4) — every earlier test lowered only the attached site's `GQ`.
+#[test]
+fn no_chain_grows_from_a_candidate_below_gq_30() {
+    let (phased, counts) = attached_with(
+        &[(0, &[(1, 1), (2, 1)]), (1, &[(1, 1), (2, 1)])],
+        |site| Some(if site == 0 { 29 } else { 40 }),
+        300_000.0,
+    );
+    assert_eq!(phased[1], None);
+    assert_eq!(counts.records_attached_by_reads, 0);
+}
+
+/// **A chain is tested against `q` only where `p` and `q` share a block** (§2.7): fragments 11 and
+/// 12 say sites 0 and 3 are trans where the consensus has them cis, so that population link breaks
+/// and 0 and 3 are in two blocks. The chain from 0 — site 1 cis with 0, site 2 trans with 1 — is
+/// then kept whatever the reads say between 2 and 3, for both values of `q`'s allele on fragments 9
+/// and 10. Kills testing the chain against a `q` in another block (mutant p6), which drops it for
+/// one of the two.
+#[test]
+fn a_chain_is_not_tested_against_a_candidate_in_another_block() {
+    for q in [0, 1] {
+        let at: &[(usize, &[(u32, u16)])] = &[
+            (0, &[(1, 1), (2, 1), (11, 0), (12, 0)]),
+            (1, &[(1, 1), (2, 1), (5, 1), (6, 1)]),
+            (2, &[(5, 0), (6, 0), (9, 0), (10, 0)]),
+            (3, &[(9, q), (10, q), (11, 1), (12, 1)]),
+        ];
+        let (phased, counts) = attached_with(at, |_| Some(40), 300_000.0);
+        assert_eq!(counts.population_links_broken, 1, "q {q}");
+        assert!(
+            phased[1].is_some() && phased[2].is_some(),
+            "q {q}: {phased:?}"
+        );
+        assert_eq!(counts.records_attached_by_reads, 2, "q {q}");
     }
 }

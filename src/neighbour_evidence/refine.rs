@@ -562,7 +562,7 @@ pub fn refine_window_joined(
 ) -> WindowRefinement {
     refine_window_with_reads(
         records,
-        &[],
+        None,
         core,
         contig_length,
         fits,
@@ -574,17 +574,18 @@ pub fn refine_window_joined(
 }
 
 /// **[`refine_window_joined`], its phase using the reads** (read phase spec §2.7): `fragments`
-/// holds each record's fragments, one entry a record of `records`, or is empty for a window
-/// without them, which phases as the population alone does.
+/// holds each record's fragments, one entry a record of `records`, or is `None` for a window
+/// without reads, which phases as the population alone does. An empty list is not "no reads":
+/// it is a list of the wrong length, and refused.
 ///
 /// # Panics
 ///
-/// As [`refine_window_joined`]; and if `fragments` is neither empty nor one entry a record.
+/// As [`refine_window_joined`]; and if `fragments` is given and not one entry a record.
 #[allow(clippy::too_many_arguments)] // the window, its reads, the run's settings, what came before
 #[must_use]
 pub fn refine_window_with_reads(
     records: &[SiteRecord],
-    fragments: &[RecordFragments],
+    fragments: Option<&[RecordFragments]>,
     core: Range<usize>,
     contig_length: Option<u64>,
     fits: &mut [SampleFit],
@@ -594,9 +595,10 @@ pub fn refine_window_with_reads(
     last_blocks: &[Option<LastBlock>],
 ) -> WindowRefinement {
     assert!(
-        fragments.is_empty() || fragments.len() == records.len(),
+        fragments.is_none_or(|fragments| fragments.len() == records.len()),
         "one fragment list a record, or none"
     );
+    let fragments = fragments.unwrap_or(&[]);
     assert!(
         records
             .windows(2)
@@ -983,7 +985,7 @@ fn final_solution(
     // §2.5). From the posterior over every genotype: the writer renormalises over the genotypes
     // of the alleles some sample keeps, which can only raise it, so a link this allows has the
     // written `GQ` at least this at both ends.
-    let mut qualities: Vec<Option<u32>> = vec![None; layout.sites()];
+    let mut genotype_qualities: Vec<Option<u32>> = vec![None; layout.sites()];
     for (&site, sum) in layout.core_sites.iter().zip(&state.sums) {
         let index = layout.record_of_site[site];
         let record = &records[index];
@@ -1043,7 +1045,7 @@ fn final_solution(
             let (a, b) = pairs.of(record.allele_count)[best.0 as usize];
             if a != b {
                 heterozygotes[site] = Some((a, b));
-                qualities[site] = Some(written_genotype_quality(quality));
+                genotype_qualities[site] = Some(written_genotype_quality(quality));
             }
         }
         solution
@@ -1085,7 +1087,7 @@ fn final_solution(
                             .map_or(&[][..], |fragments| fragments.of_sample(sample as u32))
                     })
                     .collect(),
-                qualities,
+                genotype_qualities,
             };
             let (phased, read_counts) = phase.phase_heterozygotes(
                 pairs_layout,

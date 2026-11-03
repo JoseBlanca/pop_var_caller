@@ -542,3 +542,142 @@ fn fragments_a_line_carries_reach_the_pass_and_break_a_link_they_contradict() {
         first_after
     );
 }
+
+/// Fragments over every heterozygous column of the join cohort: fragments `2k` and `2k + 1` cover
+/// records `k` and `k + 1`; about one in five shows the upper allele, with error Phreds from 10 to
+/// 49, so links of both signs and of every strength reach the link test.
+fn mixed_fragments(
+    cohort: &crate::neighbour_evidence::test_cohort::TestCohort,
+) -> impl Fn(usize) -> RecordFragments + Sync {
+    let heterozygotes: Vec<Vec<Option<(u16, u16)>>> = cohort
+        .lines
+        .iter()
+        .map(|line| {
+            line.split('\t')
+                .skip(9)
+                .map(|column| {
+                    let (x, y) =
+                        crate::vcf::line_fields::parse_genotype(column.split(':').next()?)?;
+                    (x != y).then_some((x as u16, y as u16))
+                })
+                .collect()
+        })
+        .collect();
+    move |index: usize| {
+        let mut entries = Vec::new();
+        for (sample, heterozygote) in heterozygotes[index].iter().enumerate() {
+            let Some((lower, upper)) = *heterozygote else {
+                continue;
+            };
+            for k in [Some(index), index.checked_sub(1)].into_iter().flatten() {
+                for fragment in [2 * k, 2 * k + 1] {
+                    let allele = if (sample + index + fragment).is_multiple_of(5) {
+                        upper
+                    } else {
+                        lower
+                    };
+                    entries.push(crate::read_phase::fragments::FragmentAllele {
+                        sample: sample as u32,
+                        fragment: fragment as u32,
+                        allele,
+                        error_phred: (10 + (fragment * 7 + sample) % 40) as u8,
+                    });
+                }
+            }
+        }
+        RecordFragments::from_entries(entries)
+    }
+}
+
+/// **With reads, the pass writes the same bytes at any thread count** (review Mi5): every
+/// heterozygous column carries fragments of both signs, the stage runs in pools of one and eight
+/// threads, and the output is identical — and differs from the output without reads, so the read
+/// path is what ran.
+#[test]
+fn the_pass_with_reads_writes_the_same_bytes_at_any_thread_count() {
+    let cohort = join_cohort();
+    let fragments = mixed_fragments(&cohort);
+    let at = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a pool")
+            .install(|| join_stage_with_reads(&cohort, &fragments))
+    };
+    let one = at(1);
+    assert_ne!(
+        one,
+        join_stage_with_reads(&cohort, |_| RecordFragments::default()),
+        "the fragments reach the link test"
+    );
+    assert_eq!(one, at(8));
+}
+
+/// **A column reads newly phase has `GQ` 30 or more** (read phase spec §2.5; review r1): the link
+/// test's `GQ` comes from the refined posterior, which the writer's `GQ` can only raise. With
+/// fragments over every heterozygous column, every column written phased with the reads and
+/// unphased without them is at `GQ` 30 or more. The cohort has phased-by-population heterozygotes
+/// below 30 next to ones the reads link, so a link test that ignored `GQ` would phase some.
+#[test]
+fn a_column_reads_newly_phase_has_gq_30_or_more() {
+    let cohort = join_cohort();
+    let without = join_stage_with_reads(&cohort, |_| RecordFragments::default());
+    let with = join_stage_with_reads(&cohort, mixed_fragments(&cohort));
+    // The cohort's lines carry `GP` and no `GQ` key, so the written `GQ` is read from `GP` as the
+    // pass computes it. The written `GP` is renormalised, which can only raise it, so this is at
+    // least the `GQ` the link test saw.
+    let genotype_quality = |output: &[(RecordPlace, Vec<u8>)], sample: usize, index: usize| {
+        output.iter().find_map(|(place, line)| {
+            (((place.at.position.get() - 1) / 500) as usize == index).then(|| {
+                let text = String::from_utf8_lossy(line).into_owned();
+                let columns: Vec<&str> = text.split('\t').collect();
+                let at = columns[8].split(':').position(|key| key == "GP")?;
+                let posterior: Vec<f64> = columns[9 + sample]
+                    .split(':')
+                    .nth(at)?
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .ok()?;
+                // Renormalised, as the written values are rounded.
+                let total: f64 = posterior.iter().sum();
+                let posterior: Vec<f64> = posterior.iter().map(|value| value / total).collect();
+                let (_, quality) = crate::calling::quality::score_best_genotype(&posterior);
+                Some(crate::vcf::encode::written_genotype_quality(quality))
+            })?
+        })
+    };
+    let (mut newly_phased, mut low_quality_heterozygotes) = (0, 0);
+    for sample in 0..20 {
+        let before = phase_of(&without, sample);
+        for (index, genotype, _) in phase_of(&with, sample) {
+            let quality = genotype_quality(&with, sample, index);
+            let heterozygote = genotype
+                .split(['/', '|'])
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair[0] != pair[1]);
+            if heterozygote && quality.is_some_and(|quality| quality < 30) {
+                low_quality_heterozygotes += 1;
+            }
+            let was_phased = before
+                .iter()
+                .any(|(at, earlier, _)| *at == index && earlier.contains('|'));
+            if genotype.contains('|') && !was_phased {
+                newly_phased += 1;
+                assert!(
+                    quality.is_some_and(|quality| quality >= 30),
+                    "sample {sample}, record {index}: phased by reads at GQ {quality:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        newly_phased > 0,
+        "the reads phase something the population did not"
+    );
+    assert!(
+        low_quality_heterozygotes > 0,
+        "the cohort has heterozygotes below GQ 30"
+    );
+}
