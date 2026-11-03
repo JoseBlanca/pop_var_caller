@@ -838,6 +838,7 @@ impl AlignedFilesVariantCaller {
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
             // Then the fragment keeper (read phase spec §2.4), as in psp mode.
             let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
+            let mut kept = Vec::new();
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
@@ -845,7 +846,8 @@ impl AlignedFilesVariantCaller {
                 &|record, _| Ok::<_, E>(record),
                 &mut |record: VcfRecord, windows| {
                     for (record, windows) in gathering.accept(record, windows.to_vec()) {
-                        for (record, windows, fragments) in keeper.accept(record, windows) {
+                        keeper.accept(record, windows, &mut kept);
+                        for (record, windows, fragments) in kept.drain(..) {
                             hand_over(&record, &windows, fragments)?;
                         }
                     }
@@ -854,9 +856,9 @@ impl AlignedFilesVariantCaller {
             )?;
             let mut released = Vec::new();
             for (record, windows) in gathering.finish() {
-                released.extend(keeper.accept(record, windows));
+                keeper.accept(record, windows, &mut released);
             }
-            released.extend(keeper.finish());
+            keeper.finish(&mut released);
             crate::run::fragment_keeper::log_counts(keeper.counts());
             for (record, windows, fragments) in released {
                 hand_over(&record, &windows, fragments).map_err(|source| {

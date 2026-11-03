@@ -48,37 +48,58 @@ pub fn log_counts(counts: KeeperCounts) {
 /// What the keeper remembers of one read.
 #[derive(Debug, Clone, Copy)]
 struct ReadSeen {
-    /// The position of the record its first read allele was at.
-    first_at: u64,
-    /// Records within [`READ_REACH`] of `first_at` it has a read allele at, the first included.
+    /// The written position of the record its first read allele was at.
+    first_position: u64,
+    /// Records within [`READ_REACH`] of `first_position` it has a read allele at, the first
+    /// included.
     records_within_reach: u32,
     fragment: u32,
+}
+
+/// One read in the order the keeper first saw it.
+#[derive(Debug, Clone, Copy)]
+struct FirstSeen {
+    position: u64,
+    read: ChainId,
 }
 
 /// One sample's reads seen on the current contig.
 #[derive(Debug, Default)]
 struct SampleReads {
     by_read: AHashMap<ChainId, ReadSeen>,
-    /// The same reads in the order they were first seen, which is the order of their `first_at`,
-    /// so forgetting pops from the front rather than scanning the map.
-    first_seen: VecDeque<(u64, ChainId)>,
+    /// The same reads in the order they were first seen, which is the order of their
+    /// `first_position`, so forgetting pops from the front rather than scanning the map.
+    first_seen: VecDeque<FirstSeen>,
     next_fragment: u32,
+}
+
+/// One read allele of a held record, still within reach of its read's first.
+#[derive(Debug, Clone, Copy)]
+struct HeldReadAllele {
+    sample: u32,
+    read: ChainId,
+    allele: u16,
+    error_phred: u8,
 }
 
 /// One record waiting for the reads after it, with its read alleles taken off it.
 #[derive(Debug)]
-struct Held<P> {
+struct HeldRecord<P> {
     record: VcfRecord,
     payload: P,
-    at: u64,
-    /// The record's read alleles still within reach of their read's first, as `(sample, read,
-    /// allele, Phred)`.
-    read_alleles: Vec<(u32, ChainId, u16, u8)>,
+    /// The record's written position, the writer's order key.
+    position: u64,
+    read_alleles: Vec<HeldReadAllele>,
 }
 
 /// **The fragment keeper** (§2.4). Records go in in the writer's order; each comes out once the
 /// newest record is more than [`READ_REACH`] bases past it, or its contig ends, in the order it
 /// went in, with its read alleles taken off it and handed back as [`RecordFragments`].
+///
+/// **Positions are written positions** — `POS` after the padding rule moved it — because that is
+/// what the writer orders records by. A record's region start is not: a generic record padded on
+/// the left starts one base after its written `POS`, so it can precede an STR record that starts
+/// at that `POS` and is written there too, the one tie the writer admits.
 ///
 /// **The rule.** A read allele is kept when its read has a read allele at another record no more
 /// than `R` bases from the read's first one. One more than `R` from it is dropped and counted.
@@ -94,7 +115,7 @@ struct Held<P> {
 /// `P` is whatever travels beside each record — the driver's coverage windows.
 #[derive(Debug)]
 pub struct FragmentKeeper<P> {
-    held: VecDeque<Held<P>>,
+    held: VecDeque<HeldRecord<P>>,
     samples: Vec<SampleReads>,
     contig: Option<ContigId>,
     counts: KeeperCounts,
@@ -111,47 +132,47 @@ impl<P> Default for FragmentKeeper<P> {
     }
 }
 
+/// One record out of the keeper: the record, what travelled beside it, and its fragments.
+pub type KeptRecord<P> = (VcfRecord, P, RecordFragments);
+
 impl<P> FragmentKeeper<P> {
-    /// **Take one record**, handing back every held record it releases, in the order they came.
+    /// **Take one record**, appending to `released` every held record it releases, in the order
+    /// they came.
     ///
     /// # Panics
     ///
-    /// If a record starts before the one handed in before it on the same contig: the writer's
-    /// order is non-decreasing, so that is a wiring defect.
-    pub fn accept(
-        &mut self,
-        mut record: VcfRecord,
-        payload: P,
-    ) -> Vec<(VcfRecord, P, RecordFragments)> {
-        let region = record.region();
-        let at = region.start.get();
-        let mut released = Vec::new();
-        if self.contig != Some(region.contig) {
-            self.release_all_into(&mut released);
+    /// If a record is written before the one handed in before it on the same contig: the writer's
+    /// order is non-decreasing in written position, so that is a wiring defect.
+    pub fn accept(&mut self, mut record: VcfRecord, payload: P, released: &mut Vec<KeptRecord<P>>) {
+        let contig = record.region().contig;
+        let position = crate::vcf::encode::written_position(&record);
+        if self.contig != Some(contig) {
+            self.release_all_into(released);
             for sample in &mut self.samples {
                 sample.by_read.clear();
                 sample.first_seen.clear();
                 sample.next_fragment = 0;
             }
-            self.contig = Some(region.contig);
+            self.contig = Some(contig);
         }
         if let Some(newest) = self.held.back() {
             assert!(
-                newest.at <= at,
+                newest.position <= position,
                 "records out of order: {} after {}",
-                at,
-                newest.at
+                position,
+                newest.position
             );
         }
-        while self
-            .held
-            .front()
-            .is_some_and(|oldest| at - oldest.at > READ_REACH)
+        while let Some(oldest) = self.held.front()
+            && position - oldest.position > READ_REACH
         {
+            // PANIC-FREE: the loop condition just saw a front.
             let oldest = self.held.pop_front().expect("a front, just seen");
             released.push(self.release(oldest));
         }
-        self.forget_reads_out_of_reach(self.held.front().map_or(at, |oldest| oldest.at));
+        self.forget_reads_out_of_reach(
+            self.held.front().map_or(position, |oldest| oldest.position),
+        );
 
         let read_alleles = record.replace_read_alleles(Default::default());
         let mut within_reach = Vec::with_capacity(read_alleles.len());
@@ -172,39 +193,38 @@ impl<P> FragmentKeeper<P> {
             let seen = reads.by_read.entry(read).or_insert_with(|| {
                 let fragment = *next_fragment;
                 *next_fragment += 1;
-                first_seen.push_back((at, read));
+                first_seen.push_back(FirstSeen { position, read });
                 ReadSeen {
-                    first_at: at,
+                    first_position: position,
                     records_within_reach: 0,
                     fragment,
                 }
             });
-            if at - seen.first_at > READ_REACH {
+            if position - seen.first_position > READ_REACH {
                 self.counts.read_alleles_beyond_reach += 1;
                 continue;
             }
             seen.records_within_reach += 1;
-            within_reach.push((
-                entry.sample,
+            within_reach.push(HeldReadAllele {
+                sample: entry.sample,
                 read,
-                u16::try_from(allele).expect("a record holds fewer than 65,536 alleles"),
+                // PANIC-FREE: the allele indexes the record's alleles, which calling numbers as
+                // `AlleleId`, a `u16`.
+                allele: u16::try_from(allele).expect("a record holds fewer than 65,536 alleles"),
                 error_phred,
-            ));
+            });
         }
-        self.held.push_back(Held {
+        self.held.push_back(HeldRecord {
             record,
             payload,
-            at,
+            position,
             read_alleles: within_reach,
         });
-        released
     }
 
-    /// **Release everything held**, at the end of the run.
-    pub fn finish(&mut self) -> Vec<(VcfRecord, P, RecordFragments)> {
-        let mut released = Vec::new();
-        self.release_all_into(&mut released);
-        released
+    /// **Release everything held**, at the end of the run, into `released`.
+    pub fn finish(&mut self, released: &mut Vec<KeptRecord<P>>) {
+        self.release_all_into(released);
     }
 
     /// What the keeper has done so far.
@@ -213,7 +233,7 @@ impl<P> FragmentKeeper<P> {
         self.counts
     }
 
-    fn release_all_into(&mut self, released: &mut Vec<(VcfRecord, P, RecordFragments)>) {
+    fn release_all_into(&mut self, released: &mut Vec<KeptRecord<P>>) {
         while let Some(oldest) = self.held.pop_front() {
             released.push(self.release(oldest));
         }
@@ -221,10 +241,22 @@ impl<P> FragmentKeeper<P> {
 
     /// One record out: every record within reach of each of its reads' first ones has arrived,
     /// since the newest is more than `R` past this one, which is at or after the read's first.
-    fn release(&mut self, held: Held<P>) -> (VcfRecord, P, RecordFragments) {
+    fn release(&mut self, held: HeldRecord<P>) -> KeptRecord<P> {
         let mut entries = Vec::new();
-        for (sample, read, allele, error_phred) in held.read_alleles {
-            let seen = self.samples[sample as usize].by_read[&read];
+        for HeldReadAllele {
+            sample,
+            read,
+            allele,
+            error_phred,
+        } in held.read_alleles
+        {
+            // A held read allele was kept within reach, `position − first_position ≤ R`, and a
+            // read is forgotten only once `first_position + R` is behind the oldest held record,
+            // which is this one or later; so a held record's reads are never forgotten.
+            let Some(seen) = self.samples[sample as usize].by_read.get(&read) else {
+                // UNREACHABLE: by the forgetting rule just stated.
+                unreachable!("a held record's read {read} of sample {sample} was forgotten");
+            };
             if seen.records_within_reach >= 2 {
                 self.counts.read_alleles_kept += 1;
                 entries.push(FragmentAllele {
@@ -245,13 +277,13 @@ impl<P> FragmentKeeper<P> {
     }
 
     /// Forget the reads none of whose read alleles can still be kept: their first record lies more
-    /// than `R` behind `oldest`, the oldest record held (or the one arriving, when none is), so
-    /// every read allele they have at a held record was already dropped as beyond reach, and every
-    /// later one would be too.
-    fn forget_reads_out_of_reach(&mut self, oldest: u64) {
+    /// than `R` behind `oldest_position`, the oldest record held (or the one arriving, when none
+    /// is), so every read allele they have at a held record was already dropped as beyond reach,
+    /// and every later one would be too.
+    fn forget_reads_out_of_reach(&mut self, oldest_position: u64) {
         for sample in &mut self.samples {
-            while let Some(&(first_at, read)) = sample.first_seen.front()
-                && first_at + READ_REACH < oldest
+            while let Some(&FirstSeen { position, read }) = sample.first_seen.front()
+                && position + READ_REACH < oldest_position
             {
                 sample.first_seen.pop_front();
                 sample.by_read.remove(&read);
