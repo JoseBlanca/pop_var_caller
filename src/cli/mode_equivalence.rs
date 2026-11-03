@@ -82,7 +82,8 @@ mod tests {
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
     use crate::cli::test_fixtures::{
         AVaryingCohort, FIRST_SAMPLES_SECOND_SUBSTITUTION, FIRST_SAMPLES_SUBSTITUTION, SATELLITE,
-        SECOND_SAMPLES_SUBSTITUTION, TRACT, VARYING_CONTIG, a_varying_cohort_on_disk,
+        SECOND_SAMPLES_SUBSTITUTION, TRACT, VARYING_CONTIG,
+        a_deep_varying_cohort_with_phased_pairs_on_disk, a_varying_cohort_on_disk,
         a_varying_cohort_with_a_phased_pair_on_disk, a_varying_cohort_with_a_satellite_on_disk,
     };
     use crate::region_typing::segment_criteria::{
@@ -460,13 +461,18 @@ mod tests {
 
     /// Sample `one`'s `GT` and `PS` at each record, by `POS`.
     fn first_samples_phase(lines: &[String]) -> Vec<(u64, String, String)> {
+        samples_phase(lines, 0)
+    }
+
+    /// One sample's `GT` and `PS` at each record, by `POS`.
+    fn samples_phase(lines: &[String], sample: usize) -> Vec<(u64, String, String)> {
         lines
             .iter()
             .filter(|line| !line.starts_with('#'))
             .map(|line| {
                 let columns: Vec<&str> = line.split('\t').collect();
                 let keys: Vec<&str> = columns[8].split(':').collect();
-                let values: Vec<&str> = columns[9].split(':').collect();
+                let values: Vec<&str> = columns[9 + sample].split(':').collect();
                 let value_of = |key: &str| {
                     keys.iter()
                         .position(|name| *name == key)
@@ -537,6 +543,77 @@ mod tests {
             from_alignments,
             "the filter, flagging nothing, leaves the phase as it was: the fragments reach pass \
              three through the spill",
+        );
+    }
+
+    /// **With more than 32 reads a sample at the linked records, so the read cap decides which
+    /// reads phase, both routes write one VCF, and a `--regions` run over one walked region writes
+    /// that region's records as the whole-contig run does** (read phase spec §2.4, §7.5).
+    ///
+    /// The second sample's pair, at 456 and 496, lies in the walked region after the repeat tract:
+    /// a whole-contig run numbers its reads after every read of the first region, a `--regions` run
+    /// over that region alone from zero. The cap keys on a read's rank in its region, the same in
+    /// both. Every read here carries the pair in cis, so this pins the route and the numbering
+    /// the cap sees end to end; which reads the cap keeps is pinned by
+    /// `read_phase::capture`'s tests and the walker's rank oracle.
+    #[test]
+    fn with_the_read_cap_binding_both_routes_and_a_regions_run_write_one_phase() {
+        let cohort = a_deep_varying_cohort_with_phased_pairs_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+        let whole = called_from_alignments(&cohort, &output);
+
+        let at = |lines: &[String], sample: usize, position: u64| {
+            samples_phase(lines, sample)
+                .into_iter()
+                .find(|(pos, _, _)| *pos == position)
+                .map(|(_, genotype, phase_set)| (genotype, phase_set))
+        };
+        let pair =
+            |genotype: &str, phase_set: &str| Some((genotype.to_owned(), phase_set.to_owned()));
+        assert_eq!(at(&whole, 0, 121), pair("0|1", "121"));
+        assert_eq!(at(&whole, 0, 161), pair("0|1", "121"));
+        assert_eq!(at(&whole, 1, 456), pair("0|1", "456"));
+        assert_eq!(at(&whole, 1, 496), pair("0|1", "456"));
+        let depth_at_121: u32 = whole
+            .iter()
+            .find(|line| line.starts_with("chrV\t121\t"))
+            .and_then(|line| line.split('\t').nth(9))
+            .and_then(|column| column.split(':').nth(2))
+            .and_then(|depth| depth.parse().ok())
+            .expect("a DP at 121");
+        assert!(depth_at_121 > 32, "the cap must bind: DP {depth_at_121}");
+
+        let from_psps = called_from_psps(&cohort, &output, &["one", "two"]);
+        assert_eq!(
+            from_psps, whole,
+            "both routes write one VCF with the cap binding"
+        );
+
+        // The walked region after the tract alone: 221 to 600, 1-based.
+        let bed = cohort.directory.path().join("after_the_tract.bed");
+        std::fs::write(&bed, format!("chrV\t{}\t600\n", TRACT.1)).expect("the BED writes");
+        let mut regions = alignments_args(&cohort, &output);
+        regions.regions = Some(bed);
+        run_call_from_alignments(&regions).expect("the region calls");
+        let in_region = |lines: &[String]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|line| !line.starts_with('#'))
+                .filter(|line| {
+                    line.split('\t')
+                        .nth(1)
+                        .and_then(|position| position.parse::<usize>().ok())
+                        .is_some_and(|position| position > TRACT.1)
+                })
+                .cloned()
+                .collect()
+        };
+        let alone = comparable(&output);
+        assert_eq!(at(&alone, 1, 456), pair("0|1", "456"));
+        assert_eq!(
+            in_region(&alone),
+            in_region(&whole),
+            "the region's records, phase included, as the whole-contig run writes them"
         );
     }
 

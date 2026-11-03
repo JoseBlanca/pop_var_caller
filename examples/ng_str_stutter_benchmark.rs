@@ -123,6 +123,7 @@
 //! | `founders` | 0 | how many founder haplotypes the cohort descends from (spec §12); `0` draws every site's genotype on its own, byte for byte as before |
 //! | `segment_kb` | 300 | with founders: the mean stretch one copy copies from one founder |
 //! | `run_kb` | 2000 | with founders: the mean autozygous run |
+//! | `snp_rate` | 0.001 | SNPs away from the segments, per base; a dense setting such as 0.01 gives tomato-like short gaps between heterozygotes, for read-backed phase (read phase spec §7.3) |
 //! | `threads` | all | how many samples are sequenced at once |
 //! | `seed` | 20261009 | the draw's seed; the whole output is a function of it and the rest |
 //!
@@ -185,7 +186,7 @@ const HIGHEST_STUTTER_SHARE: f64 = 0.95;
 /// The standard deviation of a library's multiplier on the log scale (spec §3.3).
 const LIBRARY_MULTIPLIER_LOG_SD: f64 = 0.4;
 
-/// Variants away from the segments, per base (spec §4.2).
+/// SNPs away from the segments, per base, unless `snp_rate` says otherwise (spec §4.2).
 const SNP_RATE: f64 = 1e-3;
 const INDEL_RATE: f64 = 1e-4;
 
@@ -599,6 +600,8 @@ struct Settings {
     run_kb: f64,
     threads: usize,
     seed: u64,
+    /// SNPs away from the segments, per base.
+    snp_rate: f64,
 }
 
 impl Default for Settings {
@@ -620,6 +623,7 @@ impl Default for Settings {
             run_kb: 2_000.0,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             seed: 20_261_009,
+            snp_rate: SNP_RATE,
         }
     }
 }
@@ -655,6 +659,7 @@ impl Settings {
                 "run_kb" => settings.run_kb = number()?,
                 "threads" => settings.threads = number()? as usize,
                 "seed" => settings.seed = number()? as u64,
+                "snp_rate" => settings.snp_rate = number()?,
                 other => return Err(format!("unknown setting `{other}`")),
             }
         }
@@ -666,6 +671,12 @@ impl Settings {
         }
         if !(0.0..=1.0).contains(&settings.inbreeding) {
             return Err("inbreeding must be between 0 and 1".to_string());
+        }
+        if !(settings.snp_rate > 0.0 && settings.snp_rate < 0.1) {
+            return Err(format!(
+                "snp_rate must be above 0 and below 0.1, got {}",
+                settings.snp_rate
+            ));
         }
         if settings.samples == 0 || settings.contigs == 0 || settings.threads == 0 {
             return Err("samples, contigs and threads must all be at least one".to_string());
@@ -2305,18 +2316,22 @@ impl GenericVariant {
     }
 }
 
-fn draw_generic_variants(contigs: &[Contig], draw: &mut Draw) -> Vec<GenericVariant> {
+fn draw_generic_variants(
+    contigs: &[Contig],
+    snp_rate: f64,
+    draw: &mut Draw,
+) -> Vec<GenericVariant> {
     let mut variants = Vec::new();
     for (contig_index, contig) in contigs.iter().enumerate() {
         for &(start, end) in &contig.ordinary {
             let mut position = start + GENERIC_VARIANT_SPACING;
             loop {
-                position += (draw.exponential() / (SNP_RATE + INDEL_RATE)) as usize;
+                position += (draw.exponential() / (snp_rate + INDEL_RATE)) as usize;
                 if position + LONGEST_GENERIC_INDEL + GENERIC_VARIANT_SPACING >= end {
                     break;
                 }
                 let bases = &contig.bases;
-                let (reference, alternative) = if draw.unit() < INDEL_RATE / (SNP_RATE + INDEL_RATE)
+                let (reference, alternative) = if draw.unit() < INDEL_RATE / (snp_rate + INDEL_RATE)
                 {
                     let mut len = 1;
                     while len < LONGEST_GENERIC_INDEL && draw.unit() < 0.5 {
@@ -2561,7 +2576,7 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
         let window = &contigs[bundle.contig].bases[bundle.window_start()..bundle.window_end()];
         bundle.alleles = draw_bundle_alleles(bundle, window, &mut bundle_draw);
     }
-    let generic = draw_generic_variants(&contigs, draw);
+    let generic = draw_generic_variants(&contigs, settings.snp_rate, draw);
     let samples: Vec<String> = (0..settings.samples)
         .map(|index| format!("sim{index:03}"))
         .collect();

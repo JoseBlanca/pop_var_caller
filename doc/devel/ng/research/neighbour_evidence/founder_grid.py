@@ -4,6 +4,7 @@ cell, called by pvc with the pass off and on, scored against the simulator's tru
 usage: uv run python founder_grid.py <work dir> <cell> [<cell> ...]
        uv run python founder_grid.py --rescore <cell dir> [<cell dir> ...]
        a cell is founders,inbreeding,samples,depth  e.g. 16,0.95,50,3
+       or founders,inbreeding,samples,depth,snp_rate  e.g. 64,0,50,3,0.01, named f64_F0_n50_d3_s0.01
        a mixed-depth cell's depth is shallow+deepxcount  e.g. 16,0.95,50,3+30x10: the first ten
        samples (sim000 to sim009) at 30x, the rest at 3x
 
@@ -104,8 +105,9 @@ def score(cell_dir):
 
 
 def cell(work, spec):
-    founders, inbreeding, samples, depth = spec.split(',')
-    name = f'f{founders}_F{inbreeding}_n{samples}_d{depth}'
+    founders, inbreeding, samples, depth, *rest = spec.split(',')
+    snp_rate = rest[0] if rest else None
+    name = f'f{founders}_F{inbreeding}_n{samples}_d{depth}' + (f'_s{snp_rate}' if snp_rate else '')
     d = os.path.join(work, name)
     if os.path.exists(os.path.join(d, 'score.json')):
         return
@@ -120,7 +122,8 @@ def cell(work, spec):
     began = time.time()
     if not os.path.exists(os.path.join(d, 'sim', 'truth.vcf.gz')):
         run(f'{SIMULATOR} {d}/sim samples={samples} depth={depth} {deep}founders={founders} '
-            f'inbreeding={inbreeding} {GENOME} design=pcr_free threads={THREADS} seed=20261102', log)
+            f'inbreeding={inbreeding} {GENOME} design=pcr_free threads={THREADS} seed=20261102'
+            + (f' snp_rate={snp_rate}' if snp_rate else ''), log)
         run(f'samtools faidx {d}/sim/reference.fa && bgzip -f {d}/sim/truth.vcf', log)
     timings['simulate'] = time.time() - began
     names = [f'sim{i:03d}' for i in range(int(samples))]
