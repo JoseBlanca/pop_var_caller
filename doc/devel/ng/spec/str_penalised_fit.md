@@ -851,11 +851,26 @@ curves.
   strength holds it. Give each locus its own slip rate, scattered around its class's rate with a
   spread fitted per motif length: a class's evidence is then bounded by its loci, a one-locus class
   counts about once however deep its reads, and the move from the prior and the neighbouring classes
-  to the class's own data is gradual instead of flipping between 2 and 3 loci. Two things to settle
-  there: the prior's centre is one rate at every repeat count (0.10), while stutter rises steeply with
-  repeat count, so a stronger prior needs a centre shaped like a curve, or the curve through the
-  well-read classes; and every class's fit changes, not only the thin ones', so it is measured on the
-  §2.11 drawn cohorts and tomato2's tetranucleotides before it replaces the rule.
+  to the class's own data is gradual instead of flipping between 2 and 3 loci. Every class's fit
+  changes, not only the thin ones', so it is measured on the §2.11 drawn cohorts and tomato2's
+  tetranucleotides before it replaces the rule.
+
+  **The prior's centre becomes a table measured on HG002** *(owner, 2026-11-03)*: slip rate by motif
+  length and repeat count, fitted on HG002 at 30× with the code of that time, in place of HipSTR's
+  0.10 at every repeat count (§2.10.2). Stutter changes about thirtyfold along a motif length: at
+  HG002 30× (benchmark run `e7964e29`, the repeat-region set) homopolymers slip at 0.004 at 8
+  repeats, 0.035 at 14 and 0.065 at 20, so a flat 0.10 is 10 to 30 times too high at short tracts,
+  for tomato2 as for HG002. Two cautions. Only well-read classes enter the table, held flat beyond
+  the last of them: HG002's own fit has the thin-class ends of §2.11 (six-base motifs at 11 repeats
+  0.21 at 30×, trinucleotides at 30 repeats 0.60 at 5×). And the weight stays low: HG002's libraries
+  are, as far as known, PCR-free, and tomato2 slips about five times more at 14 repeats in
+  homopolymers and dinucleotides (0.18 and 0.17 against 0.035 and 0.024), so the table is a centre for
+  thin classes, not a value well-read classes are pulled toward.
+
+  **The same table replaces HipSTR's constants as calling's default for a class with no reads**
+  *(owner, 2026-11-03)*: one table for both, so a class the fit could not place and a class it never
+  saw get the same stutter. It moves calls on every run that has such a class, so it is measured on
+  its own, on HG002 at 30× and 5× and on tomato2, apart from the fit's change.
 - **Stutter per slippage group and library multipliers** → `spec/str_library_stutter.md`, rebuilt on
   this fit; the climb-based prototype is deleted with the climb (§1.4).
 - **Gathering evidence one motif length at a time**, to bound the evidence's memory → the census-read

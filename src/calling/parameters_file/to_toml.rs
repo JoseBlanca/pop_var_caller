@@ -71,7 +71,8 @@ use super::{
     PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow,
     SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin,
     SlippageCurve, SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome,
-    StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    StratumAlleleLengthVariationRow, StutterMultiplierRow, SubstitutionRateRow, Warrant,
+    WarrantedValue,
 };
 
 impl ParametersFile {
@@ -680,6 +681,24 @@ impl ParametersFile {
                 )
             }),
         );
+        if !tracts.stutter_multiplier_by_read_group.is_empty() {
+            note(
+                &mut out,
+                &[
+                    "How much each read group stutters against the others of its slippage group, one row a read group and motif length. A read of the read group slips at the class's `share_of_reads_that_slip` times this multiplier, held below 0.95, so a class's rate above is the rate of a read group of typical stutter, whose multiplier is one; the multipliers of a motif length's read groups have a geometric mean of one, weighted by their reads. The shorter share and the fall-off are the class's, the same for every read group.",
+                    "",
+                    "`slipped_reads` is how many of the read group's reads the fit expects slipped over the motif length's classes. A multiplier fitted from fewer than about 20 leans on a pull toward one as much as on its reads, and has no `standard_error`. A `defaulted` multiplier of one is a read group the fit did not fit apart, such as the only read group of a run.",
+                ],
+            );
+            one_a_line(
+                &mut out,
+                "stutter_multiplier_by_read_group",
+                tracts
+                    .stutter_multiplier_by_read_group
+                    .iter()
+                    .map(a_stutter_multiplier_row),
+            );
+        }
 
         section(&mut out, "stated_constants");
         note(
@@ -1485,6 +1504,21 @@ fn an_inbreeding_row(row: &InbreedingRow) -> String {
             a_warranted_value(&row.inbreeding_coefficient),
         ),
     ])
+}
+
+fn a_stutter_multiplier_row(row: &StutterMultiplierRow) -> String {
+    let mut fields = vec![
+        ("read_group", row.read_group.to_string()),
+        ("period", row.period.to_string()),
+        (
+            "stutter_multiplier",
+            a_warranted_value(&row.stutter_multiplier),
+        ),
+    ];
+    if let Some(slipped_reads) = row.slipped_reads {
+        fields.push(("slipped_reads", a_toml_float(slipped_reads)));
+    }
+    an_inline_table(&fields)
 }
 
 fn a_slippage_group_row(row: &SlippageGroupRow) -> String {
@@ -2305,6 +2339,7 @@ mod tests {
         file.sequencing_batches.by_sample.clear();
         file.inbreeding.by_sample.clear();
         file.repeat_tracts.slippage_group_by_read_group.clear();
+        file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.repeat_tracts.slippage_by_stratum_and_group.clear();
         file.repeat_tracts.allele_length_variation_by_period.clear();
         file.repeat_tracts.substitution_rate_by_stratum.clear();

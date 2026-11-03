@@ -77,7 +77,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 7
+format_version = 8
 ploidy = 2
 
 [fitted_from]
@@ -458,6 +458,27 @@ allele_length_variation_by_period = [
 # crosses.
 substitution_rate_by_stratum = [
     { read_group = 0, period = 2, reference_repeats = 6, ploidy = 2, rate = { value = 0.0012, standard_error = 0.000173, warrant = "borrowed", observations = { bases_compared = 40122 } } },
+]
+# How much each read group stutters against the others of its slippage group,
+# one row a read group and motif length. A read of the read group slips at the
+# class's `share_of_reads_that_slip` times this multiplier, held below 0.95, so
+# a class's rate above is the rate of a read group of typical stutter, whose
+# multiplier is one; the multipliers of a motif length's read groups have a
+# geometric mean of one, weighted by their reads. The shorter share and the
+# fall-off are the class's, the same for every read group.
+#
+# `slipped_reads` is how many of the read group's reads the fit expects slipped
+# over the motif length's classes. A multiplier fitted from fewer than about 20
+# leans on a pull toward one as much as on its reads, and has no
+# `standard_error`. A `defaulted` multiplier of one is a read group the fit did
+# not fit apart, such as the only read group of a run.
+stutter_multiplier_by_read_group = [
+    { read_group = 0, period = 1, stutter_multiplier = { value = 1.25, standard_error = 0.04, warrant = "fitted_here" }, slipped_reads = 1160.5 },
+    { read_group = 0, period = 2, stutter_multiplier = { value = 0.875, warrant = "fitted_here" }, slipped_reads = 9.25 },
+    { read_group = 1, period = 1, stutter_multiplier = { value = 0.75, standard_error = 0.035, warrant = "fitted_here" }, slipped_reads = 812.25 },
+    { read_group = 1, period = 2, stutter_multiplier = { value = 1.125, standard_error = 0.1, warrant = "supplied" }, slipped_reads = 160.0 },
+    { read_group = 2, period = 1, stutter_multiplier = { value = 1.0, warrant = "defaulted" } },
+    { read_group = 2, period = 2, stutter_multiplier = { value = 1.0, warrant = "defaulted" } },
 ]
 
 [stated_constants]

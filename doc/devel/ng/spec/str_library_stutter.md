@@ -502,8 +502,9 @@ Then §8's measurements, and a report.
 
 - **Thin classes leaning on the prior instead of a threshold** *(owner, 2026-11-03)*: evidence
   counted by loci rather than reads, so a class of one or two loci is decided by the prior and its
-  neighbours and the three-loci rule goes; next, after this work merges
-  ([`str_penalised_fit.md`](str_penalised_fit.md) §6).
+  neighbours and the three-loci rule goes; the prior's centre, and calling's default for a class
+  with no reads, become one table of slip rates measured on HG002 at 30×; next, after this work
+  merges ([`str_penalised_fit.md`](str_penalised_fit.md) §6).
 
 - **The shorter share and fall-off per read group**, or as a function of its multiplier: tomato's
   dinucleotides show high-stutter read groups slipping with less mass at one repeat (§1.2). Only if

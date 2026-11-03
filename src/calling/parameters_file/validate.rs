@@ -118,6 +118,7 @@ impl ParametersFile {
         self.the_informational_tables_hold_numbers()?;
         self.the_tracts_left_out_hold_numbers()?;
         self.the_repeat_tract_numbers_are_what_they_claim()?;
+        self.every_read_group_has_a_stutter_multiplier()?;
         self.every_stated_constant_is_in_range()?;
         Ok(())
     }
@@ -167,6 +168,106 @@ impl ParametersFile {
                 rule.times_rate,
             )?;
             finite(format!("{at}.stutter_tail_rule.chance"), rule.chance)?;
+        }
+        Ok(())
+    }
+
+    /// **Each read group's stutter multipliers are finite positive numbers, one row a read group
+    /// and motif length, and in a format-8 file every read group the file declares a slippage
+    /// group for has one at every motif length it holds a fitted class of**
+    /// (`str_library_stutter.md` §7).
+    ///
+    /// **Complete, because a missing row would be read as one**: calling scales a read group's
+    /// class rates by its multiplier and takes one where the file has none, which is what an older
+    /// file means and not what a format-8 file whose row was deleted means. A row for a read group
+    /// with no slippage group, or a motif length with no fitted class, is a number no lookup
+    /// reaches, refused as the other tables refuse a stray key.
+    fn every_read_group_has_a_stutter_multiplier(&self) -> Result<(), ParametersFileError> {
+        let at = "repeat_tracts.stutter_multiplier_by_read_group";
+        let tracts = &self.repeat_tracts;
+        let rows = &tracts.stutter_multiplier_by_read_group;
+        if self.format_version < FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS {
+            if rows.is_empty() {
+                return Ok(());
+            }
+            return Err(refuse(
+                at,
+                format!(
+                    "is a format-{FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS} table in a file whose \
+                     `format_version` says {}, so it is not clear which format the file was \
+                     written in; set `format_version` to the format the file was written in",
+                    self.format_version
+                ),
+            ));
+        }
+        names_each_key_once(
+            at,
+            rows.iter()
+                .map(|row| format!("read_group = {}, period = {}", row.read_group, row.period)),
+        )?;
+        for row in rows {
+            let here = format!(
+                "{at}[read_group = {}, period = {}].stutter_multiplier",
+                row.read_group, row.period
+            );
+            a_warranted_value(&here, &row.stutter_multiplier, EvidenceCount::Reads(0))?;
+            if row.stutter_multiplier.value <= 0.0 {
+                return Err(refuse(
+                    here,
+                    format!(
+                        "is {}, and a stutter multiplier scales a slip rate, so it is above zero; \
+                         one is a read group of typical stutter",
+                        row.stutter_multiplier.value
+                    ),
+                ));
+            }
+            if let Some(slipped) = row.slipped_reads {
+                finite(
+                    format!(
+                        "{at}[read_group = {}, period = {}].slipped_reads",
+                        row.read_group, row.period
+                    ),
+                    slipped,
+                )?;
+            }
+        }
+        let declared: BTreeSet<u32> = tracts
+            .slippage_group_by_read_group
+            .iter()
+            .map(|row| row.read_group)
+            .collect();
+        let periods: BTreeSet<u8> = tracts
+            .slippage_by_stratum_and_group
+            .iter()
+            .map(|row| row.period)
+            .collect();
+        let written: BTreeSet<(u32, u8)> = rows
+            .iter()
+            .map(|row| (row.read_group, row.period))
+            .collect();
+        for &read_group in &declared {
+            for &period in &periods {
+                if !written.contains(&(read_group, period)) {
+                    return Err(refuse(
+                        at,
+                        format!(
+                            "has no row for read group {read_group} at motif length {period}, and \
+                             the file holds slip rates for that motif length; a missing row would \
+                             be read as a multiplier of one. Write one, with warrant `supplied` if \
+                             you set it yourself"
+                        ),
+                    ));
+                }
+            }
+        }
+        for &(read_group, period) in &written {
+            if !declared.contains(&read_group) || !periods.contains(&period) {
+                return Err(refuse(
+                    format!("{at}[read_group = {read_group}, period = {period}]"),
+                    "names a read group with no slippage group or a motif length with no slip \
+                     rate, so no tract is ever scored with it; delete the row",
+                ));
+            }
         }
         Ok(())
     }
@@ -1338,6 +1439,8 @@ const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
 /// **The format that added `[repeat_tracts_left_out]`**: 7. A file stamped earlier and holding it is
 /// refused.
 const FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT: u32 = 7;
+/// The format that added `repeat_tracts.stutter_multiplier_by_read_group`.
+const FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS: u32 = 8;
 
 /// The format that gave the tract ladder's second rung its own stated between-locus share,
 /// `repeat_tracts.fallback_between_locus_share_with_own_shares`.
@@ -1914,6 +2017,7 @@ mod tests {
         small.sequencing_batches.by_sample.truncate(1);
         small.inbreeding.by_sample.truncate(1);
         small.repeat_tracts.slippage_group_by_read_group.clear();
+        small.repeat_tracts.stutter_multiplier_by_read_group.clear();
         small.repeat_tracts.slippage_by_stratum_and_group.clear();
         small
             .repeat_tracts
@@ -2211,6 +2315,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2220,6 +2325,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             as_written_before_format_6(file);
@@ -2227,14 +2333,20 @@ mod tests {
         accepted(|file| {
             file.format_version = 5;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             as_written_before_format_6(file);
         });
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         });
-        accepted(|file| file.format_version = 7);
-        let (field, _) = refused(|file| file.format_version = 8);
+        accepted(|file| {
+            file.format_version = 7;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+        });
+        accepted(|file| file.format_version = 8);
+        let (field, _) = refused(|file| file.format_version = 9);
         assert_eq!(field, "format_version");
     }
 
@@ -2252,6 +2364,7 @@ mod tests {
         let (field, _) = refused(|file| {
             file.format_version = 5;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         });
         assert_eq!(field, "stated_constants.repeat_tract_outlier_weight");
     }
@@ -2327,6 +2440,7 @@ mod tests {
         let (field, problem) = refused(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.duplicated_positions = None;
         });
         assert_eq!(field, "ordinary_site_prior.fitted_density");
@@ -2335,12 +2449,14 @@ mod tests {
         let (field, _) = refused(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.ordinary_site_prior.fitted_density = None;
         });
         assert_eq!(field, "duplicated_positions");
         accepted(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2351,6 +2467,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             file.stated_constants.repeat_tract_outlier_weight.value =
@@ -2369,6 +2486,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         });
     }
 
@@ -2380,6 +2498,7 @@ mod tests {
         let (field, problem) = refused(|file| {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         });
         assert_eq!(
             field,
@@ -2553,6 +2672,7 @@ mod tests {
         let mut file = a_file_using_every_shape();
         file.format_version = 1;
         file.repeat_tracts_left_out = None;
+        file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;
@@ -2601,6 +2721,58 @@ mod tests {
     /// reads these by id, so a missing calibration row does not shift the others — it becomes a
     /// defaulted scale of one, and the file's claim that the library was fitted is gone with no
     /// message. That is spec §5's third row arriving through the back door.
+    /// **Every declared read group has a stutter multiplier at every motif length with a slip rate,
+    /// once, finite and above zero; and the table is a format-8 one** (`str_library_stutter.md`
+    /// §7). A missing row would be read as a multiplier of one, which a format-8 file does not
+    /// mean.
+    #[test]
+    fn a_stutter_multiplier_missing_doubled_or_not_a_multiplier_is_refused() {
+        let at = "repeat_tracts.stutter_multiplier_by_read_group";
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts
+                .stutter_multiplier_by_read_group
+                .remove(3);
+        });
+        assert_eq!(field, at);
+        assert!(
+            problem.contains("no row for read group 1 at motif length 2"),
+            "{problem}"
+        );
+        let (field, _) = refused(|file| {
+            let again = file.repeat_tracts.stutter_multiplier_by_read_group[0].clone();
+            file.repeat_tracts
+                .stutter_multiplier_by_read_group
+                .push(again);
+        });
+        assert_eq!(field, at);
+        for impossible in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let (field, _) = refused(|file| {
+                file.repeat_tracts.stutter_multiplier_by_read_group[0]
+                    .stutter_multiplier
+                    .value = impossible;
+            });
+            assert!(field.starts_with(at), "{impossible}: {field}");
+        }
+        // A row no lookup reaches: a motif length with no slip rate.
+        let (field, _) = refused(|file| {
+            let mut stray = file.repeat_tracts.stutter_multiplier_by_read_group[0].clone();
+            stray.period = 5;
+            file.repeat_tracts
+                .stutter_multiplier_by_read_group
+                .push(stray);
+        });
+        assert_eq!(field, format!("{at}[read_group = 0, period = 5]"));
+        // A format-8 table in a file that says 7 cannot say which format it was written in; the
+        // same file without it is a format-7 file, read with every multiplier one.
+        let (field, problem) = refused(|file| file.format_version = 7);
+        assert_eq!(field, at);
+        assert!(problem.contains("format-8 table"), "{problem}");
+        accepted(|file| {
+            file.format_version = 7;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+        });
+    }
+
     #[test]
     fn a_table_that_does_not_cover_the_read_groups_is_refused() {
         let (field, problem) = refused(|file| {
@@ -2634,6 +2806,10 @@ mod tests {
         // refused is a row naming a library the identity block does not list.
         accepted(|file| {
             file.repeat_tracts.slippage_group_by_read_group.remove(0);
+            // Its multipliers go with it: a read group with no slippage group has none.
+            file.repeat_tracts
+                .stutter_multiplier_by_read_group
+                .retain(|row| row.read_group != 0);
         });
         let (field, problem) = refused(|file| {
             file.repeat_tracts.slippage_group_by_read_group[0].read_group = 9;

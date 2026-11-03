@@ -23,8 +23,8 @@ use super::{
     RepeatTracts, RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve,
     ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
     SlippageRow, SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow,
-    SubstitutionRateRow, Warrant, WarrantedValue, between_locus_share_error_of,
-    between_locus_share_of, concentration_error_of,
+    StutterMultiplierRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    between_locus_share_error_of, between_locus_share_of, concentration_error_of,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -897,6 +897,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                 }
             })
             .collect(),
+        stutter_multiplier_by_read_group: stutter_multiplier_rows(fits),
     }
 }
 
@@ -1160,6 +1161,48 @@ impl From<FittedShape> for ShareShape {
             FittedShape::Turning => Self::Turning,
         }
     }
+}
+
+/// **A row for every read group at every motif length the run fitted a class of**
+/// (`str_library_stutter.md` §7): the fit's multiplier where it fitted the read group apart, and a
+/// `defaulted` one where it did not, which a run of one read group always is. A read group the
+/// run declared no slippage group for has no row, as it has no slippage row either.
+fn stutter_multiplier_rows(fits: &StratumFits) -> Vec<StutterMultiplierRow> {
+    let periods: std::collections::BTreeSet<u8> = fits
+        .each_stratum_and_group_with_numbers()
+        .map(|(stratum, _, _)| stratum.period)
+        .collect();
+    let mut rows = Vec::new();
+    for read_group in fits.read_groups() {
+        for &period in &periods {
+            let row = match fits.stutter_multiplier_of(read_group, period) {
+                Some(fitted) => StutterMultiplierRow {
+                    read_group: read_group.get(),
+                    period,
+                    stutter_multiplier: WarrantedValue {
+                        value: fitted.value,
+                        warrant: fitted.provenance.into(),
+                        observations: None,
+                        standard_error: fitted.standard_error,
+                    },
+                    slipped_reads: fitted.slipped_reads,
+                },
+                None => StutterMultiplierRow {
+                    read_group: read_group.get(),
+                    period,
+                    stutter_multiplier: WarrantedValue {
+                        value: 1.0,
+                        warrant: Warrant::Defaulted,
+                        observations: None,
+                        standard_error: None,
+                    },
+                    slipped_reads: None,
+                },
+            };
+            rows.push(row);
+        }
+    }
+    rows
 }
 
 #[cfg(test)]

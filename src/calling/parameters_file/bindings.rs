@@ -53,7 +53,7 @@ use super::to_run_parameters::WhereTheFilesRowsBelong;
 use super::{
     BaseQualityCalibrationRow, CensusIdentity, CensusTerm, InbreedingRow, ParametersFile,
     ParametersFileError, ReadGroupRow, RepeatRouting, RepeatTracts, RunParametersFromFile,
-    StatedConstants, SubstitutionRateRow, Warrant,
+    StatedConstants, StutterMultiplierRow, SubstitutionRateRow, Warrant,
 };
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::census::RecordingTerms;
@@ -740,6 +740,7 @@ impl ParametersFile {
             allele_length_variation_by_stratum: _,
             allele_length_variation_by_period: _,
             substitution_rate_by_stratum,
+            stutter_multiplier_by_read_group,
         } = repeat_tracts;
         fallback_between_locus_share.warrant =
             no_better_than_supplied(fallback_between_locus_share.warrant);
@@ -755,6 +756,15 @@ impl ParametersFile {
         } in substitution_rate_by_stratum
         {
             rate.warrant = no_better_than_supplied(rate.warrant);
+        }
+        for StutterMultiplierRow {
+            read_group: _,
+            period: _,
+            stutter_multiplier,
+            slipped_reads: _,
+        } in stutter_multiplier_by_read_group
+        {
+            stutter_multiplier.warrant = no_better_than_supplied(stutter_multiplier.warrant);
         }
         let StatedConstants {
             repeat_tract_outlier_weight,

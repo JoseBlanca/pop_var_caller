@@ -57,6 +57,23 @@ use super::ssr_fit::{LevelProvenance, SharesProvenance, Slippage, StratumOutcome
 
 /// What one `(read group, stratum)` cell answers with.
 ///
+/// **One read group's stutter multiplier for one motif length**, and what stands behind it
+/// (`str_library_stutter.md` §3, §7). A read of the read group slips at
+/// [`read_group_level`](super::ssr_fit::read_group_level)`(class rate, value)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StutterMultiplier {
+    /// The multiplier: one is a read group of typical stutter for its slippage group.
+    pub value: f64,
+    /// Its standard error, on the multiplier's own scale; `None` where it leans on the pull toward
+    /// one as much as on its reads, or where nothing determined it.
+    pub standard_error: Option<f64>,
+    /// The read group's expected slipped reads over the motif length's classes, without the pull;
+    /// `None` where nothing was fitted.
+    pub slipped_reads: Option<f64>,
+    /// Fitted from this run's reads, defaulted to one, or supplied by a parameters file.
+    pub provenance: Provenance,
+}
+
 /// **The three numbers and where they came from, together.** A level fitted from 8,000 slipped
 /// reads and one read off a curve through four cells are the same `f64`, and a consumer that
 /// weighs them alike is treating an interpolation as a measurement
@@ -594,6 +611,10 @@ pub struct StratumFits {
     /// warrant is for. A file demoted to `supplied` (spec §2.1) and written back out re-emerged
     /// as `fitted_here`.
     stated_concentration_warrant: Provenance,
+    /// **Each read group's stutter multiplier, per motif length** (`str_library_stutter.md` §3): how
+    /// many times its slippage group's class rate its reads slip at. **A pair with no entry is one**,
+    /// which is what a run of one read group and a parameters file older than format 8 mean.
+    stutter_multipliers: BTreeMap<(ReadGroupId, u8), StutterMultiplier>,
 }
 
 impl StratumFits {
@@ -736,6 +757,7 @@ impl StratumFits {
             // `STATED_OWN_SHARES_CONCENTRATION`).
             stated_concentration_warrant: stated_warrant,
             stated_concentration_with_own_shares_warrant: stated_warrant,
+            stutter_multipliers: BTreeMap::new(),
             by_stratum,
             allele_length_variation_by_stratum,
             allele_length_variation_by_period: BTreeMap::new(),
@@ -870,6 +892,7 @@ impl StratumFits {
                 stated_concentration_with_own_shares,
             ),
             stated_concentration_with_own_shares_warrant,
+            stutter_multipliers: BTreeMap::new(),
         }
     }
 
@@ -1005,6 +1028,57 @@ impl StratumFits {
     #[must_use]
     pub fn stated_concentration(&self) -> f64 {
         self.stated_concentration
+    }
+
+    /// **The same fits, with each read group's stutter multipliers**, keyed by read group and motif
+    /// length. A pair left out is a multiplier of one.
+    ///
+    /// # Panics
+    ///
+    /// On a multiplier that is not a finite positive number, naming the read group and motif
+    /// length: no rate can be scaled by one.
+    #[must_use]
+    pub fn with_stutter_multipliers(
+        mut self,
+        stutter_multipliers: BTreeMap<(ReadGroupId, u8), StutterMultiplier>,
+    ) -> Self {
+        for ((read_group, period), multiplier) in &stutter_multipliers {
+            assert!(
+                multiplier.value.is_finite() && multiplier.value > 0.0,
+                "read group {}'s stutter multiplier at motif length {period} is {}; a multiplier \
+                 is a finite positive number",
+                read_group.get(),
+                multiplier.value
+            );
+        }
+        self.stutter_multipliers = stutter_multipliers;
+        self
+    }
+
+    /// **A read group's stutter multiplier at a motif length**, where the fit or the file gave it
+    /// one; `None` is a multiplier of one.
+    #[must_use]
+    pub fn stutter_multiplier_of(
+        &self,
+        read_group: ReadGroupId,
+        period: u8,
+    ) -> Option<&StutterMultiplier> {
+        self.stutter_multipliers.get(&(read_group, period))
+    }
+
+    /// Every read group and motif length with a multiplier, in read-group order and then in motif
+    /// length.
+    pub fn each_stutter_multiplier(
+        &self,
+    ) -> impl Iterator<Item = (ReadGroupId, u8, &StutterMultiplier)> {
+        self.stutter_multipliers
+            .iter()
+            .map(|((read_group, period), multiplier)| (*read_group, *period, multiplier))
+    }
+
+    /// The read groups this run declared a slippage group for, in order.
+    pub fn read_groups(&self) -> impl Iterator<Item = ReadGroupId> {
+        self.slippage_group_of.keys().copied()
     }
 
     /// **Where the bottom rung's stated strength came from** — see

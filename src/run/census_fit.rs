@@ -49,13 +49,13 @@ use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
-    PenalisedFitConfig, RepeatTractFit, fit_repeat_tracts,
+    FittedMultipliers, PenalisedFitConfig, RepeatTractFit, fit_repeat_tracts,
 };
 use crate::parameter_estimation::joint::ssr_fit::tract_exclusion::{TractExclusion, TractsLeftOut};
 use crate::parameter_estimation::joint::ssr_fit::{
     StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata, strata_of_kept_loci,
 };
-use crate::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::parameter_estimation::joint::stratum_fits::{StratumFits, StutterMultiplier};
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::read::input::read_groups::ReadGroups;
@@ -88,6 +88,10 @@ pub struct CohortFit {
     /// `parameter_prepass_ssr.md` §4.6.1), written to the parameters file as the informational
     /// table `[repeat_tracts_left_out]`.
     pub tracts_left_out: TractsLeftOut,
+    /// **Each read group's stutter multiplier per motif length**, as the repeat-tract fit placed it
+    /// (`str_library_stutter.md` §3); empty for a cohort of one read group, whose every multiplier
+    /// is one.
+    pub stutter_multipliers: BTreeMap<(ReadGroupId, u8), StutterMultiplier>,
 }
 
 /// Why a cohort could not be fitted.
@@ -268,11 +272,10 @@ pub fn fit_a_cohort(
     // **Tracts whose reads come from more copies than the reference holds are left out** by
     // depth and by the stutter tail (spec `parameter_prepass_ssr.md` §4.6.1); they are still
     // called.
-    // The read groups' multipliers are not yet written to the parameters file.
     let RepeatTractFit {
         outcomes,
         tracts_left_out,
-        ..
+        read_group_multipliers,
     } = fit_repeat_tracts(
         &mut evidence,
         &homozygote_excess,
@@ -286,6 +289,14 @@ pub fn fit_a_cohort(
         .iter()
         .map(|evidence| evidence.substitution_counts())
         .collect();
+    // **The fit numbers a read group by its place in the evidence's list**, which every class
+    // shares; the file and calling key it by the run's read-group identifier.
+    let read_group_ids: Vec<ReadGroupId> = evidence
+        .first()
+        .map(|class| class.read_groups.iter().map(|group| group.id).collect())
+        .unwrap_or_default();
+    let stutter_multipliers =
+        stutter_multipliers_by_read_group(&read_group_ids, &read_group_multipliers);
     drop(evidence);
 
     Ok(CohortFit {
@@ -294,7 +305,31 @@ pub fn fit_a_cohort(
         tracts: kept_tracts,
         substitution_counts,
         tracts_left_out,
+        stutter_multipliers,
     })
+}
+
+/// **The fit's multipliers keyed by read group and motif length**, with each error moved from the
+/// log scale to the multiplier's own: an error `σ` on `ln m` is about `m σ` on `m`.
+fn stutter_multipliers_by_read_group(
+    read_group_ids: &[ReadGroupId],
+    fitted: &[(u8, FittedMultipliers)],
+) -> BTreeMap<(ReadGroupId, u8), StutterMultiplier> {
+    let mut by_read_group = BTreeMap::new();
+    for (period, fitted) in fitted {
+        for (index, &value) in fitted.multipliers.iter().enumerate() {
+            by_read_group.insert(
+                (read_group_ids[index], *period),
+                StutterMultiplier {
+                    value,
+                    standard_error: fitted.log_errors[index].map(|error| value * error),
+                    slipped_reads: Some(fitted.slipped_reads[index]),
+                    provenance: Provenance::FittedHere,
+                },
+            );
+        }
+    }
+    by_read_group
 }
 
 /// **The one number the tract half takes from the generic one**: each sample's homozygote excess,
@@ -477,7 +512,8 @@ pub fn parameters_from_the_fit(
             fit.generic.fitted_alternative_frequency(),
             fit.generic.fitted_diversity(),
         ),
-        StratumFits::over(&fit.strata, slippage_group_of.clone()),
+        StratumFits::over(&fit.strata, slippage_group_of.clone())
+            .with_stutter_multipliers(fit.stutter_multipliers.clone()),
         ssr_substitution_rate,
         ploidy,
     )
@@ -1189,6 +1225,40 @@ mod writing_the_parameters_file {
         );
     }
 
+    /// **Each read group's stutter multiplier reaches the file as the fit placed it**
+    /// (`str_library_stutter.md` §7): this cohort's three read groups are fitted apart, so each has
+    /// a `fitted_here` row at the one motif length it has a class of, with the slipped reads behind
+    /// it, and a value of its own rather than the one a read group fitted alone would get.
+    #[test]
+    fn each_read_groups_stutter_multiplier_is_written_as_fitted() {
+        let (_parameters, file) = a_fitted_cohorts_parameters();
+        let tracts = &file.repeat_tracts;
+        let periods: std::collections::BTreeSet<u8> = tracts
+            .slippage_by_stratum_and_group
+            .iter()
+            .map(|row| row.period)
+            .collect();
+        assert_eq!(
+            periods.len(),
+            1,
+            "the fixture's one tract is a dinucleotide"
+        );
+        let rows = &tracts.stutter_multiplier_by_read_group;
+        assert_eq!(rows.len(), 3, "one row a read group: {rows:?}");
+        for row in rows {
+            assert_eq!(
+                row.stutter_multiplier.warrant,
+                crate::calling::parameters_file::Warrant::FittedHere,
+                "{row:?}"
+            );
+            assert!(row.slipped_reads.is_some(), "{row:?}");
+            assert!(
+                row.stutter_multiplier.value != 1.0,
+                "the fit moved it, however little: {row:?}"
+            );
+        }
+    }
+
     /// **The base-quality calibration is fitted, and the file says which library's it is.**
     ///
     /// Both halves are present: the rate from this fit, the minted totals from the census. A
@@ -1521,6 +1591,7 @@ mod a_sample_with_repeat_tracts_only {
                 stutter_tail_by_period: Vec::new(),
                 by_stratum: Vec::new(),
             },
+            stutter_multipliers: BTreeMap::new(),
         };
         let read_groups = ReadGroups::of_lanes(&[
             ("rg0", "s0", "lib0"),

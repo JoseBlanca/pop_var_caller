@@ -1,4 +1,4 @@
-format_version = 7
+format_version = 8
 ploidy = 2
 
 [fitted_from]
@@ -446,6 +446,61 @@ standard_error = 0.000173
 
 [repeat_tracts.substitution_rate_by_stratum.rate.observations]
 bases_compared = 40122
+
+[[repeat_tracts.stutter_multiplier_by_read_group]]
+read_group = 0
+period = 1
+slipped_reads = 1160.5
+
+[repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier]
+value = 1.25
+warrant = "fitted_here"
+standard_error = 0.04
+
+[[repeat_tracts.stutter_multiplier_by_read_group]]
+read_group = 0
+period = 2
+slipped_reads = 9.25
+
+[repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier]
+value = 0.875
+warrant = "fitted_here"
+
+[[repeat_tracts.stutter_multiplier_by_read_group]]
+read_group = 1
+period = 1
+slipped_reads = 812.25
+
+[repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier]
+value = 0.75
+warrant = "fitted_here"
+standard_error = 0.035
+
+[[repeat_tracts.stutter_multiplier_by_read_group]]
+read_group = 1
+period = 2
+slipped_reads = 160.0
+
+[repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier]
+value = 1.125
+warrant = "supplied"
+standard_error = 0.1
+
+[[repeat_tracts.stutter_multiplier_by_read_group]]
+read_group = 2
+period = 1
+
+[repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier]
+value = 1.0
+warrant = "defaulted"
+
+[[repeat_tracts.stutter_multiplier_by_read_group]]
+read_group = 2
+period = 2
+
+[repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier]
+value = 1.0
+warrant = "defaulted"
 
 [stated_constants.repeat_tract_outlier_weight]
 value = 0.07

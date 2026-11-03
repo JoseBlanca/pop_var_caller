@@ -638,6 +638,7 @@ mod tests {
         file.contamination = None;
         file.repeat_tracts.slippage_by_stratum_and_group.clear();
         file.repeat_tracts.slippage_group_by_read_group.clear();
+        file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.repeat_tracts.substitution_rate_by_stratum.clear();
         file.repeat_tracts
             .allele_length_variation_by_stratum
