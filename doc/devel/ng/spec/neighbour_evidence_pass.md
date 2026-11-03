@@ -373,7 +373,8 @@ taken once, before the first record is written:
 - **The cohort's median fitted inbreeding coefficient at least `F_min`.** Starting value 0.5. The
   outbred simulation gained nothing; between the two ends is unmeasured.
 
-Both are starting values, to be set from §8's measurements. `--neighbour-evidence auto|on|off`,
+Both are starting values, to be set from §8's measurements. `--refine-genotypes auto|on|off` (named
+`--neighbour-evidence` until 2026-11-03),
 `auto` the default, overrides the decision either way — except that `on` cannot run the pass on one
 sample or at a ploidy other than two. The median of an even count is the mean of the middle two.
 Within a window a sample's `K` is fixed at `min(16, N − 1)`; a template without a row at a record
@@ -503,6 +504,9 @@ All four as recommended.
    `##refineGenotypesCommandline=`. The pass always runs (it is the command's purpose); a cohort
    it cannot run on — one sample, a ploidy other than two — is an error naming why. On the
    20-sample simulated cohort its records are byte-identical to those the in-run pass wrote.
+
+   *Removed 2026-11-03* (owner; read phase spec §5): refinement runs only inside a calling run,
+   because read evidence never reaches a VCF, so a refinement of a file could not use it.
 
 ---
 

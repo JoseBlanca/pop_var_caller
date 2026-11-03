@@ -373,3 +373,42 @@ fn a_phase_set_carries_through_short_windows() {
     // poorer than in full-sized windows (59 wrong in 5,693 when written).
     assert!(score.flips * 50 <= score.links, "{score:?}");
 }
+
+/// **The records the pass drops are those no sample carries the alternative at**: the drawn cohort
+/// writes a record at every drawn site, and at most of the rare ones no founder carries the
+/// alternative, so the pass drops them as calling would have. Moved here from the removed
+/// `refine-genotypes` command's tests (read phase spec §5).
+#[test]
+fn the_records_kept_are_those_some_sample_carries() {
+    let cohort = test_cohort(CohortShape {
+        samples: 20,
+        founders: 4,
+        records: 1_500,
+        spacing: 600,
+        segment_bases: 300_000.0,
+        inbred: true,
+        depth: 1.0,
+        read_error: 0.01,
+        seed: 13,
+        silent_from: None,
+    });
+    let carried = cohort
+        .truth
+        .iter()
+        .filter(|genotypes| genotypes.iter().any(|&genotype| genotype > 0))
+        .count();
+    let decision = decide(NeighbourEvidenceSwitch::On, &[0.95; 20], diploid());
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![1_000_000]);
+    let mut output = Vec::new();
+    for (index, line) in cohort.lines.iter().enumerate() {
+        let position = 1 + index as u64 * 600;
+        stage.push(place(0, position), line.clone().into_bytes(), &mut output);
+    }
+    stage.finish(&mut output);
+    let kept = output.len();
+    assert!(
+        kept * 100 >= carried * 95 && kept * 100 <= carried * 105,
+        "{} records in, {kept} out; {carried} carry the alternative",
+        cohort.lines.len()
+    );
+}

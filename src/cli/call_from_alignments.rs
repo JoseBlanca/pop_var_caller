@@ -266,10 +266,10 @@ pub struct CallFromAlignmentsArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = calling_run::NeighbourEvidenceArg::Auto,
+        default_value_t = calling_run::RefineGenotypesArg::Auto,
         help_heading = "Advanced"
     )]
-    pub neighbour_evidence: calling_run::NeighbourEvidenceArg,
+    pub refine_genotypes: calling_run::RefineGenotypesArg,
 
     /// The share of the neighbour-evidence pass's drawn paths that must agree on how two
     /// neighbouring heterozygous sites are phased for the VCF to phase them together. 1, all of
@@ -776,7 +776,7 @@ pub fn run_call_from_alignments(
     };
     let metadata =
         metadata.the_neighbour_evidence_decision(calling_run::neighbour_evidence_decision(
-            args.neighbour_evidence,
+            args.refine_genotypes,
             &inbreeding_by_sample,
             ploidy,
             args.phase_min_path_agreement,

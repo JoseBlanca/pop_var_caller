@@ -1,5 +1,5 @@
-"""Two builds of pvc's neighbour-evidence pass on the same founder_grid.py cells: each re-calls the
-cell's pass-off VCF (refine-genotypes, the same pass as a run with it on), and both are scored
+"""Two builds of pvc's neighbour-evidence pass on the same founder_grid.py cells: each calls the
+cell again with refinement on (`--refine-genotypes on`), and both are scored
 against the simulator's truth, deep and shallow samples apart.
 
 usage: uv run python compare_templates.py <label>=<pvc> <label>=<pvc> -- <cell dir> [<cell dir> ...]
@@ -8,23 +8,16 @@ The deep samples of a mixed-depth cell (name ending d<shallow>+<deep>x<count>) a
 <count>; in a cell of one depth every sample is in one group. Scoring as founder_grid.py: SNP
 records whose position and alleles match a truth record, one sample at one record a unit.
 """
-import collections, os, re, subprocess, sys
+import collections, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from founder_grid import read_vcf  # noqa: E402
+from founder_grid import read_vcf, refine_call  # noqa: E402
 
 THREADS = 6
 
 
 def refine(pvc, cell, label):
-    out = os.path.join(cell, f'refined_{label}.vcf.gz')
-    if not os.path.exists(out):
-        subprocess.run([pvc, 'refine-genotypes', '--vcf', os.path.join(cell, 'calls_off.vcf.gz'),
-                        '--parameters', os.path.join(cell, 'params.toml'), '--output', out,
-                        '--log', os.path.join(cell, f'refined_{label}.log'),
-                        '--threads', str(THREADS), '--force'],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return out
+    return refine_call(pvc, cell, label, THREADS)[0]
 
 
 def score(cell, refined_path, deep_count):

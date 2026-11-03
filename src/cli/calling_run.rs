@@ -595,7 +595,7 @@ fn warn_of_poor_fills(
              genotype, the neighbours alone predicted it wrong at {:.1}% of {} sites, above {:.0}%. \
              The pass is built for cohorts of inbred lines; in an outbred cohort, or one whose \
              samples share few haplotypes, its fills are less reliable. Consider \
-             --neighbour-evidence off{table_note}",
+             --refine-genotypes off{table_note}",
             100.0 * pooled,
             run_output::with_thousands(checked),
             100.0 * POOR_FILL_SHARE,
@@ -657,9 +657,9 @@ fn write_fill_check_table(
     out.flush()
 }
 
-/// **`--neighbour-evidence`'s three values** (`neighbour_evidence_pass.md` §5, ruled §9 Q3).
+/// **`--refine-genotypes`'s three values** (`neighbour_evidence_pass.md` §5, ruled §9 Q3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum NeighbourEvidenceArg {
+pub enum RefineGenotypesArg {
     /// Run where the cohort is at least 10 samples with median inbreeding at least 0.5.
     Auto,
     /// Run wherever it can: two or more samples, diploid.
@@ -686,15 +686,15 @@ pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
 /// `--phase-min-path-agreement`.
 #[must_use]
 pub fn neighbour_evidence_decision(
-    asked: NeighbourEvidenceArg,
+    asked: RefineGenotypesArg,
     inbreeding_by_sample: &[InbreedingF],
     ploidy: Ploidy,
     path_agreement: PathAgreement,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
-        NeighbourEvidenceArg::Auto => NeighbourEvidenceSwitch::Auto,
-        NeighbourEvidenceArg::On => NeighbourEvidenceSwitch::On,
-        NeighbourEvidenceArg::Off => NeighbourEvidenceSwitch::Off,
+        RefineGenotypesArg::Auto => NeighbourEvidenceSwitch::Auto,
+        RefineGenotypesArg::On => NeighbourEvidenceSwitch::On,
+        RefineGenotypesArg::Off => NeighbourEvidenceSwitch::Off,
     };
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
     let decision = decide(switch, &inbreeding, ploidy).with_path_agreement(path_agreement);

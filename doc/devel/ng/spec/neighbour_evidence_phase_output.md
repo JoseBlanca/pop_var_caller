@@ -299,6 +299,8 @@ at the `POS` of the record before it.
   (`src/vcf/header.rs:610`, "Genotype, unphased") becomes "Genotype; phased (|) where PS is set,
   unphased (/) elsewhere" when the phase is written. `##neighbourEvidence=` — built by
   `NeighbourEvidenceDecision::as_header_value` (`stage.rs:66–79`) — gains `lean_min=0.5`.
+- *The two items below described `pvc refine-genotypes`, removed on 2026-11-03 (read phase spec
+  §5); they are kept as the record of what was built.*
 - **`refine-genotypes`** writes the same, as it shares the stage, but builds its own header from the
   input's lines (`refine_genotypes.rs:164–200`), so the `GT` and `PS` declarations are added there
   too.

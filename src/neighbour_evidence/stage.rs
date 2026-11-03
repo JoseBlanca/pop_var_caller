@@ -39,7 +39,7 @@ pub const MIN_SAMPLES: usize = 10;
 /// The lowest median inbreeding the pass runs on by default (`F_min`, §5) — a starting value.
 pub const MIN_MEDIAN_INBREEDING: f64 = 0.5;
 
-/// **`--neighbour-evidence`**: whether the run decides, or the operator did (§5, ruled §9 Q3).
+/// **`--refine-genotypes`**: whether the run decides, or the operator did (§5, ruled §9 Q3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeighbourEvidenceSwitch {
     /// Run where the cohort is large and inbred enough.

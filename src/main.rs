@@ -26,7 +26,7 @@ use pop_var_caller::cli::run_output;
 use pop_var_caller::cli::{
     Cli, DevCommand, PopVarCallerCommand, run_call_from_alignments, run_call_from_psps,
     run_estimate_contamination, run_estimate_parameters, run_generate_psps, run_inspect_psp,
-    run_refine_genotypes, run_repeat_catalog, run_typed_regions,
+    run_repeat_catalog, run_typed_regions,
 };
 use pop_var_caller::error_render::format_error_chain;
 
@@ -56,9 +56,6 @@ fn main() {
         }
         PopVarCallerCommand::EstimateParameters(args) => {
             run_estimate_parameters(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::RefineGenotypes(args) => {
-            run_refine_genotypes(&args).map_err(|e| format_error_chain(&e))
         }
         PopVarCallerCommand::Dev(DevCommand::InspectPsp(args)) => {
             run_inspect_psp(&args).map_err(|e| format_error_chain(&e))

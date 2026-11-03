@@ -14,7 +14,7 @@ calls and each sample's inbreeding coefficient from the parameters file.
 
 ## When it runs
 
-`--neighbour-evidence` on `pvc call-from-psps` and `pvc call-from-alignments`:
+`--refine-genotypes` on `pvc call-from-psps` and `pvc call-from-alignments`:
 
 | value | what it does |
 |---|---|
@@ -24,8 +24,8 @@ calls and each sample's inbreeding coefficient from the parameters file.
 
 The VCF header states whether it ran and why, in a `##neighbourEvidence=` line.
 
-`pvc refine-genotypes --vcf calls.vcf.gz --parameters params.toml --output refined.vcf.gz` runs
-the pass on a VCF pvc wrote without it, so the same calls can be compared with and without it.
+The pass runs only inside a calling run. To compare the same cohort with and without it, call it
+twice, with `--refine-genotypes on` and `off`.
 
 **Forcing it on outside what `auto` accepts is at your own risk.** The pass is built for inbred
 lines. In an outbred sample — heterozygous over most of its genome — few other samples carry the
@@ -88,10 +88,6 @@ Tools that read `PS`, such as WhatsHap, or SHAPEIT with its option to use it, tr
 on its own. A tool that ignores `PS` reads every `|` of a sample as one phase along the whole
 chromosome, which these phase sets do not claim.
 
-`pvc refine-genotypes` refuses a VCF that is already phased, one whose header declares `PS` or with
-a `|` in a genotype, since its phase sets would mix with the pass's. Remove the phase first, for
-example with `bcftools annotate -x FORMAT/PS`.
-
 ## How good the fills are: the fill check
 
 Every run reports, for each sample, how often its fills would be wrong, measured on its own data.
@@ -132,5 +128,4 @@ At the end of a run pvc warns:
 
 A warning does not stop the run. Look at the named samples — a mislabelled sample, a contaminated
 library, or a sample from a population the rest of the cohort does not represent can each cause
-it — and consider `--neighbour-evidence off`, or `pvc refine-genotypes` on a cohort without the
-samples in question.
+it — and consider `--refine-genotypes off`, or a calling run without the samples in question.

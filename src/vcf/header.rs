@@ -610,7 +610,7 @@ pub(crate) const PHASED_GENOTYPE_DECLARATION: &str = r#"##FORMAT=<ID=GT,Number=1
 pub(crate) const PHASE_SET_DECLARATION: &str = r#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the POS of the first phased record of this block; records of a sample with the same PS are phased together">"#;
 
 /// **What stands in for calling's `GT` declaration where the pass ran**: the phased `GT`, then
-/// `PS` beside it — the one place both writers of a refined header take them from.
+/// `PS` beside it.
 pub(crate) fn phased_genotype_declarations() -> [String; 2] {
     [
         PHASED_GENOTYPE_DECLARATION.to_string(),

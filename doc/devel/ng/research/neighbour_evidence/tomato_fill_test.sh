@@ -16,14 +16,16 @@
 # ground the psps cover — the whole genome, if that is what they hold.
 #
 # Environment: REGIONS (a BED; default all of SL4.0ch01), THREADS (default 16), PVC (the binary;
-# default the newer of target/release/pvc and target-container/release/pvc), MASK_SHARE (0.02),
+# default the newer of target/release/pvc and target-container/release/pvc),
 # PYTHON (default `uv run python`).
 #
 # Per sample, generate-psps once, shared by every size. Per size: estimate-parameters, then
-# call-from-psps with the pass off, then refine-genotypes on that VCF — the same pass as a run with
-# it on, and it needs no second call. Then the same with 2% of the confidently called SNP
-# genotypes hidden, scored. Every step is skipped when its output is there, so a run that stops
-# resumes.
+# call-from-psps twice, with `--refine-genotypes off` and `on`. How often a fill is wrong comes from
+# the fill check the refined run writes beside its VCF (`refined.fill_check.tsv`): it hides
+# genotypes the reads settle and scores what the pass would write there. Until 2026-11-03 this script
+# hid 2% of the confidently called SNP genotypes in the pass-off VCF and refined that with
+# `pvc refine-genotypes`; that command is removed, and a VCF cannot be fed back into calling.
+# Every step is skipped when its output is there, so a run that stops resumes.
 set -euo pipefail
 
 cohort=$1
@@ -33,7 +35,6 @@ sizes=${4:-100,200,300}
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../../../.." && pwd)
 threads=${THREADS:-16}
-share=${MASK_SHARE:-0.02}
 read -r -a python <<< "${PYTHON:-uv run python}"
 
 if [[ -z ${PVC:-} ]]; then
@@ -109,20 +110,16 @@ for size in ${sizes//,/ }; do
         --log "$run/params.log" --force
     [[ -e $run/calls.vcf.gz ]] || "$PVC" call-from-psps --reference "$reference" \
         --catalog "$catalog" "${psps[@]}" --parameters "$run/params.toml" \
-        --neighbour-evidence off --threads "$threads" --output "$run/calls.vcf.gz" \
+        --refine-genotypes off --threads "$threads" --output "$run/calls.vcf.gz" \
         --log "$run/calls.log" --force
-    [[ -e $run/refined.vcf.gz ]] || "$PVC" refine-genotypes --vcf "$run/calls.vcf.gz" \
-        --parameters "$run/params.toml" --threads "$threads" --output "$run/refined.vcf.gz" \
+    [[ -e $run/refined.vcf.gz ]] || "$PVC" call-from-psps --reference "$reference" \
+        --catalog "$catalog" "${psps[@]}" --parameters "$run/params.toml" \
+        --refine-genotypes on --threads "$threads" --output "$run/refined.vcf.gz" \
         --log "$run/refined.log" --force
-    [[ -e $run/hidden.tsv ]] || "${python[@]}" "$here/tomato_fill.py" mask "$run/calls.vcf.gz" \
-        "$run/masked.vcf" "$run/hidden.tsv" --share "$share"
-    [[ -e $run/masked_refined.vcf.gz ]] || "$PVC" refine-genotypes --vcf "$run/masked.vcf" \
-        --parameters "$run/params.toml" --threads "$threads" \
-        --output "$run/masked_refined.vcf.gz" --log "$run/masked_refined.log" --force
     {
         echo "== $size accessions"
         grep -h "neighbour-evidence pass" "$run/refined.log" || true
         "${python[@]}" "$here/tomato_fill.py" missing "$run/calls.vcf.gz" "$run/refined.vcf.gz"
-        "${python[@]}" "$here/tomato_fill.py" score "$run/hidden.tsv" "$run/masked_refined.vcf.gz"
+        cat "$run/refined.fill_check.tsv"
     } | tee "$run/summary.txt"
 done

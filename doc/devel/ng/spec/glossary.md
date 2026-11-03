@@ -55,8 +55,8 @@ segment the two calls are compared and combined (`tract_dual_path.md`). With the
 *Agreed with the owner on 2026-11-03. "Imputation" in the literature covers both of the first two
 terms; this project keeps them apart.*
 
-**Refinement.** What the neighbour-evidence pass (`pvc refine-genotypes`, or the same pass at the
-end of a calling run) does to every genotype: the other samples' haplotypes act as a prior, the
+**Refinement.** What the neighbour-evidence pass (the step at the end of a calling run that
+`--refine-genotypes` switches) does to every genotype: the other samples' haplotypes act as a prior, the
 sample's own reads (its genotype likelihoods) as the evidence, and the posterior can overturn the
 genotype the reads alone gave. Beagle's and GATK's documentation call this *genotype refinement*.
 

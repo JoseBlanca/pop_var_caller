@@ -15,7 +15,7 @@ Scoring: SNP records whose position and alleles match a truth record; one unit i
 one record. Rows split by whether calling gave the sample a genotype there (it had reads) or wrote
 `./.` (it had none). For the pass's calls, the observed error rate by GQ bin.
 """
-import collections, gzip, json, os, subprocess, sys, time
+import collections, glob, gzip, json, os, subprocess, sys, time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..'))
 PVC = os.path.join(ROOT, 'target', 'release', 'pvc')
@@ -151,7 +151,7 @@ def cell(work, spec):
     timings['estimate_parameters'] = time.time() - began
     for mode in ('off', 'on'):
         began = time.time()
-        run(f'{PVC} call-from-psps {common} --parameters {d}/params.toml --neighbour-evidence {mode} '
+        run(f'{PVC} call-from-psps {common} --parameters {d}/params.toml --refine-genotypes {mode} '
             f'--output {d}/calls_{mode}.vcf.gz --log {d}/call_{mode}.log --force', log)
         timings[f'call_{mode}'] = time.time() - began
     count, gq = score(d)
@@ -163,6 +163,25 @@ def cell(work, spec):
                    'counts': count, 'gq': gq,
                    'timings': timings, 'pass_log': tally}, handle, indent=1)
     print(name, 'done', flush=True)
+
+
+def refine_call(pvc, cell, label, threads):
+    """Calls the cell again with refinement on (`pvc refine-genotypes`, which re-called the pass-off
+    VCF, was removed on 2026-11-03): the same psps, catalog and parameters founder_grid.py used.
+    Returns the VCF and the fill-check table the run writes beside it."""
+    out = os.path.join(cell, f'refined_{label}.vcf.gz')
+    table = os.path.join(cell, f'refined_{label}.fill_check.tsv')
+    if not os.path.exists(out):
+        psps = sorted(glob.glob(os.path.join(cell, 'psps', '*.psp')))
+        command = [pvc, 'call-from-psps', '--reference', os.path.join(cell, 'sim', 'reference.fa'),
+                   '--catalog', os.path.join(cell, 'catalog.parquet')]
+        for psp in psps:
+            command += ['--psp', psp]
+        command += ['--parameters', os.path.join(cell, 'params.toml'), '--refine-genotypes', 'on',
+                    '--output', out, '--log', os.path.join(cell, f'refined_{label}.log'),
+                    '--threads', str(threads), '--force']
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out, table
 
 
 def rescore(cell_dir):

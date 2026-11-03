@@ -1,7 +1,7 @@
 """Does the fill check pvc reports estimate each sample's real fill error rate? On founder_grid.py
-cells: refine-genotypes re-calls the pass-off VCF, writing <cell>/fill_check_<label>.tsv beside
-it, and each sample's reported share is set against its fills' error rate measured on the
-simulator's truth.
+cells: each is called again with `--refine-genotypes on`, writing
+<cell>/refined_<label>.fill_check.tsv beside its VCF, and each sample's reported share is set
+against its fills' error rate measured on the simulator's truth.
 
 usage: uv run python validate_fill_check.py <pvc> <label> <cell dir> [<cell dir> ...]
 
@@ -10,21 +10,14 @@ reported share times its fills, over samples with a share); per sample, in a sec
 samples with 30 fills or more. Scoring as founder_grid.py: SNP records matching a truth record. The
 check covers every record kind, the truth only SNPs, so the two are compared as rates.
 """
-import csv, os, subprocess, sys
+import csv, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from founder_grid import read_vcf  # noqa: E402
+from founder_grid import read_vcf, refine_call  # noqa: E402
 
 
 def refine(pvc, cell, label):
-    out = os.path.join(cell, f'refined_{label}.vcf.gz')
-    table = os.path.join(cell, f'refined_{label}.fill_check.tsv')
-    if not os.path.exists(table):
-        subprocess.run([pvc, 'refine-genotypes', '--vcf', os.path.join(cell, 'calls_off.vcf.gz'),
-                        '--parameters', os.path.join(cell, 'params.toml'), '--output', out,
-                        '--log', os.path.join(cell, f'refined_{label}.log'), '--threads', '6',
-                        '--force'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return out, table
+    return refine_call(pvc, cell, label, 6)
 
 
 def true_fills(cell, refined_path):
