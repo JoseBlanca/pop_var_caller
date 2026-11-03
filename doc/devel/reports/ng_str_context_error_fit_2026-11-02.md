@@ -131,7 +131,26 @@ Neither simulation plants a misread after a repeat, so nothing should move.
   the parameters file (19 rows); the fit is per read group and independent.
 - **At 5× the term costs a few heterozygous calls** inside long runs with one reference read
   (`str_context_error.md` §6.3); fitting does not change that.
-- **Not measured**: a real cohort at 3× (tomato), and timing under controlled conditions.
+- **At 3× (measured 2026-11-03, the reviewed build)** — HG002 downsampled to a tenth of the 30×
+  reads, missed / false against GIAB:
+
+  | run | main | this branch |
+  |---|---|---|
+  | chr20, `--defaults` | 18,025 / 3,890 | 18,021 / 3,886 |
+  | chr20, fitted | 18,446 / 3,517 | 18,437 / 3,507 |
+  | tandem-repeat benchmark, `--defaults` | 28,768 / 2,013 | 28,764 / 2,009 |
+  | tandem-repeat benchmark, fitted | 28,979 / 1,902 | 28,982 / 1,902 |
+
+  No net loss: three runs gain a few calls, the fourth misses 3 more and has no fewer false calls.
+- **A real cohort at low depth: tomato2** (59 accessions, 160 regions of 200 kb, fitted; no truth
+  set, so this says what changes, not whether it is right). 780 of 17.2 million genotypes change,
+  at 687 of 292,000 sites; 162 homozygous calls become heterozygous and 90 go the other way. The
+  sites are at or beside long runs; changed SNPs with no run of their own sit beside an STR tract
+  holding one, and move through the pass that refines genotypes from neighbouring sites. Each read
+  group fits 7 to 10 of its 19 entries over these 32 Mb; the rest take the defaults. Every other
+  fitted parameter is identical to main's. The base-quality check fired for 43 of 59 read groups,
+  in both directions, so it is now an information line rather than a warning (spec §4.2).
+- **Not measured**: timing under controlled conditions.
 
 ## 6. Where the build departs from the spec as approved
 

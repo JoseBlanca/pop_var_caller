@@ -490,9 +490,11 @@ pub fn parameters_from_the_fit(
 /// written by a test, say — gets every entry defaulted, which is what the run would score under
 /// without a fit.
 ///
-/// **It logs what it fitted and the base-quality check of §4.2**: one line per read group, and a
-/// warning for every entry whose misread bases' qualities claim a rate more than three times
-/// away from the fitted one. The check changes no value.
+/// **It logs what it fitted and the base-quality check of §4.2**: one line per read group, and one
+/// for every entry whose misread bases' qualities claim a rate more than three times away from
+/// the fitted one. The check changes no value, and it is information, not a warning: on the tomato2
+/// cohort (59 read groups, 2026-11-03) it fired on 43 read groups of a sound dataset, whose
+/// qualities simply do not track the misread rate after runs.
 fn misread_after_runs_of(
     cohort: &CohortCensusEvidence,
 ) -> BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>> {
@@ -523,13 +525,16 @@ fn misread_after_runs_of(
             );
             for check in quality_checks(counts, &fitted) {
                 if check.disagrees() {
-                    let (shortest, longest) = check.entry.lengths();
-                    tracing::warn!(
-                        "estimating: misreads after runs: WARNING: read group {}, the base after \
-                         a run of {shortest}{} bases: its {} misread bases' qualities claim an \
-                         error rate of {:.4}, while the reads through the run misread it at {:.4}",
+                    let lengths = match check.entry.lengths() {
+                        (shortest, None) => format!("{shortest} or more"),
+                        (shortest, Some(longest)) if longest == shortest => shortest.to_string(),
+                        (shortest, Some(longest)) => format!("{shortest}–{longest}"),
+                    };
+                    tracing::info!(
+                        "estimating: misreads after runs: read group {}, the base after a run of \
+                         {lengths} bases: its {} misread bases' qualities claim an error rate of \
+                         {:.4}, while the reads through the run misread it at {:.4}",
                         group.get(),
-                        longest.map_or("+".to_string(), |top| format!("–{top}")),
                         check.misreads,
                         check.rate_the_qualities_claim,
                         check.rate_the_through_reads_show

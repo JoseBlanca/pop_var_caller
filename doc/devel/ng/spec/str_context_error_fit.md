@@ -211,8 +211,11 @@ through the run show for reading the base as the run, `through_as_the_run / thro
 writes both to the fit's log. *(Corrected 2026-11-02: the first build compared with the substitution
 rate plus the excess, which leaves out the background misreads both directions share; at short runs,
 where the excess is near zero, every entry then warned.)* Where an entry has 100 or more misreads and
-the two differ by more than a factor of 3, the log carries a warning naming the read group and the
-entry. **The check never changes a value**: it exists to make a broken count visible. On HG002 the
+the two differ by more than a factor of 3, the log carries a line naming the read group and the
+entry. **The check never changes a value**: it exists to make a broken count visible. *(Changed
+2026-11-03 from a warning to an information line: on the tomato2 cohort it fired for 43 of 59 read
+groups, after runs of 8 to 12 bases in both directions — qualities better than the misread rate
+after runs of 8 and 9, worse after 10 and 11 — on a dataset with nothing broken.)* On HG002 the
 misread bases carry quality about 10, a rate of 1 in 10, against a measured rate of about 1 in 10
 after a 16-base run.
 
