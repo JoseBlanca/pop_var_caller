@@ -149,7 +149,8 @@ pub fn write_the_records_the_filter_kept_explaining(
         });
     }
 
-    let entries = spill.read().map_err(PassThreeError::Spill)?;
+    // The one reader of the fragments: they go to the writer beside each line.
+    let entries = spill.read_with_fragments().map_err(PassThreeError::Spill)?;
     let mut did = WhatTheFilterDid::default();
     // **Taken front to back, never indexed.** The pairing is positional and this is what makes
     // it hold: the iterator advances once per record, in step with the read.
@@ -254,7 +255,7 @@ pub fn write_the_records_the_filter_kept_explaining(
         )?;
 
         writer
-            .write_line(RecordPlace::from(&entry), &line)
+            .write_line(RecordPlace::from(&entry), &line, entry.fragments)
             .map_err(|source| PassThreeError::Write {
                 contig: entry.contig.get(),
                 position: entry.position.get(),

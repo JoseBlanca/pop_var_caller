@@ -30,6 +30,7 @@ use super::refine::{
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
+use crate::read_phase::keeper::RecordFragments;
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
 
@@ -241,13 +242,17 @@ impl NeighbourEvidenceStage {
     }
 
     /// **Takes one line**, its place already checked against the line before it by the writer,
-    /// and appends to `ready` every line whose window this one completed.
+    /// and appends to `ready` every line whose window this one completed. `fragments` are the
+    /// line's reads that reach another record (read phase spec §2.4).
     pub fn push(
         &mut self,
         place: RecordPlace,
         line: Vec<u8>,
+        fragments: RecordFragments,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) {
+        // Not read yet: the link test takes them from the read phase spec's §2.7 build step on.
+        drop(fragments);
         if self.contig.is_some_and(|contig| contig != place.at.contig) {
             self.finish(ready);
         }

@@ -819,7 +819,9 @@ pub fn run_call_from_alignments(
     let mut written = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record, window_coverage| sink.accept(record, window_coverage),
+            &mut |record, window_coverage, fragments| {
+                sink.accept(record, window_coverage, fragments)
+            },
         )
         .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
 

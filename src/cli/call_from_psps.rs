@@ -705,7 +705,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let (mut calling, mut stored) = caller
         .call_cohort_preparing_each_record(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &|record, window_coverage| preparer.prepare(record, window_coverage),
+            &|record, window_coverage, fragments| {
+                preparer.prepare(record, window_coverage, fragments)
+            },
             &mut |prepared, _| sink.accept_prepared(prepared),
         )
         .map_err(|source| CallFromPspsCliError::Run { source })?;

@@ -53,6 +53,7 @@ use crate::read::input::SampleReads;
 use crate::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::read::input::reference::OpenReference;
 use crate::read::input::{AssemblyMismatch, check_assembly};
+use crate::read_phase::keeper::RecordFragments;
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::run::cohort_merge::build::CohortObservation;
@@ -782,7 +783,7 @@ impl AlignedFilesVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage], RecordFragments) -> Result<(), E>,
     ) -> Result<WrittenCohort, RunError>
     where
         G: LocusGenotyper<S>,
@@ -844,8 +845,8 @@ impl AlignedFilesVariantCaller {
                 &|record, _| Ok::<_, E>(record),
                 &mut |record: VcfRecord, windows| {
                     for (record, windows) in gathering.accept(record, windows.to_vec()) {
-                        for (record, windows, _fragments) in keeper.accept(record, windows) {
-                            hand_over(&record, &windows)?;
+                        for (record, windows, fragments) in keeper.accept(record, windows) {
+                            hand_over(&record, &windows, fragments)?;
                         }
                     }
                     Ok(())
@@ -857,10 +858,12 @@ impl AlignedFilesVariantCaller {
             }
             released.extend(keeper.finish());
             crate::read_phase::keeper::log_counts(keeper.counts());
-            for (record, windows, _fragments) in released {
-                hand_over(&record, &windows).map_err(|source| RunError::RecordNotWritten {
-                    locus: record.region(),
-                    source: Box::new(source),
+            for (record, windows, fragments) in released {
+                hand_over(&record, &windows, fragments).map_err(|source| {
+                    RunError::RecordNotWritten {
+                        locus: record.region(),
+                        source: Box::new(source),
+                    }
                 })?;
             }
             let mut outcome = outcome;
@@ -6123,7 +6126,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let written = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record, _window_coverage| {
+                &mut |record, _window_coverage, _fragments| {
                     records.push(record.clone());
                     Ok::<(), std::io::Error>(())
                 },
@@ -6300,7 +6303,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let stopped = open_over(std::slice::from_ref(&zeta), &reference)
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |_record, _window_coverage| {
+                &mut |_record, _window_coverage, _fragments| {
                     taken += 1;
                     Err(std::io::Error::other("the disk is full"))
                 },
@@ -6470,7 +6473,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let written = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record, _window_coverage| writer.write_record(record),
+                &mut |record, _window_coverage, fragments| writer.write_record(record, fragments),
             )
             .expect("calls");
         writer.finish().expect("the file is renamed into place");
@@ -6705,7 +6708,9 @@ mod records_handed_over_as_the_run_finishes_them {
             let written = caller
                 .call_cohort_handing_each_record_over(
                     &the_shipped_genotyper(),
-                    &mut |record, _window_coverage| writer.write_record(record),
+                    &mut |record, _window_coverage, fragments| {
+                        writer.write_record(record, fragments)
+                    },
                 )
                 .expect("the mixed cohort calls");
             writer.finish().expect("the file is renamed into place");
@@ -7106,7 +7111,7 @@ mod records_handed_over_as_the_run_finishes_them {
             open_over_the_tract_ground_with(&paths, &reference, MergeParameters::DEFAULT)
                 .call_cohort_handing_each_record_over(
                     &the_shipped_genotyper(),
-                    &mut |record, _window_coverage| {
+                    &mut |record, _window_coverage, _fragments| {
                         records.push(record.clone());
                         Ok::<(), std::io::Error>(())
                     },

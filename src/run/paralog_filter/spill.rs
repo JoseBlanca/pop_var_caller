@@ -33,7 +33,22 @@
 //!     mean_depth     4 bytes   -- an f32's bits, little-endian
 //!     ref_reads      varint    -- AD[0]
 //!     alt_reads      varint    -- every alternative's reads, summed
+//!   fragments_bytes  varint    -- the section below's length, so pass two steps over it unread
+//!   fragments:
+//!     count          varint
+//!     per entry, sorted by sample and then fragment:
+//!       sample       varint
+//!       fragment     varint
+//!       allele       varint    -- numbered as the record numbers its alleles
+//!       error_phred  u8
 //! ```
+//!
+//! **The fragments are the record's reads that reach another record** (read phase spec §2.4),
+//! which the line never carries. Only pass three reads them, handing them to the writer beside
+//! the line; pass two, which reads every entry to score it, steps over the section by its length.
+//! At the top of the range they are the larger part of an entry — 3,000 samples × 32 read alleles
+//! × about 6 bytes, against a line of about 150 kB (spec §4.1) — so skipping them unread is what
+//! keeps pass two's reading at what it was.
 //!
 //! **Every record's samples carry both signals** (spec §3.2): coverage, and the split between
 //! reads carrying the reference allele and reads carrying any other — repeat tracts included,
@@ -66,6 +81,7 @@ use thiserror::Error;
 
 use super::WindowCoverage;
 use crate::psp::varint::{MAX_VARINT_BYTES, VarintError, decode_u64_leb128, encode_u64_leb128};
+use crate::read_phase::keeper::{FragmentAllele, RecordFragments};
 use crate::types::{ContigId, Position};
 
 /// The field names the decoder reports, one per field of the layout above.
@@ -84,6 +100,12 @@ mod field {
     pub const MEAN_DEPTH: &str = "mean_depth";
     pub const REF_READS: &str = "ref_reads";
     pub const ALT_READS: &str = "alt_reads";
+    pub const FRAGMENTS_BYTES: &str = "fragments_bytes";
+    pub const FRAGMENT_COUNT: &str = "fragment_count";
+    pub const FRAGMENT_SAMPLE: &str = "fragment_sample";
+    pub const FRAGMENT: &str = "fragment";
+    pub const FRAGMENT_ALLELE: &str = "fragment_allele";
+    pub const FRAGMENT_ERROR_PHRED: &str = "fragment_error_phred";
 }
 
 /// The most per-sample entries reserved up front from a decoded count, so that a corrupt count
@@ -143,6 +165,10 @@ pub struct SpillEntry {
     /// What each sample showed, one entry per sample in the run's order — dense, so a sample
     /// that covered nothing still has its place.
     pub samples: Vec<SpilledSample>,
+    /// **The record's reads that reach another record**, for whichever stage writes phase — read
+    /// back only by pass three ([`SpillReader::reading_fragments`]); empty in an entry pass two
+    /// read.
+    pub fragments: RecordFragments,
 }
 
 /// What one sample showed at a record: its window, and the split between reads carrying the
@@ -361,11 +387,14 @@ pub struct SpillReader<R: BufRead> {
     /// call is silent where forgetting an argument does not compile.
     entries_expected: u64,
     entries_read: u64,
+    /// Whether each entry's fragments are read, or stepped over unread (pass two).
+    read_fragments: bool,
 }
 
 impl<R: BufRead> SpillReader<R> {
     /// Start reading from `source`, which must be positioned at an entry boundary, expecting
     /// `entries_expected` of them.
+    /// Each entry's fragments are stepped over and come back empty.
     ///
     /// **The count is required because a spill that lost its tail on an entry boundary is byte
     /// for byte the prefix of a complete one**, so nothing in the bytes can tell the two apart.
@@ -377,6 +406,16 @@ impl<R: BufRead> SpillReader<R> {
             failed: false,
             entries_expected,
             entries_read: 0,
+            read_fragments: false,
+        }
+    }
+
+    /// [`new`](Self::new), reading each entry's fragments too — pass three's reader, which hands
+    /// them to the writer beside the line. Every other reader steps over them.
+    pub fn reading_fragments(source: R, entries_expected: u64) -> Self {
+        Self {
+            read_fragments: true,
+            ..Self::new(source, entries_expected)
         }
     }
 
@@ -412,7 +451,7 @@ impl<R: BufRead> SpillReader<R> {
             }
             return None;
         }
-        let decoded = decode_entry(&mut self.source);
+        let decoded = decode_entry(&mut self.source, self.read_fragments);
         match &decoded {
             Ok(_) => self.entries_read += 1,
             Err(_) => self.failed = true,
@@ -466,6 +505,7 @@ fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
         is_repeat_tract,
         line,
         samples,
+        fragments,
     } = entry;
 
     encode_u64_leb128(u64::from(contig.get()), out);
@@ -486,6 +526,23 @@ fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
         encode_u64_leb128(u64::from(*ref_reads), out);
         encode_u64_leb128(u64::from(*alt_reads), out);
     }
+
+    let mut section = Vec::new();
+    encode_u64_leb128(fragments.len() as u64, &mut section);
+    for entry in fragments.entries() {
+        let FragmentAllele {
+            sample,
+            fragment,
+            allele,
+            error_phred,
+        } = *entry;
+        encode_u64_leb128(u64::from(sample), &mut section);
+        encode_u64_leb128(u64::from(fragment), &mut section);
+        encode_u64_leb128(u64::from(allele), &mut section);
+        section.push(error_phred);
+    }
+    encode_u64_leb128(section.len() as u64, out);
+    out.extend_from_slice(&section);
 }
 
 /// The window pair, by bit pattern, so an absent one survives the round trip.
@@ -500,7 +557,10 @@ fn encode_window(window: &WindowCoverage, out: &mut Vec<u8>) {
 }
 
 /// Read one entry from `source`, which is positioned at its first byte.
-fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
+fn decode_entry<R: BufRead>(
+    source: &mut R,
+    read_fragments: bool,
+) -> Result<SpillEntry, SpillError> {
     let contig = read_u32(source, field::CONTIG)?;
     let position = read_varint(source, field::POSITION)?;
     let is_repeat_tract = read_bool(source, field::IS_REPEAT_TRACT)?;
@@ -524,13 +584,101 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
         samples.push(sample);
     }
 
+    let fragments = read_fragments_section(source, read_fragments)?;
+
     Ok(SpillEntry {
         contig: ContigId(contig),
         position: Position(position),
         is_repeat_tract,
         line,
         samples,
+        fragments,
     })
+}
+
+/// The largest fragments section the decoder will believe: 3,000 samples × 32 read alleles × at most
+/// 16 bytes is 1.5 MiB, so 64 MiB is far above any real entry and still bounds what one corrupt
+/// length can make the reader hold, as [`MAX_LINE_BYTES`] does for the line.
+const MAX_FRAGMENTS_BYTES: usize = 64 * 1024 * 1024;
+
+/// **Read the fragments section, or step over it**: its length, then — when `read` — its entries,
+/// and otherwise that many bytes consumed unread, which is pass two's case.
+fn read_fragments_section<R: BufRead>(
+    source: &mut R,
+    read: bool,
+) -> Result<RecordFragments, SpillError> {
+    let length = read_usize(source, field::FRAGMENTS_BYTES)?;
+    if length > MAX_FRAGMENTS_BYTES {
+        return Err(SpillError::OutOfRange {
+            field: field::FRAGMENTS_BYTES,
+            value: length as u64,
+        });
+    }
+    if !read {
+        let skipped = io::copy(&mut source.by_ref().take(length as u64), &mut io::sink()).map_err(
+            |source| SpillError::Read {
+                field: field::FRAGMENTS_BYTES,
+                source,
+            },
+        )?;
+        if skipped != length as u64 {
+            return Err(SpillError::Truncated {
+                field: field::FRAGMENTS_BYTES,
+            });
+        }
+        return Ok(RecordFragments::default());
+    }
+    let mut section = Vec::with_capacity(length);
+    let bytes_read = source
+        .by_ref()
+        .take(length as u64)
+        .read_to_end(&mut section)
+        .map_err(|source| SpillError::Read {
+            field: field::FRAGMENTS_BYTES,
+            source,
+        })?;
+    if bytes_read != length {
+        return Err(SpillError::Truncated {
+            field: field::FRAGMENTS_BYTES,
+        });
+    }
+    let mut bytes = section.as_slice();
+    let count = read_usize(&mut bytes, field::FRAGMENT_COUNT)?;
+    // Every entry takes at least four bytes, so a count the section cannot hold is refused
+    // before anything is reserved for it.
+    if count > length / 4 {
+        return Err(SpillError::OutOfRange {
+            field: field::FRAGMENT_COUNT,
+            value: count as u64,
+        });
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let sample = read_u32(&mut bytes, field::FRAGMENT_SAMPLE)?;
+        let fragment = read_u32(&mut bytes, field::FRAGMENT)?;
+        let allele = read_varint(&mut bytes, field::FRAGMENT_ALLELE)?;
+        let allele = u16::try_from(allele).map_err(|_| SpillError::OutOfRange {
+            field: field::FRAGMENT_ALLELE,
+            value: allele,
+        })?;
+        let error_phred =
+            read_byte(&mut bytes, field::FRAGMENT_ERROR_PHRED)?.ok_or(SpillError::Truncated {
+                field: field::FRAGMENT_ERROR_PHRED,
+            })?;
+        entries.push(FragmentAllele {
+            sample,
+            fragment,
+            allele,
+            error_phred,
+        });
+    }
+    if !bytes.is_empty() {
+        return Err(SpillError::OutOfRange {
+            field: field::FRAGMENTS_BYTES,
+            value: length as u64,
+        });
+    }
+    Ok(RecordFragments::from_entries(entries))
 }
 
 /// Read the record's line: a length, then that many bytes.

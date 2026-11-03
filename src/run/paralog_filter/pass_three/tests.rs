@@ -52,6 +52,7 @@ fn a_record(contig: u32, position: u64, filter: &str) -> SpillEntry {
         )
         .into_bytes(),
         samples: vec![a_row()],
+        fragments: Default::default(),
     }
 }
 

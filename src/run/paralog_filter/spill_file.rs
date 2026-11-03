@@ -253,6 +253,23 @@ impl SpillFile {
     /// If [`Self::finish_writing`] has not been called — reading before the flush would see
     /// whatever had reached the disk — or if the file cannot be opened. Both name the path.
     pub fn read(&self) -> Result<SpillReader<BufReader<File>>, SpillFileError> {
+        self.open_reader(false)
+    }
+
+    /// [`read`](Self::read), with each entry's fragments read too: pass three's cursor, which
+    /// hands them to the writer beside the line (read phase spec §4). Pass two's steps over them.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`](Self::read).
+    pub fn read_with_fragments(&self) -> Result<SpillReader<BufReader<File>>, SpillFileError> {
+        self.open_reader(true)
+    }
+
+    fn open_reader(
+        &self,
+        read_fragments: bool,
+    ) -> Result<SpillReader<BufReader<File>>, SpillFileError> {
         if self.stage != Stage::Finished {
             return Err(SpillFileError::PassOneHasNotEnded {
                 path: self.path.clone(),
@@ -262,10 +279,12 @@ impl SpillFile {
             path: self.path.clone(),
             source,
         })?;
-        Ok(SpillReader::new(
-            BufReader::with_capacity(BUFFER_BYTES, file),
-            self.entries_written,
-        ))
+        let source = BufReader::with_capacity(BUFFER_BYTES, file);
+        Ok(if read_fragments {
+            SpillReader::reading_fragments(source, self.entries_written)
+        } else {
+            SpillReader::new(source, self.entries_written)
+        })
     }
 
     /// Give a failure that came off one of this file's readers the path it happened on.

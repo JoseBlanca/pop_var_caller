@@ -35,6 +35,7 @@ use super::header::{VcfHeaderMetadata, header_text};
 use crate::neighbour_evidence::line::RewriteTally;
 use crate::neighbour_evidence::refine::FillCheck;
 use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
+use crate::read_phase::keeper::RecordFragments;
 use crate::types::{GenomePosition, Ploidy, Position};
 
 /// The 28-byte empty-block marker every well-formed bgzf file ends with.
@@ -166,11 +167,19 @@ impl VcfWriter {
     ///
     /// # Errors
     ///
+    /// **`fragments` are the record's reads that reach another record** (read phase spec §2.4),
+    /// handed beside it because the line never carries them: whichever stage writes phase reads
+    /// them, and nothing writes them to the file.
+    ///
     /// If the record runs backwards, if it forms a tie that is not the legal one, or if the
     /// write fails.
-    pub fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfWriteError> {
+    pub fn write_record(
+        &mut self,
+        record: &VcfRecord,
+        fragments: RecordFragments,
+    ) -> Result<(), VcfWriteError> {
         let line = record_line(record, self.metadata.contigs(), self.ploidy);
-        self.write_line(place_of(record), line.as_bytes())
+        self.write_line(place_of(record), line.as_bytes(), fragments)
     }
 
     /// **Write a line that has already been encoded**, saying where it sits.
@@ -196,8 +205,17 @@ impl VcfWriter {
     /// # Errors
     ///
     /// If the `place` runs backwards, if it forms a tie that is not the legal one, or if the
+    /// **The line carries no fragments**, so a caller that rebuilds a record from its line, as
+    /// the hidden-duplication filter's pass three does, hands them in from wherever it kept them
+    /// (read phase spec §6). A line written with none is phased by the population alone.
+    ///
     /// write fails. Note that these are properties of the `place`, not of the line's bytes.
-    pub fn write_line(&mut self, place: RecordPlace, line: &[u8]) -> Result<(), VcfWriteError> {
+    pub fn write_line(
+        &mut self,
+        place: RecordPlace,
+        line: &[u8],
+        fragments: RecordFragments,
+    ) -> Result<(), VcfWriteError> {
         if let Some(last) = self.last {
             self.check_order(last, place)?;
         }
@@ -205,7 +223,7 @@ impl VcfWriter {
         match self.neighbour_evidence.as_mut() {
             None => self.write_checked_line(line),
             Some(stage) => {
-                stage.push(place, line.to_vec(), &mut self.released);
+                stage.push(place, line.to_vec(), fragments, &mut self.released);
                 self.write_released()
             }
         }
@@ -295,7 +313,7 @@ impl VcfWriter {
         records: impl IntoIterator<Item = VcfRecord>,
     ) -> Result<(), VcfWriteError> {
         for record in records {
-            self.write_record(&record)?;
+            self.write_record(&record, RecordFragments::default())?;
         }
         Ok(())
     }

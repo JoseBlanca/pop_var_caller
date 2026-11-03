@@ -107,6 +107,7 @@ fn no_window() -> WindowCoverage {
 /// A generic locus at `position`, one row per `(window, ref_reads, alt_reads)`.
 fn a_generic_locus(position: u64, samples: Vec<(WindowCoverage, u32, u32)>) -> SpillEntry {
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(0),
         position: Position(position),
         is_repeat_tract: false,
@@ -126,6 +127,7 @@ fn a_generic_locus(position: u64, samples: Vec<(WindowCoverage, u32, u32)>) -> S
 /// another — rows of the shape every record carries (spec §3.2).
 fn a_repeat_tract(position: u64, windows: Vec<WindowCoverage>) -> SpillEntry {
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(0),
         position: Position(position),
         is_repeat_tract: true,

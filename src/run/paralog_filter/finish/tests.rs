@@ -42,6 +42,7 @@ const ONE_COPY_DEPTH: f32 = 5.25;
 fn a_record(position: u64, samples: usize, depth: f32) -> SpillEntry {
     let columns: String = (0..samples).map(|_| "\t0/1:5,5".to_string()).collect();
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(0),
         position: Position(position),
         is_repeat_tract: false,

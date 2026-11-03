@@ -42,6 +42,7 @@ fn an_output_path(test_name: &str) -> PathBuf {
 /// One record, distinguishable from the next by its position.
 fn a_record_at(position: u64) -> SpillEntry {
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(2),
         position: Position(position),
         is_repeat_tract: false,

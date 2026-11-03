@@ -21,6 +21,7 @@ use proptest::prelude::*;
 
 use super::{EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
 use crate::psp::varint::encode_u64_leb128;
+use crate::read_phase::keeper::{FragmentAllele, RecordFragments};
 use crate::run::paralog_filter::WindowCoverage;
 use crate::types::{ContigId, Position};
 
@@ -63,6 +64,7 @@ fn a_sample_without_a_window(ref_reads: u32, alt_reads: u32) -> SpilledSample {
 /// A biallelic SNP two samples covered, one of them with no window.
 fn a_snp_two_samples_covered() -> SpillEntry {
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(3),
         position: Position(1_000_000),
         is_repeat_tract: false,
@@ -79,6 +81,7 @@ fn a_snp_two_samples_covered() -> SpillEntry {
 /// as every record's do (spec §3.2).
 fn a_tract_two_samples_covered() -> SpillEntry {
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(3),
         position: Position(2_000_000),
         is_repeat_tract: true,
@@ -100,6 +103,12 @@ fn a_tiny_record() -> SpillEntry {
         is_repeat_tract: false,
         line: b"AB".to_vec(),
         samples: vec![a_sample_with_a_window(0.5, 2.0, 3, 130)],
+        fragments: RecordFragments::from_entries(vec![FragmentAllele {
+            sample: 0,
+            fragment: 5,
+            allele: 1,
+            error_phred: 30,
+        }]),
     }
 }
 
@@ -121,6 +130,7 @@ fn holds_the_same_bits(left: &SpillEntry, right: &SpillEntry) -> bool {
         is_repeat_tract,
         line,
         samples,
+        fragments,
     } = left;
     let SpillEntry {
         contig: other_contig,
@@ -128,6 +138,7 @@ fn holds_the_same_bits(left: &SpillEntry, right: &SpillEntry) -> bool {
         is_repeat_tract: other_is_repeat_tract,
         line: other_line,
         samples: other_samples,
+        fragments: other_fragments,
     } = right;
 
     contig == other_contig
@@ -135,6 +146,7 @@ fn holds_the_same_bits(left: &SpillEntry, right: &SpillEntry) -> bool {
         && is_repeat_tract == other_is_repeat_tract
         && line == other_line
         && samples_hold_the_same_bits(samples, other_samples)
+        && fragments == other_fragments
 }
 
 /// The samples, compared by bit pattern.
@@ -193,7 +205,7 @@ fn encoded_bytes(entries: &[SpillEntry]) -> Vec<u8> {
 
 /// Encode the entries and read them back.
 fn round_trip(entries: &[SpillEntry]) -> Vec<SpillEntry> {
-    SpillReader::new(Cursor::new(encoded_bytes(entries)), entries.len() as u64)
+    SpillReader::reading_fragments(Cursor::new(encoded_bytes(entries)), entries.len() as u64)
         .map(|entry| entry.expect("every entry the writer wrote reads back"))
         .collect()
 }
@@ -278,6 +290,7 @@ fn holds_the_same_bits_separates_entries_that_differ_in_any_one_field() {
             "the sample count",
             SpillEntry {
                 samples: vec![a_sample_with_a_window(0.41, 6.25, 5, 5)],
+                fragments: Default::default(),
                 ..base.clone()
             },
         ),
@@ -399,6 +412,7 @@ fn a_nan_comes_back_as_the_same_nan_and_not_merely_as_a_nan() {
 fn a_record_with_no_samples_at_all_round_trips() {
     let entry = SpillEntry {
         samples: Vec::new(),
+        fragments: Default::default(),
         ..a_snp_two_samples_covered()
     };
     assert!(assert_round_trips(&entry).samples.is_empty());
@@ -431,6 +445,7 @@ fn a_repeat_tract_round_trips_with_its_tract_flag_and_its_read_counts() {
     // Both facts must come back: the tract flag, which the writer's ordering rule reads, and the
     // counts, which the scorer reads (spec §3.2).
     let entry = SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(0),
         position: Position(1),
         is_repeat_tract: true,
@@ -539,6 +554,7 @@ fn a_stream_of_records_comes_back_in_the_order_it_was_written() {
         contig: ContigId(4),
         position: Position(7),
         samples: Vec::new(),
+        fragments: Default::default(),
         ..a_snp_two_samples_covered()
     };
 
@@ -548,6 +564,41 @@ fn a_stream_of_records_comes_back_in_the_order_it_was_written() {
     assert!(holds_the_same_bits(&first, &read[0]));
     assert!(holds_the_same_bits(&second, &read[1]));
     assert!(holds_the_same_bits(&third, &read[2]));
+}
+
+/// **The fragments ride the spill, and only pass three's reader reads them** (read phase spec
+/// §4.1): the reader pass three opens gets them back exactly; pass two's steps over them by their
+/// length, comes back with none, and still meets the next entry where it starts.
+#[test]
+fn fragments_are_read_back_by_pass_three_and_stepped_over_by_pass_two() {
+    let deep = SpillEntry {
+        fragments: RecordFragments::from_entries(
+            (0..40)
+                .map(|at| FragmentAllele {
+                    sample: at % 3,
+                    fragment: 1_000 + at * 7,
+                    allele: (at % 2) as u16,
+                    error_phred: 20 + (at % 30) as u8,
+                })
+                .collect(),
+        ),
+        ..a_snp_two_samples_covered()
+    };
+    let after = a_tract_two_samples_covered();
+    let bytes = encoded_bytes(&[deep.clone(), after.clone()]);
+
+    let read: Vec<SpillEntry> = SpillReader::reading_fragments(Cursor::new(bytes.clone()), 2)
+        .collect::<Result<_, _>>()
+        .expect("pass three reads both");
+    assert_eq!(read[0].fragments, deep.fragments);
+    assert!(holds_the_same_bits(&after, &read[1]));
+
+    let skipped: Vec<SpillEntry> = SpillReader::new(Cursor::new(bytes), 2)
+        .collect::<Result<_, _>>()
+        .expect("pass two reads both");
+    assert!(skipped[0].fragments.is_empty());
+    assert_eq!(skipped[0].line, deep.line);
+    assert!(holds_the_same_bits(&after, &skipped[1]));
 }
 
 #[test]
@@ -577,6 +628,12 @@ fn the_encoding_matches_the_layout_the_spec_fixes() {
             0x00, 0x00, 0x00, 0x40, // mean_depth 2.0
             0x03, // ref_reads 3
             0x82, 0x01, // alt_reads 130, two varint bytes
+            0x05, // the fragments section is five bytes long          — offset 19
+            0x01, // one fragment allele
+            0x00, // sample 0
+            0x05, // fragment 5
+            0x01, // allele 1
+            0x1E, // error Phred 30
         ]
     );
 }
@@ -609,12 +666,16 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
         (16, "ref_reads"),
         (17, "alt_reads"),
         (18, "alt_reads"),
+        (19, "fragments_bytes"),
+        (20, "fragments_bytes"),
+        (22, "fragments_bytes"),
+        (24, "fragments_bytes"),
     ];
 
     let whole = encoded_bytes(&[a_tiny_record()]);
     assert_eq!(
         whole.len(),
-        19,
+        25,
         "the byte list moved and the offsets below move with it"
     );
 
@@ -632,22 +693,28 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
     }
 }
 
+/// An empty fragments section closes every entry: its length, one byte, then a count of zero.
+const EMPTY_FRAGMENTS_SECTION_BYTES: usize = 2;
+
 #[test]
 fn a_failure_inside_the_samples_names_which_sample() {
     // At a cohort of three thousand a message that names only the field points at three
     // thousand places at once.
     let entry = SpillEntry {
         samples: vec![a_sample_with_a_window(0.5, 2.0, 1, 1); 3],
+        fragments: Default::default(),
         ..a_tiny_record()
     };
     let whole = encoded_bytes(std::slice::from_ref(&entry));
     let head = encoded_bytes(&[SpillEntry {
         samples: Vec::new(),
+        fragments: Default::default(),
         ..entry
     }])
     .len();
     let bytes_per_sample = (whole.len() - head) / 3;
-    let two_bytes_into_the_second_sample = head + bytes_per_sample + 2;
+    let two_bytes_into_the_second_sample =
+        head - EMPTY_FRAGMENTS_SECTION_BYTES + bytes_per_sample + 2;
 
     let mut reader = SpillReader::new(
         Cursor::new(whole[..two_bytes_into_the_second_sample].to_vec()),
@@ -978,6 +1045,7 @@ fn any_entry() -> impl Strategy<Value = SpillEntry> {
                 is_repeat_tract,
                 line,
                 samples,
+                fragments: Default::default(),
             }
         })
 }

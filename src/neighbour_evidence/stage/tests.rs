@@ -108,7 +108,12 @@ fn run_stage(threads: usize) -> StageRun {
         let mut stage = NeighbourEvidenceStage::new(&decision, vec![1_000_000, 1_000_000]);
         let mut output = Vec::new();
         for (place, line) in &inputs {
-            stage.push(*place, line.clone().into_bytes(), &mut output);
+            stage.push(
+                *place,
+                line.clone().into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            );
         }
         stage.finish(&mut output);
         (output, stage.tally())
@@ -200,7 +205,12 @@ fn join_stage(
             let at = position(index);
             // The drawn line's POS is `1 + 500·index`; it is moved to `at`.
             let line = line.replacen(&format!("\t{}\t", 1 + index * 500), &format!("\t{at}\t"), 1);
-            stage.push(place(0, at), line.into_bytes(), &mut output);
+            stage.push(
+                place(0, at),
+                line.into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            );
         }
         stage.finish(&mut output);
         output
@@ -402,7 +412,12 @@ fn the_records_kept_are_those_some_sample_carries() {
     let mut output = Vec::new();
     for (index, line) in cohort.lines.iter().enumerate() {
         let position = 1 + index as u64 * 600;
-        stage.push(place(0, position), line.clone().into_bytes(), &mut output);
+        stage.push(
+            place(0, position),
+            line.clone().into_bytes(),
+            RecordFragments::default(),
+            &mut output,
+        );
     }
     stage.finish(&mut output);
     let kept = output.len();

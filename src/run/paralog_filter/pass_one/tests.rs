@@ -8,6 +8,7 @@
 
 use super::{CalledRecordSink, entry_for};
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
+use crate::read_phase::keeper::RecordFragments;
 use crate::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position};
 use crate::vcf::encode::record_line;
 use crate::vcf::{
@@ -154,7 +155,13 @@ fn a_left_padded_deletion_is_parked_at_the_position_it_is_written_at() {
         None,
     );
 
-    let entry = entry_for(&deletion, &[a_window(5.0)], &contigs(), diploid());
+    let entry = entry_for(
+        &deletion,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    );
 
     assert_eq!(
         entry.position,
@@ -179,7 +186,13 @@ fn a_records_line_is_parked_exactly_as_the_encoder_wrote_it() {
         None,
     );
 
-    let entry = entry_for(&snp, &[a_window(5.0)], &contigs(), diploid());
+    let entry = entry_for(
+        &snp,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    );
 
     assert_eq!(
         entry.line,
@@ -201,7 +214,13 @@ fn a_multiallelic_site_is_parked_with_its_alternatives_summed() {
         None,
     );
 
-    let entry = entry_for(&multiallelic, &[a_window(5.0)], &contigs(), diploid());
+    let entry = entry_for(
+        &multiallelic,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    );
 
     let rows = entry.samples;
     assert_eq!(rows[0].ref_reads, 2);
@@ -224,7 +243,13 @@ fn a_record_with_no_alternative_parks_a_zero_alternative_count() {
         None,
     );
 
-    let entry = entry_for(&refused, &[a_window(5.0)], &contigs(), diploid());
+    let entry = entry_for(
+        &refused,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    );
 
     let rows = entry.samples;
     assert_eq!(rows[0].ref_reads, 4);
@@ -252,6 +277,7 @@ fn the_windows_reach_the_entry_in_the_runs_sample_order() {
     let entry = entry_for(
         &snp,
         &[a_window(1.0), a_window(2.0), a_window(3.0)],
+        RecordFragments::default(),
         &contigs(),
         diploid(),
     );
@@ -291,7 +317,13 @@ fn the_entry_a_record_parks_can_be_written_back_where_the_record_would_have_gone
     );
 
     for source in [&deletion, &tract] {
-        let entry = entry_for(source, &[a_window(5.0)], &contigs(), diploid());
+        let entry = entry_for(
+            source,
+            &[a_window(5.0)],
+            RecordFragments::default(),
+            &contigs(),
+            diploid(),
+        );
         let from_the_entry = crate::vcf::RecordPlace::from(&entry);
 
         assert_eq!(from_the_entry.at.contig, source.region().contig);
@@ -337,7 +369,8 @@ fn a_sink_that_parks_records_does_not_create_the_vcf() {
         None,
     );
 
-    sink.accept(&snp, &[a_window(5.0)]).expect("the record");
+    sink.accept(&snp, &[a_window(5.0)], RecordFragments::default())
+        .expect("the record");
 
     assert!(
         !output.exists(),
@@ -366,7 +399,13 @@ fn the_alternative_count_is_the_written_alleles_and_not_the_depth_minus_the_refe
         None,
     );
 
-    let entry = entry_for(&snp, &[a_window(5.0)], &contigs(), diploid());
+    let entry = entry_for(
+        &snp,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    );
 
     let rows = entry.samples;
     assert_eq!(rows[0].ref_reads, 4);
@@ -398,7 +437,13 @@ fn a_record_is_parked_on_the_contig_it_was_called_on() {
         None,
     );
 
-    let entry = entry_for(&on_the_second, &[a_window(5.0)], &two_contigs(), diploid());
+    let entry = entry_for(
+        &on_the_second,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &two_contigs(),
+        diploid(),
+    );
 
     assert_eq!(entry.contig, ContigId(1));
     assert!(
@@ -421,9 +466,23 @@ fn the_runs_ploidy_reaches_the_parked_line() {
         None,
     );
 
-    let diploid_line = entry_for(&with_a_no_call, &[a_window(5.0)], &contigs(), diploid()).line;
+    let diploid_line = entry_for(
+        &with_a_no_call,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    )
+    .line;
     let tetraploid = Ploidy::try_new(4).expect("four copies");
-    let tetraploid_line = entry_for(&with_a_no_call, &[a_window(5.0)], &contigs(), tetraploid).line;
+    let tetraploid_line = entry_for(
+        &with_a_no_call,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        tetraploid,
+    )
+    .line;
 
     assert!(String::from_utf8_lossy(&diploid_line).contains("./."));
     assert!(String::from_utf8_lossy(&tetraploid_line).contains("./././."));
@@ -448,7 +507,13 @@ fn a_record_and_a_window_slice_that_disagree_are_refused_rather_than_zipped_shor
         None,
     );
 
-    let _ = entry_for(&snp, &[a_window(5.0)], &contigs(), diploid());
+    let _ = entry_for(
+        &snp,
+        &[a_window(5.0)],
+        RecordFragments::default(),
+        &contigs(),
+        diploid(),
+    );
 }
 
 #[test]
@@ -482,8 +547,10 @@ fn parked_records_are_readable_once_the_sink_is_finished() {
         Some(TractAnnotation::new(Motif::new(b"AT").expect("a motif"))),
     );
 
-    sink.accept(&snp, &[a_window(5.0)]).expect("the SNP");
-    sink.accept(&tract, &[a_window(6.0)]).expect("the tract");
+    sink.accept(&snp, &[a_window(5.0)], RecordFragments::default())
+        .expect("the SNP");
+    sink.accept(&tract, &[a_window(6.0)], RecordFragments::default())
+        .expect("the tract");
 
     let CalledRecordSink::ParkedOnTheSpill(mut parked) = sink else {
         panic!("the sink changed variant")
@@ -529,7 +596,7 @@ fn a_sink_that_cannot_write_says_which_half_of_pass_one_failed() {
     );
 
     let refused = sink
-        .accept(&snp, &[a_window(5.0)])
+        .accept(&snp, &[a_window(5.0)], RecordFragments::default())
         .expect_err("there is no directory to park in");
 
     assert!(
@@ -558,6 +625,7 @@ fn a_repeat_tract_is_parked_with_its_read_split() {
     let entry = entry_for(
         &tract,
         &[a_window(5.0), a_window(6.0)],
+        RecordFragments::default(),
         &contigs(),
         diploid(),
     );

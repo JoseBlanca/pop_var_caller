@@ -93,6 +93,7 @@ fn a_tract(samples: Vec<(WindowCoverage, u32, u32)>) -> SpillEntry {
 /// A generic locus whose samples carry windows and read counts.
 fn a_generic_locus(samples: Vec<(WindowCoverage, u32, u32)>) -> SpillEntry {
     SpillEntry {
+        fragments: Default::default(),
         contig: ContigId(0),
         position: Position(100),
         is_repeat_tract: false,
