@@ -354,12 +354,12 @@ tracts the rule leaves out with and without the multipliers.
 ## 6. Calling
 
 **A cell's frozen slip rate is its class's rate times its read group's multiplier for the class's
-motif length**, `λᵣₛ` of §1.4,
-set where calling gathers a tract's stutter: `TractScoringFits::gather_for_locus` and
-`gather_for_bundle` (`calling/inference/repeat_tract_parameters.rs:305`, `:452`), which already loop
-over every read group and look its slippage up per read group. The multiplied rate goes into the
-stutter model and into the cell's frozen slippage, so the per-locus slip refit, where it runs, pulls
-toward the read group's own rate.
+motif length**, `λᵣₛ` of §1.4. It is applied in the one lookup calling reads a read group's stutter
+through, `StratumFits::at`, so both places that gather a tract's stutter take it:
+`TractScoringFits::gather_for_locus` and `gather_for_bundle`
+(`calling/inference/repeat_tract_parameters.rs`), which already loop over every read group. The
+multiplied rate goes into the stutter model and into the cell's frozen slippage, so the per-locus slip
+refit, where it runs, pulls toward the read group's own rate.
 
 - **`--defaults`, and a file of version 7 or older**: every multiplier one.
 - **A read group with no row in the table**: the file is refused when it is read (§7), because the

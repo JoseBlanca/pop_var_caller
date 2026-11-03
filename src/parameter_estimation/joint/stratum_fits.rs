@@ -53,7 +53,9 @@ use super::census::Stratum;
 use super::share_curve::ShareSource;
 use super::slippage_curve::LevelSource;
 use super::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR;
-use super::ssr_fit::{LevelProvenance, SharesProvenance, Slippage, StratumOutcome};
+use super::ssr_fit::{
+    LevelProvenance, SharesProvenance, Slippage, StratumOutcome, read_group_level,
+};
 
 /// What one `(read group, stratum)` cell answers with.
 ///
@@ -1128,6 +1130,10 @@ impl StratumFits {
 
     /// The numbers for one read group at one stratum.
     ///
+    /// **The slip rate is the read group's own**: its slippage group's class rate times its stutter
+    /// multiplier at the motif length ([`Self::with_stutter_multipliers`]), held below 0.95. The
+    /// shorter share, the fall-off and every provenance and error are the class's.
+    ///
     /// **Fill the stratum from the *candidate*, not from the tract.** A read's chance of slipping
     /// is a property of the tract it was copied from, and that is the candidate allele
     /// (`spec/read_likelihoods.md` §4.4): a candidate of 6 repeats and one of 12 at the same
@@ -1179,9 +1185,16 @@ impl StratumFits {
         }
         // Indexed rather than `get`-ed from here on: `over` has checked that the three vectors
         // are the same length, and the bound above is that length.
-        fitted_at(row, stratum, index).ok_or(NoSlippage::GroupPutNoReadHere {
+        let mut fitted = fitted_at(row, stratum, index).ok_or(NoSlippage::GroupPutNoReadHere {
             slippage_group: group,
-        })
+        })?;
+        // **The read group's own slip rate**: its slippage group's class rate times its
+        // multiplier at this motif length (`str_library_stutter.md` §6). The shorter share and
+        // the fall-off are the class's for every read group.
+        if let Some(multiplier) = self.stutter_multipliers.get(&(read_group, period)) {
+            fitted.slippage.level = read_group_level(fitted.slippage.level, multiplier.value);
+        }
+        Ok(fitted)
     }
 
     /// Which slippage group a read group's reads are drawn under, for a caller reporting what it
@@ -1869,6 +1882,49 @@ mod tests {
             None,
             "and a read group the run never named has no group at all",
         );
+    }
+
+    /// **A read group is answered at its own slip rate**: the class rate times its multiplier at
+    /// the class's motif length, held below 0.95, with the class's shorter share and fall-off
+    /// (`str_library_stutter.md` §6). A read group without a multiplier, or at another motif
+    /// length, gets the class rate.
+    #[test]
+    fn each_read_group_slips_at_its_class_rate_times_its_multiplier() {
+        let multiplier = |value: f64| StutterMultiplier {
+            value,
+            standard_error: None,
+            slipped_reads: Some(100.0),
+            provenance: Provenance::FittedHere,
+        };
+        let fits = of_rows(
+            [derived(
+                stratum(2, 9),
+                vec![Some(slippage(0.08))],
+                vec![Some(from_the_cell(400.0))],
+            )],
+            BTreeMap::from([
+                (ReadGroupId(3), 0),
+                (ReadGroupId(4), 0),
+                (ReadGroupId(5), 0),
+            ]),
+        )
+        .with_stutter_multipliers(BTreeMap::from([
+            ((ReadGroupId(3), 2), multiplier(2.5)),
+            ((ReadGroupId(4), 1), multiplier(2.5)),
+            ((ReadGroupId(5), 2), multiplier(20.0)),
+        ]));
+        let class = slippage(0.08);
+        let at = |group: u32| fits.at(ReadGroupId(group), 2, 9).expect("fitted");
+
+        assert!((at(3).slippage.level - 0.20).abs() < 1e-15, "{:?}", at(3));
+        assert_eq!(at(3).slippage.shorter_share, class.shorter_share);
+        assert_eq!(at(3).slippage.fall_off, class.fall_off);
+        assert_eq!(
+            at(4).slippage.level,
+            0.08,
+            "its multiplier is for homopolymers"
+        );
+        assert_eq!(at(5).slippage.level, 0.95, "held below the ceiling");
     }
 
     /// **The four ways a lookup can come back empty are four different answers**, and a caller
