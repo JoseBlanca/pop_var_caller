@@ -56,6 +56,7 @@ pub use header::{
 pub use writer::{FinishedVcf, RecordPlace, VcfWriteError, VcfWriter};
 
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
+use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::types::{GenomeRegion, Genotype, GenotypeRows, Motif, Phred, Position};
 
 /// The first base of a contig, in the 1-based inclusive coordinates
@@ -157,6 +158,11 @@ pub struct VcfRecord {
     /// `STR` flag, `RU` and `PERIOD` together, so no consumer can meet a record that claims one
     /// and not the others. Read through [`Self::repeat_tract`].
     repeat_tract: Option<TractAnnotation>,
+    /// **Which allele each of every sample's reads showed here**, numbered as this record numbers
+    /// its alleles (read phase spec §2.3). **Never written to the file**: it travels beside the
+    /// record to the step that writes phase, and moves wherever the record moves. Empty on a
+    /// repeat-tract record, whose observations name no reads.
+    read_alleles: RecordReadAlleles,
 }
 
 impl VcfRecord {
@@ -325,6 +331,7 @@ impl VcfRecord {
             padding_base,
             filter,
             repeat_tract,
+            read_alleles: RecordReadAlleles::default(),
         }
     }
 
@@ -394,6 +401,17 @@ impl VcfRecord {
     #[must_use]
     pub fn filter(&self) -> FilterVerdict {
         self.filter
+    }
+
+    /// Every sample's read alleles at this record (read phase spec §2.3).
+    #[must_use]
+    pub fn read_alleles(&self) -> &RecordReadAlleles {
+        &self.read_alleles
+    }
+
+    /// Replace the record's read alleles, handing back what it held.
+    pub fn replace_read_alleles(&mut self, read_alleles: RecordReadAlleles) -> RecordReadAlleles {
+        std::mem::replace(&mut self.read_alleles, read_alleles)
     }
 
     /// **What marks this a repeat-tract record** — `None` at a SNP or indel.

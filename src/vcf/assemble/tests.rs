@@ -99,6 +99,7 @@ fn evidence(
         })
         .collect();
     LocusEvidenceForOutput {
+        read_alleles: RecordReadAlleles::default(),
         samples,
         allele_mapq: mapq,
         padding_base: None,
@@ -344,6 +345,7 @@ fn evidence_over_three(samples: Vec<SampleEvidenceForOutput>) -> LocusEvidenceFo
         })
         .collect();
     LocusEvidenceForOutput {
+        read_alleles: RecordReadAlleles::default(),
         samples,
         allele_mapq: mapq,
         padding_base: None,
@@ -382,6 +384,40 @@ fn an_alternative_no_sample_calls_is_dropped_and_its_reads_become_unexplained() 
         "the call is renumbered onto the surviving table, and DP still counts all 20 reads \
          with the dropped allele's three in DP − ΣAD",
     );
+}
+
+/// **A read allele on the dropped alternative goes with it, and one on a renumbered allele follows
+/// it** (read phase spec §2.3, step 2): `T` (2 reads) is dropped and `G` moves from 2 to 1.
+#[test]
+fn the_read_alleles_are_renumbered_with_the_alternatives_the_record_keeps() {
+    use crate::read_phase::capture::ReadAllele;
+    let locus = locus_over_three(vec![called(&[0, 2], 40.0)], vec![1.0, 0.0, 1.0]);
+    let mut evidence = evidence_over_three(vec![sample(vec![9, 3, 8], 0)]);
+    let read_allele = |read, allele| ReadAllele {
+        read,
+        allele,
+        error_phred: 30,
+    };
+    evidence.read_alleles = RecordReadAlleles::from_merge(
+        vec![(
+            0,
+            vec![
+                read_allele(1, 0),
+                read_allele(2, 1),
+                read_allele(3, 2),
+                read_allele(4, 1),
+            ],
+        )],
+        Some,
+    );
+    let record = assemble_record(&locus, evidence);
+    let kept: Vec<(u64, u32)> = record
+        .read_alleles()
+        .entries()
+        .iter()
+        .map(|entry| (entry.read_allele.read, entry.read_allele.allele))
+        .collect();
+    assert_eq!(kept, vec![(1, 0), (3, 1)]);
 }
 
 /// **An alternative some sample does call stays, whatever the others say.**

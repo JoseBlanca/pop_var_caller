@@ -84,8 +84,8 @@ use super::explain::{
 };
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
-    base_before_left_flank, evidence_for_output, padding_base_beside, reference_beside_locus,
-    reread_spellings_cut_short,
+    base_before_left_flank, evidence_for_output, padding_base_beside, read_alleles_on_the_record,
+    reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -1059,7 +1059,7 @@ where
         merge_parameters.cohort_locus_builder_regions_len,
         merge_parameters.max_cohort_locus_span,
         merge_parameters.min_alt_reads,
-        &mut |observation, _reads| {
+        &mut |observation, reads| {
             if stopped.is_some() {
                 return;
             }
@@ -1131,7 +1131,7 @@ where
                         locus: inference.region,
                         source,
                     })?;
-                    let evidence = evidence_for_output(
+                    let mut evidence = evidence_for_output(
                         &inference,
                         &observation,
                         remap,
@@ -1150,6 +1150,8 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
+                    // Asked only now, for a locus that is written (read phase spec §2.2).
+                    evidence.read_alleles = read_alleles_on_the_record(&observation, remap, reads);
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -1417,6 +1419,11 @@ where
 
 /// **What became of a called locus at the record-building stage** — the drivers' answer for each
 /// locus that reached a call.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "built and moved once per called locus; boxing the record would add an allocation \
+              per written record to save copying 216 bytes"
+)]
 pub(crate) enum CalledLocus {
     /// A record, for the file.
     Written(VcfRecord),
@@ -7415,7 +7422,7 @@ where
         },
         |worker: &mut RoundCallScratch<'_, S>,
          observation: CohortObservation,
-         _reads: &crate::run::cohort_merge::build::LocusReads<'_, '_>| {
+         reads: &crate::run::cohort_merge::build::LocusReads<'_, '_>| {
             let region = observation.region;
             let RoundCallScratch {
                 shaping,
@@ -7495,7 +7502,7 @@ where
                         locus: inference.region,
                         source,
                     })?;
-                    let evidence = evidence_for_output(
+                    let mut evidence = evidence_for_output(
                         &inference,
                         &observation,
                         remap,
@@ -7514,6 +7521,8 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
+                    // Asked only now, for a locus that is written (read phase spec §2.2).
+                    evidence.read_alleles = read_alleles_on_the_record(&observation, remap, reads);
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));

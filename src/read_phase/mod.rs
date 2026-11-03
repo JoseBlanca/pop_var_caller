@@ -8,5 +8,8 @@
 //!
 //! - [`capture`] — one sample's read alleles at one cohort locus, taken in the merge before the
 //!   chain ids are dropped, and settled: one per read, at most 32 a sample (§2.2, §2.4).
+//! - [`record_reads`] — every sample's read alleles at one written record, numbered as the
+//!   record numbers its alleles (§2.3).
 
 pub mod capture;
+pub mod record_reads;
