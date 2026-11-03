@@ -4109,6 +4109,7 @@ mod tests {
         observations: Vec<SequenceObservation>,
     ) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(position),
@@ -4327,6 +4328,7 @@ mod tests {
     /// The three-base-motif tract at 200, which `two_stratum_writer` keeps.
     fn atg_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(200),
@@ -4346,6 +4348,7 @@ mod tests {
 
     fn ssr_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(100),

@@ -2429,6 +2429,7 @@ mod tests {
             "the fixture's reference must cover its own region",
         );
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: Box::from(reference_bases),
             observations: vec![sequence(observed_bases)],

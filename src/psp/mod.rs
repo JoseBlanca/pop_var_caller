@@ -1038,6 +1038,31 @@ mod tests {
         }
     }
 
+    /// **A 1.0 psp is refused and told to regenerate** (owner, 2026-11-03: no backward
+    /// compatibility): its heads carry no walked region's first chain id, which read-backed phase
+    /// keys its read cap on. The refusal comes from the version alone, before the body is read.
+    #[test]
+    fn a_format_1_0_psp_is_refused_with_the_message_to_write_it_again() {
+        let body = "format-version = \"1.0\"\n";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HEAD_MAGIC);
+        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(body.as_bytes());
+        bytes.extend_from_slice(HEAD_SENTINEL);
+        let (_dir, path) = a_file_holding(&bytes);
+
+        match read_header(&path) {
+            Err(refused @ PspReadError::WrittenByAnotherPvc { found: (1, 0), .. }) => {
+                let message = refused.to_string();
+                assert!(
+                    message.contains("chain-id base") && message.contains("generate-psps"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected WrittenByAnotherPvc for 1.0, got {other:?}"),
+        }
+    }
+
     /// Both formats use the extension `.psp`. Handed production's, this says which it was
     /// given rather than reporting a damaged ng file.
     #[test]

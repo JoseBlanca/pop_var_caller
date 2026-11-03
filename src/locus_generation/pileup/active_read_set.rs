@@ -363,12 +363,17 @@ impl ActiveReads {
                 })?;
 
         let qname_for_register = read.qname.clone();
+        let read_group_for_register = read.read_group;
         let (chain_id, partner_read_id) = chain_ids.allocate_for_read(&read)?;
 
         // Tell the chain-id allocator this fresh first-mate's read_id
         // (no-op when this is a second mate or solo read, since the
         // qname isn't in `pending_mates` in those cases).
-        chain_ids.register_first_mate_read_id(&qname_for_register, read_id);
+        chain_ids.register_first_mate_read_id(
+            read_group_for_register,
+            &qname_for_register,
+            read_id,
+        );
 
         let cursor = CigarCursor::new(&read.cigar, read.alignment_start);
 

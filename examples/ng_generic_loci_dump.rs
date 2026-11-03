@@ -1727,6 +1727,7 @@ mod tests {
     /// One hand-built locus, so `push_locus`'s guard can be aimed at rather than waited for.
     fn locus_witnessing(runs: &[(u16, u16)], footprint: u64) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(1),

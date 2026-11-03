@@ -176,6 +176,7 @@ mod tests {
 
     fn record(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: crate::types::GenomeRegion {
                 contig: crate::types::ContigId(0),
                 start: crate::types::Position(1),

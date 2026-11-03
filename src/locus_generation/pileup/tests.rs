@@ -692,7 +692,10 @@ fn placed_left_at_an_indel_record_counts_against_its_anchor() {
     let rec4 = records.iter().find(|r| r.anchor() == 4).unwrap();
     let reference = rec4.reference_observation();
     assert_eq!(reference.num_obs, 2);
-    assert_eq!(reference.placed_left, 1, "only the tie, 3 bases each side of 4");
+    assert_eq!(
+        reference.placed_left, 1,
+        "only the tie, 3 bases each side of 4"
+    );
     let deleted = rec4
         .observations
         .iter()

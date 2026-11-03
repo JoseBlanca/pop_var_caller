@@ -676,6 +676,7 @@ impl PartialEq for ComparableLocus {
         // Exhaustive destructure on both sides: a field added to the locus type stops this
         // compiling rather than going silently uncompared.
         let SampleLocusObservations {
+            chain_id_base: _, // production's frozen answer records none
             region: our_region,
             reference_bases: our_bases,
             observations: our_observations,
@@ -684,6 +685,7 @@ impl PartialEq for ComparableLocus {
             kind: our_kind,
         } = ours;
         let SampleLocusObservations {
+            chain_id_base: _,
             region: their_region,
             reference_bases: their_bases,
             observations: their_observations,
@@ -1516,6 +1518,7 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
     /// `chain_ids` is as [`comparable`] leaves it — empty where the `A` matches the reference.
     fn frozen_locus(position: u64, reference: u8, placed_left: u32) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(position),

@@ -2291,6 +2291,7 @@ mod tests {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(contig),
                 start: Position(start),
@@ -4838,8 +4839,8 @@ mod tests {
         }
         .encode(&mut payload);
         // position-offset 0, reference-span 1, neither of the keep rule's counts, no discarded
-        // reads, and then a body length larger than anything that follows.
-        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00]);
+        // reads, no chain-id base change, and then a body length larger than anything that follows.
+        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
         encode_u64_leb128(u64::from(u32::MAX), &mut payload);
         // No chain-id departures and no arrivals, so the head is whole and what the reader
         // cannot find the end of is the body.

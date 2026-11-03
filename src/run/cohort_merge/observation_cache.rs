@@ -2039,6 +2039,7 @@ mod tests {
         let width = usize::try_from(region.end.0.saturating_sub(region.start.0) + 1)
             .expect("a fixture region fits in memory");
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: vec![b'A'; width].into_boxed_slice(),
             observations: vec![SequenceObservation {

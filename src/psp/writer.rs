@@ -951,6 +951,7 @@ pub(crate) mod tests_support {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(contig),
                 start: Position(start),

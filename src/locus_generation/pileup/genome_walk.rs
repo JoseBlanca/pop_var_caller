@@ -295,6 +295,12 @@ where
         self.state.chain_ids.counters()
     }
 
+    /// The id the next fresh read will get: read when a region opens, it is the region's first
+    /// id (read phase spec §2.4).
+    pub fn next_chain_id(&self) -> u64 {
+        self.state.chain_ids.next_chain_id()
+    }
+
     /// The read source, for a caller that needs to ask it something — **ng's, D1.**
     ///
     /// A walker that lives for a chromosome swallows its source for that long, and the
