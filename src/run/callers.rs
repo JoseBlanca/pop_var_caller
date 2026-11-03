@@ -673,7 +673,7 @@ impl AlignedFilesVariantCaller {
             merge_parameters.cohort_locus_builder_regions_len,
             merge_parameters.max_cohort_locus_span,
             merge_parameters.min_alt_reads,
-            &mut |observation| {
+            &mut |observation, _reads| {
                 if stopped.is_some() {
                     return;
                 }
@@ -1059,7 +1059,7 @@ where
         merge_parameters.cohort_locus_builder_regions_len,
         merge_parameters.max_cohort_locus_span,
         merge_parameters.min_alt_reads,
-        &mut |observation| {
+        &mut |observation, _reads| {
             if stopped.is_some() {
                 return;
             }
@@ -7413,7 +7413,9 @@ where
             tracts: TractOutcomes::default(),
             totals: tract_totals_ref,
         },
-        |worker: &mut RoundCallScratch<'_, S>, observation: CohortObservation| {
+        |worker: &mut RoundCallScratch<'_, S>,
+         observation: CohortObservation,
+         _reads: &crate::run::cohort_merge::build::LocusReads<'_, '_>| {
             let region = observation.region;
             let RoundCallScratch {
                 shaping,

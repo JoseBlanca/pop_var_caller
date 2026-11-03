@@ -142,7 +142,7 @@ fn scale(observation: &mut SequenceObservation, fraction: f64) {
 /// The splitmix64 finaliser: a bijection that spreads consecutive identifiers across the whole
 /// range, so "lowest hash" is not "lowest identifier" — which would keep the reads that arrived
 /// first, a sample tilted towards early alignment starts.
-fn splitmix64(value: u64) -> u64 {
+pub(crate) fn splitmix64(value: u64) -> u64 {
     let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);

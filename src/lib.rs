@@ -24,6 +24,8 @@
 //!   measured from the cohort's own loci before anything is called.
 //! - [`calling`], [`genetics`] — candidate alleles, read likelihoods, genotype priors, the loop
 //!   that fits each site's allele frequencies, and site quality.
+//! - [`neighbour_evidence`], [`read_phase`] — refinement with the samples a sample shares stretches
+//!   of chromosome with, and the phase written from it and from the reads themselves.
 //! - [`run`] — what a run is made of: the walk over each sample's alignments, the psp files it can
 //!   store, the parameter fit, the cohort merge that joins every sample's loci, and the calling
 //!   that follows; [`vcf`] — the one file a run writes.
@@ -94,6 +96,7 @@ pub mod parameter_estimation;
 pub mod psp;
 pub mod raw_chrom_reader;
 pub mod read;
+pub mod read_phase;
 pub mod ref_seq;
 pub mod reference_info;
 pub mod region_typing;

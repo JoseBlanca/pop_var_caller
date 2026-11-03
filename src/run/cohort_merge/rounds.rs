@@ -35,7 +35,7 @@
 
 use rayon::prelude::*;
 
-use super::build::{CohortObservation, build_region_handing_over_windowed};
+use super::build::{CohortObservation, LocusReads, build_region_handing_over_windowed};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
@@ -101,7 +101,7 @@ where
     T: Send,
     Sc: Send,
     MK: Fn() -> Sc + Sync + Send,
-    CL: Fn(&mut Sc, CohortObservation) -> T + Sync + Send,
+    CL: Fn(&mut Sc, CohortObservation, &LocusReads<'_, '_>) -> T + Sync + Send,
 {
     refuse_malformed_analysed_regions(analysed);
 
@@ -166,9 +166,9 @@ where
                                     window,
                                     max_cohort_locus_span,
                                     min_alt_reads,
-                                    &mut |built: CohortObservation| {
+                                    &mut |built: CohortObservation, reads: &LocusReads<'_, '_>| {
                                         let span = built.region;
-                                        calls.push((span, call_locus(scratch, built)));
+                                        calls.push((span, call_locus(scratch, built, reads)));
                                     },
                                     &mut failed,
                                     &|sample, index| cache.build_at(sample, starts[sample] + index),
@@ -278,7 +278,7 @@ mod tests {
             region_width,
             MaxCohortLocusSpan::DEFAULT,
             MinAltReads::DEFAULT,
-            &mut |built| loci.push(format!("{built:?}")),
+            &mut |built, _| loci.push(format!("{built:?}")),
             &mut refused,
         )
         .expect("the fixture sources hold");
@@ -309,7 +309,7 @@ mod tests {
             MaxCohortLocusSpan::DEFAULT,
             MinAltReads::DEFAULT,
             || (),
-            |(), built| format!("{built:?}"),
+            |(), built, _| format!("{built:?}"),
             &mut |rendered| loci.push(rendered),
             &mut refused,
         )

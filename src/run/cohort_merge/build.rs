@@ -41,6 +41,7 @@ use crate::locus_generation::{
     FlankDeletion, HeldFlank, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
     WitnessedLocusPositions,
 };
+use crate::read_phase::capture::{ReadAllele, error_phred_of_mean_ln_error, settle};
 use crate::run::explain::{DroppedLoci, MergeDrop};
 use crate::types::ChainId;
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
@@ -643,6 +644,22 @@ impl AlleleTable {
     /// `per_allele: Vec<SequenceObservation>`, "parallel to `CohortObservation::alleles`",
     /// which is the shape this is not; the divergence is deliberate and recorded there.
     fn assemble(locus: &ClosedLocus<'_>) -> (Self, Vec<SampleSupport>) {
+        Self::assemble_capturing(locus, None)
+    }
+
+    /// [`assemble`](Self::assemble), and, when `read_alleles` is given, **which allele each of
+    /// every covering sample's reads showed**, one list per sample in member order, settled and
+    /// numbered against the finished table (read phase spec §2.2).
+    ///
+    /// **The same derivation, not a second one**, so a read's allele is exactly the one its
+    /// support was tallied under. It runs only for a locus that is to be written
+    /// ([`LocusReads`]): capturing at every built locus cost 6.4% of the merge's time on 200
+    /// simulated samples (160 at 3×, 40 at 30×), above the spec's 5% bar, and most built loci
+    /// are never written.
+    fn assemble_capturing(
+        locus: &ClosedLocus<'_>,
+        mut read_alleles: Option<&mut Vec<Vec<ReadAllele>>>,
+    ) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
         let reference_allele = alleles.intern(reference.bases(), FlankDeletion::NONE);
@@ -659,12 +676,17 @@ impl AlleleTable {
         // the scratch beside it exists for. It cannot live *in* that scratch: the derivation
         // holds it mutably for the length of the call while the callback writes this.
         let mut tally: Vec<AlleleGroupTally> = Vec::new();
+        // What each read showed, in the table's preliminary numbering; refilled per sample and
+        // settled into the sample's own list (read phase spec §2.2).
+        let mut captured: Vec<ReadAllele> = Vec::new();
+        let capture_on = read_alleles.is_some();
 
         for sample_members in &locus.members {
             let records = sample_members.observations;
             let sample = sample_members.sample;
             tally.clear();
             let mut composed_across_records = 0u32;
+            captured.clear();
 
             let removed = alleles_of_sample(
                 &reference,
@@ -710,17 +732,46 @@ impl AlleleTable {
                     match backing {
                         AlleleBacking::OneSequence(sequence) => {
                             tally[entry].tally.add_whole(sequence);
+                            // Every read behind the sequence showed it; `num_obs` is not zero here.
+                            let error_phred = error_phred_of_mean_ln_error(
+                                sequence.q_sum.nats() / f64::from(sequence.num_obs),
+                            );
+                            if capture_on {
+                                captured.extend(sequence.chain_ids.iter().map(|&read| {
+                                    ReadAllele {
+                                        read,
+                                        allele: allele as u32,
+                                        error_phred,
+                                    }
+                                }));
+                            }
                         }
                         AlleleBacking::OneRead { records, sightings } => {
                             composed_across_records = composed_across_records.saturating_add(1);
                             tally[entry]
                                 .tally
                                 .add_one_reads_share(share_of_one_read(sample, records, sightings));
+                            if capture_on {
+                                captured.push(ReadAllele {
+                                    read: sightings[0].read,
+                                    allele: allele as u32,
+                                    error_phred: weakest_error_phred(records, sightings),
+                                });
+                            }
                         }
                     }
                 },
             );
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
+            // One sample's records inside one cohort locus come from one walked region: a locus
+            // never crosses a segment boundary, so they share its first id.
+            if let Some(lists) = read_alleles.as_deref_mut() {
+                settle(
+                    &mut captured,
+                    records.first().map_or(0, |record| record.chain_id_base),
+                );
+                lists.push(captured.clone());
+            }
 
             // **Not sorted here.** The rows are put into ascending `(allele, read group)` order
             // once the table's own order is settled, below; sorting them by first-met ids now
@@ -771,6 +822,14 @@ impl AlleleTable {
         // tally was filled in the order the derivation emitted alleles, which is neither.
         // Unstable is enough, because the key is unique, one entry per pair by construction.
         let moved_to = alleles.sort_canonically();
+        // Renamed like the rows, and still in read order: the lists were sorted by read, and each
+        // read is listed once.
+        for read_allele in read_alleles
+            .iter_mut()
+            .flat_map(|lists| lists.iter_mut().flatten())
+        {
+            read_allele.allele = moved_to[read_allele.allele as usize] as u32;
+        }
         for support in &mut per_sample {
             for row in &mut support.supported {
                 row.allele = moved_to[row.allele];
@@ -972,7 +1031,7 @@ pub fn build_region_windowed<'a, E>(
         window,
         max_cohort_locus_span,
         min_alt_reads,
-        &mut |built| cohort_observations.push(built),
+        &mut |built, _| cohort_observations.push(built),
         failed_locus_spans,
         build,
         None,
@@ -990,7 +1049,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
     window: &WindowedCohort<'a>,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
-    keep: &mut impl FnMut(CohortObservation),
+    keep: &mut impl FnMut(CohortObservation, &LocusReads<'_, '_>),
     refused: &mut Vec<GenomeRegion>,
     build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
     dropped: Option<&DroppedLoci>,
@@ -1042,10 +1101,13 @@ pub fn build_region_handing_over_windowed<'a, E>(
             // (`spec/cohort_merge_psp_path.md` §3.1).
             Verdict::Build => match window.observations {
                 // Records in hand: the members are slices of them, and nothing can fail.
-                Some(records) => keep(CohortObservation::over(
-                    &locus.resolved_against(records),
-                    window,
-                )),
+                Some(records) => {
+                    let resolved = locus.resolved_against(records);
+                    keep(
+                        CohortObservation::over(&resolved, window),
+                        &LocusReads { locus: &resolved },
+                    );
+                }
                 // Evidence still compressed: this is where it is decoded, and the only
                 // place after the cover where a run can fail.
                 None => {
@@ -1063,9 +1125,12 @@ pub fn build_region_handing_over_windowed<'a, E>(
                     ) {
                         refused.push(resolved.region);
                     } else {
-                        let built = CohortObservation::over(&resolved, window);
-                        drop(resolved);
-                        keep(built);
+                        // The records stay alive through the hand-over: calling may ask for the
+                        // locus's read alleles ([`LocusReads`]).
+                        keep(
+                            CohortObservation::over(&resolved, window),
+                            &LocusReads { locus: &resolved },
+                        );
                     }
                 }
             },
@@ -1089,6 +1154,31 @@ pub fn build_region_handing_over_windowed<'a, E>(
         closer.recycle(locus.members);
     }
     Ok(())
+}
+
+/// **The reads behind one built locus, for the moment calling decides to write it** (read phase
+/// spec §2.2).
+///
+/// Handed over beside each [`CohortObservation`], while the samples' minted records the locus was
+/// built from are still held: their chain ids are what says which read showed which allele, and
+/// the observation keeps none. Asking is not free — it derives the locus's alleles a second time
+/// — so calling asks only for a locus it is going to write.
+pub struct LocusReads<'l, 'a> {
+    locus: &'l ClosedLocus<'a>,
+}
+
+impl LocusReads<'_, '_> {
+    /// **Which allele each read of each covering sample showed**: one list per sample, in the
+    /// order of the observation's [`per_sample`](CohortObservation::per_sample), each in read
+    /// order, one entry a read, at most
+    /// [`READ_ALLELES_KEPT`](crate::read_phase::capture::READ_ALLELES_KEPT), numbered against the
+    /// observation's allele table.
+    #[must_use]
+    pub fn read_alleles(&self) -> Vec<Vec<ReadAllele>> {
+        let mut lists = Vec::with_capacity(self.locus.members.len());
+        let _ = AlleleTable::assemble_capturing(self.locus, Some(&mut lists));
+        lists
+    }
 }
 
 /// Whether no locus this builder could own can begin in `builder_region` — so the outcome is
@@ -1771,6 +1861,22 @@ impl SupportSums {
     }
 }
 
+/// **One read's error Phred across the sample's records**: the weakest of the means of the
+/// sequences it was sighted in, as [`share_of_one_read`] takes the weakest for the read's quality —
+/// an allele spanning several records is only as good as the least it saw well (read phase spec
+/// §2.2).
+fn weakest_error_phred(records: &[SampleLocusObservations], sightings: &[ReadSighting]) -> u8 {
+    let weakest = sightings
+        .iter()
+        .map(|sighting| {
+            let sequence =
+                &records[sighting.record as usize].observations[sighting.sequence as usize];
+            sequence.q_sum.nats() / f64::from(sequence.num_obs.max(1))
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    error_phred_of_mean_ln_error(weakest)
+}
+
 /// One read's share of the sequences it showed across the locus — the division
 /// [`AlleleSupport`] documents.
 ///
@@ -2259,23 +2365,14 @@ impl AlleleBacking<'_> {
     /// record, [`alleles_of_sample`] has already removed the read for showing two things
     /// there, and counted it in [`SampleSupport::reads_removed_as_evidence`].
     ///
-    /// **The other needs no defect at all, and it is a property of the input.** A fragment's
-    /// two mates are collapsed onto one chain id **on their name alone**
-    /// (`pending_mates`, `locus_generation/pileup/chain_id_allocator.rs`), while the read group
-    /// is resolved from each SAM record's own `RG` tag
-    /// ([`resolve_read_group`](crate::read::input::read_groups::ReadGroupResolution)), and
-    /// nothing requires a fragment's two mates to carry the same one. So a file whose mates
-    /// disagree about their `@RG` reaches this arm legally — needing only that the two mates
-    /// fall in one cohort locus at different records without overlapping — and so does a
-    /// merged file in which two libraries reuse a read name.
-    ///
-    /// **The same input has a worse form this cannot see**, and it is upstream: where such a
-    /// fragment's two mates *overlap* and agree, the walk sums their base quality and gives it
-    /// to one of them (`resolve_mate_overlap_at_pos`, `locus_generation/pileup/genome_walk.rs`),
-    /// which stamps one library's quality with the other's group in a single observation. One
-    /// sighting, nothing here to compare. Both forms have one repair and it is not this check:
-    /// carry the read group on the pending mate and refuse a mismatched second mate where the
-    /// chain id is handed out.
+    /// **The other was a property of the input, and since 2026-11-03 it no longer reaches here.**
+    /// Mates used to be collapsed onto one chain id on their name alone, while each SAM record's
+    /// read group comes from its own `RG` tag, so a pair whose mates disagreed about their `@RG`,
+    /// or two libraries of one merged file reusing a read name, reached this arm legally. Pending
+    /// mates are now keyed by read group and name (`pending_mates`,
+    /// `locus_generation/pileup/chain_id_allocator.rs`; read phase spec §2.1), so such mates are
+    /// two reads with two ids — and, having no partner, are no longer merged where they overlap
+    /// (`resolve_mate_overlap_at_pos`), which was the worse form this check could not see.
     ///
     /// # Why it is refused rather than resolved
     ///
@@ -5693,5 +5790,91 @@ mod tests {
             loci_owned > 100,
             "the walked regions owned only {loci_owned} loci"
         );
+    }
+
+    /// The read alleles one sample's support carries, as `(read, allele bytes, error Phred)`, looked
+    /// up through the finished table — so a list renamed wrongly through `moved_to` names the
+    /// wrong bytes here.
+    fn read_alleles_of(locus: &ClosedLocus<'_>, sample: usize) -> Vec<(ChainId, Vec<u8>, u8)> {
+        let observed = CohortObservation::over(locus, &no_measurement());
+        LocusReads { locus }.read_alleles()[sample]
+            .iter()
+            .map(|read_allele| {
+                (
+                    read_allele.read,
+                    observed.alleles[read_allele.allele as usize].to_vec(),
+                    read_allele.error_phred,
+                )
+            })
+            .collect()
+    }
+
+    /// **At a sample's sole record every read behind a sequence showed its allele**, with the
+    /// sequence's mean error as its Phred (read phase spec §2.2): four reads at a mean of −2 nats
+    /// (Phred 9) show the SNP and two at −2.5 nats (Phred 11) the reference, each named through
+    /// the table's final order.
+    #[test]
+    fn at_a_sole_record_each_read_is_captured_with_its_sequences_allele() {
+        let one_record = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                shown_by(b"T", &[7, 9, 11, 13], -8.0, 3, 240, 14_400, 1),
+                shown_by(b"G", &[15, 17], -5.0, 1, 100, 5_000, 0),
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&one_record, &deletion]);
+
+        assert_eq!(
+            read_alleles_of(&locus, 0),
+            vec![
+                (7, b"ACTTA".to_vec(), 9),
+                (9, b"ACTTA".to_vec(), 9),
+                (11, b"ACTTA".to_vec(), 9),
+                (13, b"ACTTA".to_vec(), 9),
+                (15, b"ACGTA".to_vec(), 11),
+                (17, b"ACGTA".to_vec(), 11),
+            ]
+        );
+    }
+
+    /// **Across several records a read is captured once, with the allele it composed**, and a
+    /// read the merge removed is not captured: read 7 showed two things at 12 and is gone, read
+    /// 11 composed `ACGTC` from its sightings at 12 and 14.
+    #[test]
+    fn across_records_a_read_is_captured_once_and_a_removed_read_not_at_all() {
+        let two_records = [
+            record(region(12, 12), b"G", &[(b"A", &[7]), (b"G", &[7, 11])]),
+            record(region(14, 14), b"A", &[(b"C", &[11])]),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let captured: Vec<_> = read_alleles_of(&locus, 0)
+            .into_iter()
+            .map(|(read, allele, _)| (read, allele))
+            .collect();
+        assert_eq!(captured, vec![(11, b"ACGTC".to_vec())]);
+    }
+
+    /// **At a sole record, a fragment whose mates overlap and disagree is not captured** (read
+    /// phase spec §2.2): the merge keeps both of its alleles as evidence, but as phase evidence a
+    /// molecule that showed two things at a site says nothing there. Read 11 is unaffected.
+    #[test]
+    fn a_fragment_that_showed_two_things_at_its_sole_record_is_not_captured() {
+        let sole_record = [record(
+            region(12, 12),
+            b"G",
+            &[(b"A", &[7]), (b"G", &[7, 11])],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&sole_record, &deletion]);
+
+        let captured: Vec<_> = read_alleles_of(&locus, 0)
+            .into_iter()
+            .map(|(read, allele, _)| (read, allele))
+            .collect();
+        assert_eq!(captured, vec![(11, b"ACGTA".to_vec())]);
     }
 }
