@@ -24,6 +24,12 @@ q = shlex.quote
 
 # ---- pvc --------------------------------------------------------------------------------------
 
+# The neighbour-evidence pass (pvc's default, `auto`, runs it on 10 or more mostly inbred diploid
+# samples) is not ready to be benchmarked, so every calling run turns it off. Benchmarks for it come
+# when it is.
+NEIGHBOUR_EVIDENCE = "--neighbour-evidence off "
+
+
 def pvc_catalog(ctx, reference, out, log):
     return ("repeat_catalog",
             f"{q(ctx.pvc_bin)} repeat-catalog --reference {q(reference)} --output {q(out)} "
@@ -40,7 +46,8 @@ def pvc_call_from_alignments(ctx, reference, catalog, alignments, regions, out, 
     return (label,
             f"{q(ctx.pvc_bin)} call-from-alignments --reference {q(reference)} "
             f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} {satellites}"
-            f"--threads {threads or ctx.threads} --output {q(out)} --log {q(log)} --force")
+            f"{NEIGHBOUR_EVIDENCE}--threads {threads or ctx.threads} --output {q(out)} "
+            f"--log {q(log)} --force")
 
 
 def pvc_join_segments(segment_vcfs, out):
@@ -85,8 +92,8 @@ def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None)
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     return ("call_from_psps",
             f"{q(ctx.pvc_bin)} call-from-psps --reference {q(reference)} --catalog {q(catalog)} "
-            f"{psp_args} {source} --threads {ctx.threads} --output {q(out)} --log {q(log)} "
-            f"--force")
+            f"{psp_args} {source} {NEIGHBOUR_EVIDENCE}--threads {ctx.threads} --output {q(out)} "
+            f"--log {q(log)} --force")
 
 
 # ---- GATK -------------------------------------------------------------------------------------
