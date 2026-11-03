@@ -20,13 +20,13 @@ use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
 use super::phase::{
-    DISAGREEMENT_COST, EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, PathAgreement,
-    SHARED_RECORDS_TO_JOIN, SWITCH_COST, WrittenPhase,
+    DISAGREEMENT_COST, EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, PassReadCounts,
+    PathAgreement, SHARED_RECORDS_TO_JOIN, SWITCH_COST, WrittenPhase,
 };
 use super::records::SiteRecord;
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
-    PHASING_ROUNDS, Phasing, RefinedRecord, refine_window_joined, window_key,
+    PHASING_ROUNDS, Phasing, RefinedRecord, refine_window_with_reads, window_key,
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
@@ -89,10 +89,17 @@ impl NeighbourEvidenceDecision {
                  hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
                  hidden_share={MAX_HIDDEN_SHARE},extra_paths={EXTRA_PATHS_PER_ROUND},\
                  lean_min={LEAN_MIN},path_agreement={},join_records={SHARED_RECORDS_TO_JOIN},\
-                 alignment_costs={DISAGREEMENT_COST}/{SWITCH_COST}>",
+                 alignment_costs={DISAGREEMENT_COST}/{SWITCH_COST},\
+                 read_link_min={:.2},read_break_min={:.2},read_error_floor={},read_gq_min={},\
+                 read_reach={}>",
                 self.sizes.core_bases,
                 self.sizes.margin_bases,
-                self.path_agreement.get()
+                self.path_agreement.get(),
+                crate::read_phase::link::LINK_MIN,
+                crate::read_phase::link::BREAK_MIN,
+                crate::read_phase::link::ERROR_FLOOR,
+                crate::read_phase::link::GQ_MIN,
+                crate::read_phase::keeper::READ_REACH,
             )
         } else {
             format!("<ran=no,why=\"{why}\">")
@@ -188,6 +195,9 @@ pub struct NeighbourEvidenceStage {
     positions: Vec<u64>,
     /// The held sites' walk records; `sites[0]` is site number `first_site`.
     sites: Vec<SiteRecord>,
+    /// Each held site's fragments, beside `sites` (read phase spec §2.7): the reads the link test
+    /// reads. A line that is no site keeps none, since the pass phases only sites.
+    site_fragments: Vec<RecordFragments>,
     first_site: usize,
     next_site: usize,
     /// The first held line not yet written.
@@ -196,6 +206,8 @@ pub struct NeighbourEvidenceStage {
     tally: RewriteTally,
     /// Each sample's fill check, summed over the cores solved so far.
     fill_checks: Vec<FillCheck>,
+    /// What reads did to each sample's phase, summed over the cores solved so far.
+    read_counts: Vec<PassReadCounts>,
     /// Each sample's last written block on the current contig, kept across windows that write no
     /// phase for it (phase output spec §2.4).
     last_blocks: Vec<Option<WrittenBlock>>,
@@ -219,12 +231,14 @@ impl NeighbourEvidenceStage {
             held: Vec::new(),
             positions: Vec::new(),
             sites: Vec::new(),
+            site_fragments: Vec::new(),
             first_site: 0,
             next_site: 0,
             core_start: 0,
             pairs: GenotypePairs::default(),
             tally: RewriteTally::default(),
             fill_checks: vec![FillCheck::default(); decision.inbreeding_by_sample.len()],
+            read_counts: vec![PassReadCounts::default(); decision.inbreeding_by_sample.len()],
             last_blocks: vec![None; decision.inbreeding_by_sample.len()],
         }
     }
@@ -241,6 +255,13 @@ impl NeighbourEvidenceStage {
         &self.fill_checks
     }
 
+    /// What reads did to each sample's phase so far, in the VCF's sample order (read phase spec
+    /// §2.7, §2.8).
+    #[must_use]
+    pub fn read_counts(&self) -> &[PassReadCounts] {
+        &self.read_counts
+    }
+
     /// **Takes one line**, its place already checked against the line before it by the writer,
     /// and appends to `ready` every line whose window this one completed. `fragments` are the
     /// line's reads that reach another record (read phase spec §2.4).
@@ -251,14 +272,13 @@ impl NeighbourEvidenceStage {
         fragments: RecordFragments,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) {
-        // Not read yet: the link test takes them from the read phase spec's §2.7 build step on.
-        drop(fragments);
         if self.contig.is_some_and(|contig| contig != place.at.contig) {
             self.finish(ready);
         }
         self.contig = Some(place.at.contig);
         let site = site_of(&line, self.samples).map(|record| {
             self.sites.push(record);
+            self.site_fragments.push(fragments);
             self.next_site += 1;
             self.next_site - 1
         });
@@ -274,6 +294,7 @@ impl NeighbourEvidenceStage {
         self.held.clear();
         self.positions.clear();
         self.sites.clear();
+        self.site_fragments.clear();
         self.first_site = self.next_site;
         self.core_start = 0;
         self.contig = None;
@@ -331,9 +352,11 @@ impl NeighbourEvidenceStage {
                         })
                     })
                     .collect();
-                let solved = refine_window_joined(
-                    &self.sites
-                        [window_sites.start - self.first_site..window_sites.end - self.first_site],
+                let in_window =
+                    window_sites.start - self.first_site..window_sites.end - self.first_site;
+                let solved = refine_window_with_reads(
+                    &self.sites[in_window.clone()],
+                    &self.site_fragments[in_window],
                     core_sites.start - window_sites.start..core_sites.end - window_sites.start,
                     contig_length,
                     &mut self.fits,
@@ -344,6 +367,9 @@ impl NeighbourEvidenceStage {
                 );
                 for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
                     *sum += check;
+                }
+                for (sum, counts) in self.read_counts.iter_mut().zip(solved.read_counts) {
+                    *sum += counts;
                 }
                 self.remember_last_blocks(core_sites.start, &solved.records);
                 solved.records
@@ -440,6 +466,7 @@ impl NeighbourEvidenceStage {
         self.held.drain(..keep_from);
         self.positions.drain(..keep_from);
         self.sites.drain(..sites_dropped);
+        self.site_fragments.drain(..sites_dropped);
         self.first_site += sites_dropped;
         self.core_start -= keep_from;
     }

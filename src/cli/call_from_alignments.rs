@@ -923,6 +923,7 @@ pub fn run_call_from_alignments(
         .or_else(|| filtered.as_ref().map(|run| run.finished.clone()))
         .expect("the calls were written by one of the two paths");
     calling_run::report_neighbour_evidence(&finished, &args.output);
+    calling_run::report_read_phase(&finished);
     let records = finished.records_written;
     tracing::info!(
         "done: {} records written to {} in {}",

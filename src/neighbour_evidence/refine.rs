@@ -36,13 +36,15 @@ use super::model::{
     walk_and_draw_paths,
 };
 use super::phase::{
-    EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PathAgreement, SamplePhase,
-    WrittenPhase, join_and_name_core_blocks,
+    EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
+    SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks,
 };
 use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
+use crate::read_phase::keeper::RecordFragments;
+use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
 pub const MISMATCH: f64 = 0.01;
@@ -142,6 +144,8 @@ pub struct WindowRefinement {
     pub records: Vec<RefinedRecord>,
     /// One per sample, over the core; zero for a sample not re-called in the window.
     pub checks: Vec<FillCheck>,
+    /// One per sample: what reads did to its phase in the window (read phase spec §2.7, §2.8).
+    pub read_counts: Vec<PassReadCounts>,
 }
 
 /// **What the pass did to one sample at one record.**
@@ -182,6 +186,7 @@ struct SampleSolution {
     phases: Vec<Option<WrittenPhase>>,
     posteriors: Vec<f64>,
     check: FillCheck,
+    read_counts: PassReadCounts,
 }
 
 /// **How a window is solved: in one round, or in phasing's rounds** (phasing spec §2.1, §5). One
@@ -555,6 +560,43 @@ pub fn refine_window_joined(
     phasing: Phasing,
     last_blocks: &[Option<LastBlock>],
 ) -> WindowRefinement {
+    refine_window_with_reads(
+        records,
+        &[],
+        core,
+        contig_length,
+        fits,
+        max_templates,
+        no_read,
+        phasing,
+        last_blocks,
+    )
+}
+
+/// **[`refine_window_joined`], its phase using the reads** (read phase spec §2.7): `fragments`
+/// holds each record's fragments, one entry a record of `records`, or is empty for a window
+/// without them, which phases as the population alone does.
+///
+/// # Panics
+///
+/// As [`refine_window_joined`]; and if `fragments` is neither empty nor one entry a record.
+#[allow(clippy::too_many_arguments)] // the window, its reads, the run's settings, what came before
+#[must_use]
+pub fn refine_window_with_reads(
+    records: &[SiteRecord],
+    fragments: &[RecordFragments],
+    core: Range<usize>,
+    contig_length: Option<u64>,
+    fits: &mut [SampleFit],
+    max_templates: usize,
+    no_read: NoReadRule,
+    phasing: Phasing,
+    last_blocks: &[Option<LastBlock>],
+) -> WindowRefinement {
+    assert!(
+        fragments.is_empty() || fragments.len() == records.len(),
+        "one fragment list a record, or none"
+    );
     assert!(
         records
             .windows(2)
@@ -641,6 +683,7 @@ pub fn refine_window_joined(
         .map(|(sample, state)| {
             final_solution(
                 records,
+                fragments,
                 &layout,
                 &pairs,
                 sample,
@@ -664,11 +707,13 @@ pub fn refine_window_joined(
         })
         .collect();
     let mut checks = vec![FillCheck::default(); samples];
+    let mut read_counts = vec![PassReadCounts::default(); samples];
     for (sample, solution) in solutions.iter().enumerate() {
         let Some(solution) = solution else {
             continue;
         };
         checks[sample] = solution.check;
+        read_counts[sample] = solution.read_counts;
         assert_eq!(
             solution.sites.len(),
             solution.phases.len(),
@@ -689,6 +734,7 @@ pub fn refine_window_joined(
     WindowRefinement {
         records: refined,
         checks,
+        read_counts,
     }
 }
 
@@ -899,6 +945,7 @@ fn solve_round(
 #[allow(clippy::too_many_arguments)] // the window's data, one sample's state, and the rules
 fn final_solution(
     records: &[SiteRecord],
+    fragments: &[RecordFragments],
     layout: &WindowLayout,
     pairs_layout: &PairLayout,
     sample: usize,
@@ -924,6 +971,7 @@ fn final_solution(
         phases: Vec::new(),
         posteriors: Vec::new(),
         check: FillCheck::default(),
+        read_counts: PassReadCounts::default(),
     };
     assert_eq!(
         state.sums.len(),
@@ -931,6 +979,11 @@ fn final_solution(
         "one sum a core site"
     );
     let mut heterozygotes: Vec<Option<(usize, usize)>> = vec![None; layout.sites()];
+    // The `GQ` each called core heterozygote is written with, for the link test (read phase spec
+    // §2.5). From the posterior over every genotype: the writer renormalises over the genotypes
+    // of the alleles some sample keeps, which can only raise it, so a link this allows has the
+    // written `GQ` at least this at both ends.
+    let mut qualities: Vec<Option<u32>> = vec![None; layout.sites()];
     for (&site, sum) in layout.core_sites.iter().zip(&state.sums) {
         let index = layout.record_of_site[site];
         let record = &records[index];
@@ -986,10 +1039,11 @@ fn final_solution(
             }
         };
         if outcome == Outcome::Called {
-            let (best, _) = score_best_genotype(&posterior);
+            let (best, quality) = score_best_genotype(&posterior);
             let (a, b) = pairs.of(record.allele_count)[best.0 as usize];
             if a != b {
                 heterozygotes[site] = Some((a, b));
+                qualities[site] = Some(written_genotype_quality(quality));
             }
         }
         solution
@@ -1021,13 +1075,27 @@ fn final_solution(
                 let (a, b) = (record.copy_0_allele, record.copy_1_allele);
                 heterozygotes[layout.site(record.record)] = Some((a.min(b), a.max(b)));
             }
-            let phased = phase.phase_heterozygotes(
+            let reads = SiteReads {
+                fragments: layout
+                    .record_of_site
+                    .iter()
+                    .map(|&index| {
+                        fragments
+                            .get(index)
+                            .map_or(&[][..], |fragments| fragments.of_sample(sample as u32))
+                    })
+                    .collect(),
+                qualities,
+            };
+            let (phased, read_counts) = phase.phase_heterozygotes(
                 pairs_layout,
                 &heterozygotes,
                 &positions,
                 parameters.segment_bases,
                 phasing.path_agreement,
+                &reads,
             );
+            solution.read_counts = read_counts;
             join_and_name_core_blocks(
                 &phased,
                 |site| layout.core_sites.binary_search(&site).is_ok(),

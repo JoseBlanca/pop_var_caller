@@ -43,7 +43,8 @@ fn the_header_line_states_the_decision() {
         "<ran=yes,why=\"57 samples, median inbreeding 0.98\",templates=16,mismatch=0.01,\
          core=2000000,margin=1000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
          hidden_share=0.05,extra_paths=8,lean_min=0.5,path_agreement=1,join_records=3,\
-         alignment_costs=1/2>"
+         alignment_costs=1/2,read_link_min=5.29,read_break_min=2.20,read_error_floor=0.01,\
+         read_gq_min=30,read_reach=1000>"
     );
     let decision = decide(NeighbourEvidenceSwitch::Auto, &[0.0; 2], diploid());
     assert_eq!(
@@ -425,5 +426,119 @@ fn the_records_kept_are_those_some_sample_carries() {
         kept * 100 >= carried * 95 && kept * 100 <= carried * 105,
         "{} records in, {kept} out; {carried} carry the alternative",
         cohort.lines.len()
+    );
+}
+
+/// The join cohort through a stage in one window, `fragments(index)` beside record `index`.
+fn join_stage_with_reads(
+    cohort: &crate::neighbour_evidence::test_cohort::TestCohort,
+    fragments: impl Fn(usize) -> RecordFragments,
+) -> Vec<(RecordPlace, Vec<u8>)> {
+    let decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+    let mut output = Vec::new();
+    for (index, line) in cohort.lines.iter().enumerate() {
+        stage.push(
+            place(0, 1 + index as u64 * 500),
+            line.clone().into_bytes(),
+            fragments(index),
+            &mut output,
+        );
+    }
+    stage.finish(&mut output);
+    output
+}
+
+/// One sample's written `GT` and `PS` at each output line, by the drawn record's index.
+fn phase_of(output: &[(RecordPlace, Vec<u8>)], sample: usize) -> Vec<(usize, String, String)> {
+    output
+        .iter()
+        .filter_map(|(place, line)| {
+            let text = String::from_utf8_lossy(line).into_owned();
+            let columns: Vec<&str> = text.split('\t').collect();
+            let keys: Vec<&str> = columns[8].split(':').collect();
+            let values: Vec<&str> = columns[9 + sample].split(':').collect();
+            let value = |key: &str| {
+                keys.iter()
+                    .position(|name| *name == key)
+                    .and_then(|at| values.get(at))
+                    .map(|value| (*value).to_owned())
+            };
+            Some((
+                ((place.at.position.get() - 1) / 500) as usize,
+                value("GT")?,
+                value("PS")?,
+            ))
+        })
+        .collect()
+}
+
+/// **The reads a line carries reach the pass's link test** (read phase spec §2.7): two records a
+/// sample's population phase links are given two fragments that say the opposite relation, and the
+/// block breaks between them — the fragments having gone from the stage's held lines, by site, to
+/// the window's solve and the sample's link test. Without them the two are written in one block.
+#[test]
+fn fragments_a_line_carries_reach_the_pass_and_break_a_link_they_contradict() {
+    let cohort = join_cohort();
+    let without = join_stage_with_reads(&cohort, |_| RecordFragments::default());
+    // A sample's first two consecutive records written in one phase set.
+    let (sample, first, second) = (0..20)
+        .find_map(|sample| {
+            let phased: Vec<(usize, String, String)> = phase_of(&without, sample)
+                .into_iter()
+                .filter(|(_, genotype, _)| genotype.contains('|'))
+                .collect();
+            phased
+                .windows(2)
+                .find(|pair| pair[0].2 == pair[1].2)
+                .map(|pair| (sample, pair[0].clone(), pair[1].clone()))
+        })
+        .expect("the population phases some sample's records together");
+    let alleles = |genotype: &str| -> (u16, u16) {
+        let (copy_0, copy_1) = genotype.split_once('|').expect("phased");
+        (
+            copy_0.parse().expect("an allele"),
+            copy_1.parse().expect("an allele"),
+        )
+    };
+    let ((first_0, first_1), (second_0, second_1)) = (alleles(&first.1), alleles(&second.1));
+    // Two fragments, each pairing copy 0's allele at one record with copy 1's at the other.
+    let fragments = |index: usize| {
+        let entries: &[(u32, u16)] = if index == first.0 {
+            &[(1, first_0), (2, first_1)]
+        } else if index == second.0 {
+            &[(1, second_1), (2, second_0)]
+        } else {
+            &[]
+        };
+        RecordFragments::from_entries(
+            entries
+                .iter()
+                .map(
+                    |&(fragment, allele)| crate::read_phase::keeper::FragmentAllele {
+                        sample: sample as u32,
+                        fragment,
+                        allele,
+                        error_phred: 30,
+                    },
+                )
+                .collect(),
+        )
+    };
+    let with = join_stage_with_reads(&cohort, fragments);
+    let after = phase_of(&with, sample);
+    let at = |index: usize| {
+        after
+            .iter()
+            .find(|(record, _, _)| *record == index)
+            .map(|(_, _, phase_set)| phase_set.clone())
+    };
+    let (first_after, second_after) = (at(first.0), at(second.0));
+    assert!(
+        first_after != second_after || first_after.as_deref() == Some("."),
+        "sample {sample}: records {} and {} must no longer be phased together, and are in {:?}",
+        first.0,
+        second.0,
+        first_after
     );
 }

@@ -33,6 +33,7 @@ use super::VcfRecord;
 use super::encode::record_line;
 use super::header::{VcfHeaderMetadata, header_text, reads_phase_alone};
 use crate::neighbour_evidence::line::RewriteTally;
+use crate::neighbour_evidence::phase::PassReadCounts;
 use crate::neighbour_evidence::refine::FillCheck;
 use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
 use crate::read_phase::keeper::RecordFragments;
@@ -112,6 +113,9 @@ pub struct FinishedVcf {
     /// Each sample's fill check, by name in the VCF's sample order, when the pass ran; empty
     /// otherwise.
     pub fill_checks: Vec<(String, FillCheck)>,
+    /// What reads did to each sample's phase in the pass, by name in the VCF's sample order, when
+    /// the pass ran; empty otherwise (read phase spec §2.7, §2.8).
+    pub pass_read_counts: Vec<(String, PassReadCounts)>,
 }
 
 impl VcfWriter {
@@ -347,6 +351,7 @@ impl VcfWriter {
     pub fn finish(mut self) -> Result<FinishedVcf, VcfWriteError> {
         let mut neighbour_evidence = None;
         let mut fill_checks = Vec::new();
+        let mut pass_read_counts = Vec::new();
         if let Some(stage) = self.neighbour_evidence.as_mut() {
             stage.finish(&mut self.released);
             neighbour_evidence = Some(stage.tally());
@@ -356,6 +361,13 @@ impl VcfWriter {
                 .iter()
                 .cloned()
                 .zip(stage.fill_checks().iter().copied())
+                .collect();
+            pass_read_counts = self
+                .metadata
+                .sample_names()
+                .iter()
+                .cloned()
+                .zip(stage.read_counts().iter().copied())
                 .collect();
             self.write_released()?;
         }
@@ -372,6 +384,7 @@ impl VcfWriter {
             neighbour_evidence,
             read_phase,
             fill_checks,
+            pass_read_counts,
         })
     }
 }

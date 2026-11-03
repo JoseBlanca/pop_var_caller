@@ -483,6 +483,53 @@ pub fn round_shape_for(
 /// in ten is known to within about a factor of two.
 pub const MIN_FILL_CHECK_SITES: u32 = 30;
 
+/// **Reports what reads did to the phase** (read phase spec §2.6, §2.8): phase from reads alone where
+/// it ran, and where the neighbour-evidence pass ran, the read check of its population links — in
+/// total in the log, and per sample at debug level.
+pub fn report_read_phase(finished: &FinishedVcf) {
+    if let Some(tally) = finished.read_phase {
+        tracing::info!(
+            "phase from reads alone: {} sample columns written phased, in {} blocks of two records or \
+             more; {} links made by reads, {} refused because a read over an earlier record of the \
+             block contradicted them",
+            run_output::with_thousands(tally.columns_phased),
+            run_output::with_thousands(tally.blocks),
+            run_output::with_thousands(tally.links),
+            run_output::with_thousands(tally.links_refused_by_an_earlier_record),
+        );
+    }
+    if finished.pass_read_counts.is_empty() {
+        return;
+    }
+    let mut total = crate::neighbour_evidence::phase::PassReadCounts::default();
+    for (_, counts) in &finished.pass_read_counts {
+        total += *counts;
+    }
+    tracing::info!(
+        "reads in the neighbour-evidence pass: the read check — of the population links reads \
+         reach at odds of 199 to 1 with GQ 30 or more at both ends, {} of {} contradicted by the \
+         reads, a check of the population links that does not come from the model, for links \
+         under 1 kb and not acted on; {} population links broken by reads, {} links made by reads, \
+         {} heterozygotes the consensus did not lean on attached by reads",
+        total.population_links_contradicted,
+        total.population_links_reached,
+        total.population_links_broken,
+        total.links_made_by_reads,
+        total.records_attached_by_reads,
+    );
+    for (sample, counts) in &finished.pass_read_counts {
+        tracing::debug!(
+            "  {sample}: read check {} of {} population links contradicted; {} broken, {} made, {} \
+             attached by reads",
+            counts.population_links_contradicted,
+            counts.population_links_reached,
+            counts.population_links_broken,
+            counts.links_made_by_reads,
+            counts.records_attached_by_reads,
+        );
+    }
+}
+
 /// **Reports what the neighbour-evidence pass did**, when it ran: its counts in the log, and each
 /// sample's fill check (`FillCheck`) — summarised in the log, and in full in a table beside the VCF,
 /// `<vcf name>.fill_check.tsv`, unless the VCF went to standard output. A table that cannot be

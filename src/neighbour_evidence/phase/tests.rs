@@ -83,13 +83,16 @@ fn the_link_test_catches_a_switch_the_alignment_absorbs() {
     let mut paths: Vec<Vec<HaplotypePair>> = (0..4).map(|_| path(n, |_| false)).collect();
     paths.push(path(n, |site| site >= 10));
     let (pairs, phase) = rounds(n, &paths);
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &every_site_heterozygous(n),
-        &positions(n),
-        300_000.0,
-        PathAgreement::ALL,
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions(n),
+            300_000.0,
+            PathAgreement::ALL,
+            &SiteReads::default(),
+        )
+        .0;
     for (site, written) in phased.iter().enumerate() {
         let written = written.expect("every site is phased");
         let block_start = if site < 10 { 1 } else { 1 + 10 * 1_000 };
@@ -97,13 +100,16 @@ fn the_link_test_catches_a_switch_the_alignment_absorbs() {
         assert_eq!((written.copy_0_allele, written.copy_1_allele), (1, 0));
     }
     // With one path of five allowed to disagree, the link holds.
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &every_site_heterozygous(n),
-        &positions(n),
-        300_000.0,
-        PathAgreement::try_new(0.75).expect("a share"),
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions(n),
+            300_000.0,
+            PathAgreement::try_new(0.75).expect("a share"),
+            &SiteReads::default(),
+        )
+        .0;
     assert!(
         phased
             .iter()
@@ -121,13 +127,16 @@ fn the_lean_minimum_is_inclusive() {
     };
     for (middle, phased_middle) in [(0.75, true), (0.74, false)] {
         let (pairs, phase) = rounds(n, &[make(middle)]);
-        let phased = phase.phase_heterozygotes(
-            &pairs,
-            &every_site_heterozygous(n),
-            &positions(n),
-            300_000.0,
-            PathAgreement::ALL,
-        );
+        let phased = phase
+            .phase_heterozygotes(
+                &pairs,
+                &every_site_heterozygous(n),
+                &positions(n),
+                300_000.0,
+                PathAgreement::ALL,
+                &SiteReads::default(),
+            )
+            .0;
         assert_eq!(phased[1].is_some(), phased_middle, "middle {middle}");
     }
 }
@@ -147,13 +156,16 @@ fn only_heterozygotes_in_blocks_of_two_are_phased() {
         Some((0, 1)),
     ];
     let positions = vec![1, 1_001, 2_001, 3_001, 50_001, 51_001];
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &heterozygotes,
-        &positions,
-        30_000.0,
-        PathAgreement::ALL,
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &heterozygotes,
+            &positions,
+            30_000.0,
+            PathAgreement::ALL,
+            &SiteReads::default(),
+        )
+        .0;
     let blocks: Vec<Option<u64>> = phased.iter().map(|w| w.map(|w| w.phase_set)).collect();
     // Sites 0, 1 and 3 link (no uncalled record breaks a block); 3 → 4 is past S; 4 and 5 link.
     assert_eq!(
@@ -161,13 +173,16 @@ fn only_heterozygotes_in_blocks_of_two_are_phased() {
         vec![Some(1), Some(1), None, Some(1), Some(50_001), Some(50_001)]
     );
     let heterozygotes = vec![Some((0, 1)), None, None, None, Some((0, 1)), None];
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &heterozygotes,
-        &positions,
-        30_000.0,
-        PathAgreement::ALL,
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &heterozygotes,
+            &positions,
+            30_000.0,
+            PathAgreement::ALL,
+            &SiteReads::default(),
+        )
+        .0;
     assert!(phased.iter().all(Option::is_none), "two blocks of one");
 }
 
@@ -180,13 +195,16 @@ fn a_broken_link_at_one_position_leaves_the_second_unphased() {
     paths.push(path(n, |site| site >= 2));
     let (pairs, phase) = rounds(n, &paths);
     let positions = vec![1, 1_001, 1_001, 2_001];
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &every_site_heterozygous(n),
-        &positions,
-        300_000.0,
-        PathAgreement::ALL,
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions,
+            300_000.0,
+            PathAgreement::ALL,
+            &SiteReads::default(),
+        )
+        .0;
     assert_eq!(phased[0].map(|w| w.phase_set), Some(1));
     assert_eq!(phased[1].map(|w| w.phase_set), Some(1));
     assert_eq!(phased[2], None);
@@ -209,13 +227,16 @@ fn a_multi_allelic_pair_is_phased_on_its_own_alleles() {
     let mut phase = SamplePhase::new(&[2, 3, 2], &pairs);
     phase.record_path(&pairs, &path);
     phase.add_round(&path);
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &[Some((0, 1)), Some((1, 2)), Some((0, 1))],
-        &positions(3),
-        300_000.0,
-        PathAgreement::ALL,
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &[Some((0, 1)), Some((1, 2)), Some((0, 1))],
+            &positions(3),
+            300_000.0,
+            PathAgreement::ALL,
+            &SiteReads::default(),
+        )
+        .0;
     let middle = phased[1].expect("the 1/2 is phased");
     assert_eq!((middle.copy_0_allele, middle.copy_1_allele), (2, 1));
     assert_eq!(
@@ -403,13 +424,16 @@ fn a_link_breaks_where_one_path_does_not_lean() {
     let mut paths: Vec<Vec<HaplotypePair>> = (0..4).map(|_| path(n, |_| false)).collect();
     paths.push(vec![site(0.95, 0.05), site(0.6, 0.4), site(0.95, 0.05)]);
     let (pairs, phase) = rounds(n, &paths);
-    let phased = phase.phase_heterozygotes(
-        &pairs,
-        &every_site_heterozygous(n),
-        &positions(n),
-        300_000.0,
-        PathAgreement::ALL,
-    );
+    let phased = phase
+        .phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions(n),
+            300_000.0,
+            PathAgreement::ALL,
+            &SiteReads::default(),
+        )
+        .0;
     assert!(phased.iter().all(Option::is_none), "{phased:?}");
 }
 
@@ -429,13 +453,16 @@ fn a_share_asks_for_whole_paths_rounded_up() {
         phase.record_path(&pairs, &path(n, |site| site == 1));
     }
     let at = |share: f64| {
-        phase.phase_heterozygotes(
-            &pairs,
-            &every_site_heterozygous(n),
-            &positions(n),
-            300_000.0,
-            PathAgreement::try_new(share).expect("a share"),
-        )
+        phase
+            .phase_heterozygotes(
+                &pairs,
+                &every_site_heterozygous(n),
+                &positions(n),
+                300_000.0,
+                PathAgreement::try_new(share).expect("a share"),
+                &SiteReads::default(),
+            )
+            .0
     };
     assert!(
         at(0.7).iter().all(Option::is_none),
@@ -526,4 +553,225 @@ fn a_join_reads_the_block_of_the_first_core_record() {
     );
     let out = join(&window, Some(&last_block(&written)));
     assert_eq!(out[4].map(|phase| phase.phase_set), Some(77));
+}
+
+// ---------------------------------------------------------------- reads in the link test
+
+/// Fragments at each site, as `(fragment, allele)` at Phred 30, and every site's written `GQ`.
+fn read_fixture(
+    n: usize,
+    at: &[(usize, &[(u32, u16)])],
+    quality: impl Fn(usize) -> Option<u32>,
+) -> (Vec<Vec<FragmentAllele>>, Vec<Option<u32>>) {
+    let mut fragments = vec![Vec::new(); n];
+    for &(site, entries) in at {
+        fragments[site] = entries
+            .iter()
+            .map(|&(fragment, allele)| FragmentAllele {
+                sample: 0,
+                fragment,
+                allele,
+                error_phred: 30,
+            })
+            .collect();
+    }
+    (fragments, (0..n).map(quality).collect())
+}
+
+fn site_reads<'a>(
+    fragments: &'a [Vec<FragmentAllele>],
+    qualities: &[Option<u32>],
+) -> SiteReads<'a> {
+    SiteReads {
+        fragments: fragments.iter().map(Vec::as_slice).collect(),
+        qualities: qualities.to_vec(),
+    }
+}
+
+/// Each site's written copy-0 allele and phase set, `None` where unphased.
+fn written(phased: &[Option<WrittenPhase>]) -> Vec<Option<(usize, u64)>> {
+    phased
+        .iter()
+        .map(|written| written.map(|w| (w.copy_0_allele, w.phase_set)))
+        .collect()
+}
+
+/// **A kept population link stands where the reads are silent or agree, and breaks where they
+/// contradict it at ln 9 or more** (read phase spec §2.7, rows 1 and 2); the read check counts the
+/// contradicted link among those reads reached. Five paths agree everywhere, so every link is kept;
+/// two fragments say sites 1 and 2 are trans where the consensus has them cis.
+#[test]
+fn reads_break_a_population_link_they_contradict_and_leave_the_rest() {
+    let n = 4;
+    let paths: Vec<Vec<HaplotypePair>> = (0..5).map(|_| path(n, |_| false)).collect();
+    let (pairs, phase) = rounds(n, &paths);
+    let (fragments, qualities) =
+        read_fixture(n, &[(1, &[(7, 0), (8, 1)]), (2, &[(7, 1), (8, 0)])], |_| {
+            Some(40)
+        });
+    let (phased, counts) = phase.phase_heterozygotes(
+        &pairs,
+        &every_site_heterozygous(n),
+        &positions(n),
+        300_000.0,
+        PathAgreement::ALL,
+        &site_reads(&fragments, &qualities),
+    );
+    assert_eq!(
+        written(&phased),
+        vec![
+            Some((1, 1)),
+            Some((1, 1)),
+            Some((1, 2_001)),
+            Some((1, 2_001))
+        ]
+    );
+    assert_eq!(
+        counts,
+        PassReadCounts {
+            population_links_reached: 1,
+            population_links_contradicted: 1,
+            population_links_broken: 1,
+            links_made_by_reads: 0,
+            records_attached_by_reads: 0,
+        }
+    );
+}
+
+/// **Reads link two candidates the population did not, and a link whose relation is the opposite
+/// of the consensus's swaps the following block as a whole** (§2.7, row 3). One path of five turns
+/// over at site 10, so the population keeps no link across 9–10; two fragments say trans there,
+/// where the consensus has the two cis. Sites 10 on are written the other way round, in site 0's
+/// phase set. With `GQ` 29 at site 10 (row 4) the reads link nothing.
+#[test]
+fn reads_link_what_the_population_did_not_and_swap_the_block_after() {
+    let n = 20;
+    let mut paths: Vec<Vec<HaplotypePair>> = (0..4).map(|_| path(n, |_| false)).collect();
+    paths.push(path(n, |site| site >= 10));
+    let (pairs, phase) = rounds(n, &paths);
+    let at: &[(usize, &[(u32, u16)])] = &[(9, &[(3, 0), (4, 1)]), (10, &[(3, 1), (4, 0)])];
+
+    let (fragments, qualities) = read_fixture(n, at, |_| Some(40));
+    let (phased, counts) = phase.phase_heterozygotes(
+        &pairs,
+        &every_site_heterozygous(n),
+        &positions(n),
+        300_000.0,
+        PathAgreement::ALL,
+        &site_reads(&fragments, &qualities),
+    );
+    let expected: Vec<Option<(usize, u64)>> = (0..n)
+        .map(|site| Some((usize::from(site < 10), 1)))
+        .collect();
+    assert_eq!(written(&phased), expected);
+    assert_eq!(counts.links_made_by_reads, 1);
+
+    let (fragments, qualities) = read_fixture(n, at, |site| Some(if site == 10 { 29 } else { 40 }));
+    let (phased, counts) = phase.phase_heterozygotes(
+        &pairs,
+        &every_site_heterozygous(n),
+        &positions(n),
+        300_000.0,
+        PathAgreement::ALL,
+        &site_reads(&fragments, &qualities),
+    );
+    assert_eq!(phased[10].map(|w| w.phase_set), Some(10_001));
+    assert_eq!(counts.links_made_by_reads, 0);
+}
+
+/// Five sites; the consensus leans at 0, 3 and 4 and not at 1 and 2, every path agreeing.
+fn with_two_records_the_consensus_does_not_lean_on() -> (PairLayout, SamplePhase) {
+    let n = 5;
+    let path: Vec<HaplotypePair> = (0..n)
+        .map(|site| {
+            if site == 1 || site == 2 {
+                self::site(0.5, 0.5)
+            } else {
+                self::site(0.95, 0.05)
+            }
+        })
+        .collect();
+    rounds(n, &vec![path; 5])
+}
+
+/// **Heterozygotes the consensus does not lean on are attached by reads, as a chain from the
+/// candidate before them** (§2.7): 1 is cis with 0 and 2 trans with 1, so 1 is written as 0 is
+/// and 2 the other way round, all in 0's phase set; the chain's last record says nothing against 3.
+/// When two fragments say 2 is cis with 3, which the block has trans, the chain is dropped; when
+/// only one fragment links 1 and 2, the chain stops at 1.
+#[test]
+fn a_chain_of_records_the_consensus_does_not_lean_on_is_attached_by_reads() {
+    let (pairs, phase) = with_two_records_the_consensus_does_not_lean_on();
+    let n = 5;
+    let phased_with = |at: &[(usize, &[(u32, u16)])]| {
+        let (fragments, qualities) = read_fixture(n, at, |_| Some(40));
+        phase.phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions(n),
+            300_000.0,
+            PathAgreement::ALL,
+            &site_reads(&fragments, &qualities),
+        )
+    };
+
+    let (phased, counts) = phased_with(&[
+        (0, &[(1, 1), (2, 0)]),
+        (1, &[(1, 1), (2, 0), (5, 1), (6, 0)]),
+        (2, &[(5, 0), (6, 1)]),
+    ]);
+    assert_eq!(
+        written(&phased),
+        vec![
+            Some((1, 1)),
+            Some((1, 1)),
+            Some((0, 1)),
+            Some((1, 1)),
+            Some((1, 1))
+        ]
+    );
+    assert_eq!(counts.records_attached_by_reads, 2);
+
+    let (phased, counts) = phased_with(&[
+        (0, &[(1, 1), (2, 0)]),
+        (1, &[(1, 1), (2, 0), (5, 1), (6, 0)]),
+        (2, &[(5, 0), (6, 1), (9, 0), (10, 1)]),
+        (3, &[(9, 0), (10, 1)]),
+    ]);
+    assert_eq!(written(&phased)[1..3], [None, None], "{phased:?}");
+    assert_eq!(counts.records_attached_by_reads, 0);
+
+    let (phased, counts) = phased_with(&[
+        (0, &[(1, 1), (2, 0)]),
+        (1, &[(1, 1), (2, 0), (5, 1)]),
+        (2, &[(5, 0)]),
+    ]);
+    assert_eq!(written(&phased)[1..3], [Some((1, 1)), None]);
+    assert_eq!(counts.records_attached_by_reads, 1);
+}
+
+/// **A heterozygote below `GQ` 30 is never linked by reads**, however well they agree, and one with
+/// no `GQ` — a margin record an earlier window wrote — neither: at a wrong heterozygote every
+/// fragment shows one allele, and two fragments then agree half the time (§2.5).
+#[test]
+fn a_heterozygote_below_gq_30_is_never_attached_by_reads() {
+    let (pairs, phase) = with_two_records_the_consensus_does_not_lean_on();
+    let n = 5;
+    for quality in [Some(29), None] {
+        let (fragments, qualities) = read_fixture(
+            n,
+            &[(0, &[(1, 1), (2, 1)]), (1, &[(1, 1), (2, 1)])],
+            |site| if site == 1 { quality } else { Some(40) },
+        );
+        let (phased, counts) = phase.phase_heterozygotes(
+            &pairs,
+            &every_site_heterozygous(n),
+            &positions(n),
+            300_000.0,
+            PathAgreement::ALL,
+            &site_reads(&fragments, &qualities),
+        );
+        assert_eq!(phased[1], None, "GQ {quality:?}");
+        assert_eq!(counts.records_attached_by_reads, 0);
+    }
 }
