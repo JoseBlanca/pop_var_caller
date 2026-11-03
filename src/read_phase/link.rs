@@ -42,7 +42,7 @@ pub const GQ_MIN: u8 = 30;
 #[must_use]
 pub fn error_of(error_phred: u8) -> f64 {
     let error = crate::float::powf(10.0, -f64::from(error_phred) / 10.0);
-    error.max(ERROR_FLOOR).min(0.5)
+    error.clamp(ERROR_FLOOR, 0.5)
 }
 
 /// **One fragment's weight**, `ln([(1 − eᵢ)(1 − eⱼ) + eᵢeⱼ] / [eᵢ(1 − eⱼ) + eⱼ(1 − eᵢ)])`: never
