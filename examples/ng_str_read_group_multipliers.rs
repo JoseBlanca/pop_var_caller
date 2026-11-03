@@ -15,7 +15,12 @@
 //!   multiplier, its standard error on the log scale (empty when it rests on the pull), and the
 //!   read group's expected slipped reads;
 //! - `<output>.classes.tsv`: one line a class: its slip rate, the rate of a read group of typical
-//!   stutter.
+//!   stutter;
+//! - `<output>.tracts.tsv`: one line a tract the fit kept and read group that read it, at tracts
+//!   where every sample's reads favour one length and it is the same length for all: the read
+//!   group's reads and how many of them are at another length. For measuring how much more tracts
+//!   vary than a binomial allows, with one rate a class and with each read group's own
+//!   (`str_library_stutter.md` §8.6).
 //!
 //! The options are `estimate-parameters`'s; only `--reference`, `--catalog` and `--psp` are read
 //! from them, and `--output` names the first table.
@@ -128,5 +133,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
     }
+    let mut tracts = BufWriter::new(File::create(format!(
+        "{}.tracts.tsv",
+        cli.args.output.display()
+    ))?);
+    writeln!(
+        tracts,
+        "period\treference_repeats\ttract\tread_group\treads\toff_length"
+    )?;
+    for class in &strata {
+        for (index, tract) in class.tracts.iter().enumerate() {
+            let Some(shared) = the_length_every_sample_favours(tract) else {
+                continue;
+            };
+            let mut by_read_group: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
+            for sample in &tract.samples {
+                for (read_group, reads) in &sample.by_read_group {
+                    let entry = by_read_group.entry(read_group.get()).or_default();
+                    for (bucket, count) in reads.iter().enumerate() {
+                        entry.0 += u64::from(*count);
+                        if bucket != shared {
+                            entry.1 += u64::from(*count);
+                        }
+                    }
+                }
+            }
+            for (read_group, (reads, off)) in by_read_group {
+                writeln!(
+                    tracts,
+                    "{}\t{}\t{index}\t{read_group}\t{reads}\t{off}",
+                    class.stratum.period, class.stratum.reference_repeats
+                )?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// **The length bucket every sample's reads favour**, where each of at least two samples has one
+/// most common length and it is the same for all of them; `None` otherwise.
+fn the_length_every_sample_favours(
+    tract: &pop_var_caller::parameter_estimation::joint::ssr_fit::TractReads,
+) -> Option<usize> {
+    let mut shared = None;
+    if tract.samples.len() < 2 {
+        return None;
+    }
+    for sample in &tract.samples {
+        let mut summed: Vec<u64> = Vec::new();
+        for (_, reads) in &sample.by_read_group {
+            if summed.len() < reads.len() {
+                summed.resize(reads.len(), 0);
+            }
+            for (bucket, count) in reads.iter().enumerate() {
+                summed[bucket] += u64::from(*count);
+            }
+        }
+        let most = *summed.iter().max()?;
+        let mut at_most = (0..summed.len()).filter(|bucket| summed[*bucket] == most);
+        let favoured = at_most.next()?;
+        if at_most.next().is_some() || shared.is_some_and(|length| length != favoured) {
+            return None;
+        }
+        shared = Some(favoured);
+    }
+    shared
 }
