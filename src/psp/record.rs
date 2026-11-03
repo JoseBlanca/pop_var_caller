@@ -2528,8 +2528,34 @@ pub fn decode_the_body_of(
             ),
         });
     }
+    // **The base against the reads it is the base of: the only check this field has.** Any byte
+    // below 0x80 is a valid change, and the value runs, so one damaged byte would shift the base of
+    // every later record in the block and with it which reads the read-phase cap keeps. The
+    // generator stamps a generic record with the first id its walked region issued, and the walk
+    // drops its pending mates at every region's opening, so every read the record names was issued
+    // at or after it. STR and STR-bundle records carry a base of zero, which this skips; and a
+    // damaged base that stays at or below the smallest id still passes.
+    let base = found.head.chain_id_base;
+    if base != 0
+        && let Some(smallest) = decoded_body
+            .record
+            .observations
+            .iter()
+            .flat_map(|observation| observation.chain_ids.iter().copied())
+            .min()
+        && smallest < base
+    {
+        return Err(RecordDecodeError::Malformed {
+            field: CHAIN_ID_BASE_CHANGE,
+            bytes_in: head_bytes,
+            reason: format!(
+                "a walked region's first chain id of {base} over a record naming read {smallest}, \
+                 issued before it"
+            ),
+        });
+    }
     let mut record = decoded_body.record;
-    record.chain_id_base = found.head.chain_id_base;
+    record.chain_id_base = base;
     Ok(DecodedRecord {
         record,
         head: found.head,
@@ -3745,6 +3771,69 @@ mod tests {
                 );
             }
             other => panic!("expected the copy to be refused, got {other:?}"),
+        }
+    }
+
+    /// **A damaged chain-id base change is refused when it lifts the base above a read the record
+    /// names** (review of 2026-11-03, Mi3). One byte is any valid change, so before this check the
+    /// damaged record decoded, and so did every later record of its block, all with a wrong base.
+    /// The record here starts at the base its smallest read sits on, ten, and the damage lifts it to
+    /// sixty-three.
+    #[test]
+    fn a_damaged_chain_id_base_above_the_records_reads_is_refused() {
+        let mut record = a_rich_record();
+        for (observation, ids) in record.observations.iter_mut().zip([[10, 17], [12, 30]]) {
+            observation.chain_ids = ids.to_vec();
+            observation.num_obs = 2;
+            observation.num_fwd = observation.num_fwd.min(2);
+        }
+        record.chain_id_base = 10;
+        let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
+        let decode = |bytes: &[u8]| {
+            decode_a_record(
+                &mut a_live_set_reader(),
+                bytes,
+                record.region.contig,
+                OffsetBase::at_block_start(block_starts_at),
+                &RecordLayout::as_this_build_writes_it(),
+            )
+        };
+        assert_eq!(
+            decode(&bytes)
+                .expect("a base at the smallest read is sound")
+                .record,
+            record
+        );
+
+        let mut head = FieldReader::new(&bytes);
+        for name in [
+            "position-offset",
+            "reference-span",
+            "non-reference-reads",
+            "reads-compared-with-reference",
+            "reads-discarded-by-the-depth-cap-head-copy",
+        ] {
+            head.read_varint(name).expect("the head reads");
+        }
+        let change_at = head.bytes_read();
+        assert_eq!(
+            head.read_signed_varint(CHAIN_ID_BASE_CHANGE)
+                .expect("the head reads"),
+            10,
+            "the block's first record changes the base from zero"
+        );
+        assert_eq!(head.bytes_read(), change_at + 1, "in one byte");
+        bytes[change_at] = 0x7E;
+
+        match decode(&bytes) {
+            Err(RecordDecodeError::Malformed { field, reason, .. }) => {
+                assert_eq!(field, "chain-id-base-change");
+                assert!(
+                    reason.contains("63") && reason.contains("read 10"),
+                    "got {reason}"
+                );
+            }
+            other => panic!("expected the base to be refused, got {other:?}"),
         }
     }
 
@@ -6871,8 +6960,15 @@ mod tests {
             first + 9_000,
             first + 9_000,
         ];
+        // Every read lifted past the highest base, as a walk issues them: no read a record names
+        // was issued before its region's first id, and the reader refuses a record whose was.
         for (record, base) in records.iter_mut().zip(bases) {
             record.chain_id_base = base;
+            for observation in &mut record.observations {
+                for id in &mut observation.chain_ids {
+                    *id += first + 9_000;
+                }
+            }
         }
         let (bytes, block_starts_at) = a_run_of_records(&records);
         for (what, is_kept) in the_skip_patterns() {
