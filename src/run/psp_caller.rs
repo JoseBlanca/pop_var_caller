@@ -790,6 +790,9 @@ impl PspVariantCaller {
             // are prepared here, on this thread, as the gathering releases them.
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
+            // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
+            // the same order, with only the read alleles of reads seen at two records or more.
+            let mut keeper = crate::read_phase::keeper::FragmentKeeper::default();
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
             };
@@ -797,7 +800,9 @@ impl PspVariantCaller {
                               _: &[WindowCoverage]|
              -> Result<(), E> {
                 for (record, windows) in gathering.accept(record, windows) {
-                    hand_over(prepare(record, &windows)?, &windows)?;
+                    for (record, windows, _fragments) in keeper.accept(record, windows) {
+                        hand_over(prepare(record, &windows)?, &windows)?;
+                    }
                 }
                 Ok(())
             };
@@ -822,7 +827,13 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
+            let mut released = Vec::new();
             for (record, windows) in gathering.finish() {
+                released.extend(keeper.accept(record, windows));
+            }
+            released.extend(keeper.finish());
+            crate::read_phase::keeper::log_counts(keeper.counts());
+            for (record, windows, _fragments) in released {
                 let locus = record.region();
                 prepare(record, &windows)
                     .and_then(|ready| hand_over(ready, &windows))

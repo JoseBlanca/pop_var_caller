@@ -835,6 +835,8 @@ impl AlignedFilesVariantCaller {
             // (`str_edge_deletion_alleles.md` §6), as in psp mode.
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
+            // Then the fragment keeper (read phase spec §2.4), as in psp mode.
+            let mut keeper = crate::read_phase::keeper::FragmentKeeper::default();
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
@@ -842,12 +844,20 @@ impl AlignedFilesVariantCaller {
                 &|record, _| Ok::<_, E>(record),
                 &mut |record: VcfRecord, windows| {
                     for (record, windows) in gathering.accept(record, windows.to_vec()) {
-                        hand_over(&record, &windows)?;
+                        for (record, windows, _fragments) in keeper.accept(record, windows) {
+                            hand_over(&record, &windows)?;
+                        }
                     }
                     Ok(())
                 },
             )?;
+            let mut released = Vec::new();
             for (record, windows) in gathering.finish() {
+                released.extend(keeper.accept(record, windows));
+            }
+            released.extend(keeper.finish());
+            crate::read_phase::keeper::log_counts(keeper.counts());
+            for (record, windows, _fragments) in released {
                 hand_over(&record, &windows).map_err(|source| RunError::RecordNotWritten {
                     locus: record.region(),
                     source: Box::new(source),

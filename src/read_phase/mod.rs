@@ -10,6 +10,9 @@
 //!   chain ids are dropped, and settled: one per read, at most 32 a sample (§2.2, §2.4).
 //! - [`record_reads`] — every sample's read alleles at one written record, numbered as the
 //!   record numbers its alleles (§2.3).
+//! - [`keeper`] — on the ordered thread, the read alleles of reads seen at two records or more,
+//!   numbered as per-sample fragments; the rest dropped (§2.4).
 
 pub mod capture;
+pub mod keeper;
 pub mod record_reads;
