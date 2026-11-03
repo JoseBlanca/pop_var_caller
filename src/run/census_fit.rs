@@ -49,7 +49,7 @@ use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
-    PenalisedFitConfig, fit_repeat_tracts,
+    PenalisedFitConfig, RepeatTractFit, fit_repeat_tracts,
 };
 use crate::parameter_estimation::joint::ssr_fit::tract_exclusion::{TractExclusion, TractsLeftOut};
 use crate::parameter_estimation::joint::ssr_fit::{
@@ -268,7 +268,12 @@ pub fn fit_a_cohort(
     // **Tracts whose reads come from more copies than the reference holds are left out** by
     // depth and by the stutter tail (spec `parameter_prepass_ssr.md` §4.6.1); they are still
     // called.
-    let (outcomes, tracts_left_out) = fit_repeat_tracts(
+    // The read groups' multipliers are not yet written to the parameters file.
+    let RepeatTractFit {
+        outcomes,
+        tracts_left_out,
+        ..
+    } = fit_repeat_tracts(
         &mut evidence,
         &homozygote_excess,
         tracts,

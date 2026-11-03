@@ -53,7 +53,7 @@ pub fn log_multiplier_objective(
         -pull * multiplier,
     );
     for class in classes {
-        if !(class.class_rate > 0.0) {
+        if class.class_rate.is_nan() || class.class_rate <= 0.0 {
             continue;
         }
         let lifted = multiplier * class.class_rate;
@@ -92,22 +92,31 @@ pub fn largest_log_multiplier(classes: &[ClassEvidence]) -> f64 {
 /// With no class evidence the pull alone holds it at one; with a pull of zero and no slipped read it
 /// would run toward zero, so a run always pulls.
 pub fn fit_multiplier(classes: &[ClassEvidence], pull: f64, start: f64) -> f64 {
+    fit_tilted_multiplier(classes, pull, 0.0, start)
+}
+
+/// [`fit_multiplier`] with `tilt · ln m` taken from the objective: the read group's share of a
+/// Lagrange term ([`fit_multipliers_of_a_typical_one`]).
+fn fit_tilted_multiplier(classes: &[ClassEvidence], pull: f64, tilt: f64, start: f64) -> f64 {
+    let objective = |u: f64| {
+        let (value, slope, curvature) = log_multiplier_objective(u, classes, pull);
+        (value - tilt * u, slope - tilt, curvature)
+    };
     let ceiling = largest_log_multiplier(classes);
     // Just inside the ceiling, where every class's lifted rate is below one and the objective
     // finite.
     let below_ceiling = |u: f64| u.min(ceiling - 1e-9);
     let mut u = below_ceiling(float::ln(start));
-    let (mut value, mut slope, mut curvature) = log_multiplier_objective(u, classes, pull);
+    let (mut value, mut slope, mut curvature) = objective(u);
     for _ in 0..100 {
-        if !(curvature < 0.0) || slope.abs() < 1e-12 {
+        if curvature.is_nan() || curvature >= 0.0 || slope.abs() < 1e-12 {
             break;
         }
         let mut step = -slope / curvature;
         let mut moved = false;
         for _ in 0..60 {
             let next = below_ceiling(u + step);
-            let (next_value, next_slope, next_curvature) =
-                log_multiplier_objective(next, classes, pull);
+            let (next_value, next_slope, next_curvature) = objective(next);
             if next_value >= value {
                 moved = next != u;
                 u = next;
@@ -123,6 +132,100 @@ pub fn fit_multiplier(classes: &[ClassEvidence], pull: f64, start: f64) -> f64 {
     float::exp(u)
 }
 
+/// **A motif length's multipliers with the classes held, their weighted geometric mean one**
+/// (spec `str_library_stutter.md` §2.2, §3.4): each read group's objective maximised under the
+/// one constraint `Σᵣ wᵣ ln mᵣ = 0`, `wᵣ` the read group's reads, by a Lagrange multiplier `λ`
+/// shared by every read group, each read group's objective tilted by `λ wᵣ ln mᵣ`.
+///
+/// **Why under the constraint, and not fitted then scaled.** The pull toward one is not unchanged
+/// when every multiplier is scaled, so multipliers fitted freely and then scaled are not the
+/// maximum of the objective the fit climbs; the fit's rounds then cycled, the scaling moving the
+/// class rates one way and the next curve moving them back, and every motif length of the
+/// 50-sample stuttering simulation ran out of rounds (2026-11-02). Under the constraint, a round
+/// that leaves the class rates where they are leaves the multipliers where they are too.
+///
+/// `λ` is found by bisection on the constraint, which falls as `λ` grows; each trial is one Newton
+/// solve a read group. Read groups with no reads take no part in the constraint. Where no tilt
+/// reaches it, every read group held at its ceiling first, the closest reached is returned.
+pub fn fit_multipliers_of_a_typical_one(
+    classes_by_read_group: &[Vec<ClassEvidence>],
+    weights: &[f64],
+    pull: f64,
+    starts: &[f64],
+) -> Vec<f64> {
+    assert_eq!(
+        classes_by_read_group.len(),
+        weights.len(),
+        "one weight a read group"
+    );
+    assert_eq!(
+        classes_by_read_group.len(),
+        starts.len(),
+        "one start a read group"
+    );
+    let total: f64 = weights.iter().sum();
+    if total.is_nan() || total <= 0.0 {
+        return starts.to_vec();
+    }
+    // Weights of mean one, so that `λ` is on the scale of one read group's slope.
+    let read_groups = weights.iter().filter(|weight| **weight > 0.0).count() as f64;
+    let scaled: Vec<f64> = weights.iter().map(|w| w * read_groups / total).collect();
+    let solve = |lambda: f64| -> Vec<f64> {
+        classes_by_read_group
+            .iter()
+            .zip(&scaled)
+            .zip(starts)
+            .map(|((classes, weight), start)| {
+                fit_tilted_multiplier(classes, pull, lambda * weight, *start)
+            })
+            .collect()
+    };
+    let mean_log = |multipliers: &[f64]| -> f64 {
+        multipliers
+            .iter()
+            .zip(&scaled)
+            .map(|(m, w)| w * float::ln(*m))
+            .sum::<f64>()
+            / read_groups
+    };
+    let at_zero = solve(0.0);
+    let gap = mean_log(&at_zero);
+    if gap == 0.0 {
+        return at_zero;
+    }
+    // Bracket: the constraint's sign flips between `0` and `bound` in the direction of `gap`.
+    let mut bound = gap.signum();
+    let mut far = solve(bound);
+    while mean_log(&far).signum() == gap.signum() {
+        bound *= 2.0;
+        far = solve(bound);
+        // No tilt reaches the constraint: every read group is held at its ceiling, where a class's
+        // rate times the multiplier reaches `MULTIPLIED_LEVEL_CEILING`, before the mean reaches
+        // one. The closest reached is returned rather than stopping the run.
+        if bound.abs() >= 1e12 {
+            return far;
+        }
+    }
+    let (mut near, mut away) = (0.0, bound);
+    let mut best = far;
+    for _ in 0..100 {
+        let middle = 0.5 * (near + away);
+        let multipliers = solve(middle);
+        let value = mean_log(&multipliers);
+        if value.abs() < 1e-13 || (away - near).abs() < 1e-14 * bound.abs().max(1.0) {
+            best = multipliers;
+            break;
+        }
+        if value.signum() == gap.signum() {
+            near = middle;
+        } else {
+            away = middle;
+        }
+        best = multipliers;
+    }
+    best
+}
+
 /// **Scales a motif length's multipliers so their geometric mean, each weighted by `weights`, is
 /// one**, and returns the factor every multiplier was divided by (spec §2.2). A class rate times
 /// that factor keeps every read group's slip rate where it was. Read groups with no weight do not
@@ -130,7 +233,7 @@ pub fn fit_multiplier(classes: &[ClassEvidence], pull: f64, start: f64) -> f64 {
 pub fn scale_to_a_typical_read_group(multipliers: &mut [f64], weights: &[f64]) -> f64 {
     assert_eq!(multipliers.len(), weights.len(), "one weight a read group");
     let total: f64 = weights.iter().sum();
-    if !(total > 0.0) {
+    if total.is_nan() || total <= 0.0 {
         return 1.0;
     }
     let mean_log = multipliers
@@ -168,7 +271,7 @@ pub fn log_multiplier_error(
     let u = float::ln(multiplier);
     let (_, _, curvature) = log_multiplier_objective(u, classes, pull);
     let information = -curvature;
-    if !(information > 0.0) {
+    if information.is_nan() || information <= 0.0 {
         return None;
     }
     let spread: f64 = by_tract
@@ -200,7 +303,7 @@ mod tests {
 
         fn normal(&mut self) -> f64 {
             let (a, b) = (self.uniform().max(1e-300), self.uniform());
-            (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()
+            (-2.0 * float::ln(a)).sqrt() * float::cos(std::f64::consts::TAU * b)
         }
 
         fn binomial(&mut self, trials: u32, chance: f64) -> u32 {
@@ -251,7 +354,7 @@ mod tests {
             let (mut exact, mut slipped) = (0.0, 0.0);
             for _ in 0..tracts {
                 let factor =
-                    (tract_spread * draw.normal() - 0.5 * tract_spread * tract_spread).exp();
+                    float::exp(tract_spread * draw.normal() - 0.5 * tract_spread * tract_spread);
                 let chance = (multiplier * rate * factor).min(0.95);
                 let slips = f64::from(draw.binomial(depth, chance));
                 let stays = f64::from(depth) - slips;
@@ -332,13 +435,59 @@ mod tests {
         let mean_log: f64 = multipliers
             .iter()
             .zip(&weights)
-            .map(|(m, w)| w * m.ln())
+            .map(|(m, w)| w * float::ln(*m))
             .sum::<f64>()
             / weights.iter().sum::<f64>();
         assert!(mean_log.abs() < 1e-12, "weighted mean log {mean_log}");
         for (scaled, old) in multipliers.iter().zip(&before) {
             assert!((scaled * factor - old).abs() < 1e-12);
         }
+    }
+
+    /// **Fitted under the constraint, the multipliers' weighted geometric mean is one** and each is
+    /// its own objective's maximum once the Lagrange tilt is taken off: here with the pull, which
+    /// makes freely fitted multipliers' mean drift from one.
+    #[test]
+    fn multipliers_fitted_together_have_a_typical_one() {
+        let classes = vec![
+            vec![evidence(0.02, 9_000.0, 360.0)],
+            vec![evidence(0.02, 9_000.0, 90.0)],
+            vec![evidence(0.02, 2_000.0, 60.0)],
+            vec![evidence(0.02, 500.0, 2.0)],
+        ];
+        let weights: Vec<f64> = classes
+            .iter()
+            .map(|c| c[0].reads.exact + c[0].reads.slipped)
+            .collect();
+        let fitted = fit_multipliers_of_a_typical_one(
+            &classes,
+            &weights,
+            PULL_TOWARD_ONE_SLIPPED_READS,
+            &[1.0; 4],
+        );
+        let mean_log: f64 = fitted
+            .iter()
+            .zip(&weights)
+            .map(|(m, w)| w * float::ln(*m))
+            .sum::<f64>()
+            / weights.iter().sum::<f64>();
+        assert!(mean_log.abs() < 1e-9, "weighted mean log {mean_log}");
+        // The three with many slipped reads ranked as their reads rank them; the fourth, 2 slipped
+        // reads against the pull's 20, held nearer one than its reads alone would put it.
+        assert!(fitted[0] > fitted[2] && fitted[2] > fitted[1]);
+        assert!(fitted[3] > fitted[1], "{fitted:?}");
+        // Freely fitted, the pull leaves their mean away from one.
+        let free: Vec<f64> = classes
+            .iter()
+            .map(|c| fit_multiplier(c, PULL_TOWARD_ONE_SLIPPED_READS, 1.0))
+            .collect();
+        let free_mean: f64 = free
+            .iter()
+            .zip(&weights)
+            .map(|(m, w)| w * float::ln(*m))
+            .sum::<f64>()
+            / weights.iter().sum::<f64>();
+        assert!(free_mean.abs() > 1e-3, "free mean {free_mean}");
     }
 
     /// **Against drawn truth, the multipliers land within two of their errors of it about 95 times
@@ -349,17 +498,17 @@ mod tests {
     /// only for that.
     #[test]
     fn drawn_multipliers_are_recovered_within_their_errors() {
-        let mut draw = Draw(2026_11_02);
+        let mut draw = Draw(20_261_102);
         for depth in [3, 30] {
             let read_groups = 200;
             let mut covered = 0;
             for _ in 0..read_groups {
-                let truth = (0.4 * draw.normal()).exp();
+                let truth = float::exp(0.4 * draw.normal());
                 let (classes, by_tract) = drawn_read_group(truth, 40, depth, &mut draw);
                 let fitted = fit_multiplier(&classes, 0.0, 1.0);
                 let error = log_multiplier_error(fitted, &classes, &by_tract, 0.0)
                     .expect("every drawn read group has slipped reads");
-                if (fitted.ln() - truth.ln()).abs() <= 2.0 * error {
+                if (float::ln(fitted) - float::ln(truth)).abs() <= 2.0 * error {
                     covered += 1;
                 }
             }
@@ -390,13 +539,13 @@ mod tests {
         let read_groups = 200;
         let mut covered = 0;
         for _ in 0..read_groups {
-            let truth = (0.4 * draw.normal()).exp();
+            let truth = float::exp(0.4 * draw.normal());
             let (classes, by_tract) =
                 drawn_read_group_with_tracts_apart(truth, 40, 30, 0.8, &mut draw);
             let fitted = fit_multiplier(&classes, 0.0, 1.0);
             let error = log_multiplier_error(fitted, &classes, &by_tract, 0.0)
                 .expect("every drawn read group has slipped reads");
-            if (fitted.ln() - truth.ln()).abs() <= 2.0 * error {
+            if (float::ln(fitted) - float::ln(truth)).abs() <= 2.0 * error {
                 covered += 1;
             }
         }

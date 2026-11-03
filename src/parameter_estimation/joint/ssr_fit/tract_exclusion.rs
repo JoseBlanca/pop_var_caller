@@ -304,28 +304,54 @@ fn binomial_upper_tail(trials: u64, chance: f64, at_least: u64) -> f64 {
 ///
 /// **The test leans towards keeping a tract.** A read that slips from one allele onto the other's
 /// length is not counted, so on a tract the model describes `K` falls short of `level × N` on
-/// average. Every read group is scored at the class's one stutter, so one rate serves every read.
+/// average.
+///
+/// **With `multipliers`, each read group's reads at its own rate** (spec `str_library_stutter.md`
+/// §5): the genotype is read off the reads scored at each read group's rate, and `level` is the
+/// read-weighted mean of the read groups' rates at the tract, `Σᵣ nᵣ λᵣ / N`. A sum of reads
+/// slipping at different rates is less spread than a binomial at their mean (Hoeffding 1956), so
+/// the binomial at the mean overstates the chance of many off-length reads, and the test still
+/// leans towards keeping. Without them, every read is at the class's rate.
 pub(super) fn tracts_in_the_stutter_tail(
     evidence: &StratumEvidence,
     homozygote_excess: &[f64],
     slippage: Slippage,
     allele_span: i32,
     rule: &StutterTailRule,
+    multipliers: Option<&[f64]>,
 ) -> Vec<usize> {
     let level = slippage.level;
     if !(level > 0.0) {
         return Vec::new();
     }
-    reads_off_the_genotype_the_reads_favour(evidence, homozygote_excess, slippage, allele_span)
-        .into_iter()
-        .enumerate()
-        .filter(|(_, (crossing, off_length))| {
-            *off_length as f64 >= rule.times_rate * level * *crossing as f64
-                && *off_length > 0
-                && binomial_upper_tail(*crossing, level, *off_length) < rule.chance
-        })
-        .map(|(tract, _)| tract)
-        .collect()
+    reads_off_the_genotype_the_reads_favour(
+        evidence,
+        homozygote_excess,
+        slippage,
+        allele_span,
+        multipliers,
+    )
+    .into_iter()
+    .enumerate()
+    .filter(|(_, reads)| {
+        let (crossing, off_length) = (reads.crossing, reads.off_length);
+        match reads.expected_slipped {
+            None => {
+                off_length as f64 >= rule.times_rate * level * crossing as f64
+                    && off_length > 0
+                    && binomial_upper_tail(crossing, level, off_length) < rule.chance
+            }
+            Some(expected) => {
+                let mean_rate = expected / crossing as f64;
+                off_length as f64 >= rule.times_rate * expected
+                    && off_length > 0
+                    && mean_rate > 0.0
+                    && binomial_upper_tail(crossing, mean_rate, off_length) < rule.chance
+            }
+        }
+    })
+    .map(|(tract, _)| tract)
+    .collect()
 }
 
 #[cfg(test)]
@@ -474,7 +500,46 @@ mod tests {
             stutter(level),
             2,
             &StutterTailRule::production(),
+            None,
         )
+    }
+
+    /// **A tract read by a read group that slips three times as often as typical is tested at that
+    /// read group's rate** (spec `str_library_stutter.md` §5): 1,000 reads, 60 of them one repeat
+    /// short. At the class's rate of 2 in 100 that is three times what it predicts and far past
+    /// chance, so a test at the class's rate leaves the tract out; at the read group's own 6 in 100
+    /// it is what slippage gives, and the tract stays. Sample 0, the typical read group, reads
+    /// another tract.
+    #[test]
+    fn a_tract_read_by_a_stuttering_read_group_is_tested_at_its_rate() {
+        let evidence = class(
+            10,
+            vec![
+                tract(&[row(&[(0, 100)])]),
+                TractReads {
+                    samples: vec![SampleTractReads {
+                        sample: 1,
+                        by_read_group: vec![(ReadGroupIndex(1), row(&[(0, 940), (-1, 60)]))],
+                    }],
+                },
+            ],
+            2,
+        );
+        let test = |multipliers: Option<&[f64]>| {
+            tracts_in_the_stutter_tail(
+                &evidence,
+                &[0.0, 0.0],
+                stutter(0.02),
+                2,
+                &StutterTailRule::production(),
+                multipliers,
+            )
+        };
+        assert_eq!(test(None), vec![1], "at the class's rate");
+        assert!(
+            test(Some(&[1.0, 3.0])).is_empty(),
+            "at the read group's own"
+        );
     }
 
     #[test]
@@ -568,12 +633,13 @@ mod tests {
                 ..StutterTailRule::production()
             }),
         };
-        let (outcomes, _) = fit_repeat_tracts(
+        let outcomes = fit_repeat_tracts(
             &mut strata,
             &[0.3],
             &PenalisedFitConfig::production().with_allele_span(2),
             &exclusion,
-        );
+        )
+        .outcomes;
         let level = outcomes[0].slippage()[0].expect("fitted").level;
         (level, strata[0].tracts_in_stutter_tail)
     }

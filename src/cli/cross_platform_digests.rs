@@ -281,7 +281,11 @@ mod tests {
     /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
     /// Again the same day, when the section's note began saying the stutter-tail rule counts against
     /// the genotype each sample's reads favour: putting the old sentence back reproduces `10ac8802b6d82f5606bfa48a3932e109`.
-    const FITTED_PARAMETERS_MD5: &str = "f4282c42a1b42d9f018ed23313e0310e";
+    /// **Re-recorded 2026-11-03** when the repeat-tract fit began fitting a stutter multiplier per
+    /// read group (`str_library_stutter.md`): this fixture's read groups are fitted apart, and
+    /// one class's slip rate moves from 0.0041936 to 0.0041942 and the allele-length curve's shares in their 11th digit; nothing else moves. Fitting with the multipliers off reproduces the
+    /// old checksum, `f4282c42a1b42d9f018ed23313e0310e`, exactly. Recorded in the Linux container (arm64).
+    const FITTED_PARAMETERS_MD5: &str = "ea978f24444117cc4aa0b8592079f718";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -452,7 +456,10 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `443a89c2b2066d269a43107f4e253a16`, exactly. Recorded in the Linux container (arm64).
-    const CALLS_MD5: &str = "50c08ae0a51e01882b70041979b99f83";
+    /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
+    /// read the multipliers yet. It was `50c08ae0a51e01882b70041979b99f83`. Recorded in the Linux container (arm64).
+    const CALLS_MD5: &str = "a5d975a05904fa2ce6dc868a04262806";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -576,7 +583,11 @@ mod tests {
     /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
     /// Again the same day, when the section's note began saying the stutter-tail rule counts against
     /// the genotype each sample's reads favour: putting the old sentence back reproduces `41130496d7dc1120a2d2e4760af301f4`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "6a75cce6cf5adbc4558fc5a37f389b9d";
+    /// **Re-recorded 2026-11-03** when the repeat-tract fit began fitting a stutter multiplier per
+    /// read group (`str_library_stutter.md`): this fixture's read groups are fitted apart, and
+    /// one class's slip rate moves from 0.0041936 to 0.0041942 and the allele-length curve's shares in their 11th digit; nothing else moves. Fitting with the multipliers off reproduces the
+    /// old checksum, `6a75cce6cf5adbc4558fc5a37f389b9d`, exactly. Recorded in the Linux container (arm64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "5e4c1b74d5ef345a12de513258d55652";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -725,7 +736,10 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `35933d51ad28e7a7f30ac8272e18c6d5`, exactly. Recorded in the Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "62b2a7d1fa6a7c47667a7b816e44a864";
+    /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
+    /// read the multipliers yet. It was `62b2a7d1fa6a7c47667a7b816e44a864`. Recorded in the Linux container (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "73881956d9d2bf64a8256b617d07de85";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -862,7 +876,11 @@ mod tests {
     /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
     /// Again the same day, when the section's note began saying the stutter-tail rule counts against
     /// the genotype each sample's reads favour: putting the old sentence back reproduces `5045368821e56ca04c011245fead47f7`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "64ed7e146fe238eebf7295aa10cd3666";
+    /// **Re-recorded 2026-11-03** when the repeat-tract fit began fitting a stutter multiplier per
+    /// read group (`str_library_stutter.md`): this fixture's read groups are fitted apart, and
+    /// one class's slip rate moves from 0.00032378388 to 0.00032378431 and the allele-length curve's shares in their 14th digit; nothing else moves. Fitting with the multipliers off reproduces the
+    /// old checksum, `64ed7e146fe238eebf7295aa10cd3666`, exactly. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "f34a4d2c703f158a27bc3640c7a6aeb4";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1027,7 +1045,10 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `c21340eb1a9d52d3b5f540a95e45969c`, exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "3bfeadc38c78f7aa12e1f027f43a96a6";
+    /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
+    /// read the multipliers yet. It was `3bfeadc38c78f7aa12e1f027f43a96a6`. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "e6fbf1ff12b25f63cc5e7192dda22efc";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

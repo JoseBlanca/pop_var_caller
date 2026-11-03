@@ -30,6 +30,9 @@ use super::expected_counts::{
     CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs, ScoredDistinctRows,
     concentration_stopped_inside_its_search, expected_counts_by_distinct_rows,
 };
+use super::read_group_stutter::{
+    ClassEvidence, fit_multipliers_of_a_typical_one, log_multiplier_error,
+};
 use super::tract_exclusion::{
     self, StratumTractsLeftOut, StutterTailOutcome, StutterTailRule, TractExclusion, TractsLeftOut,
 };
@@ -115,6 +118,17 @@ pub struct PenalisedFitConfig {
     /// **Where the stutter prior sits**: production's is [`STUTTER_PRIOR_CENTRE`], the stutter
     /// calling uses for a class with no reads.
     pub stutter_prior_centre: Slippage,
+    /// **Stutter per read group** (spec `str_library_stutter.md` §3): the pull toward a multiplier of
+    /// one, in pseudo-reads, with which each read group's multiplier for the motif length is fitted
+    /// alongside the curves, every round. Production's is
+    /// [`PULL_TOWARD_ONE_SLIPPED_READS`](super::read_group_stutter::PULL_TOWARD_ONE_SLIPPED_READS).
+    /// **`None` scores every read group at the class's rate**, as the fit did before 2026-11-02. A
+    /// cohort of one read group is always scored so: there is nothing to tell its multiplier from.
+    pub read_group_multiplier_pull: Option<f64>,
+    /// **A class with fewer loci with reads than this takes its stutter from the curves and does
+    /// not shape them** (spec §2.11). Production's is [`LOCI_TO_SHAPE_THE_STUTTER_CURVES`]; zero
+    /// lets every class shape them, as the fit did before 2026-11-02.
+    pub loci_to_shape_the_stutter_curves: usize,
     /// **How many times the between-locus share is read off pairs of samples at a locus**, each time
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
     /// copies, which says almost nothing in an inbred cohort.
@@ -188,6 +202,10 @@ impl PenalisedFitConfig {
             allele_prior_tracts: ALLELE_PRIOR_LOCI,
             stutter_prior_reads: STUTTER_PRIOR_READS,
             stutter_prior_centre: STUTTER_PRIOR_CENTRE,
+            read_group_multiplier_pull: Some(
+                super::read_group_stutter::PULL_TOWARD_ONE_SLIPPED_READS,
+            ),
+            loci_to_shape_the_stutter_curves: LOCI_TO_SHAPE_THE_STUTTER_CURVES,
             pair_alternations: PAIR_ALTERNATIONS,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
@@ -220,6 +238,8 @@ impl PenalisedFitConfig {
             allele_prior_tracts: 0.0,
             stutter_prior_reads: 0.0,
             stutter_prior_centre: STUTTER_PRIOR_CENTRE,
+            read_group_multiplier_pull: None,
+            loci_to_shape_the_stutter_curves: 0,
             pair_alternations: 0,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
@@ -407,6 +427,14 @@ pub const LOCI_FOR_AN_ERROR: usize = 8;
 /// every cohort size measured, 1 to 2,000 samples, 89 to 90; in the lowest cell, a shorter
 /// share at 60 samples and 5 to 7 loci, 82 (measured before plan step D7). Soft.
 pub const LOCI_FOR_A_DIRECTION_ERROR: usize = 3;
+/// **A class with fewer loci with reads than this takes its three stutter numbers from the curves
+/// drawn through the other classes of its motif length**, and its reads do not shape those curves
+/// (spec §2.11; owner 2026-11-02). The line where the direction numbers' errors start. On tomato2,
+/// two tetranucleotide classes of one locus each, at the end of a straight slip-rate curve,
+/// explained their reads as slips and pulled the curve from 0.0039–0.0076 at 6 to 9 repeats up to
+/// 0.0025–0.013, and themselves to 0.78 and 0.86. A motif length with no class this thick keeps
+/// every class's own reads in its curves.
+pub const LOCI_TO_SHAPE_THE_STUTTER_CURVES: usize = LOCI_FOR_A_DIRECTION_ERROR;
 
 /// **How a curve's penalty strength is set.**
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -602,6 +630,35 @@ pub struct PenalisedPeriodFit {
     /// from could not be inverted; `None` when nothing was left undetermined that way, or when no
     /// errors were asked for. The classes' errors are already absent where this says so.
     pub undetermined_errors: Option<UndeterminedErrors>,
+    /// **Each read group's stutter multiplier for this motif length** (spec
+    /// `str_library_stutter.md` §3), indexed as the evidence's read groups; `None` when every read
+    /// group was scored at the class's rate: a cohort of one read group, or a fit with
+    /// [`PenalisedFitConfig::read_group_multiplier_pull`] `None`.
+    pub read_group_multipliers: Option<FittedMultipliers>,
+}
+
+/// **What the repeat-tract fit of a cohort returns** ([`fit_repeat_tracts`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepeatTractFit {
+    /// One a class handed in, in the same order.
+    pub outcomes: Vec<StratumOutcome>,
+    /// The tracts the two rules left out, and what they were set to.
+    pub tracts_left_out: TractsLeftOut,
+    /// **Each motif length's read-group stutter multipliers**, in increasing motif length, for the
+    /// motif lengths whose read groups were fitted apart; empty for a cohort of one read group.
+    pub read_group_multipliers: Vec<(u8, FittedMultipliers)>,
+}
+
+/// **A motif length's read-group multipliers as fitted**, one entry a read group of the evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FittedMultipliers {
+    /// The multiplier, scaled so that the read groups' weighted geometric mean is one.
+    pub multipliers: Vec<f64>,
+    /// The read group's expected slipped reads over the motif length's classes, without the pull.
+    pub slipped_reads: Vec<f64>,
+    /// The multiplier's standard error on the log scale; `None` where it rests on the pull, or
+    /// where the fit computed no errors.
+    pub log_errors: Vec<Option<f64>>,
 }
 
 /// **Standard errors a motif length's fit left undetermined because the curvature they come from
@@ -744,6 +801,7 @@ fn fit_one_period_leaving_out_the_stutter_tail(
                     period.slippage[point],
                     fit.allele_span,
                     rule,
+                    period.multipliers.as_deref(),
                 );
                 (!tracts.is_empty()).then_some((class, tracts))
             })
@@ -791,6 +849,7 @@ fn no_period_fit(classes: &[&StratumEvidence]) -> PenalisedPeriodFit {
         class_rounds_counted: 0,
         error_seconds: 0.0,
         undetermined_errors: None,
+        read_group_multipliers: None,
     }
 }
 
@@ -807,6 +866,9 @@ fn finished_period(
     } else {
         (vec![None; period.points()], None)
     };
+    if fit.standard_errors {
+        period.multiplier_errors = period.multiplier_errors(classes, homozygote_excess, fit);
+    }
     period.error_seconds = started.elapsed().as_secs_f64();
     period.into_fit(classes, errors, undetermined_errors)
 }
@@ -942,7 +1004,7 @@ pub fn fit_repeat_tracts(
     homozygote_excess: &[f64],
     config: &PenalisedFitConfig,
     exclusion: &TractExclusion,
-) -> (Vec<StratumOutcome>, TractsLeftOut) {
+) -> RepeatTractFit {
     if strata.is_empty() {
         return fit_repeat_tracts_logging(
             strata,
@@ -1001,7 +1063,7 @@ pub fn fit_repeat_tracts_keeping_every_tract(
         config,
         &TractExclusion::none(),
     )
-    .0
+    .outcomes
 }
 
 /// [`fit_repeat_tracts`], each line of its run's log handed to `log` as soon as it is known: a
@@ -1015,7 +1077,7 @@ fn fit_repeat_tracts_logging(
     exclusion: &TractExclusion,
     log: &mut dyn FnMut(run_log::Line),
     round_ended: &dyn Fn(u8, usize, f64),
-) -> (Vec<StratumOutcome>, TractsLeftOut) {
+) -> RepeatTractFit {
     let mut left_out = TractsLeftOut {
         exclusion: *exclusion,
         typical_depth: None,
@@ -1024,7 +1086,11 @@ fn fit_repeat_tracts_logging(
     };
     if strata.is_empty() {
         log(run_log::Line::Detail(run_log::no_classes_line()));
-        return (Vec::new(), left_out);
+        return RepeatTractFit {
+            outcomes: Vec::new(),
+            tracts_left_out: left_out,
+            read_group_multipliers: Vec::new(),
+        };
     }
     for evidence in strata.iter() {
         assert_eq!(
@@ -1051,6 +1117,7 @@ fn fit_repeat_tracts_logging(
             .push(index);
     }
     let mut outcomes: Vec<Option<StratumOutcome>> = vec![None; strata.len()];
+    let mut read_group_multipliers = Vec::new();
     for indices in classes_of_each_period.values() {
         let period = strata[indices[0]].stratum.period;
         let round_ended = |round, change| round_ended(period, round, change);
@@ -1082,6 +1149,17 @@ fn fit_repeat_tracts_logging(
                 log(run_log::Line::Warning(line));
             }
         }
+        if let (Some(multipliers), Some(pull)) = (
+            &fit.read_group_multipliers,
+            config.read_group_multiplier_pull,
+        ) {
+            log(run_log::Line::Detail(run_log::multipliers_line(
+                period,
+                multipliers,
+                pull,
+            )));
+            read_group_multipliers.push((period, multipliers.clone()));
+        }
         let (period_outcomes, lines) = outcomes_and_lines_of_a_motif_length(&classes, fit, config);
         for line in lines {
             log(line);
@@ -1098,7 +1176,11 @@ fn fit_repeat_tracts_logging(
         log(run_log::Line::Detail(line));
     }
     left_out.by_stratum = strata.iter().map(StratumTractsLeftOut::of).collect();
-    (outcomes, left_out)
+    RepeatTractFit {
+        outcomes,
+        tracts_left_out: left_out,
+        read_group_multipliers,
+    }
 }
 
 /// **One motif length's fit as each class's [`StratumOutcome`] and the run log's lines for it**:
@@ -1386,6 +1468,21 @@ struct Period {
     error_seconds: f64,
     /// Whether F was read off pairs of samples, so is not a number of the counting objective.
     spread_from_pairs: bool,
+    /// **Each read group's multiplier**, indexed as the evidence's read groups, when the fit scores
+    /// read groups apart: `None` for a cohort of one read group, or with no pull configured.
+    multipliers: Option<Vec<f64>>,
+    /// How far, in natural-log units, the multiplier that moved most moved in the last round.
+    multiplier_change: f64,
+    /// Each multiplier's standard error on the log scale, once computed.
+    multiplier_errors: Vec<Option<f64>>,
+    /// Per grid point, whether the class there takes its stutter numbers from the curves without
+    /// shaping them: fewer loci with reads than [`LOCI_TO_SHAPE_THE_STUTTER_CURVES`], in a motif
+    /// length where some class has that many.
+    stutter_from_the_curves: Vec<bool>,
+    /// Per grid point, for a class whose stutter comes from the curves and that lies beyond the
+    /// outermost class shaping them, that class's point: its stutter is held there, not read off
+    /// the curves' straight continuation (spec §2.11).
+    stutter_held_at: Vec<Option<usize>>,
 }
 
 impl Period {
@@ -1409,7 +1506,45 @@ impl Period {
             );
         }
         let alleles = allele_classes_in(fit.allele_span);
+        // One list of read groups a run, shared by every class.
+        let read_groups = classes[with_reads[0]].read_groups.len();
+        let multipliers = fit
+            .read_group_multiplier_pull
+            .filter(|_| read_groups >= 2)
+            .map(|_| vec![1.0; read_groups]);
+        let thin = |index: usize| {
+            classes[index].tracts_with_reads() < fit.loci_to_shape_the_stutter_curves
+        };
+        let some_class_is_thick = with_reads.iter().any(|&index| !thin(index));
+        let stutter_from_the_curves: Vec<bool> = class_at_point
+            .iter()
+            .map(|class| some_class_is_thick && class.is_some_and(thin))
+            .collect();
+        // The outermost points of classes shaping the curves; beyond them a curve continues as a
+        // straight line on the logit scale, without bound.
+        let shaping: Vec<usize> = (0..points)
+            .filter(|&point| class_at_point[point].is_some() && !stutter_from_the_curves[point])
+            .collect();
+        let stutter_held_at = (0..points)
+            .map(|point| {
+                let (first, last) = (*shaping.first()?, *shaping.last()?);
+                if !stutter_from_the_curves[point] {
+                    None
+                } else if point < first {
+                    Some(first)
+                } else if point > last {
+                    Some(last)
+                } else {
+                    None
+                }
+            })
+            .collect();
         Some(Self {
+            multipliers,
+            multiplier_change: 0.0,
+            multiplier_errors: Vec::new(),
+            stutter_from_the_curves,
+            stutter_held_at,
             between_locus_share_measurable: with_reads.iter().any(|&index| {
                 classes[index]
                     .tracts
@@ -1449,6 +1584,141 @@ impl Period {
 
     fn points(&self) -> usize {
         self.class_at_point.len()
+    }
+
+    /// **A class's slope with its three stutter entries zeroed when its stutter comes from the
+    /// curves**: those numbers are not in its part of the objective (spec §2.11), only in the
+    /// curves' penalties.
+    fn without_a_thin_class_stutter(&self, point: usize, mut slope: Vec<f64>) -> Vec<f64> {
+        if self.stutter_from_the_curves[point] {
+            slope[..3].fill(0.0);
+        }
+        slope
+    }
+
+    /// **A class's table of distinct rows as this fit scores them**: pooled when every read group
+    /// is at the class's rate, keyed by read group at the round's multipliers when they are fitted.
+    fn table_of(&self, evidence: &StratumEvidence, homozygote_excess: &[f64]) -> DistinctRows {
+        match &self.multipliers {
+            None => DistinctRows::of(evidence, homozygote_excess),
+            Some(multipliers) => DistinctRows::keyed_at(evidence, homozygote_excess, multipliers),
+        }
+    }
+
+    /// **Each read group's evidence about its multiplier**: one entry a class with counts, its
+    /// rate as just fitted and the read group's expected reads there.
+    fn evidence_of_read_group(
+        &self,
+        counts: &[Option<ClassCounts>],
+        read_group: usize,
+    ) -> Vec<ClassEvidence> {
+        counts
+            .iter()
+            .enumerate()
+            // A class whose stutter comes from the curves says nothing about stutter (spec §2.11).
+            .filter(|(point, _)| !self.stutter_from_the_curves[*point])
+            .filter_map(|(point, counts)| {
+                let reads = *counts.as_ref()?.read_groups.get(read_group)?;
+                (reads.exact + reads.slipped > 0.0).then_some(ClassEvidence {
+                    class_rate: self.slippage[point].level,
+                    reads,
+                })
+            })
+            .collect()
+    }
+
+    /// **The multipliers' step of a round** (spec `str_library_stutter.md` §3.1, step 3): every
+    /// read group's multiplier with the curves just drawn held, from the round's expected counts,
+    /// under the constraint that their geometric mean, each weighted by its reads, is one
+    /// ([`fit_multipliers_of_a_typical_one`]). Returns how far, in natural-log units, the
+    /// multiplier that moved most moved.
+    fn update_multipliers(&mut self, counts: &[Option<ClassCounts>], pull: f64) -> f64 {
+        let Some(old) = self.multipliers.clone() else {
+            return 0.0;
+        };
+        let evidence: Vec<Vec<ClassEvidence>> = (0..old.len())
+            .map(|read_group| self.evidence_of_read_group(counts, read_group))
+            .collect();
+        let weights: Vec<f64> = evidence
+            .iter()
+            .map(|classes| {
+                classes
+                    .iter()
+                    .map(|class| class.reads.exact + class.reads.slipped)
+                    .sum()
+            })
+            .collect();
+        let fitted = fit_multipliers_of_a_typical_one(&evidence, &weights, pull, &old);
+        let moved = fitted
+            .iter()
+            .zip(&old)
+            .map(|(new, old)| (float::ln(*new) - float::ln(*old)).abs())
+            .fold(0.0, f64::max);
+        self.multipliers = Some(fitted);
+        moved
+    }
+
+    /// **Each multiplier's standard error** (spec `str_library_stutter.md` §3.6), at the numbers
+    /// the fit reached: the read group's evidence over the motif length's classes, and its
+    /// contribution to the slope tract by tract, from one more expectation pass over each tract.
+    /// Empty when the read groups are scored at the class's rate.
+    fn multiplier_errors(
+        &self,
+        classes: &[&StratumEvidence],
+        homozygote_excess: &[f64],
+        fit: &PenalisedFitConfig,
+    ) -> Vec<Option<f64>> {
+        let (Some(multipliers), Some(pull)) = (&self.multipliers, fit.read_group_multiplier_pull)
+        else {
+            return Vec::new();
+        };
+        let read_groups = multipliers.len();
+        // Per read group, one entry a tract with its reads: the tract's class rate and the read
+        // group's reads there.
+        let mut by_tract: Vec<Vec<Vec<ClassEvidence>>> = vec![Vec::new(); read_groups];
+        for (point, class) in self.class_at_point.iter().enumerate() {
+            let Some(index) = class else {
+                continue;
+            };
+            let evidence = classes[*index];
+            let per_tract: Vec<ClassCounts> = evidence
+                .tracts
+                .par_iter()
+                .filter(|tract| !tract.samples.is_empty())
+                .map(|tract| {
+                    let one = one_tract_of(evidence, tract);
+                    expected_counts_by_distinct_rows(
+                        &one,
+                        &self.table_of(&one, homozygote_excess),
+                        self.slippage[point],
+                        &self.shares[point],
+                        self.concentration[point],
+                        fit.allele_span,
+                    )
+                })
+                .collect();
+            for counts in &per_tract {
+                for (read_group, reads) in counts.read_groups.iter().enumerate() {
+                    if reads.exact + reads.slipped > 0.0 {
+                        by_tract[read_group].push(vec![ClassEvidence {
+                            class_rate: self.slippage[point].level,
+                            reads: *reads,
+                        }]);
+                    }
+                }
+            }
+        }
+        (0..read_groups)
+            .map(|read_group| {
+                let evidence = self.evidence_of_read_group(&self.last_counts, read_group);
+                log_multiplier_error(
+                    multipliers[read_group],
+                    &evidence,
+                    &by_tract[read_group],
+                    pull,
+                )
+            })
+            .collect()
     }
 
     /// **Rounds of penalised counting** until no number moves by more than the tolerance or the
@@ -1491,6 +1761,7 @@ impl Period {
                 fit.reuse_settled_counts
                     && rounds_here > 1
                     && self.class_change[point] < fit.tolerance
+                    && self.multiplier_change < fit.tolerance
                     && self.last_counts[point].is_some()
             };
             self.class_rounds_counted += self
@@ -1512,7 +1783,7 @@ impl Period {
                     let Some(index) = *class else {
                         return (None, None);
                     };
-                    let distinct = DistinctRows::of(classes[index], homozygote_excess);
+                    let distinct = self.table_of(classes[index], homozygote_excess);
                     let counts = expected_counts_by_distinct_rows(
                         classes[index],
                         &distinct,
@@ -1549,6 +1820,11 @@ impl Period {
                 });
                 let (mut ys, mut ns) = (vec![0.0; points], vec![0.0; points]);
                 for (point, count) in counts.iter().enumerate() {
+                    // A thin class takes a stutter curve's value and does not shape it (spec
+                    // §2.11); F's curve still reads it.
+                    if prior_centre.is_some() && self.stutter_from_the_curves[point] {
+                        continue;
+                    }
                     if let Some(count) = count {
                         let n = trials(count).max(0.0);
                         ns[point] = n + prior_trials;
@@ -1561,12 +1837,21 @@ impl Period {
                 }
             };
             let centre = fit.stutter_prior_centre;
-            let level = self.level_curve.refit(
-                &binomial(&|c| c.slipped, &|c| c.slipped + c.exact, Some(centre.level)),
-                fit,
-                search,
-            );
-            let shorter = self.shorter_curve.refit(
+            // With read groups apart, each slips at the class's rate times its multiplier, so the
+            // slip rate's curve is drawn through each read group's reads (spec
+            // `str_library_stutter.md` §3.3); the stutter prior is read at the rate itself.
+            let level_data = match &self.multipliers {
+                None => binomial(&|c| c.slipped, &|c| c.slipped + c.exact, Some(centre.level)),
+                Some(multipliers) => multiplied_binomial(
+                    &counts,
+                    &self.stutter_from_the_curves,
+                    multipliers,
+                    fit.stutter_prior_reads,
+                    centre.level,
+                ),
+            };
+            let mut level = self.level_curve.refit(&level_data, fit, search);
+            let mut shorter = self.shorter_curve.refit(
                 &binomial(
                     &|c| c.shorter,
                     &|c| c.shorter + c.longer,
@@ -1577,7 +1862,7 @@ impl Period {
             );
             // A slip of k steps has probability (1 − f) f^(k − 1): k − 1 "one step further" against
             // one "stopped".
-            let fall_off = self.fall_off_curve.refit(
+            let mut fall_off = self.fall_off_curve.refit(
                 &binomial(
                     &|c| c.steps - c.stepped,
                     &|c| c.steps,
@@ -1586,6 +1871,20 @@ impl Period {
                 fit,
                 search,
             );
+            // A class beyond the outermost class shaping the stutter curves holds that class's
+            // stutter (spec §2.11).
+            for (point, source) in self.stutter_held_at.clone().into_iter().enumerate() {
+                if let Some(source) = source {
+                    for (values, state) in [
+                        (&mut level, &mut self.level_curve),
+                        (&mut shorter, &mut self.shorter_curve),
+                        (&mut fall_off, &mut self.fall_off_curve),
+                    ] {
+                        values[point] = values[source];
+                        state.values[point] = values[source];
+                    }
+                }
+            }
             let between = if spread_held {
                 None
             } else {
@@ -1667,6 +1966,11 @@ impl Period {
                 self.slippage[point] = new_slippage;
                 self.shares[point] = new_shares;
                 self.concentration[point] = new_concentration;
+            }
+            if let (Some(pull), Some(_)) = (fit.read_group_multiplier_pull, &self.multipliers) {
+                let moved = self.update_multipliers(&counts, pull);
+                self.multiplier_change = moved;
+                change = change.max(moved);
             }
             self.last_counts = counts;
             self.last_change = change;
@@ -1791,7 +2095,10 @@ impl Period {
         let slope_of = |counts: &ClassCounts, theta: &[f64]| -> Vec<f64> {
             let mut slope = Vec::with_capacity(width);
             let level = logistic(theta[0]);
-            slope.push(counts.slipped - level * (counts.slipped + counts.exact));
+            slope.push(match &self.multipliers {
+                None => counts.slipped - level * (counts.slipped + counts.exact),
+                Some(multipliers) => multiplied_level_slope(counts, multipliers, theta[0]),
+            });
             let shorter = logistic(theta[1]);
             slope.push(counts.shorter - shorter * (counts.shorter + counts.longer));
             let fall_off = logistic(theta[2]);
@@ -1823,7 +2130,7 @@ impl Period {
                     concentration,
                     allele_span,
                 );
-                slope_of(&counts, theta)
+                self.without_a_thin_class_stutter(point, slope_of(&counts, theta))
             };
         let step = 1e-3;
         // Each class's curvature and spread blocks, **one class at a time** as in `count`, so one
@@ -1836,7 +2143,7 @@ impl Period {
             .map(|(point, class)| {
                 let evidence = classes[(*class)?];
                 let theta = theta_at(point);
-                let distinct = DistinctRows::of(evidence, homozygote_excess);
+                let distinct = self.table_of(evidence, homozygote_excess);
                 let mut curvature = vec![0.0; width * width];
                 let mut add_column = |column: usize, above: &[f64], below: &[f64]| {
                     for row in 0..width {
@@ -1867,7 +2174,10 @@ impl Period {
                     let [above, below] = steps_in(column).map(|theta| {
                         let (slippage, shares, concentration) = numbers_of(point, &theta);
                         debug_assert_eq!(slippage, central_stutter);
-                        slope_of(&central.expected_counts(&shares, concentration), &theta)
+                        self.without_a_thin_class_stutter(
+                            point,
+                            slope_of(&central.expected_counts(&shares, concentration), &theta),
+                        )
                     });
                     add_column(column, &above, &below);
                 }
@@ -1899,12 +2209,7 @@ impl Period {
                             bases_compared: 0,
                             mismatching_bases: 0,
                         };
-                        class_slope(
-                            &one,
-                            &DistinctRows::of(&one, homozygote_excess),
-                            point,
-                            &theta,
-                        )
+                        class_slope(&one, &self.table_of(&one, homozygote_excess), point, &theta)
                     })
                     .collect();
                 let mut spread = vec![0.0; width * width];
@@ -1959,9 +2264,10 @@ impl Period {
             add_curve(&self.between_curve, 3);
         }
         add_curve(&self.shares_curve, share_offset);
-        // The stutter prior's curvature on the logit of each class's three stutter numbers.
+        // The stutter prior's curvature on the logit of each class's three stutter numbers, at the
+        // classes whose stutter the curves are drawn through.
         for (point, class) in self.class_at_point.iter().enumerate() {
-            if class.is_none() {
+            if class.is_none() || self.stutter_from_the_curves[point] {
                 continue;
             }
             let slippage = self.slippage[point];
@@ -2061,6 +2367,7 @@ impl Period {
                         &self.shares[point],
                         homozygote_excess,
                         allele_span,
+                        self.multipliers.as_deref(),
                     );
                     if pairs.is_empty() {
                         continue;
@@ -2197,6 +2504,7 @@ impl Period {
                     &self.shares[point],
                     homozygote_excess,
                     allele_span,
+                    self.multipliers.as_deref(),
                 );
                 if pairs.is_empty() {
                     return Vec::new();
@@ -2319,6 +2627,27 @@ impl Period {
             class_rounds_counted: self.class_rounds_counted,
             error_seconds: self.error_seconds,
             undetermined_errors,
+            read_group_multipliers: self.multipliers.as_ref().map(|multipliers| {
+                let slipped_reads = (0..multipliers.len())
+                    .map(|read_group| {
+                        self.last_counts
+                            .iter()
+                            .flatten()
+                            .filter_map(|counts| counts.read_groups.get(read_group))
+                            .map(|reads| reads.slipped)
+                            .sum()
+                    })
+                    .collect();
+                FittedMultipliers {
+                    multipliers: multipliers.clone(),
+                    slipped_reads,
+                    log_errors: if self.multiplier_errors.is_empty() {
+                        vec![None; multipliers.len()]
+                    } else {
+                        self.multiplier_errors.clone()
+                    },
+                }
+            }),
         }
     }
 }
@@ -2346,6 +2675,95 @@ fn softmax_with_reference(logits: &[f64], reference: usize) -> Vec<f64> {
 // One curve's penalised fit
 // ---------------------------------------------------------------------
 
+/// **One class's evidence as one tract of it**: the class's tract `tract` alone, with the class's
+/// read groups and none of its counts of tracts left out. What the standard errors score tract by
+/// tract.
+fn one_tract_of(evidence: &StratumEvidence, tract: &TractReads) -> StratumEvidence {
+    StratumEvidence {
+        stratum: evidence.stratum,
+        tracts: vec![tract.clone()],
+        read_span: evidence.read_span,
+        groups: evidence.groups,
+        read_groups: Arc::clone(&evidence.read_groups),
+        tracts_over_guard_threshold: 0,
+        reads_crossing_tracts_over_guard_threshold: 0,
+        tracts_too_deep: 0,
+        tracts_in_stutter_tail: 0,
+        reads_reaching_not_crossing: 0,
+        guard_reads: 0,
+        bases_compared: 0,
+        mismatching_bases: 0,
+    }
+}
+
+/// **The slip rate's curve data with read groups apart** (spec `str_library_stutter.md` §3.3): at
+/// each repeat count with counts, each read group's slipped and exactly-read reads at its
+/// multiplier, and the stutter prior, `prior_reads` read at the rate itself with `centre` of it
+/// slipped. A repeat count `from_the_curve` holds no data and takes the curve's value (spec
+/// `str_penalised_fit.md` §2.11).
+fn multiplied_binomial(
+    counts: &[Option<ClassCounts>],
+    from_the_curve: &[bool],
+    multipliers: &[f64],
+    prior_reads: f64,
+    centre: f64,
+) -> CurveData {
+    let points = counts.len();
+    let (mut read_groups, mut successes, mut trials) = (
+        vec![Vec::new(); points],
+        vec![0.0; points],
+        vec![0.0; points],
+    );
+    for (point, count) in counts.iter().enumerate() {
+        let Some(count) = count else {
+            continue;
+        };
+        if from_the_curve[point] {
+            continue;
+        }
+        successes[point] = prior_reads * centre;
+        trials[point] = prior_reads;
+        read_groups[point] = count
+            .read_groups
+            .iter()
+            .zip(multipliers)
+            .filter(|(reads, _)| reads.exact + reads.slipped > 0.0)
+            .map(|(reads, multiplier)| MultipliedReads {
+                multiplier: *multiplier,
+                slipped: reads.slipped.max(0.0),
+                exact: reads.exact.max(0.0),
+            })
+            .collect();
+    }
+    CurveData::MultipliedBinomial {
+        read_groups,
+        successes,
+        trials,
+    }
+}
+
+/// **The counting objective's slope in the slip rate's logit `eta`, read groups apart**: each read
+/// group's slope at the class's rate times its multiplier, summed ([`multiplied_at_logit`]). At
+/// every multiplier one it is the binomial's, `slipped − p · (slipped + exact)`.
+fn multiplied_level_slope(counts: &ClassCounts, multipliers: &[f64], eta: f64) -> f64 {
+    counts
+        .read_groups
+        .iter()
+        .zip(multipliers)
+        .map(|(reads, multiplier)| {
+            multiplied_at_logit(
+                MultipliedReads {
+                    multiplier: *multiplier,
+                    slipped: reads.slipped,
+                    exact: reads.exact,
+                },
+                eta,
+            )
+            .1
+        })
+        .sum()
+}
+
 /// **The counts one curve is fitted to**, per grid point (a repeat count). A point whose counts are
 /// all zero carries no evidence and takes the curve's value.
 #[derive(Debug, Clone, PartialEq)]
@@ -2367,9 +2785,6 @@ pub(crate) enum CurveData {
     /// and exactly-read reads, a read group's reads slipping at the point's rate times its
     /// multiplier; and `successes` out of `trials` read at the rate itself, which carry the stutter
     /// prior. The unbounded number is the logit of the rate.
-    /// **Built and tested, drawn by no run yet**: the fit draws its slip-rate curve through it in the
-    /// build step that fits the multipliers (`str_library_stutter.md` §10, step 4).
-    #[cfg_attr(not(test), allow(dead_code))]
     MultipliedBinomial {
         read_groups: Vec<Vec<MultipliedReads>>,
         successes: Vec<f64>,
@@ -3600,6 +4015,8 @@ mod tests {
                 shorter_share: 0.5,
                 fall_off: 0.05,
             },
+            read_group_multiplier_pull: Some(20.0),
+            loci_to_shape_the_stutter_curves: 3,
             pair_alternations: 10,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
@@ -4651,7 +5068,7 @@ mod tests {
             (value, gradient[0], information[0])
         };
         for rate in [0.002_f64, 0.03, 0.3] {
-            let eta = (rate / (1.0 - rate)).ln();
+            let eta = float::ln(rate / (1.0 - rate));
             let step = 1e-5;
             let (_, slope, information) = at(eta);
             let ((up, up_slope, _), (down, down_slope, _)) = (at(eta + step), at(eta - step));
@@ -5393,6 +5810,294 @@ mod tests {
     /// share or fall-off ends beyond a logit of ±9 (within one part in 8,000 of 0 or 1), which
     /// the test checks so that it is seen to catch the drift. (Neither truth drives a slip rate
     /// down to ±40 at weight 0 on these draws; the oracle did, through a stiff straight line.)
+    /// A drawn dinucleotide cohort, repeat counts 8 to 16, 150 loci a class, `samples` samples at
+    /// `depth` reads, sample `s` in read group `s mod multipliers.len()`.
+    fn drawn_cohort_with_read_groups(
+        samples: usize,
+        depth: f64,
+        multipliers: &[f64],
+    ) -> crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::DrawnPeriod {
+        use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
+            CohortModel, LociPerClass, StutterRegime, draw_period,
+        };
+        let mut model = CohortModel::tomato_like(2, StutterRegime::Pcr);
+        model.repeat_counts = Some((8..=16).collect());
+        model.loci = LociPerClass::Each(150);
+        model.samples = samples;
+        model.depth = depth;
+        model.read_group_multipliers = multipliers.to_vec();
+        model.seed = 11;
+        draw_period(&model, RECORDED_OFFSET_RANGE)
+    }
+
+    /// **A cohort drawn with read groups at known multipliers is fitted to them** (spec
+    /// `str_library_stutter.md` §8.1), end to end: ten read groups of three samples each, from 0.5
+    /// to 2 times typical, at 10 reads a sample. Truth is scaled as the fit scales, to a weighted
+    /// geometric mean of one over the read groups' reads. **The five most stuttering read groups'
+    /// reads are left out of every other class**, so the mix of read groups changes from class to
+    /// class, as in a real cohort: a curve drawn through the pooled reads then puts those classes'
+    /// rates a third below the others', which rescaling cannot undo. Every fitted multiplier lies
+    /// within three of its errors of its truth and at least 8 of the 10 within two, as an honest
+    /// error gives (about 9.5 in 10); and every class rate, against the truth's at that scale, lies
+    /// within 5%. *The errors hold the class rates fixed, so they are somewhat narrow: on a cohort
+    /// of 300 loci a class and four samples a read group, the ten misses' squares summed to 15.3,
+    /// against 10 for honest errors (2026-11-02).*
+    #[test]
+    fn a_drawn_cohort_is_fitted_to_its_read_groups_multipliers() {
+        let truth = [0.5, 0.6, 0.7, 0.85, 1.0, 1.0, 1.2, 1.4, 1.7, 2.0];
+        let mut drawn = drawn_cohort_with_read_groups(30, 10.0, &truth);
+        for class in drawn.strata.iter_mut().skip(1).step_by(2) {
+            for tract in &mut class.tracts {
+                for sample in &mut tract.samples {
+                    sample.by_read_group.retain(|(index, _)| index.get() < 5);
+                }
+                tract
+                    .samples
+                    .retain(|sample| !sample.by_read_group.is_empty());
+            }
+        }
+        let fitted = fit_period_by_penalised_counting(
+            &drawn.strata,
+            &drawn.homozygote_excess,
+            &PenalisedFitConfig::production(),
+        );
+        let multipliers = fitted
+            .read_group_multipliers
+            .as_ref()
+            .expect("ten read groups are fitted apart");
+        // The fit's own weights: each read group's reads over the classes.
+        let reads: Vec<f64> = (0..truth.len())
+            .map(|read_group| {
+                drawn
+                    .strata
+                    .iter()
+                    .flat_map(|class| &class.tracts)
+                    .flat_map(|tract| &tract.samples)
+                    .flat_map(|sample| &sample.by_read_group)
+                    .filter(|(index, _)| index.get() == read_group)
+                    .flat_map(|(_, counts)| counts)
+                    .map(|count| f64::from(*count))
+                    .sum()
+            })
+            .collect();
+        let mut scaled_truth = truth.to_vec();
+        let factor = super::super::read_group_stutter::scale_to_a_typical_read_group(
+            &mut scaled_truth,
+            &reads,
+        );
+        let mut within_two = 0;
+        for (read_group, ((got, want), error)) in multipliers
+            .multipliers
+            .iter()
+            .zip(&scaled_truth)
+            .zip(&multipliers.log_errors)
+            .enumerate()
+        {
+            let error = error.expect("every read group has slipped reads well past the pull");
+            let misses_by = (float::ln(*got) - float::ln(*want)).abs() / error;
+            assert!(
+                misses_by <= 3.0,
+                "read group {read_group}: {got} against {want}, error {error} on the log scale"
+            );
+            within_two += usize::from(misses_by <= 2.0);
+        }
+        assert!(within_two >= 8, "{within_two} of 10 within two errors");
+        for (class, truth) in fitted.classes.iter().zip(&drawn.truth) {
+            let class = class.as_ref().expect("every class has reads");
+            let ratio = class.slippage.level / (truth.slippage.level * factor);
+            assert!(
+                (ratio - 1.0).abs() < 0.05,
+                "{} repeats: class rate {ratio} times the truth at a typical read group",
+                truth.stratum.reference_repeats
+            );
+        }
+    }
+
+    /// **Two classes of one locus each cannot bend their motif length's stutter curves** (spec
+    /// §2.11), in the corner where tomato2's did: a dinucleotide motif with little stutter and
+    /// few reads, so that the slip-rate curve is stiff — five classes at 6 to 10 repeats of 10 loci
+    /// each, 59 samples at 3 reads — and at 19 and 20 repeats one tract each whose samples read it
+    /// at every length from three repeats short to three long, as a duplication would. The five
+    /// classes' slip rates equal, to within 10%, those of a fit without the two; and the two take
+    /// the curve's rates. *Measured 2026-11-02: at 6 repeats 7% off with the rule, the two still
+    /// feeding the allele-length and F curves; 56% off without it.*
+    #[test]
+    fn two_one_locus_classes_cannot_bend_the_stutter_curves() {
+        use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
+            CohortModel, LociPerClass, StutterRegime, draw_period,
+        };
+        let mut model = CohortModel::tomato_like(2, StutterRegime::PcrFree);
+        model.loci = LociPerClass::Listed(vec![
+            (6, 10),
+            (7, 10),
+            (8, 10),
+            (9, 10),
+            (10, 10),
+            (19, 1),
+            (20, 1),
+        ]);
+        model.samples = 59;
+        model.depth = 3.0;
+        model.seed = 5;
+        let mut drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
+        let buckets = (2 * RECORDED_OFFSET_RANGE + 1) as usize;
+        for class in drawn.strata.iter_mut().skip(5) {
+            let mut spread = vec![0_u32; buckets];
+            for offset in -3..=3 {
+                spread[(offset + RECORDED_OFFSET_RANGE) as usize] = 2;
+            }
+            class.tracts = vec![TractReads {
+                samples: (0..59)
+                    .map(|sample| SampleTractReads {
+                        sample,
+                        by_read_group: vec![(ReadGroupIndex(0), spread.clone())],
+                    })
+                    .collect(),
+            }];
+        }
+        let config = PenalisedFitConfig {
+            standard_errors: false,
+            ..PenalisedFitConfig::production()
+        };
+        let with_them =
+            fit_period_by_penalised_counting(&drawn.strata, &drawn.homozygote_excess, &config);
+        let without =
+            fit_period_by_penalised_counting(&drawn.strata[..5], &drawn.homozygote_excess, &config);
+        for (with, alone) in with_them.classes.iter().zip(&without.classes) {
+            let (with, alone) = (with.as_ref().unwrap(), alone.as_ref().unwrap());
+            let ratio = with.slippage.level / alone.slippage.level;
+            assert!(
+                (ratio - 1.0).abs() < 0.10,
+                "{} repeats: {} with the thin classes, {} without",
+                with.stratum.reference_repeats,
+                with.slippage.level,
+                alone.slippage.level
+            );
+        }
+        let curve = &with_them.curves.as_ref().unwrap().level;
+        for class in with_them.classes[5..].iter().flatten() {
+            let point = (class.stratum.reference_repeats - curve.first_repeats) as usize;
+            assert_eq!(class.slippage.level, curve.values[point]);
+        }
+    }
+
+    /// **Measurement, not a check** (spec §2.11): cohorts drawn with tomato2's loci in each class,
+    /// 59 samples at 3 reads, fitted with and without the thin-class rule, each class's slip rate
+    /// against its truth, classes of fewer than 3 loci and the rest apart. Run with `--ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "a measurement that prints; minutes"]
+    fn measure_the_thin_class_rule_against_drawn_truth() {
+        use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
+            CohortModel, LociPerClass, StutterRegime, draw_period,
+        };
+        for period in [1_u8, 2] {
+            for seed in [1_u64, 2, 3] {
+                // Tomato2's loci in each class as this branch gathers them (2026-11-02), the thin
+                // classes at the long ends included.
+                #[rustfmt::skip]
+                let listed: Vec<(u64, usize)> = if period == 1 {
+                    vec![
+                        (8, 4885), (9, 4228), (10, 2115), (11, 865), (12, 446), (13, 274),
+                        (14, 156), (15, 91), (16, 61), (17, 35), (18, 22), (19, 29), (20, 22),
+                        (21, 15), (22, 5), (23, 1), (24, 3), (25, 2), (26, 2), (27, 1), (28, 1),
+                        (31, 1), (32, 2), (34, 1),
+                    ]
+                } else {
+                    vec![
+                        (6, 448), (7, 200), (8, 164), (9, 113), (10, 94), (11, 63), (12, 52),
+                        (13, 36), (14, 41), (15, 30), (16, 34), (17, 30), (18, 31), (19, 24),
+                        (20, 22), (21, 18), (22, 21), (23, 18), (24, 11), (25, 22), (26, 10),
+                        (27, 16), (28, 6), (29, 4), (30, 6), (31, 3), (32, 3), (33, 6), (34, 3),
+                        (35, 4), (36, 3), (37, 1), (38, 2), (40, 3), (41, 1), (42, 2), (43, 1),
+                        (44, 2), (46, 1), (48, 1), (49, 1),
+                    ]
+                };
+                let mut model = CohortModel::tomato_like(period, StutterRegime::Pcr);
+                model.loci = LociPerClass::Listed(listed);
+                model.samples = 59;
+                model.depth = 3.0;
+                model.seed = seed;
+                let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
+                for threshold in [0, LOCI_TO_SHAPE_THE_STUTTER_CURVES] {
+                    let fitted = fit_period_by_penalised_counting(
+                        &drawn.strata,
+                        &drawn.homozygote_excess,
+                        &PenalisedFitConfig {
+                            standard_errors: false,
+                            loci_to_shape_the_stutter_curves: threshold,
+                            ..PenalisedFitConfig::production()
+                        },
+                    );
+                    for thin in [true, false] {
+                        let mut logs: Vec<f64> = fitted
+                            .classes
+                            .iter()
+                            .zip(&drawn.truth)
+                            .zip(&drawn.strata)
+                            .filter(|(_, evidence)| {
+                                (evidence.tracts_with_reads() < 3) == thin
+                                    && evidence.tracts_with_reads() > 0
+                            })
+                            .filter_map(|((class, truth), _)| {
+                                Some(float::ln(
+                                    class.as_ref()?.slippage.level / truth.slippage.level,
+                                ))
+                            })
+                            .collect();
+                        if logs.is_empty() {
+                            continue;
+                        }
+                        logs.sort_by(f64::total_cmp);
+                        let median_abs = {
+                            let mut a: Vec<f64> = logs.iter().map(|x| x.abs()).collect();
+                            a.sort_by(f64::total_cmp);
+                            a[a.len() / 2]
+                        };
+                        let worst = logs
+                            .iter()
+                            .copied()
+                            .fold(0.0_f64, |w, x| if x.abs() > w.abs() { x } else { w });
+                        eprintln!(
+                            "MEASURE period {period} seed {seed} rule {threshold} {}: {} classes, median |ln fitted/true| {median_abs:.3}, median ln {:.3}, worst x{:.2}",
+                            if thin { "thin" } else { "thick" },
+                            logs.len(),
+                            logs[logs.len() / 2],
+                            float::exp(worst)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A cohort of one read group is fitted as before, to the bit**: with the multipliers asked
+    /// for, there is nothing to tell its multiplier from, so none is fitted and every class's
+    /// numbers equal the fit with them turned off.
+    #[test]
+    fn a_cohort_of_one_read_group_is_fitted_as_before() {
+        let drawn = drawn_cohort_with_read_groups(6, 5.0, &[1.0]);
+        assert_eq!(drawn.strata[0].read_groups.len(), 1);
+        let with = fit_period_by_penalised_counting(
+            &drawn.strata,
+            &drawn.homozygote_excess,
+            &PenalisedFitConfig::production(),
+        );
+        let without = fit_period_by_penalised_counting(
+            &drawn.strata,
+            &drawn.homozygote_excess,
+            &PenalisedFitConfig {
+                read_group_multiplier_pull: None,
+                ..PenalisedFitConfig::production()
+            },
+        );
+        assert!(with.read_group_multipliers.is_none());
+        assert_eq!(with.classes, without.classes);
+    }
+
     #[test]
     fn a_thin_tail_no_longer_drifts_to_zero() {
         use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;

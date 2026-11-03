@@ -205,6 +205,10 @@ pub(super) struct DistinctRows {
     keying: RowKeying,
     /// How many read-length buckets a row counts, `2 × read_span + 1`.
     buckets: usize,
+    /// **The multiplier each read group's reads are scored at**, indexed as
+    /// [`StratumEvidence::read_groups`]; `None` to score at the evidence's own. Read only by a
+    /// keyed table: a pooled one scores every read group at the class's stutter.
+    multipliers: Option<Vec<f64>>,
     /// Each distinct row once, in the order first met. **Pooled**, one count a bucket. **Keyed by
     /// read group**, one part for each of the sample's read groups in increasing order, each part
     /// the read group's index followed by its count in each bucket ([`Self::parts`]).
@@ -223,9 +227,6 @@ pub(super) enum RowKeying {
     /// one stutter.
     Pooled,
     /// Each read group of the sample apart, so that each can be scored at its own slip rate.
-    /// **Built and tested, read by no run yet**: the fit is wired to it in the build step that
-    /// fits the multipliers (`str_library_stutter.md` §10, step 4).
-    #[cfg_attr(not(test), allow(dead_code))]
     ByReadGroup,
 }
 
@@ -261,6 +262,24 @@ impl DistinctRows {
             .unwrap_or(64)
             .clamp(1, 64);
         Self::in_blocks_of(evidence, homozygote_excess, tracts_per_block, keying)
+    }
+
+    /// **A table keyed by read group whose rows are scored at `multipliers`**, one a read group of
+    /// `evidence`, rather than at the evidence's own: what the fit's rounds score at while they
+    /// move the multipliers.
+    pub(super) fn keyed_at(
+        evidence: &StratumEvidence,
+        homozygote_excess: &[f64],
+        multipliers: &[f64],
+    ) -> Self {
+        assert_eq!(
+            multipliers.len(),
+            evidence.read_groups.len(),
+            "one multiplier a read group"
+        );
+        let mut table = Self::keyed(evidence, homozygote_excess, RowKeying::ByReadGroup);
+        table.multipliers = Some(multipliers.to_vec());
+        table
     }
 
     /// **The parts of a distinct row**: each with the read group it came through, `None` for a
@@ -369,6 +388,7 @@ impl DistinctRows {
         Self {
             keying,
             buckets,
+            multipliers: None,
             reads,
             rows,
             tract_starts,
@@ -498,6 +518,7 @@ impl ReadModel {
         slippage: Slippage,
         allele_span: i32,
         keying: RowKeying,
+        multipliers: Option<&[f64]>,
     ) -> Self {
         let classes = allele_classes_in(allele_span);
         let genotypes = genotype_pairs(classes);
@@ -522,11 +543,21 @@ impl ReadModel {
                         .all(|read_group| read_group.slippage_group == 0),
                     "the repeat-tract fit scores one slippage group"
                 );
+                // Each read group's multiplier: the table's, or the evidence's own.
+                let of_read_group: Vec<f64> = multipliers.map_or_else(
+                    || {
+                        evidence
+                            .read_groups
+                            .iter()
+                            .map(|read_group| read_group.stutter_multiplier)
+                            .collect()
+                    },
+                    <[f64]>::to_vec,
+                );
                 // Each distinct multiplier once, by its bits, in increasing order.
-                let mut multipliers: Vec<u64> = evidence
-                    .read_groups
+                let mut multipliers: Vec<u64> = of_read_group
                     .iter()
-                    .map(|read_group| read_group.stutter_multiplier.to_bits())
+                    .map(|multiplier| multiplier.to_bits())
                     .collect();
                 multipliers
                     .sort_unstable_by(|a, b| f64::from_bits(*a).total_cmp(&f64::from_bits(*b)));
@@ -544,11 +575,10 @@ impl ReadModel {
                         ReadModelAtRate::of(scored, per_allele, &genotypes)
                     })
                     .collect();
-                let rate_of_read_group = evidence
-                    .read_groups
+                let rate_of_read_group = of_read_group
                     .iter()
-                    .map(|read_group| {
-                        let bits = read_group.stutter_multiplier.to_bits();
+                    .map(|multiplier| {
+                        let bits = multiplier.to_bits();
                         // PANIC-FREE: every read group's multiplier was put in the list above.
                         multipliers
                             .binary_search_by(|held| {
@@ -601,7 +631,19 @@ impl ReadModel {
     /// row scores to the bit as before read groups were told apart.
     fn score(&self, parts: &PartsAtRates<'_, '_>) -> ScoredRow {
         // Each genotype's log-likelihood, then its likelihood scaled by the largest, in place.
-        let mut scaled: Vec<f64> = (0..self.genotypes.len())
+        let mut scaled = self.log_likelihoods(parts);
+        let largest = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        for value in &mut scaled {
+            *value = float::exp(*value - largest);
+        }
+        ScoredRow { largest, scaled }
+    }
+
+    /// **Each genotype's log-likelihood of a row**, in `genotypes` order: the sum over the row's
+    /// parts of the part's reads read off its own rate's log chances, a row of one part taking that
+    /// part's sum as it is.
+    fn log_likelihoods(&self, parts: &PartsAtRates<'_, '_>) -> Vec<f64> {
+        (0..self.genotypes.len())
             .map(|genotype| {
                 let mut each = parts
                     .iter()
@@ -609,12 +651,7 @@ impl ReadModel {
                 let first = each.next().unwrap_or(0.0);
                 each.fold(first, |total, part| total + part)
             })
-            .collect();
-        let largest = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        for value in &mut scaled {
-            *value = float::exp(*value - largest);
-        }
-        ScoredRow { largest, scaled }
+            .collect()
     }
 
     /// **The counts of every sample that holds a row**, from the row's `parts`, its scaled
@@ -793,7 +830,13 @@ impl<'a> ScoredDistinctRows<'a> {
         slippage: Slippage,
         allele_span: i32,
     ) -> Self {
-        let model = ReadModel::of(evidence, slippage, allele_span, distinct.keying);
+        let model = ReadModel::of(
+            evidence,
+            slippage,
+            allele_span,
+            distinct.keying,
+            distinct.multipliers.as_deref(),
+        );
         // [`ln_reads`] reads a row against its log table bucket by bucket and would drop a bucket
         // the table lacks; every part of a row is built `2 · read_span + 1` buckets long.
         let buckets = (2 * evidence.read_span + 1) as usize;
@@ -1009,9 +1052,13 @@ pub(super) fn reads_off_the_genotype_the_reads_favour(
     homozygote_excess: &[f64],
     slippage: Slippage,
     allele_span: i32,
-) -> Vec<(u64, u64)> {
+    multipliers: Option<&[f64]>,
+) -> Vec<TractOffLengthReads> {
     // The table pairs each row with its sample's excess; with no prior, nothing reads it.
-    let distinct = DistinctRows::of(evidence, homozygote_excess);
+    let distinct = match multipliers {
+        None => DistinctRows::of(evidence, homozygote_excess),
+        Some(multipliers) => DistinctRows::keyed_at(evidence, homozygote_excess, multipliers),
+    };
     let scored = ScoredDistinctRows::of(evidence, &distinct, slippage, allele_span);
     let genotypes = scored.genotypes_the_reads_favour();
     let read_span = evidence.read_span;
@@ -1023,22 +1070,48 @@ pub(super) fn reads_off_the_genotype_the_reads_favour(
             let rows = distinct.tract_starts[tract]..distinct.tract_starts[tract + 1];
             let mut crossing = 0_u64;
             let mut off_length = 0_u64;
+            let mut expected_slipped = multipliers.map(|_| 0.0);
             for row in rows {
                 let reads = &distinct.reads[distinct.rows[row].0 as usize];
-                crossing += reads.iter().map(|count| u64::from(*count)).sum::<u64>();
-                if let Some((a, b)) = genotypes[row] {
-                    let (a, b) = (slot(a), slot(b));
-                    off_length += reads
-                        .iter()
-                        .enumerate()
-                        .filter(|(bucket, _)| *bucket != a && *bucket != b)
-                        .map(|(_, count)| u64::from(*count))
-                        .sum::<u64>();
+                for (read_group, counts) in distinct.parts(reads) {
+                    let part_reads = counts.iter().map(|count| u64::from(*count)).sum::<u64>();
+                    crossing += part_reads;
+                    if let (Some(expected), Some(read_group), Some(multipliers)) =
+                        (expected_slipped.as_mut(), read_group, multipliers)
+                    {
+                        *expected += part_reads as f64
+                            * read_group_level(slippage.level, multipliers[read_group.get()]);
+                    }
+                    if let Some((a, b)) = genotypes[row] {
+                        let (a, b) = (slot(a), slot(b));
+                        off_length += counts
+                            .iter()
+                            .enumerate()
+                            .filter(|(bucket, _)| *bucket != a && *bucket != b)
+                            .map(|(_, count)| u64::from(*count))
+                            .sum::<u64>();
+                    }
                 }
             }
-            (crossing, off_length)
+            TractOffLengthReads {
+                crossing,
+                off_length,
+                expected_slipped,
+            }
         })
         .collect()
+}
+
+/// **One tract's reads for the stutter-tail rule**, summed over its samples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TractOffLengthReads {
+    /// Reads that crossed the tract.
+    pub crossing: u64,
+    /// Of those, reads at neither allele of the genotype their sample's reads favour.
+    pub off_length: u64,
+    /// **The slipped reads the read groups' own rates predict**, `Σᵣ nᵣ λᵣ`, when the rows were
+    /// scored at read groups' multipliers; `None` when every read was scored at the class's rate.
+    pub expected_slipped: Option<f64>,
 }
 
 /// **One round's expected counts over the whole class**, at the stutter `slippage`, the
@@ -1264,22 +1337,13 @@ pub(super) fn scaled_ln_pairs_of_tract(cubics: &[PairCubic], spread: f64) -> f64
 
 /// **A row of reads' likelihood under every ordered allele pair**, `first · classes + second`,
 /// divided by the largest of them; `ln_read_chances` is [`ln_read_chances`] for `genotypes`.
-fn ordered_row(
-    reads: &[u32],
-    ln_read_chances: &[Vec<f64>],
-    genotypes: &[(usize, usize)],
-    classes: usize,
-) -> Vec<f64> {
-    let log_likelihoods: Vec<f64> = ln_read_chances
-        .iter()
-        .map(|ln_chances| ln_reads(ln_chances, reads))
-        .collect();
+fn ordered_row(log_likelihoods: &[f64], genotypes: &[(usize, usize)], classes: usize) -> Vec<f64> {
     let largest = log_likelihoods
         .iter()
         .copied()
         .fold(f64::NEG_INFINITY, f64::max);
     let mut ordered = vec![0.0; classes * classes];
-    for ((first, second), value) in genotypes.iter().zip(&log_likelihoods) {
+    for ((first, second), value) in genotypes.iter().zip(log_likelihoods) {
         let scaled = float::exp(value - largest);
         ordered[first * classes + second] = scaled;
         ordered[second * classes + first] = scaled;
@@ -1302,19 +1366,28 @@ pub(super) fn pair_cubics_by_tract(
     shares: &[f64],
     homozygote_excess: &[f64],
     allele_span: i32,
+    multipliers: Option<&[f64]>,
 ) -> Vec<Vec<PairCubic>> {
     let classes = allele_classes_in(allele_span);
-    let genotypes = genotype_pairs(classes);
-    let read_groups = one_stutter_for_every_read_group(evidence);
-    let distributions =
-        ReadDistributionsByLevel::of(&[slippage], &read_groups, allele_span, evidence.read_span);
-    let ln_read_chances =
-        ln_read_chances(&distributions.read_distribution_by_allele[0], &genotypes);
-    let distinct = DistinctRows::of(evidence, homozygote_excess);
+    let distinct = match multipliers {
+        None => DistinctRows::of(evidence, homozygote_excess),
+        Some(multipliers) => DistinctRows::keyed_at(evidence, homozygote_excess, multipliers),
+    };
+    let model = ReadModel::of(
+        evidence,
+        slippage,
+        allele_span,
+        distinct.keying,
+        multipliers,
+    );
+    let genotypes = &model.genotypes;
     let ordered: Vec<Vec<f64>> = distinct
         .reads
         .par_iter()
-        .map(|reads| ordered_row(reads, &ln_read_chances, &genotypes, classes))
+        .map(|reads| {
+            let log_likelihoods = model.log_likelihoods(&model.parts_at_rates(&distinct, reads));
+            ordered_row(&log_likelihoods, genotypes, classes)
+        })
         .collect();
     let at: Vec<RowAtShares> = ordered
         .par_iter()
@@ -1387,7 +1460,8 @@ pub struct SamplePairs {
 
 impl SamplePairs {
     /// The pairs of `evidence`'s tracts, each sample's reads scored at `slippage`, the pairs reduced
-    /// at the allele-length shares `shares`.
+    /// at the allele-length shares `shares`. With `multipliers`, one a read group, each read
+    /// group's reads are scored at the class's rate times its multiplier.
     #[must_use]
     pub fn of(
         evidence: &StratumEvidence,
@@ -1395,12 +1469,19 @@ impl SamplePairs {
         shares: &[f64],
         homozygote_excess: &[f64],
         allele_span: i32,
+        multipliers: Option<&[f64]>,
     ) -> Self {
-        let per_tract =
-            pair_cubics_by_tract(evidence, slippage, shares, homozygote_excess, allele_span)
-                .into_iter()
-                .filter(|pairs| !pairs.is_empty())
-                .collect();
+        let per_tract = pair_cubics_by_tract(
+            evidence,
+            slippage,
+            shares,
+            homozygote_excess,
+            allele_span,
+            multipliers,
+        )
+        .into_iter()
+        .filter(|pairs| !pairs.is_empty())
+        .collect();
         Self { per_tract }
     }
 
@@ -1919,7 +2000,7 @@ mod tests {
                 .map(|group| {
                     let p = per_allele(multipliers[group], allele);
                     (0..buckets)
-                        .map(|bucket| p[bucket].powi(reads[group][bucket] as i32))
+                        .map(|bucket| float::powi(p[bucket], reads[group][bucket] as i32))
                         .product::<f64>()
                 })
                 .product()
@@ -1928,10 +2009,10 @@ mod tests {
             .map(|allele| shares[allele] * likelihood(allele))
             .sum();
         assert!(
-            (counts.log_likelihood - total.ln()).abs() < 1e-10,
+            (counts.log_likelihood - float::ln(total)).abs() < 1e-10,
             "log-likelihood {} against {}",
             counts.log_likelihood,
-            total.ln()
+            float::ln(total)
         );
         for group in 0..2 {
             let stay = 1.0 - read_group_level(class.level, multipliers[group]);

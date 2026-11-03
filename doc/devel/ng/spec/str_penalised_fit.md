@@ -28,6 +28,9 @@ sample the prior's pull on two-base direction numbers is a known dishonesty of t
 the prior's weight stays one read, on a three-seed sweep (§2.10.2); and the fit is made independent
 of the order the psps are named in before milestone D (§3, plan step C10).
 
+**Amended 2026-11-02, owner: a class of fewer than 3 loci takes its stutter from the curves and
+does not shape them (§2.11).**
+
 **Amended 2026-10-16, owner (§7):** where a thin class's errors start (§2.6) — the shorter share and
 the fall-off from 3 loci with reads, the slip rate, F and the allele-length shares from 8 — and a rare
 share's line lowered from 3 loci's worth to 1. Built in plan step D8.
@@ -676,6 +679,65 @@ The lead put five questions with a recommendation each; the owner answered all f
    the prior the ridge no longer sets any stutter number, and changing it would move F and the
    allele lengths for a reason unrelated to this fix.
 
+### 2.11 A class of one or two loci does not shape the stutter curves — owner 2026-11-02
+
+**A class with fewer than 3 loci with reads takes its three stutter numbers (slip rate, shorter
+share, fall-off) from the curves drawn through the other classes of its motif length, and its reads
+do not shape those curves** (`LOCI_TO_SHAPE_THE_STUTTER_CURVES`, the line where the direction
+numbers' errors start, §2.6). Its expected counts, the stutter prior at its repeat count and its
+part of the standard errors' slopes are left out of the three stutter curves; it still shapes the
+allele-length and F curves, and it is still called.
+
+**Why.** On tomato2 (59 accessions, about 3 reads), the tetranucleotide classes at 19 and 20 repeats
+hold one locus each, at the end of a slip-rate curve the fit drew straight (strength about 10¹⁰).
+Each could explain its one tract's reads as slips: 13.9 expected slipped reads at 19 repeats where
+an earlier fit had 0.26. That pulled the whole line steep, from 0.0043–0.0090 at 6 to 10 repeats to
+0.0025–0.023, and the two classes to slip rates of 0.78 and 0.86. It surfaced with the read-group
+multipliers ([`str_library_stutter.md`](str_library_stutter.md)), which tipped the fit into that
+solution; fitted without the classes of fewer than two loci, the rates at 6 to 9 repeats came back to
+0.0039–0.0076. The owner (2026-11-02): such classes "are not that important", so take defaults or
+extrapolate from the others. Extrapolating was chosen over calling's default (10% slipped at every
+repeat count), which is a worse guess for a long tetranucleotide than the curve.
+
+**When no class of a motif length has 3 loci**, every class keeps its own reads in the curves, as
+before: there is nothing else to extrapolate from, and the stutter prior (§2.10) is what holds them.
+
+**Beyond the outermost class that shapes the curves, a thin class is held flat at that class's three
+numbers**, not given the curves' continuation; between two shaping classes it takes the curves' value
+at its repeat count. A thin class's reads are also left out of the read-group multipliers' evidence
+([`str_library_stutter.md`](str_library_stutter.md) §3.4), since its rate is not its own. The
+continuation was measured and rejected (below): a straight logit line carried past its last data
+point can reach a rate above the multipliers' ceiling of 0.95, where no set of multipliers has a
+typical one of one.
+
+**Measured against drawn truth** (ignored test `measure_the_thin_class_rule_against_drawn_truth`:
+tomato2's own number of loci with reads in every class of motif lengths 1 and 2, 59 samples at 3
+reads, seeds 1–3). Median miss of the thin classes' slip rates, as |ln(fitted / true)|, over the three
+seeds:
+
+| a class of 1–2 loci gets | homopolymers | dinucleotides |
+|---|---|---|
+| its own reads (no rule) | 0.050 / 0.081 / 0.021 | 0.034 / 0.060 / 0.028 |
+| the outermost shaping class's numbers (built) | 0.158 / 0.122 / 0.043, all low | 0.023 / 0.086 / 0.001 |
+| the curves' continuation | 0.546 / 0.282 / 0.133 (worst ×0.31) | 0.053 / 0.242 / 0.030 (worst ×1.70) |
+
+The classes with 3 loci or more come out the same under all three. The drawn cohorts hold no odd
+locus, so the first row is the rule's cost and not the failure it guards against: on tomato2 the
+tetranucleotides at 19 and 20 repeats come out at 0.78 and 0.86 without the rule and at 0.009 with
+it. The flat hold's cost is a thin class at the end of a motif length whose stutter still rises with
+length, held at the rate of a shorter tract and so low.
+
+**A stopgap.** The rule is a threshold, so a class's treatment flips between 2 and 3 loci; the
+principled form counts evidence by loci and lets the prior and the neighbouring classes decide a thin
+class gradually (§6).
+
+**What it costs, measured** on a drawn cohort in the same corner (test
+`two_one_locus_classes_cannot_bend_the_stutter_curves`: dinucleotides with little stutter, five
+classes of 10 loci, 59 samples at 3 reads, and two one-locus classes read at every length from three
+repeats short to three long): the five classes' slip rates stay within 10% of a fit without the two,
+7% at 6 repeats, against 56% without the rule. What is left comes through the allele-length and F
+curves.
+
 ---
 
 ## 3. What will bite
@@ -781,6 +843,19 @@ The lead put five questions with a recommendation each; the owner answered all f
 
 ## 6. Deferred, with a recommended home
 
+- **Evidence counted by loci, not reads, so thin classes lean on the prior** *(owner, 2026-11-03:
+  "if our conclusion can change just because of a couple of data points we're at the mercy of random
+  noise")* → its own spec, after the read-group multipliers merge; it replaces §2.11's threshold.
+  Today every read of a class is independent evidence of the class's slip rate, so one locus read in
+  59 samples weighs hundreds of reads against a stutter prior of one (§2.10), and no prior of sensible
+  strength holds it. Give each locus its own slip rate, scattered around its class's rate with a
+  spread fitted per motif length: a class's evidence is then bounded by its loci, a one-locus class
+  counts about once however deep its reads, and the move from the prior and the neighbouring classes
+  to the class's own data is gradual instead of flipping between 2 and 3 loci. Two things to settle
+  there: the prior's centre is one rate at every repeat count (0.10), while stutter rises steeply with
+  repeat count, so a stronger prior needs a centre shaped like a curve, or the curve through the
+  well-read classes; and every class's fit changes, not only the thin ones', so it is measured on the
+  §2.11 drawn cohorts and tomato2's tetranucleotides before it replaces the rule.
 - **Stutter per slippage group and library multipliers** → `spec/str_library_stutter.md`, rebuilt on
   this fit; the climb-based prototype is deleted with the climb (§1.4).
 - **Gathering evidence one motif length at a time**, to bound the evidence's memory → the census-read
