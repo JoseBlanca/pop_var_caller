@@ -85,7 +85,7 @@ use super::explain::{
 };
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
-    base_before_left_flank, evidence_for_output, padding_base_beside, read_alleles_on_the_record,
+    base_before_left_flank, evidence_for_output, padding_base_beside, read_alleles_for_record,
     reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
@@ -1146,7 +1146,7 @@ where
                         locus: inference.region,
                         source,
                     })?;
-                    let mut evidence = evidence_for_output(
+                    let evidence = evidence_for_output(
                         &inference,
                         &observation,
                         remap,
@@ -1166,7 +1166,7 @@ where
                         ));
                     }
                     // Asked only now, for a locus that is written (read phase spec §2.2).
-                    evidence.read_alleles = read_alleles_on_the_record(&observation, remap, reads);
+                    let read_alleles = read_alleles_for_record(remap, reads);
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -1175,7 +1175,11 @@ where
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(
+                        &inference,
+                        evidence,
+                        read_alleles,
+                    )))
                 },
             );
             if let Some(mut rows) = explanation {
@@ -7524,7 +7528,7 @@ where
                         locus: inference.region,
                         source,
                     })?;
-                    let mut evidence = evidence_for_output(
+                    let evidence = evidence_for_output(
                         &inference,
                         &observation,
                         remap,
@@ -7544,11 +7548,15 @@ where
                         ));
                     }
                     // Asked only now, for a locus that is written (read phase spec §2.2).
-                    evidence.read_alleles = read_alleles_on_the_record(&observation, remap, reads);
+                    let read_alleles = read_alleles_for_record(remap, reads);
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(
+                        &inference,
+                        evidence,
+                        read_alleles,
+                    )))
                 },
             );
             // **Finished on this worker, where the record still exists**, and folded on the

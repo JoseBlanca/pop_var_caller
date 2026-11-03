@@ -1,10 +1,13 @@
 use super::*;
 
-fn read_allele(read: u64, allele: u32) -> ReadAllele {
-    ReadAllele {
-        read,
-        allele,
-        error_phred: 30,
+fn read_allele(sample: u32, read: u64, allele: u32) -> SampleReadAllele {
+    SampleReadAllele {
+        sample,
+        read_allele: ReadAllele {
+            read,
+            allele,
+            error_phred: 30,
+        },
     }
 }
 
@@ -14,8 +17,9 @@ fn read_allele(read: u64, allele: u32) -> ReadAllele {
 fn a_read_allele_follows_its_allele_through_selection() {
     let record = RecordReadAlleles::from_merge(
         vec![
-            (3, vec![read_allele(5, 0), read_allele(8, 2)]),
-            (7, vec![read_allele(1, 1)]),
+            read_allele(3, 5, 0),
+            read_allele(3, 8, 2),
+            read_allele(7, 1, 1),
         ],
         |merge| match merge {
             0 => Some(0),
@@ -44,10 +48,11 @@ fn a_read_allele_follows_its_allele_through_selection() {
 #[test]
 fn a_read_allele_follows_its_allele_when_the_record_drops_an_alternative() {
     let mut record = RecordReadAlleles::from_merge(
-        vec![(
-            0,
-            vec![read_allele(1, 0), read_allele(2, 1), read_allele(3, 2)],
-        )],
+        vec![
+            read_allele(0, 1, 0),
+            read_allele(0, 2, 1),
+            read_allele(0, 3, 2),
+        ],
         Some,
     );
     record.renumber(&[Some(0), None, Some(1)]);
@@ -60,7 +65,7 @@ fn a_read_allele_follows_its_allele_when_the_record_drops_an_alternative() {
 }
 
 #[test]
-#[should_panic(expected = "covering samples out of order")]
+#[should_panic(expected = "read alleles out of order")]
 fn samples_out_of_order_are_a_wiring_defect() {
-    let _ = RecordReadAlleles::from_merge(vec![(4, vec![]), (2, vec![])], Some);
+    let _ = RecordReadAlleles::from_merge(vec![read_allele(4, 1, 0), read_allele(2, 1, 0)], Some);
 }

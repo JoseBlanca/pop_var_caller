@@ -591,24 +591,17 @@ where
 /// phase spec §2.3, step 1) — asked of the merge only here, for a locus calling is about to write,
 /// because asking derives the locus's alleles a second time ([`LocusReads`]). A read allele on an
 /// allele candidate selection dropped is dropped with it, as its reads leave `AD` for the leftover.
+/// The capture names each read allele's sample itself, so nothing here pairs lists with samples.
 #[must_use]
-pub fn read_alleles_on_the_record(
-    observation: &CohortObservation,
+pub fn read_alleles_for_record(
     remap: &AlleleRemap,
     reads: &LocusReads<'_, '_>,
 ) -> RecordReadAlleles {
-    RecordReadAlleles::from_merge(
-        observation
-            .per_sample
-            .iter()
-            .map(|support| support.sample)
-            .zip(reads.read_alleles()),
-        |merge| {
-            remap
-                .candidate_for(merge as usize)
-                .map(|written| u32::from(written.get()))
-        },
-    )
+    RecordReadAlleles::from_merge(reads.read_alleles(), |merge_allele| {
+        remap
+            .candidate_for(merge_allele as usize)
+            .map(|written| u32::from(written.get()))
+    })
 }
 
 /// **Everything a record needs that the called locus does not already carry**, gathered while
@@ -770,7 +763,6 @@ pub fn evidence_for_output(
     };
 
     LocusEvidenceForOutput {
-        read_alleles: crate::read_phase::record_reads::RecordReadAlleles::default(),
         samples,
         allele_mapq,
         padding_base,

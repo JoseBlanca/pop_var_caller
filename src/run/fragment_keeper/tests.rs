@@ -1,5 +1,5 @@
 use super::*;
-use crate::read_phase::record_reads::RecordReadAlleles;
+use crate::read_phase::record_reads::{RecordReadAlleles, SampleReadAllele};
 use crate::types::{AlleleId, GenomeRegion, Genotype, Phred, Position};
 use crate::vcf::{
     FilterVerdict, MapqPool, PaddingBase, SampleCall, SampleColumn, SampleReadCounts,
@@ -58,22 +58,19 @@ fn record_at(
         FilterVerdict::Pass,
         None,
     );
-    let mut by_sample: Vec<(usize, Vec<ReadAllele>)> = Vec::new();
-    for &(sample, read, allele) in reads {
-        if by_sample.last().is_none_or(|(last, _)| *last != sample) {
-            by_sample.push((sample, Vec::new()));
-        }
-        by_sample
-            .last_mut()
-            .expect("just pushed")
-            .1
-            .push(ReadAllele {
+    let mut entries: Vec<SampleReadAllele> = reads
+        .iter()
+        .map(|&(sample, read, allele)| SampleReadAllele {
+            sample: sample as u32,
+            read_allele: ReadAllele {
                 read,
                 allele,
                 error_phred: 25,
-            });
-    }
-    record.replace_read_alleles(RecordReadAlleles::from_merge(by_sample, Some));
+            },
+        })
+        .collect();
+    entries.sort_unstable();
+    record.replace_read_alleles(RecordReadAlleles::from_merge(entries, Some));
     record
 }
 

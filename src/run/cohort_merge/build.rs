@@ -42,6 +42,7 @@ use crate::locus_generation::{
     WitnessedLocusPositions,
 };
 use crate::read_phase::capture::{ReadAllele, error_phred_of_mean_ln_error, settle};
+use crate::read_phase::record_reads::SampleReadAllele;
 use crate::run::explain::{DroppedLoci, MergeDrop};
 use crate::types::ChainId;
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
@@ -648,8 +649,9 @@ impl AlleleTable {
     }
 
     /// [`assemble`](Self::assemble), and, when `read_alleles` is given, **which allele each of
-    /// every covering sample's reads showed**, one list per sample in member order, settled and
-    /// numbered against the finished table (read phase spec §2.2).
+    /// every covering sample's reads showed**, appended to it: each entry names its run sample,
+    /// each sample's entries settled, in member order (which is ascending sample order) and then
+    /// read order, numbered against the finished table (read phase spec §2.2).
     ///
     /// **The same derivation, not a second one**, so a read's allele is exactly the one its
     /// support was tallied under. It runs only for a locus that is to be written
@@ -658,7 +660,7 @@ impl AlleleTable {
     /// are never written.
     fn assemble_capturing(
         locus: &ClosedLocus<'_>,
-        mut read_alleles: Option<&mut Vec<Vec<ReadAllele>>>,
+        mut read_alleles: Option<&mut Vec<SampleReadAllele>>,
     ) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
@@ -732,11 +734,13 @@ impl AlleleTable {
                     match backing {
                         AlleleBacking::OneSequence(sequence) => {
                             tally[entry].tally.add_whole(sequence);
-                            // Every read behind the sequence showed it; `num_obs` is not zero here.
-                            let error_phred = error_phred_of_mean_ln_error(
-                                sequence.q_sum.nats() / f64::from(sequence.num_obs),
-                            );
                             if capture_on {
+                                // Every read behind the sequence showed it; `num_obs` is not zero
+                                // here, as the derivation emits only sequences with a read behind
+                                // them.
+                                let error_phred = error_phred_of_mean_ln_error(
+                                    sequence.q_sum.nats() / f64::from(sequence.num_obs),
+                                );
                                 captured.extend(sequence.chain_ids.iter().map(|&read| {
                                     ReadAllele {
                                         read,
@@ -765,12 +769,18 @@ impl AlleleTable {
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
             // One sample's records inside one cohort locus come from one walked region: a locus
             // never crosses a segment boundary, so they share its first id.
-            if let Some(lists) = read_alleles.as_deref_mut() {
+            if let Some(entries) = read_alleles.as_deref_mut() {
                 settle(
                     &mut captured,
                     records.first().map_or(0, |record| record.chain_id_base),
                 );
-                lists.push(captured.clone());
+                // PANIC-FREE: a run's samples are counted in a `u32` everywhere downstream; a
+                // cohort of four billion samples is not a run this program can hold.
+                let sample = u32::try_from(sample).expect("a run's samples are counted in a u32");
+                entries.extend(captured.iter().map(|&read_allele| SampleReadAllele {
+                    sample,
+                    read_allele,
+                }));
             }
 
             // **Not sorted here.** The rows are put into ascending `(allele, read group)` order
@@ -822,13 +832,13 @@ impl AlleleTable {
         // tally was filled in the order the derivation emitted alleles, which is neither.
         // Unstable is enough, because the key is unique, one entry per pair by construction.
         let moved_to = alleles.sort_canonically();
-        // Renamed like the rows, and still in read order: the lists were sorted by read, and each
-        // read is listed once.
-        for read_allele in read_alleles
+        // Renamed like the rows, and still in read order: each sample's entries were sorted by
+        // read, and each read is listed once.
+        for entry in read_alleles
             .iter_mut()
-            .flat_map(|lists| lists.iter_mut().flatten())
+            .flat_map(|entries| entries.iter_mut())
         {
-            read_allele.allele = moved_to[read_allele.allele as usize] as u32;
+            entry.read_allele.allele = moved_to[entry.read_allele.allele as usize] as u32;
         }
         for support in &mut per_sample {
             for row in &mut support.supported {
@@ -1168,17 +1178,47 @@ pub struct LocusReads<'l, 'a> {
 }
 
 impl LocusReads<'_, '_> {
-    /// **Which allele each read of each covering sample showed**: one list per sample, in the
-    /// order of the observation's [`per_sample`](CohortObservation::per_sample), each in read
-    /// order, one entry a read, at most
-    /// [`READ_ALLELES_KEPT`](crate::read_phase::capture::READ_ALLELES_KEPT), numbered against the
-    /// observation's allele table.
+    /// **Which allele each read of each covering sample showed**, each entry naming its run
+    /// sample, sorted by sample and then by read: one entry a read, at most
+    /// [`READ_ALLELES_KEPT`](crate::read_phase::capture::READ_ALLELES_KEPT) a sample, numbered
+    /// against the observation's allele table.
     #[must_use]
-    pub fn read_alleles(&self) -> Vec<Vec<ReadAllele>> {
-        let mut lists = Vec::with_capacity(self.locus.members.len());
-        let _ = AlleleTable::assemble_capturing(self.locus, Some(&mut lists));
-        lists
+    pub fn read_alleles(&self) -> Vec<SampleReadAllele> {
+        let mut entries = Vec::new();
+        let _ = AlleleTable::assemble_capturing(self.locus, Some(&mut entries));
+        entries
     }
+}
+
+#[cfg(test)]
+/// **The merge's own capture over one sample's one minted record**, as `(read, allele bases)`:
+/// the record alone made a locus, its alleles derived and its reads settled and capped as at any
+/// written locus — for tests that hold records, from a psp, rather than loci.
+pub(crate) fn captured_at_one_record(record: &SampleLocusObservations) -> Vec<(ChainId, Vec<u8>)> {
+    let locus = ClosedLocus {
+        region: record.region,
+        members: vec![SampleMembers {
+            sample: 0,
+            observations: std::slice::from_ref(record),
+        }],
+        non_reference_reads: 0,
+        verdict: Verdict::Build,
+        kind: &record.kind,
+    };
+    let observed = CohortObservation::over(
+        &locus,
+        &crate::run::cohort_merge::observation_cache::WindowedCohort::with_nothing_measured(),
+    );
+    LocusReads { locus: &locus }
+        .read_alleles()
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.read_allele.read,
+                observed.alleles[entry.read_allele.allele as usize].to_vec(),
+            )
+        })
+        .collect()
 }
 
 /// Whether no locus this builder could own can begin in `builder_region` — so the outcome is
@@ -1871,7 +1911,10 @@ fn weakest_error_phred(records: &[SampleLocusObservations], sightings: &[ReadSig
         .map(|sighting| {
             let sequence =
                 &records[sighting.record as usize].observations[sighting.sequence as usize];
-            sequence.q_sum.nats() / f64::from(sequence.num_obs.max(1))
+            // A sighting names a complete sequence with at least one read behind it, which the
+            // derivation enforces before recording one ([`alleles_of_sample`]): `num_obs` is not
+            // zero, the same rule the whole-sequence branch of the capture relies on.
+            sequence.q_sum.nats() / f64::from(sequence.num_obs)
         })
         .fold(f64::NEG_INFINITY, f64::max);
     error_phred_of_mean_ln_error(weakest)
@@ -5797,8 +5840,11 @@ mod tests {
     /// wrong bytes here.
     fn read_alleles_of(locus: &ClosedLocus<'_>, sample: usize) -> Vec<(ChainId, Vec<u8>, u8)> {
         let observed = CohortObservation::over(locus, &no_measurement());
-        LocusReads { locus }.read_alleles()[sample]
+        LocusReads { locus }
+            .read_alleles()
             .iter()
+            .filter(|entry| entry.sample as usize == sample)
+            .map(|entry| entry.read_allele)
             .map(|read_allele| {
                 (
                     read_allele.read,
@@ -5876,5 +5922,80 @@ mod tests {
             .map(|(read, allele, _)| (read, allele))
             .collect();
         assert_eq!(captured, vec![(11, b"ACGTA".to_vec())]);
+    }
+
+    /// **A deep sample keeps the same ranks whatever its walked region's first id** (read phase
+    /// spec §2.4; review M5): 40 reads at one record, numbered from 0 with base 0, and from
+    /// 1,000,000 with base 1,000,000 — the same region walked alone and after other ground. Both
+    /// keep 32, and the same ranks. Handing the cap base 0 for every record — the raw id as its
+    /// key — keeps different ranks in the second.
+    #[test]
+    fn a_deep_sample_keeps_the_same_ranks_whatever_its_regions_first_id() {
+        let ranks_kept = |base: ChainId| {
+            let reads: Vec<ChainId> = (base..base + 40).collect();
+            let mut deep = record_of(
+                region(12, 12),
+                b"G",
+                vec![shown_by(b"T", &reads, -80.0, 20, 2_400, 144_000, 10)],
+            );
+            deep.chain_id_base = base;
+            let deep = [deep];
+            let locus = closed_locus(region(12, 12), &[&deep]);
+            read_alleles_of(&locus, 0)
+                .into_iter()
+                .map(|(read, _, _)| read - base)
+                .collect::<Vec<_>>()
+        };
+        let walked_alone = ranks_kept(0);
+        assert_eq!(
+            walked_alone.len(),
+            crate::read_phase::capture::READ_ALLELES_KEPT
+        );
+        assert_eq!(ranks_kept(1_000_000), walked_alone);
+    }
+
+    /// **Read alleles reach the record's numbering through candidate selection's remap**, and a
+    /// read on an allele selection dropped is dropped with it (read phase spec §2.3, step 1;
+    /// review M5): sample 0 shows `G` (reads 15, 17) and `T` (7, 9), sample 1 shows `C` (21, 23).
+    /// Selection keeps the reference and `C`, as candidate 1, and drops `T`. Mapping merge
+    /// alleles to themselves instead keeps reads 7 and 9 and leaves 21 and 23 on `C`'s merge index.
+    #[test]
+    fn read_alleles_follow_candidate_selection_to_the_record() {
+        use crate::calling::allele_candidates::AlleleRemap;
+        use crate::types::AlleleId;
+
+        let first = [record(
+            region(12, 12),
+            b"G",
+            &[(b"G", &[15, 17]), (b"T", &[7, 9])],
+        )];
+        let second = [record(region(12, 12), b"G", &[(b"C", &[21, 23])])];
+        let locus = closed_locus(region(12, 12), &[&first, &second]);
+        let observed = CohortObservation::over(&locus, &no_measurement());
+        let index_of = |bases: &[u8]| {
+            observed
+                .alleles
+                .iter()
+                .position(|allele| &**allele == bases)
+                .expect("an allele the samples showed")
+        };
+        let mut remap = AlleleRemap::with_all_dropped(observed.alleles.len());
+        remap.admit(index_of(b"G"), AlleleId(0));
+        remap.admit(index_of(b"C"), AlleleId(1));
+
+        let on_the_record =
+            crate::run::records::read_alleles_for_record(&remap, &LocusReads { locus: &locus });
+        let shown: Vec<(u32, ChainId, u32)> = on_the_record
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.sample,
+                    entry.read_allele.read,
+                    entry.read_allele.allele,
+                )
+            })
+            .collect();
+        assert_eq!(shown, vec![(0, 15, 0), (0, 17, 0), (1, 21, 1), (1, 23, 1)]);
     }
 }

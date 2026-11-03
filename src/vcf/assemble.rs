@@ -121,16 +121,17 @@ pub struct LocusEvidenceForOutput {
     /// A locus whose loop did not converge is the one verdict derivable from the locus itself,
     /// and [`assemble_record`] checks the two agree rather than choosing between them.
     pub filter: FilterVerdict,
-    /// **Which allele each of every sample's reads showed**, in the candidate table's numbering
-    /// (read phase spec §2.3, step 1): empty until calling fills it for a record it writes.
-    /// [`assemble_record`] renumbers it with the alternatives it drops and puts it on the record.
-    pub read_alleles: RecordReadAlleles,
 }
 
 /// **Turn a called locus into the record the file will state.**
 ///
 /// The mapper of the output stream. Every rule it applies is settled design; only the shape of
 /// what it is handed is provisional (see the module note).
+///
+/// `read_alleles` is **which allele each of every sample's reads showed**, in the candidate
+/// table's numbering (read phase spec §2.3, step 1). It is an argument, not a field of the
+/// evidence, so a driver that builds a record must say what reads it carries: it is renumbered
+/// with the alternatives this drops and put on the record.
 ///
 /// # Panics
 ///
@@ -139,7 +140,11 @@ pub struct LocusEvidenceForOutput {
 /// converged when it did not. All three are wiring defects between two things the same worker
 /// built, which is [`VcfRecord::new`]'s reasoning and the same choice.
 #[must_use]
-pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput) -> VcfRecord {
+pub fn assemble_record(
+    locus: &LocusInference,
+    evidence: LocusEvidenceForOutput,
+    read_alleles: RecordReadAlleles,
+) -> VcfRecord {
     assert_eq!(
         evidence.samples.len(),
         locus.per_sample.len(),
@@ -183,7 +188,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         .collect();
 
     let mut expected_copies = locus.cohort_expected_copies().copies().to_vec();
-    let mut read_alleles = evidence.read_alleles;
+    let mut read_alleles = read_alleles;
     let mut allele_mapq = evidence.allele_mapq;
     let mut alleles = alleles;
     let mut sample_columns = sample_columns;

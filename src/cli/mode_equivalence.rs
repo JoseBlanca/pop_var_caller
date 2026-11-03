@@ -197,9 +197,19 @@ mod tests {
         cohort: &AVaryingCohort,
         setting: crate::run::RepeatGroundSetting,
     ) -> PathBuf {
+        walked_into_psps_over(cohort, setting, None, "psps")
+    }
+
+    /// The same, over `regions` when given, into the directory `directory` names.
+    fn walked_into_psps_over(
+        cohort: &AVaryingCohort,
+        setting: crate::run::RepeatGroundSetting,
+        regions: Option<PathBuf>,
+        directory: &str,
+    ) -> PathBuf {
         use crate::run::RepeatGroundSetting;
 
-        let psps = cohort.directory.path().join("psps");
+        let psps = cohort.directory.path().join(directory);
         let generic_path_only = setting == RepeatGroundSetting::GenericPathOnly;
         run_generate_psps(&GeneratePspsArgs {
             call_satellites: setting == RepeatGroundSetting::CallSatellites,
@@ -208,7 +218,7 @@ mod tests {
             catalog: (!generic_path_only).then(|| cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output_dir: psps.clone(),
-            regions: None,
+            regions,
             force: true,
             build_index_if_missing: false,
             min_copies: MinCopies::default(),
@@ -615,6 +625,69 @@ mod tests {
             in_region(&whole),
             "the region's records, phase included, as the whole-contig run writes them"
         );
+    }
+
+    /// **The walked region's first id reaches the read cap, end to end** (read phase spec §2.4,
+    /// §7.5; review M5): the deep cohort is walked into psps whole, and over the walked region
+    /// after the tract alone, as `--regions` walks it. A whole walk numbers that region's reads
+    /// after every read of the first region, a `--regions` walk from zero. At every one of the
+    /// second sample's records there with more than 32 reads, the merge's own capture, read as
+    /// `(read − the record's chain_id_base, allele)`, is the same 32 entries both ways.
+    ///
+    /// A cap keyed on raw ids keeps different reads in the two walks, so this fails if the
+    /// generator stamps the wrong base, the psp loses it, or the merge does not pass it to the
+    /// cap. (The VCF-level test above cannot: every read there is cis, so any 32 phase alike.)
+    #[test]
+    fn the_cap_keeps_the_same_ranks_whole_contig_and_regions() {
+        use crate::psp::PspReader;
+        use crate::run::cohort_merge::build::captured_at_one_record;
+
+        let cohort = a_deep_varying_cohort_with_phased_pairs_on_disk();
+        let bed = cohort.directory.path().join("after_the_tract.bed");
+        std::fs::write(&bed, format!("chrV\t{}\t600\n", TRACT.1)).expect("the BED writes");
+        let setting = crate::run::RepeatGroundSetting::StrPaths;
+        let whole = walked_into_psps_over(&cohort, setting, None, "psps_whole");
+        let alone = walked_into_psps_over(&cohort, setting, Some(bed), "psps_after_the_tract");
+
+        let deep_records = |directory: &Path| {
+            let mut psp =
+                PspReader::open(&psp_path_for(directory, "two")).expect("the sample's psp opens");
+            psp.records()
+                .expect("its records walk")
+                .map(|found| found.expect("a record reads").record.expect("a built body"))
+                .filter(|record| record.region.start.get() > TRACT.1 as u64)
+                .filter(|record| {
+                    record
+                        .observations
+                        .iter()
+                        .map(|sequence| sequence.chain_ids.len())
+                        .sum::<usize>()
+                        > crate::read_phase::capture::READ_ALLELES_KEPT
+                })
+                .collect::<Vec<_>>()
+        };
+        let ranks = |record: &crate::locus_generation::SampleLocusObservations| {
+            captured_at_one_record(record)
+                .into_iter()
+                .map(|(read, allele)| (read.wrapping_sub(record.chain_id_base), allele))
+                .collect::<Vec<_>>()
+        };
+        let (from_whole, from_alone) = (deep_records(&whole), deep_records(&alone));
+        assert!(
+            !from_alone.is_empty(),
+            "the region has records the cap binds at"
+        );
+        assert_eq!(from_whole.len(), from_alone.len());
+        for (in_whole, in_alone) in from_whole.iter().zip(&from_alone) {
+            assert_eq!(in_whole.region, in_alone.region);
+            assert_ne!(
+                in_whole.chain_id_base, in_alone.chain_id_base,
+                "the whole walk numbers this region after the first, or the test cannot fail"
+            );
+            let kept = ranks(in_alone);
+            assert_eq!(kept.len(), crate::read_phase::capture::READ_ALLELES_KEPT);
+            assert_eq!(ranks(in_whole), kept, "at {:?}", in_whole.region);
+        }
     }
 
     /// **Spec §10's third oracle: the drop-mode file is the tag-mode file without its tagged

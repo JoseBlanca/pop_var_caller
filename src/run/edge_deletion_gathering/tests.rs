@@ -175,21 +175,21 @@ fn a_flank_half_written_as_a_substitution_is_absorbed_into_the_str_record() {
 #[test]
 fn a_merged_generic_records_read_alleles_are_lost_and_counted() {
     use crate::read_phase::capture::ReadAllele;
-    use crate::read_phase::record_reads::RecordReadAlleles;
+    use crate::read_phase::record_reads::{RecordReadAlleles, SampleReadAllele};
     let mut gathering = EdgeDeletionGathering::default();
     let tract = a_tract_widened_right(&[(&[1, 2], 30.0)]);
     let mut snp = a_snp_at_110(&[(&[0, 1], 40.0)]);
     snp.replace_read_alleles(RecordReadAlleles::from_merge(
-        vec![(
-            0,
-            (0..3)
-                .map(|read| ReadAllele {
+        (0..3)
+            .map(|read| SampleReadAllele {
+                sample: 0,
+                read_allele: ReadAllele {
                     read,
                     allele: 1,
                     error_phred: 30,
-                })
-                .collect(),
-        )],
+                },
+            })
+            .collect(),
         Some,
     ));
     let out = written(&mut gathering, vec![tract, snp]);

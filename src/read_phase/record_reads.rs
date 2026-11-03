@@ -8,6 +8,7 @@ use super::capture::ReadAllele;
 pub struct SampleReadAllele {
     /// The sample's index in the run's sample order.
     pub sample: u32,
+    /// What the sample's read showed.
     pub read_allele: ReadAllele,
 }
 
@@ -22,39 +23,31 @@ pub struct RecordReadAlleles {
 }
 
 impl RecordReadAlleles {
-    /// **The merge's lists, in the record's numbering**: `lists` holds `(run sample, that
-    /// sample's read alleles)` in ascending sample order, each list in read order, as the merge's
-    /// per-sample lists give them; `written` takes a merge allele index to
-    /// the record's, `None` where candidate selection dropped the allele, and such a read allele
-    /// is dropped with it (§2.3, step 1).
+    /// **The merge's read alleles, in the record's numbering**: `entries` holds every covering
+    /// sample's read alleles, each naming its run sample, sorted by sample and then by read, as
+    /// the merge's capture gives them; `written` takes a merge allele index to the record's,
+    /// `None` where candidate selection dropped the allele, and such a read allele is dropped
+    /// with it (§2.3, step 1).
     ///
     /// # Panics
     ///
-    /// If the samples are not in strictly ascending order: the merge lists covering samples that
+    /// If the entries are not sorted by sample and then by read: the merge captures them that
     /// way, so anything else is a wiring defect.
     pub fn from_merge(
-        lists: impl IntoIterator<Item = (usize, Vec<ReadAllele>)>,
+        mut entries: Vec<SampleReadAllele>,
         written: impl Fn(u32) -> Option<u32>,
     ) -> Self {
-        let mut entries = Vec::new();
-        let mut previous: Option<usize> = None;
-        for (sample, list) in lists {
-            assert!(
-                previous.is_none_or(|previous| previous < sample),
-                "covering samples out of order: {previous:?} then {sample}"
-            );
-            previous = Some(sample);
-            let sample = u32::try_from(sample).expect("a run's samples are counted in a u32");
-            entries.extend(list.into_iter().filter_map(|read_allele| {
-                written(read_allele.allele).map(|allele| SampleReadAllele {
-                    sample,
-                    read_allele: ReadAllele {
-                        allele,
-                        ..read_allele
-                    },
-                })
-            }));
-        }
+        assert!(
+            entries.is_sorted(),
+            "read alleles out of order: the merge lists them by sample and then by read"
+        );
+        entries.retain_mut(|entry| match written(entry.read_allele.allele) {
+            Some(allele) => {
+                entry.read_allele.allele = allele;
+                true
+            }
+            None => false,
+        });
         Self { entries }
     }
 
@@ -97,6 +90,7 @@ impl RecordReadAlleles {
         self.entries.len()
     }
 
+    /// Whether the record carries none.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
