@@ -84,6 +84,33 @@ often than elsewhere.
 `--phase-min-path-agreement` (default `1`) is the share of the drawn estimates that must agree for
 a link to be written. Lower values give longer phase sets with more wrong links.
 
+### Reads in the phase
+
+The pass also uses each sample's reads, which show directly which alleles lie on one molecule
+([Phase from reads](vcf.md#phase-from-reads)). Between two neighbouring heterozygotes it phases:
+
+- a link the drawn estimates agree on is kept unless the sample's reads contradict it at odds of 9
+  to 1 or more, in which case the phase set ends there;
+- where the estimates do not agree, reads that link the two at odds of 199 to 1, both genotypes at
+  `GQ` 30 or more, join them;
+- a heterozygote between the two that the estimates cannot orient is joined to them by reads in
+  the same way.
+
+Reads reach about a kilobase, so they change the links between close heterozygotes only. On a
+simulated outbred cohort of 50 samples at 3× from 64 lineages, with a SNP every 100 bases, they cut
+the wrong links inside phase sets from 5.2% to 3.6%, and the links they made themselves were wrong 15
+times in 3,029. On the
+simulated cohorts above, links made by reads were wrong 1 time in 176, and the links reads broke
+were mostly wrong ones in outbred cohorts: 5 of 7 at 50 samples from 64 lineages, where the wrong
+links inside phase sets fell from 56 to 52 of about 1,300. Reads link records only next to ones
+the estimates do orient, so in a cohort where the estimates orient nothing — a few outbred samples
+switched on with `on` — the reads phase nothing either, while the same run with the pass off phases
+from reads alone.
+
+The log reports a **read check**: of the links the estimates made that reads reach with confidence,
+how many the reads contradict. It is a check of the population phase that does not come from the
+pass's own model, for links under a kilobase, and it changes nothing.
+
 Tools that read `PS`, such as WhatsHap, or SHAPEIT with its option to use it, treat each phase set
 on its own. A tool that ignores `PS` reads every `|` of a sample as one phase along the whole
 chromosome, which these phase sets do not claim.
