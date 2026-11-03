@@ -16,6 +16,8 @@
 //! default for a diploid cohort of at least ten samples whose median inbreeding is at least 0.5,
 //! and the decision, with its reason, goes into the header either way.
 
+use rayon::prelude::*;
+
 use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
@@ -147,7 +149,6 @@ pub struct NeighbourEvidenceStage {
     next_site: usize,
     /// The first held line not yet written.
     core_start: usize,
-    pairs: GenotypePairs,
     tally: RewriteTally,
 }
 
@@ -171,7 +172,6 @@ impl NeighbourEvidenceStage {
             first_site: 0,
             next_site: 0,
             core_start: 0,
-            pairs: GenotypePairs::default(),
             tally: RewriteTally::default(),
         }
     }
@@ -246,20 +246,33 @@ impl NeighbourEvidenceStage {
                     MAX_TEMPLATES,
                 )
             };
-            for held in &mut self.held[plan.core_start..plan.core_end] {
-                let line = std::mem::take(&mut held.line);
-                match held.site {
-                    Some(site) => {
-                        if let Some(rewritten) = rewrite_line(
+            // **The core's lines are rewritten on the pool and handed back in their own order.**
+            // Each rewrite reads only its line and its refined record, so the lines are
+            // independent; done on this thread it was a quarter of the writing pass on 59 tomato
+            // accessions over 32 Mb, with every other thread waiting for the next window. The
+            // tallies are counts, so summing them in any order gives the serial total.
+            let rewritten: Vec<(RecordPlace, Option<Vec<u8>>, RewriteTally)> = self.held
+                [plan.core_start..plan.core_end]
+                .par_iter_mut()
+                .map_init(GenotypePairs::default, |pairs, held| {
+                    let line = std::mem::take(&mut held.line);
+                    let mut tally = RewriteTally::default();
+                    let written = match held.site {
+                        Some(site) => rewrite_line(
                             &line,
                             &refined[site - core_sites.start],
-                            &mut self.pairs,
-                            &mut self.tally,
-                        ) {
-                            ready.push((held.place, rewritten));
-                        }
-                    }
-                    None => ready.push((held.place, line)),
+                            pairs,
+                            &mut tally,
+                        ),
+                        None => Some(line),
+                    };
+                    (held.place, written, tally)
+                })
+                .collect();
+            for (place, written, tally) in rewritten {
+                self.tally.add(tally);
+                if let Some(line) = written {
+                    ready.push((place, line));
                 }
             }
             self.core_start = plan.core_end;

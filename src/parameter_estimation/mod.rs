@@ -48,6 +48,7 @@
 pub mod calibration;
 pub mod depth_bins;
 pub mod joint;
+pub mod misread_after_runs;
 pub(crate) mod progress;
 pub mod repeat_strata;
 

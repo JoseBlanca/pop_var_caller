@@ -25,6 +25,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -388,9 +389,18 @@ fn path_is_bgzf(path: &Path) -> bool {
 
 /// The bytes' destination: plain text or bgzf, fixed at creation by the path's suffix, or
 /// standard output, which is always plain text.
+///
+/// **A bgzf file is compressed on the run's threads** (`--threads`, which sizes rayon's global
+/// pool), because compression is most of what writing costs: on a 200-sample cohort with the
+/// neighbour-evidence pass off it was 81% of the writing pass, all of it on the one thread that
+/// writes while the others waited. The multithreaded writer cuts the same 64 KiB blocks at the
+/// same level, so the file is byte for byte the one the single-threaded writer produces. **One
+/// thread keeps the single-threaded writer**, since the multithreaded one adds a writer thread and
+/// at least one compressing thread, and an operator who asked for one thread asked for one.
 enum Sink {
     Plain(BufWriter<File>),
     Bgzf(Box<noodles_bgzf::io::Writer<File>>),
+    BgzfThreaded(Box<noodles_bgzf::io::MultithreadedWriter<File>>),
     Stdout(BufWriter<io::Stdout>),
 }
 
@@ -408,7 +418,12 @@ impl Sink {
             source,
         })?;
         Ok(if path_is_bgzf(final_path) {
-            Self::Bgzf(Box::new(noodles_bgzf::io::Writer::new(file)))
+            match NonZeroUsize::new(rayon::current_num_threads()).filter(|n| n.get() > 1) {
+                Some(workers) => Self::BgzfThreaded(Box::new(
+                    noodles_bgzf::io::MultithreadedWriter::with_worker_count(workers, file),
+                )),
+                None => Self::Bgzf(Box::new(noodles_bgzf::io::Writer::new(file))),
+            }
         } else {
             Self::Plain(BufWriter::with_capacity(WRITE_BUFFER_BYTES, file))
         })
@@ -443,6 +458,12 @@ impl Sink {
                 tmp_path: tmp_path.clone(),
                 source,
             })?,
+            Self::BgzfThreaded(mut bgzf) => {
+                bgzf.finish().map_err(|source| VcfWriteError::FinishBgzf {
+                    tmp_path: tmp_path.clone(),
+                    source,
+                })?
+            }
         };
 
         file.sync_all().map_err(|source| VcfWriteError::Fsync {
@@ -466,6 +487,7 @@ impl Write for Sink {
         match self {
             Self::Plain(sink) => sink.write(buf),
             Self::Bgzf(sink) => sink.write(buf),
+            Self::BgzfThreaded(sink) => sink.write(buf),
             Self::Stdout(sink) => sink.write(buf),
         }
     }
@@ -474,6 +496,7 @@ impl Write for Sink {
         match self {
             Self::Plain(sink) => sink.flush(),
             Self::Bgzf(sink) => sink.flush(),
+            Self::BgzfThreaded(sink) => sink.flush(),
             Self::Stdout(sink) => sink.flush(),
         }
     }

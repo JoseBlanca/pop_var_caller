@@ -18,9 +18,10 @@ use super::{
     BaseQualityCalibration, BaseQualityCalibrationRow, BetweenLocusShare, CensusIdentity,
     Contamination, ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, FORMAT_VERSION, FittedDensity, FittedDuplicatedPositions, Inbreeding,
-    InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing, OrdinarySitePrior,
-    ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting,
-    RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
+    InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing, MisreadAfterRunRow,
+    MisreadAfterRuns, MisreadBase, OrdinarySitePrior, ParametersFile,
+    PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting, RepeatTracts,
+    RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
     ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
     SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow, SubstitutionRateRow,
     Warrant, WarrantedValue, between_locus_share_error_of, between_locus_share_of,
@@ -448,6 +449,8 @@ impl ParametersFile {
                 fitted_density: None,
             },
             duplicated_positions: None,
+            repeat_tracts_left_out: None,
+            misread_after_runs: misread_after_runs_of(run),
             repeat_routing: repeat_routing.map(RepeatRouting::of),
             repeat_tracts: repeat_tracts_of(run),
             stated_constants: StatedConstants {
@@ -500,6 +503,62 @@ impl ParametersFile {
         self.duplicated_positions = duplicated_positions;
         self
     }
+
+    /// **Record which tracts the repeat-tract fit left out, and why** — format 7's informational
+    /// table `[repeat_tracts_left_out]` (`parameter_prepass_ssr.md` §4.6.1); `None` where the file
+    /// was not written by a fit, or the file it carries over had none.
+    ///
+    /// A builder for the same reason as [`Self::with_what_the_data_determine`]: no run reads it.
+    #[must_use]
+    pub fn with_repeat_tracts_left_out(
+        mut self,
+        repeat_tracts_left_out: Option<RepeatTractsLeftOut>,
+    ) -> Self {
+        self.repeat_tracts_left_out = repeat_tracts_left_out;
+        self
+    }
+}
+
+/// **`[misread_after_runs]` from what the run scores under** — `None` where the run holds no
+/// read group's table, so a file written under the defaults says nothing and reads back the same.
+fn misread_after_runs_of(run: &RunParameters) -> Option<MisreadAfterRuns> {
+    use crate::calling::likelihood::run_context::{DistanceAfterRun, RunEntry};
+    if run.misread_after_runs().is_empty() {
+        return None;
+    }
+    let entries = run
+        .misread_after_runs()
+        .iter()
+        .flat_map(|(group, fitted)| {
+            RunEntry::all().zip(fitted).map(move |(entry, fit)| {
+                let (shortest, longest) = entry.lengths();
+                let fitted_here = fit.provenance == Provenance::FittedHere;
+                // **A fitted excess carries its error and the reads it rests on; a defaulted one
+                // neither**, which is the file's rule for every warranted number.
+                let warranted = |value: f64, standard_error: f64| WarrantedValue {
+                    value,
+                    warrant: fit.provenance.into(),
+                    observations: (fitted_here && fit.through_reads > 0)
+                        .then_some(EvidenceCount::Reads(fit.through_reads)),
+                    standard_error: fitted_here.then_some(standard_error),
+                };
+                MisreadAfterRunRow {
+                    read_group: group.get(),
+                    shortest_run: shortest as u64,
+                    longest_run: longest.map(|top| top as u64),
+                    base: match entry.distance() {
+                        DistanceAfterRun::NextBase => MisreadBase::NextBase,
+                        DistanceAfterRun::FurtherOn => MisreadBase::FurtherOn,
+                    },
+                    as_the_run: warranted(fit.excess.as_the_run, fit.standard_error.as_the_run),
+                    other_wrong: warranted(fit.excess.other_wrong, fit.standard_error.other_wrong),
+                    through_reads: fit.through_reads,
+                    arriving_first_reads: fit.arriving_first_reads,
+                }
+            })
+        })
+        .collect();
+    Some(MisreadAfterRuns { entries })
 }
 
 /// One row a read group: the multiplier and its warrant from the run, the count from whichever of
@@ -3430,7 +3489,7 @@ mod tests {
             draw_stratum, spectrum_of,
         };
         use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
-            PenalisedFitConfig, fit_repeat_tracts,
+            PenalisedFitConfig, fit_repeat_tracts_keeping_every_tract,
         };
         let class = |period: u8, repeats: u64, loci: usize, concentration: f64| {
             let truth = Slippage {
@@ -3466,7 +3525,7 @@ mod tests {
             class(3, 9, 30, 1e6),
             class(3, 10, 30, 1e6),
         ];
-        fit_repeat_tracts(
+        fit_repeat_tracts_keeping_every_tract(
             &strata,
             &vec![0.3; samples],
             &PenalisedFitConfig::production().with_allele_span(2),
@@ -3810,7 +3869,8 @@ mod one_writer_three_sources {
         .with_what_the_data_determine(
             supplied.ordinary_site_prior.fitted_density.clone(),
             supplied.duplicated_positions.clone(),
-        );
+        )
+        .with_repeat_tracts_left_out(supplied.repeat_tracts_left_out.clone());
 
         assert_eq!(written, supplied);
     }
@@ -4014,7 +4074,8 @@ mod one_writer_three_sources {
         .with_what_the_data_determine(
             supplied.ordinary_site_prior.fitted_density.clone(),
             supplied.duplicated_positions.clone(),
-        );
+        )
+        .with_repeat_tracts_left_out(supplied.repeat_tracts_left_out.clone());
 
         assert_eq!(
             written.base_quality_calibration.by_read_group[0].error_probability_multiplier,

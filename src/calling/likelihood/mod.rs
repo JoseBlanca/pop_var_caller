@@ -126,6 +126,7 @@
 //! a per-locus loop is for.
 
 pub mod generic;
+pub mod run_context;
 pub mod ssr;
 pub mod ssr_emission;
 pub mod stutter_rates;
@@ -1822,6 +1823,10 @@ impl GenericEvidenceBuffer {
 #[derive(Default, Debug)]
 pub struct SsrRowScratch<ModelScratch> {
     emissions: Vec<f64>,
+    /// The same cache for reads sequenced on the reverse strand, where the misread rate after a
+    /// long run makes them differ (`str_context_error.md`); equal to `emissions` everywhere else.
+    /// Read by the row only, never by the slippage re-fit, which takes `emissions` for every read.
+    reverse_emissions: Vec<f64>,
     candidates: usize,
     model: ModelScratch,
     /// A read and an allele respelled over a common flank extent, reused per pair
@@ -1856,6 +1861,9 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
         self.emissions.clear();
         self.emissions
             .resize(evidence.observations.len() * candidates, fill);
+        self.reverse_emissions.clear();
+        self.reverse_emissions
+            .resize(evidence.observations.len() * candidates, fill);
     }
 
     /// One cached emission, by the position the evidence's filters yield and the candidate.
@@ -1874,10 +1882,31 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
         self.emissions[self.slot(observation, candidate)]
     }
 
-    /// Write one cached emission. See [`emission_at`](Self::emission_at) for the index.
+    /// Write one cached emission, the same for reads of either strand. See
+    /// [`emission_at`](Self::emission_at) for the index.
     pub fn set_emission(&mut self, observation: usize, candidate: usize, value: f64) {
         let slot = self.slot(observation, candidate);
         self.emissions[slot] = value;
+        self.reverse_emissions[slot] = value;
+    }
+
+    /// Write one cached emission for each strand's reads: `forward` for reads sequenced left to
+    /// right, `reverse` for the others.
+    pub fn set_emission_by_strand(
+        &mut self,
+        observation: usize,
+        candidate: usize,
+        forward: f64,
+        reverse: f64,
+    ) {
+        let slot = self.slot(observation, candidate);
+        self.emissions[slot] = forward;
+        self.reverse_emissions[slot] = reverse;
+    }
+
+    /// One cached emission for reverse-strand reads; see [`emission_at`](Self::emission_at).
+    pub fn reverse_emission_at(&self, observation: usize, candidate: usize) -> f64 {
+        self.reverse_emissions[self.slot(observation, candidate)]
     }
 
     #[cfg(test)]

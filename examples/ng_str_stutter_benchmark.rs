@@ -47,7 +47,9 @@
 //!   `abutting_interrupted`) and where its reference stutters, as `motif:offset:length` from the
 //!   hull's first base: the format `ng_str_bundle_runs` writes the caller's reference runs in, so
 //!   the typing check compares the two. A file of its own, so that with `hard_bundle_share=0` every
-//!   other file is byte for byte what the simulator wrote before hard shapes existed.
+//!   other file is what the simulator wrote before hard shapes existed — byte for byte until the
+//!   scanner copy learnt the motif-change split (2026-11-02), which accepts some separated shapes
+//!   the old copy refused (`a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes`).
 //! - `libraries.tsv` — each sample's library: its stutter level and its own multiplier.
 //! - `stutter_rates.tsv` — the share of molecules that stutter, by level, motif length and
 //!   repeat count, before a library's multiplier (§3.2's table, laid out per repeat count).
@@ -114,7 +116,7 @@
 //! | `depth` | 30 | reads a position, both mates counted, averaged over the genome |
 //! | `segments_per_period` | 500 | STR segments of each motif length |
 //! | `bundles` | 500 | STR bundles, all motif lengths together; `0` lays none and leaves every other output as it was without them |
-//! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle as before hard shapes existed, byte for byte |
+//! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle separated, as before hard shapes existed |
 //! | `genome_bp` | 4000000 | the reference's length, all contigs together |
 //! | `contigs` | 4 | how many contigs the reference is cut into |
 //! | `inbreeding` | 0 | without founders, the chance a sample's two copies at a site are one draw; with them, the share of each sample's genome in autozygous runs |
@@ -268,6 +270,12 @@ const LONGEST_BUNDLE_HULL: usize = 100;
 /// The test `the_scanner_copy_uses_the_library_scores` fails when the two part.
 const SCANNER_MATCH_REWARD: i64 = 2;
 const SCANNER_MISMATCH_PENALTY: i64 = 7;
+
+/// The purity a joined tract must reach, after its clean whole-motif cut, for the typing to keep
+/// it rather than the pieces it was joined from ([`chosen_readings`]): a copy of
+/// `segment_criteria.rs`'s `DEFAULT_MIN_PURITY`, held here for the reason the scores are. The test
+/// `the_scanner_copy_uses_the_library_scores` fails when the two part.
+const TYPING_PURITY_FLOOR: f32 = 0.8;
 
 /// The redraws [`draw_bundle_shape`] makes before it gives up, far more than today's rules need; the
 /// bound turns a rule that can no longer be met into a message rather than a hang.
@@ -580,7 +588,8 @@ struct Settings {
     segments_per_period: usize,
     bundles: usize,
     /// The share of bundles laid in a hard shape ([`draw_hard_bundle_shape`]); the rest are laid
-    /// separated ([`draw_bundle_shape`]). `0` lays every bundle as before hard shapes existed.
+    /// separated ([`draw_bundle_shape`]). `0` lays every bundle separated, as before hard shapes
+    /// existed.
     hard_bundle_share: f64,
     genome_bp: usize,
     contigs: usize,
@@ -899,9 +908,11 @@ fn joined<T: std::fmt::Display>(values: impl IntoIterator<Item = T>, separator: 
 ///   bundles than in segments, most of all for motif lengths four to six.
 /// - **The typing's scanner reports exactly the members** ([`scanner_repeats`]): nothing joins
 ///   two members into one repeat, nothing stretches a member past its drawn span, and nothing
-///   in a gap clears a copy floor. Two members of one motif length — whatever their motifs,
-///   since the scanner compares each base with the one a motif length before it — are read as
-///   one repeat when the gap is too short to break the run; this is the rule that catches it.
+///   in a gap clears a copy floor. Two members of one motif — or of motifs that are rotations of
+///   each other — are read as one repeat when the gap is too short to break the run; this is the
+///   rule that catches it. Two of different motifs are split where the motif changes
+///   ([`split_at_motif_changes`]), so `(AT)6 GT (CT)6` and `A8 CC T8` pass, as the typing reads
+///   them; until 2026-10-30 they were read as one run and redrawn.
 ///
 /// # Panics
 ///
@@ -1065,8 +1076,10 @@ fn draw_hard_bundle_shape(draw: &mut Draw) -> BundleShape {
             if abuts && !left_is_homopolymer && draw.unit() < HOMOPOLYMER_TAIL_SHARE {
                 let left = &repeats[index].0;
                 let base = majority_base(left);
-                // HG002's tails follow a short repeat — `(AAAC)4 A8`, `(TTC)4 T9` — that the
-                // scanner reads by running on into the tail: three copies up to its floor.
+                // HG002's tails follow a short repeat — `(AAAC)4 A8`, `(TTC)4 T9`: three copies
+                // up to its floor. The scanner read such a lead by running on into the tail until
+                // 2026-10-30; it now splits at the junction, so a lead below its floor is not typed,
+                // and the shape passes the one-bundle rule below only with another repeat beside.
                 let floor = CALLING_FLOOR[left.len() - 1];
                 let span = floor - TAIL_LEAD_LEAST_COPIES + 1;
                 repeats[index].1 = TAIL_LEAD_LEAST_COPIES + draw.below(u64::from(span)) as u32;
@@ -1363,16 +1376,39 @@ const BUNDLE_FLANK_ATTEMPTS: usize = 1_000;
 /// zero-based half-open, in start order — this file's own copy of the typing's arithmetic, so
 /// the fixture does not change when the caller's code does:
 ///
-/// 1. For each motif length `p` from one to six, every base scores
-///    [`SCANNER_MATCH_REWARD`] if it equals the base `p` before it and loses
-///    [`SCANNER_MISMATCH_PENALTY`] otherwise; each maximal scoring stretch is one repeat
-///    (`tandem_repeat.rs`, `find_tandem_repeats`), kept when it holds two copies and its
-///    first `p` bases are not themselves a repeat of a shorter unit.
-/// 2. A repeat at least half covered by one of a shorter motif length that divides its own is
-///    the same repeat seen at a multiple of its period, and is dropped.
+/// 1. The scanner's intervals ([`scanner_intervals`]): a repeat read across a change of motif
+///    is split there, and one joined across a short interruption comes with the pieces it was
+///    joined from.
+/// 2. One reading of each joined tract, by the typing's purity floor ([`chosen_readings`];
+///    `segment_criteria.rs`, `chosen_readings`).
 /// 3. What is left must clear the calling copy floor ([`CALLING_FLOOR`]) to count
 ///    (`segment_criteria.rs`, `prefilter`).
+///
+/// The typing's admission gates after that (purity, clean cut, compound motif) are not copied: a
+/// shape's rules are written on these repeats.
 fn scanner_repeats(bases: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut kept = chosen_readings(scanner_intervals(bases), bases);
+    kept.retain(|(start, end, period)| {
+        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+    });
+    kept.sort_unstable();
+    kept
+}
+
+/// **Every interval the typing's scanner returns for `bases`**, as `(start, end, period)`,
+/// zero-based half-open, sorted by period, start and longest first — the copy of
+/// `tandem_repeat.rs`'s `find_tandem_repeats`, before any reading is chosen or floor applied:
+///
+/// 1. For each motif length `p` from one to six, every base scores
+///    [`SCANNER_MATCH_REWARD`] if it equals the base `p` before it and loses
+///    [`SCANNER_MISMATCH_PENALTY`] otherwise; each maximal scoring stretch is cut where its motif
+///    changes ([`split_at_motif_changes`]), and each tract that gives is kept when it holds two
+///    copies and its first `p` bases are not themselves a repeat of a shorter unit.
+/// 2. A repeat at least half covered by one of a shorter motif length that divides its own is
+///    the same repeat seen at a multiple of its period, and is dropped. A piece nested inside a
+///    kept joined tract of its own period is never the one that covers: the tract around it
+///    covers at least as much.
+fn scanner_intervals(bases: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut found: Vec<(usize, usize, usize)> = Vec::new();
     for period in 1..=6_usize {
         if period >= bases.len() {
@@ -1390,33 +1426,262 @@ fn scanner_repeats(bases: &[u8]) -> Vec<(usize, usize, usize)> {
         let mut stretches = Vec::new();
         maximal_scoring_stretches(&scores, 0, &mut stretches);
         for (first, last) in stretches {
-            let (start, end) = (first, last + period + 1);
-            if (end - start) / period >= 2 && is_primitive(&bases[start..start + period]) {
-                found.push((start, end, period));
+            for (first, last) in split_at_motif_changes(bases, period, first, last) {
+                let (start, end) = (first, last + period + 1);
+                if (end - start) / period >= 2 && is_primitive(&bases[start..start + period]) {
+                    found.push((start, end, period));
+                }
             }
         }
     }
-    found.sort_by_key(|(start, _, period)| (*period, *start));
+    found.sort_by_key(|(start, end, period)| (*period, *start, std::cmp::Reverse(*end)));
+    // The repeats a longer period is checked against: those kept and not nested in another.
+    let mut covering: Vec<(usize, usize, usize)> = Vec::new();
+    // The furthest end so far of this period's covering repeats, and the period.
+    let mut reach = (0, 0);
     let mut kept: Vec<(usize, usize, usize)> = Vec::with_capacity(found.len());
     for (start, end, period) in found {
+        let nested = reach.0 == period && end <= reach.1;
         let len = end - start;
-        let seen_shorter = kept.iter().any(|(other_start, other_end, other_period)| {
-            *other_period < period
-                && period.is_multiple_of(*other_period)
-                && 2 * (*other_end)
-                    .min(end)
-                    .saturating_sub((*other_start).max(start))
-                    >= len
-        });
-        if !seen_shorter {
-            kept.push((start, end, period));
+        let seen_shorter = covering
+            .iter()
+            .any(|(other_start, other_end, other_period)| {
+                *other_period < period
+                    && period.is_multiple_of(*other_period)
+                    && 2 * (*other_end)
+                        .min(end)
+                        .saturating_sub((*other_start).max(start))
+                        >= len
+            });
+        if seen_shorter {
+            continue;
+        }
+        if !nested {
+            reach = (period, end);
+            covering.push((start, end, period));
+        }
+        kept.push((start, end, period));
+    }
+    kept
+}
+
+/// **One maximal scoring stretch, `first..=last` in score indices, cut where its motif changes**
+/// (`tandem_repeat.rs`, `split_at_motif_changes`; `ssr_repeat_scanner.md` §3.4a), as score-index
+/// pairs. Comparing each base with the one `period` back is as true inside a run of `T` as inside
+/// `(CTTT)n`, so `(CTTT)4 T8` scores as one stretch; the typing reads it as two repeats.
+///
+/// - **A solid block** is a run of at least `period` consecutive matches — two whole copies. Its
+///   motif is its first `period` bases, compared up to rotation, so a substitution (too few
+///   matches to make a block) and an indel (a rotation of the motif) change nothing, and a
+///   different repeat starts a new piece. The mismatches between two pieces belong to neither.
+/// - **An interruption is absorbed** when its piece's neighbours share a motif: the nearest
+///   earlier piece of the new piece's motif, everything after it and the new piece become one,
+///   provided the joined tract matches that motif, tiled in the phase of the earlier piece's last
+///   block, at the scoring's own tolerance — penalty / (reward + penalty), 7/9 at the defaults.
+/// - **A piece at either end is never absorbed**: nothing of the first motif follows it.
+///
+/// A joined piece is returned **with the pieces it was joined from**, after it; which reading the
+/// typing keeps is [`chosen_readings`]' question. A stretch of one motif is returned whole.
+fn split_at_motif_changes(
+    bases: &[u8],
+    period: usize,
+    first: usize,
+    last: usize,
+) -> Vec<(usize, usize)> {
+    let is_match = |index: usize| bases[index + period] == bases[index];
+    let same_motif = |one: usize, other: usize| {
+        let (one, other) = (&bases[one..one + period], &bases[other..other + period]);
+        (0..period).any(|turn| (0..period).all(|at| one[at] == other[(at + turn) % period]))
+    };
+    // How many bases in `from..to` equal the motif read at `motif_at`, tiled in its phase.
+    let in_phase = |motif_at: usize, from: usize, to: usize| {
+        (from..to)
+            .filter(|&at| {
+                bases[at] == bases[motif_at + (at % period + period - motif_at % period) % period]
+            })
+            .count() as i64
+    };
+    let (reward, penalty) = (SCANNER_MATCH_REWARD, SCANNER_MISMATCH_PENALTY);
+
+    // Every piece as cut, before absorption.
+    let mut cut: Vec<(usize, usize)> = Vec::new();
+    // The pieces after absorption: first and last score index, where its motif is read, the bases
+    // of its tract matching that motif in phase, and the first of `cut` it holds. A piece's tract
+    // is its score indices widened by `period + 1`, as the stretch's is.
+    let mut pieces: Vec<(usize, usize, usize, i64, usize)> = Vec::new();
+    let push = |pieces: &mut Vec<(usize, usize, usize, i64, usize)>,
+                cut: &mut Vec<(usize, usize)>,
+                (from, to, motif_at): (usize, usize, usize)| {
+        pieces.push((
+            from,
+            to,
+            motif_at,
+            in_phase(motif_at, from, to + period + 1),
+            cut.len(),
+        ));
+        cut.push((from, to));
+        loop {
+            let right = pieces[pieces.len() - 1];
+            let Some(earlier) = (0..pieces.len() - 1)
+                .rev()
+                .find(|&index| same_motif(pieces[index].2, right.2))
+            else {
+                return;
+            };
+            let left = pieces[earlier];
+            let (left_end, right_end) = (left.1 + period + 1, right.1 + period + 1);
+            let matches = left.3 + in_phase(left.2, left_end, right_end.max(left_end));
+            if matches * (reward + penalty) < penalty * (right_end - left.0) as i64 {
+                return;
+            }
+            pieces.truncate(earlier);
+            pieces.push((left.0, right.1, left.2, matches, left.4));
+        }
+    };
+
+    // The open piece: where it starts, its current motif's block, and its last block's end.
+    let mut piece_start = first;
+    let mut motif_at: Option<usize> = None;
+    let mut last_block_end = first;
+    let mut index = first;
+    while index <= last {
+        if !is_match(index) {
+            index += 1;
+            continue;
+        }
+        let block_start = index;
+        while index <= last && is_match(index) {
+            index += 1;
+        }
+        let block_end = index - 1;
+        if block_end + 1 - block_start < period {
+            continue;
+        }
+        if let Some(motif) = motif_at
+            && !same_motif(motif, block_start)
+        {
+            push(&mut pieces, &mut cut, (piece_start, last_block_end, motif));
+            piece_start = block_start;
+        }
+        motif_at = Some(block_start);
+        last_block_end = block_end;
+    }
+    let (Some(last_motif), false) = (motif_at, pieces.is_empty()) else {
+        return vec![(first, last)];
+    };
+    push(&mut pieces, &mut cut, (piece_start, last, last_motif));
+
+    let mut out = Vec::new();
+    for (index, &(from, to, _, _, first_cut)) in pieces.iter().enumerate() {
+        out.push((from, to));
+        let end_cut = pieces.get(index + 1).map_or(cut.len(), |next| next.4);
+        if end_cut - first_cut > 1 {
+            out.extend_from_slice(&cut[first_cut..end_cut]);
         }
     }
-    kept.retain(|(start, end, period)| {
-        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+    out
+}
+
+/// **One reading of each joined tract**, as the typing chooses it (`segment_criteria.rs`,
+/// `choose_readings`): `intervals` with, for each tract that has pieces nested inside it at its own
+/// period, either the tract or its pieces left out. The tract stays when it has a clean
+/// whole-motif cut and the cut tract is at least [`TYPING_PURITY_FLOOR`] pure
+/// ([`joined_passes_purity_floor`]); otherwise its pieces stay. The scanner absorbs at its own
+/// tolerance, 7/9, below the typing's floor, which is why the choice is the typing's.
+fn chosen_readings(
+    intervals: Vec<(usize, usize, usize)>,
+    bases: &[u8],
+) -> Vec<(usize, usize, usize)> {
+    let mut keep = vec![true; intervals.len()];
+    let mut order: Vec<usize> = (0..intervals.len()).collect();
+    order.sort_by_key(|&index| {
+        let (start, end, period) = intervals[index];
+        (period, start, std::cmp::Reverse(end))
     });
-    kept.sort_unstable();
-    kept
+    let mut settle = |enclosing: Option<usize>, inside: &mut Vec<usize>| {
+        if let (Some(joined), false) = (enclosing, inside.is_empty()) {
+            if joined_passes_purity_floor(intervals[joined], bases) {
+                inside.iter().for_each(|&index| keep[index] = false);
+            } else {
+                keep[joined] = false;
+            }
+        }
+        inside.clear();
+    };
+    let mut enclosing: Option<usize> = None;
+    let mut inside: Vec<usize> = Vec::new();
+    for index in order {
+        let (start, end, period) = intervals[index];
+        let nested = enclosing.is_some_and(|outer| {
+            let (outer_start, outer_end, outer_period) = intervals[outer];
+            outer_period == period && start >= outer_start && end <= outer_end
+        });
+        if nested {
+            inside.push(index);
+        } else {
+            settle(enclosing, &mut inside);
+            enclosing = Some(index);
+        }
+    }
+    settle(enclosing, &mut inside);
+    intervals
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(interval, kept)| kept.then_some(interval))
+        .collect()
+}
+
+/// Whether the typing keeps a joined tract over its pieces (`segment_criteria.rs`,
+/// `joined_passes_on_bases`): the motif is the tract's first `period` bases, the tract has a clean
+/// whole-motif cut ([`minimal_trim`]), and the cut tract matches that motif, tiled from its first
+/// base, at [`TYPING_PURITY_FLOOR`] or more of its bases.
+fn joined_passes_purity_floor((start, end, period): (usize, usize, usize), bases: &[u8]) -> bool {
+    let tract = &bases[start..end];
+    let Some(motif) = tract.get(..period) else {
+        return false;
+    };
+    minimal_trim(tract, motif).is_some_and(|(from, to)| {
+        let cut = &tract[from..to];
+        let matches = cut
+            .iter()
+            .enumerate()
+            .filter(|(at, base)| **base == motif[at % period])
+            .count();
+        !cut.is_empty() && matches as f32 / cut.len() as f32 >= TYPING_PURITY_FLOOR
+    })
+}
+
+/// A tract's clean whole-motif cut, as offsets into it (`segment_criteria.rs`, `minimal_trim`):
+/// the first place two copies of `motif` start and the last place two end, each within
+/// `min(3 · |motif|, |tract| / 2)` of its end; `None` if either is missing or they cross.
+fn minimal_trim(tract: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
+    let len = motif.len();
+    let two_copies_len = 2 * len;
+    let max_trim = (3 * len).min(tract.len() / 2);
+    let two_copies = |slice: &[u8]| slice[..len] == *motif && slice[len..] == *motif;
+    let mut from = None;
+    for offset in 0..=max_trim {
+        if offset + two_copies_len >= tract.len() {
+            return None;
+        }
+        if two_copies(&tract[offset..offset + two_copies_len]) {
+            from = Some(offset);
+            break;
+        }
+    }
+    let from = from?;
+    let mut to = None;
+    for offset in (tract.len().saturating_sub(max_trim)..=tract.len()).rev() {
+        if offset < two_copies_len {
+            return None;
+        }
+        if two_copies(&tract[offset - two_copies_len..offset]) {
+            to = Some(offset);
+            break;
+        }
+    }
+    let to = to?;
+    (from < to).then_some((from, to))
 }
 
 /// The maximal scoring stretches of `scores`, as inclusive index pairs offset by `offset`:
@@ -1574,14 +1839,12 @@ fn build_reference(
 ///
 /// The shape was accepted on its hull and a spacer either side ([`scanner_probe`]), but the
 /// typing scans the flanks too, and a repeat can read on through a one-base spacer into them:
-/// `(AAT)6 A8` followed by the spacer `C` and a flank starting `AACA…` was typed five bases
-/// longer than laid. So once the flanks are drawn the scanner copy is run again over them, and the
-/// flanks are redrawn until the typing sees the bundle as accepted — the drawn members for a
-/// separated shape, one bundle over exactly the hull for a hard one. A shape accepted at the first
-/// try costs no extra draw. Separated shapes nearly always are (all but 2 of 20,000,
-/// `separated_bundles_rarely_need_new_flanks`), so a zero hard share lays what the build before
-/// hard shapes laid wherever that was typed as laid; where it was not, that build's run stopped at
-/// the typing check.
+/// `G9 CCTTATTA T8` followed by the spacer `A` and a flank starting `TTATGA…` is typed as a `TTA`
+/// repeat five bases past the hull. So once the flanks are drawn the scanner copy is run again over
+/// them, and the flanks are redrawn until the typing sees the bundle as accepted — the drawn
+/// members for a separated shape, one bundle over exactly the hull for a hard one. A shape accepted
+/// at the first try costs no extra draw. Separated shapes nearly always are (all but 1 of 100,000,
+/// `separated_bundles_rarely_need_new_flanks`).
 ///
 /// # Panics
 ///
@@ -4233,16 +4496,64 @@ mod tests {
         );
     }
 
-    /// **The scanner copy finds what the library's scanner finds**, after the calling copy floor,
-    /// on bundle-like sequences whose gaps follow no rule — so the copy cannot drift from
-    /// `tandem_repeat::find_tandem_repeats` without this test saying so. The copy stays the
-    /// fixture's own; this only reports when the two part.
-    #[test]
-    fn the_scanner_copy_agrees_with_the_library_scanner() {
+    /// What the library finds in `bases`, each list sorted and at the calling copy floor: every
+    /// interval `find_tandem_repeats` returns — a joined tract and its pieces both — and the
+    /// intervals left once `chosen_readings` has kept one reading of each joined tract at the
+    /// typing's default purity floor, which is what the typing goes on to read.
+    type LibraryRepeats = (Vec<(usize, usize, usize)>, Vec<(usize, usize, usize)>);
+    fn library_repeats(bases: &[u8]) -> LibraryRepeats {
+        use pop_var_caller::region_typing::segment_criteria::{
+            SsrSegmentCriteria, chosen_readings,
+        };
         use pop_var_caller::tandem_repeat::{PeriodRange, ScanParams, find_tandem_repeats};
         let periods = PeriodRange::new(1, 6).expect("1..=6 is a valid range");
+        let found = find_tandem_repeats(bases, periods, &ScanParams::default());
+        let at_the_floor = |intervals: Vec<pop_var_caller::tandem_repeat::RepeatInterval>| {
+            let mut kept: Vec<(usize, usize, usize)> = intervals
+                .into_iter()
+                .map(|one| {
+                    (
+                        one.start as usize,
+                        one.end as usize,
+                        usize::from(one.period),
+                    )
+                })
+                .filter(|(start, end, period)| {
+                    (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+                })
+                .collect();
+            kept.sort_unstable();
+            kept
+        };
+        let typed = chosen_readings(found.clone(), bases, &SsrSegmentCriteria::default());
+        (at_the_floor(found), at_the_floor(typed))
+    }
+
+    /// The copy's intervals at the calling floor, sorted, to compare with [`library_repeats`]'
+    /// first list.
+    fn copy_intervals_at_the_floor(bases: &[u8]) -> Vec<(usize, usize, usize)> {
+        let mut kept: Vec<(usize, usize, usize)> = scanner_intervals(bases)
+            .into_iter()
+            .filter(|(start, end, period)| {
+                (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+            })
+            .collect();
+        kept.sort_unstable();
+        kept
+    }
+
+    /// **The scanner copy finds what the library's scanner finds**, after the calling copy floor,
+    /// on bundle-like sequences whose gaps follow no rule — so the copy cannot drift from
+    /// `tandem_repeat::find_tandem_repeats` without this test saying so. Two comparisons, since
+    /// 2026-10-30 the scanner returns a joined tract together with the pieces it was joined from:
+    /// every interval ([`scanner_intervals`] against `find_tandem_repeats`), and the repeats the
+    /// typing reads once one reading of each joined tract is chosen ([`scanner_repeats`] against
+    /// `segment_criteria::chosen_readings`), which is what a shape is accepted on. The copy stays
+    /// the fixture's own; this only reports when the two part.
+    #[test]
+    fn the_scanner_copy_agrees_with_the_library_scanner() {
         let mut draw = Draw::new(29);
-        let mut differing = 0;
+        let (mut differing, mut differing_typed, mut with_two_readings) = (0, 0, 0);
         for _ in 0..3_000 {
             let mut bases = Vec::new();
             append_aperiodic(&mut bases, 20, &mut draw);
@@ -4256,28 +4567,18 @@ mod tests {
                 }
             }
             append_aperiodic(&mut bases, 20, &mut draw);
-            let library: Vec<(usize, usize, usize)> =
-                find_tandem_repeats(&bases, periods, &ScanParams::default())
-                    .into_iter()
-                    .map(|one| {
-                        (
-                            one.start as usize,
-                            one.end as usize,
-                            usize::from(one.period),
-                        )
-                    })
-                    .filter(|(start, end, period)| {
-                        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
-                    })
-                    .collect();
-            let mut library = library;
-            library.sort_unstable();
-            differing += usize::from(scanner_repeats(&bases) != library);
+            let (library, library_typed) = library_repeats(&bases);
+            differing += usize::from(copy_intervals_at_the_floor(&bases) != library);
+            differing_typed += usize::from(scanner_repeats(&bases) != library_typed);
+            with_two_readings += usize::from(library != library_typed);
         }
         assert_eq!(
-            differing, 0,
-            "{differing} of 3000 sequences scanned differently"
+            (differing, differing_typed),
+            (0, 0),
+            "of 3000 sequences, {differing} scanned and {differing_typed} read differently"
         );
+        // The second comparison is not the first again: some sequences hold a joined tract.
+        assert!(with_two_readings > 0);
     }
 
     /// **A zero hard share lays the bundles laid before hard shapes existed**: the truth VCF and the
@@ -4286,6 +4587,16 @@ mod tests {
     /// taken from this build at share 0, after every output file of a full run on these settings
     /// was compared byte for byte with the build before hard shapes and found equal
     /// (`str_stutter_benchmark.md` §11.4); the comparison is the evidence, the hash guards it.
+    ///
+    /// **Re-recorded 2026-11-02, when the scanner copy learnt the library's split at a motif
+    /// change** (2026-10-30). The draw is the same; what changed is which candidate shapes the
+    /// copy accepts. The stale copy read two neighbouring runs of different motifs as one and
+    /// refused them; the library, and now the copy, read them as the two members they are. Of
+    /// 200,000 candidate separated shapes, 2,792 (1.4%) are accepted now and were refused before,
+    /// and none the other way. Here the sixth shape drawn is the first to differ: `A8 CGATAGGATAA
+    /// T21 C A9`, refused before, is accepted now, and every draw after it moves. With the stale
+    /// copy swapped back in, this build gives the old hash, `0xe542_83ee_1512_eb5b`, so nothing
+    /// else changed. The identity with the build before hard shapes no longer holds byte for byte.
     #[test]
     fn a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes() {
         let settings = Settings {
@@ -4318,17 +4629,16 @@ mod tests {
     }
 
     /// The hash [`a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes`] expects.
-    const ZERO_HARD_SHARE_HASH: u64 = 0xe542_83ee_1512_eb5b;
+    const ZERO_HARD_SHARE_HASH: u64 = 0x8368_abfc_65cb_a0e1;
 
     /// Every hard shape keeps its rules: not the separated kind; every member at least one copy; a
     /// hull of at most 100 bases; two abutting members never of one motif; at least one abutting
     /// junction or interruption, as its kind says; and the scanner's arithmetic — which agrees with
-    /// the library's scanner on these hulls too — sees one bundle over exactly the hull. And the
-    /// kinds all turn up, with members nested or overlapping in a good share of them, as on HG002.
+    /// the library's scanner and reading choice on these hulls too ([`library_repeats`]) — sees
+    /// one bundle over exactly the hull. And the kinds all turn up, with members nested or
+    /// overlapping in a good share of them, as on HG002.
     #[test]
     fn hard_shapes_keep_their_rules() {
-        use pop_var_caller::tandem_repeat::{PeriodRange, ScanParams, find_tandem_repeats};
-        let periods = PeriodRange::new(1, 6).expect("1..=6 is a valid range");
         let mut draw = Draw::new(31);
         let mut kinds = std::collections::HashMap::new();
         let mut nested_or_overlapping = 0;
@@ -4381,23 +4691,10 @@ mod tests {
             append_spacer(&mut probe, shape.first_motif());
             probe.extend(shape.spell(&shape.reference_repeats()));
             append_spacer(&mut probe, shape.last_motif());
-            let mut library: Vec<(usize, usize, usize)> =
-                find_tandem_repeats(&probe, periods, &ScanParams::default())
-                    .into_iter()
-                    .map(|one| {
-                        (
-                            one.start as usize,
-                            one.end as usize,
-                            usize::from(one.period),
-                        )
-                    })
-                    .filter(|(start, end, period)| {
-                        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
-                    })
-                    .collect();
-            library.sort_unstable();
+            let (library, library_typed) = library_repeats(&probe);
+            assert_eq!(copy_intervals_at_the_floor(&probe), library, "{shape:?}");
             let found = scanner_repeats(&probe);
-            assert_eq!(found, library, "{shape:?}");
+            assert_eq!(found, library_typed, "{shape:?}");
             nested_or_overlapping +=
                 usize::from(found.windows(2).any(|pair| pair[1].0 < pair[0].1));
         }
@@ -4530,42 +4827,64 @@ mod tests {
         assert!(without_sites > 0, "no hard bundle without a run");
     }
 
-    /// **A repeat that reads on into the flank is caught when the bundle is laid**: `(AAT)6 A8`
-    /// passes the hull-and-spacers check, but with the flank one hard-only run laid after it
-    /// (`C` spacer, then `AACAG…`) the scanner reads the `AAT` repeat five bases past the hull —
-    /// the typing check's one failure in 3,000 shapes before [`lay_bundle`] re-scanned the flanks.
-    /// Laid now, the same shape gets flanks the typing sees it through exactly; and every bundle of
-    /// a hard-only cohort is typed over exactly its hull with the flanks around it.
+    /// **A repeat that reads on into the flank is caught when the bundle is laid**. `G9 CCTTATTA
+    /// T8` passes the hull-and-spacers check, but with the flanks one draw gave it (`…CGGCA`
+    /// before, the `A` spacer and `TTATGA…` after) the scanner reads a `TTA` repeat from the gap
+    /// on through the `T` run, five bases past the hull — the one separated shape in 100,000 that
+    /// [`lay_bundle`] must give new flanks (`separated_bundles_rarely_need_new_flanks`). Laid now,
+    /// it gets flanks the typing sees it through exactly; and every bundle of a hard-only cohort is
+    /// typed over exactly its hull with the flanks around it.
+    ///
+    /// The case this test was written for, `(AAT)6 A8` followed by the spacer `C` and a flank
+    /// starting `AACAG…`, the typing check's one failure in 3,000 hard shapes before [`lay_bundle`]
+    /// re-scanned the flanks, no longer reads past the hull: since 2026-10-30 the scanner splits the
+    /// `AAT` repeat where the `A` run starts, so the run cannot carry it into the flank.
     #[test]
     fn a_bundle_is_never_typed_past_its_flanks() {
         let shape = BundleShape {
-            members: vec![(b"AAT".to_vec(), 6), (b"A".to_vec(), 8)],
-            gaps: vec![Vec::new()],
-            kind: BundleShapeKind::Abutting,
+            members: vec![(b"G".to_vec(), 9), (b"T".to_vec(), 8)],
+            gaps: vec![b"CCTTATTA".to_vec()],
+            kind: BundleShapeKind::Separated,
         };
-        assert!(scanner_reports_one_bundle_over_the_hull(&shape));
-        let left = b"TCATGAGGTAGCGGTTAGCCATTAACTCCA";
-        let right = b"CAACAGAGGTGCGTCAGGCCAAGCATTGCAACGTCCGCAT";
+        assert!(scanner_reports_exactly_the_members(&shape));
+        let left = b"CCGGTTCTGATGAGCATCTGTTATACGGCA";
+        let right = b"ATTATGACCTCCGATGAGTATGTTGGTTAACAGGTATATC";
         let hull = shape.spell(&shape.reference_repeats());
-        assert_eq!(hull, b"AATAATAATAATAATAATAAAAAAAA");
+        assert_eq!(hull, b"GGGGGGGGGCCTTATTATTTTTTTT");
         let as_laid_then = [&left[..], &hull, &right[..]].concat();
-        assert!(!scanner_types_one_bundle_over(
+        assert!(!scanner_finds_exactly_the_members(
+            &shape,
             &as_laid_then,
-            left.len(),
-            left.len() + hull.len()
+            left.len()
         ));
-
+        // The library reads it so too.
+        assert_eq!(
+            library_repeats(&as_laid_then).1,
+            scanner_repeats(&as_laid_then)
+        );
         for seed in 0..50 {
             let mut bases = Vec::new();
             append_aperiodic(&mut bases, 200, &mut Draw::new(seed));
             let start = lay_bundle(&mut bases, &shape, &mut Draw::new(seed + 1_000));
             assert_eq!(&bases[start..start + hull.len()], &hull[..]);
-            assert!(scanner_types_one_bundle_over(
-                &bases,
-                start,
-                start + hull.len()
-            ));
+            assert!(scanner_finds_exactly_the_members(&shape, &bases, start));
         }
+
+        let first_case = BundleShape {
+            members: vec![(b"AAT".to_vec(), 6), (b"A".to_vec(), 8)],
+            gaps: vec![Vec::new()],
+            kind: BundleShapeKind::Abutting,
+        };
+        let left = b"TCATGAGGTAGCGGTTAGCCATTAACTCCA";
+        let right = b"CAACAGAGGTGCGTCAGGCCAAGCATTGCAACGTCCGCAT";
+        let hull = first_case.spell(&first_case.reference_repeats());
+        assert_eq!(hull, b"AATAATAATAATAATAATAAAAAAAA");
+        let as_laid_then = [&left[..], &hull, &right[..]].concat();
+        assert!(scanner_types_one_bundle_over(
+            &as_laid_then,
+            left.len(),
+            left.len() + hull.len()
+        ));
 
         let settings = Settings {
             samples: 1,
@@ -4595,17 +4914,21 @@ mod tests {
     }
 
     /// **A separated bundle almost always passes with the first flanks drawn**, and [`lay_bundle`]
-    /// spends extra draws only on the ones that do not. Measured: of 20,000 separated shapes, each
-    /// given one draw of flanks as the build before hard shapes laid them, 2 were typed otherwise —
-    /// `T8 A (TC)6` after a flank ending `…GATATAT`, the `TC` repeat read back into the flank; and
-    /// `(TG)7 GT G8` before a flank starting `AGGAG…`, read on as a `GGA`-like repeat. Each would
-    /// have stopped the run at the typing check. So a zero hard share lays byte for byte what it
-    /// laid before wherever that was typed as laid, and redraws the flanks where it was not.
+    /// spends extra draws only on the ones that do not. Measured: of 100,000 separated shapes, each
+    /// given one draw of flanks, 1 is typed otherwise — `G9 CCTTATTA T8` before a flank starting
+    /// `ATTATGA…`, a `TTA` repeat read on through the `T` run into it
+    /// (`a_bundle_is_never_typed_past_its_flanks`). It would have stopped the run at the typing
+    /// check.
+    ///
+    /// Before the scanner split repeats where their motif changes (2026-10-30), 2 of the first
+    /// 20,000 failed — `T8 A (TC)6` after a flank ending `…GATATAT`, the `TC` repeat read back into
+    /// the flank; and `(TG)7 GT G8` before a flank starting `AGGAG…`, read on as a `GGA`-like
+    /// repeat. Both now stop where their motif changes.
     #[test]
     fn separated_bundles_rarely_need_new_flanks() {
         let mut draw = Draw::new(41);
         let mut failing = 0;
-        for _ in 0..20_000 {
+        for _ in 0..100_000 {
             let shape = draw_bundle_shape(&mut draw);
             let mut bases = Vec::new();
             append_aperiodic(&mut bases, 50, &mut draw);
@@ -4627,20 +4950,24 @@ mod tests {
                 ));
             }
         }
-        assert_eq!(failing, 2);
+        assert_eq!(failing, 1);
     }
 
-    /// The scanner copy's scores and the widest gap laid are the library's, so a retuned scanner or
-    /// bundle radius in `src/` shows up here rather than as different bundles.
+    /// The scanner copy's scores, the typing's purity floor and the widest gap laid are the
+    /// library's, so a retuned scanner, purity floor or bundle radius in `src/` shows up here
+    /// rather than as different bundles.
     #[test]
     fn the_scanner_copy_uses_the_library_scores() {
-        use pop_var_caller::region_typing::segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
+        use pop_var_caller::region_typing::segment_criteria::{
+            DEFAULT_BUNDLE_THRESHOLD, DEFAULT_MIN_PURITY,
+        };
         use pop_var_caller::tandem_repeat::{DEFAULT_MATCH_REWARD, DEFAULT_MISMATCH_PENALTY};
         assert_eq!(SCANNER_MATCH_REWARD, i64::from(DEFAULT_MATCH_REWARD));
         assert_eq!(
             SCANNER_MISMATCH_PENALTY,
             i64::from(DEFAULT_MISMATCH_PENALTY)
         );
+        assert_eq!(TYPING_PURITY_FLOOR, DEFAULT_MIN_PURITY);
         assert_eq!(LONGEST_BUNDLE_GAP as u64, DEFAULT_BUNDLE_THRESHOLD - 1);
     }
 }

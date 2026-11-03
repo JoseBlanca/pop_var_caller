@@ -66,6 +66,7 @@
 //! frozen.
 
 use super::ContaminationView;
+use super::run_context::{ReadDirection, a_run_may_reach_a_charged_length};
 use super::ssr_emission::{
     BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over,
 };
@@ -747,19 +748,32 @@ pub fn genotype_log_likelihood_row<Model: SsrEmissionModel>(
             // copy carries is skipped rather than multiplied by zero, which is what keeps the
             // cost proportional to the ploidy rather than to the candidate count.
             let mut explained_by_this_genotype = 0.0;
+            let mut explained_for_reverse_reads = 0.0;
             for (candidate, &copies) in carried_copies.iter().enumerate() {
                 if copies == 0 {
                     continue;
                 }
                 explained_by_this_genotype +=
                     copy_share[copies as usize] * scratch.emission_at(position, candidate);
+                explained_for_reverse_reads +=
+                    copy_share[copies as usize] * scratch.reverse_emission_at(position, candidate);
             }
-            slot.0 += reads
-                * float::ln(
-                    from_this_individual * explained_by_this_genotype
+            let bracket = |explained: f64| {
+                float::ln(
+                    from_this_individual * explained
                         + from_the_junk_distribution
                         + from_the_contaminant,
-                );
+                )
+            };
+            // **Each strand's reads under their own emission where the two differ**
+            // (`str_context_error.md`); where they agree, the one sum as before, bit for bit.
+            if explained_by_this_genotype.to_bits() == explained_for_reverse_reads.to_bits() {
+                slot.0 += reads * bracket(explained_by_this_genotype);
+            } else {
+                let forward_reads = f64::from(observation.num_fwd.min(observation.num_obs));
+                slot.0 += forward_reads * bracket(explained_by_this_genotype)
+                    + (reads - forward_reads) * bracket(explained_for_reverse_reads);
+            }
         }
     }
 
@@ -808,87 +822,34 @@ fn fill_emissions<Model: SsrEmissionModel>(
             // still counts for that allele, at that price, rather than for nothing (HG002 at 30×:
             // two reads of an 11-`C` allele missing the base before the run, 2026-10-11).
             let context = contexts.of(observation.read_group, candidate);
-            let scored = if observation.flank_deletion == allele.flank_deletion {
-                model.emission(
-                    &observation.bases,
-                    allele,
-                    context,
-                    scratch.model_scratch_mut(),
-                )
-            } else {
-                let wider = crate::locus_generation::FlankDeletion {
-                    left: observation
-                        .flank_deletion
-                        .left
-                        .max(allele.flank_deletion.left),
-                    right: observation
-                        .flank_deletion
-                        .right
-                        .max(allele.flank_deletion.right),
+            // **Scored once per strand where a long run sits in or beside the candidate**
+            // (`str_context_error.md`): a read sequenced through the run misreads the bases after
+            // it, and only the reads of one strand were. Everywhere else one score serves both.
+            if a_run_may_reach_a_charged_length_beside(allele, context) {
+                let scored_from = |direction| SsrScoringContext {
+                    read_direction: Some(direction),
+                    flanks_for_run_context: allele.reference_flanks,
+                    ..*context
                 };
-                let (read_over, allele_over) = &mut scratch.respelled;
-                let respelled = respelled_over(
-                    &observation.bases,
-                    observation.flank_deletion,
-                    wider,
-                    allele.reference_flanks,
-                    read_over,
-                )
-                .and_then(|()| {
-                    respelled_over(
-                        allele.bases,
-                        allele.flank_deletion,
-                        wider,
-                        allele.reference_flanks,
-                        allele_over,
-                    )
-                });
-                match respelled {
-                    Some(()) if read_over.len() == allele_over.len() => {
-                        let (read_over, allele_over) =
-                            (std::mem::take(read_over), std::mem::take(allele_over));
-                        let scored = model.emission(
-                            &read_over,
-                            &SsrCandidate {
-                                bases: &allele_over,
-                                // A bundle allele respelled over the wider extent carries the
-                                // flank bases it was given in front, and its runs move with it.
-                                bundle: allele.bundle.map(|bundle| BundleCandidate {
-                                    leading_flank_bases: bundle.leading_flank_bases
-                                        + u32::from(wider.left - allele.flank_deletion.left),
-                                    ..bundle
-                                }),
-                                ..*allele
-                            },
-                            context,
-                            scratch.model_scratch_mut(),
-                        );
-                        scratch.respelled = (read_over, allele_over);
-                        scored
-                    }
-                    _ => {
-                        let read_flank = i64::from(observation.flank_deletion.left)
-                            + i64::from(observation.flank_deletion.right);
-                        let allele_flank = i64::from(allele.flank_deletion.left)
-                            + i64::from(allele.flank_deletion.right);
-                        let flank_change = context
-                            .stutter
-                            .flank_length_change_probability(allele_flank - read_flank);
-                        if flank_change > 0.0 {
-                            flank_change
-                                * model.emission(
-                                    &observation.bases,
-                                    allele,
-                                    context,
-                                    scratch.model_scratch_mut(),
-                                )
-                        } else {
-                            0.0
-                        }
-                    }
-                }
-            };
-            scratch.set_emission(position, candidate, scored);
+                let forward = complete_emission(
+                    model,
+                    observation,
+                    allele,
+                    &scored_from(ReadDirection::Forward),
+                    scratch,
+                );
+                let reverse = complete_emission(
+                    model,
+                    observation,
+                    allele,
+                    &scored_from(ReadDirection::Reverse),
+                    scratch,
+                );
+                scratch.set_emission_by_strand(position, candidate, forward, reverse);
+            } else {
+                let scored = complete_emission(model, observation, allele, context, scratch);
+                scratch.set_emission(position, candidate, scored);
+            }
         }
     }
 
@@ -936,6 +897,129 @@ fn fill_emissions<Model: SsrEmissionModel>(
                 None => 0.5 * from(HeldFlank::Left) + 0.5 * from(HeldFlank::Right),
             };
             scratch.set_emission(position, candidate, scored);
+        }
+    }
+}
+
+/// Whether a repeat in `allele`, or beside it in the locus's flanks, is long enough to be charged
+/// or one unit short of it ([`a_run_may_reach_a_charged_length`]).
+fn a_run_may_reach_a_charged_length_beside(
+    allele: &SsrCandidate<'_>,
+    context: &SsrScoringContext<'_>,
+) -> bool {
+    let (left, right) = allele.reference_flanks;
+    a_run_may_reach_a_charged_length(
+        left.iter().chain(allele.bases).chain(right),
+        context.misread_after_runs,
+    )
+}
+
+/// **`context` with the flanks the run context reads cut back to what lies outside `extent`**:
+/// a sequence over a flank extent already covers that many flank bases on each side — deleted at
+/// an edge-deletion allele, spelled out where it was respelled over a wider extent — so the bases
+/// before and after it are the flanks less those. Without the cut, the run context would read the
+/// covered flank bases twice, or read deleted ones back in, and could find a run that is not there.
+fn with_flanks_outside<'a>(
+    context: &SsrScoringContext<'a>,
+    extent: crate::locus_generation::FlankDeletion,
+) -> SsrScoringContext<'a> {
+    let (left, right) = context.flanks_for_run_context;
+    SsrScoringContext {
+        flanks_for_run_context: (
+            &left[..left.len().saturating_sub(usize::from(extent.left))],
+            &right[usize::from(extent.right).min(right.len())..],
+        ),
+        ..*context
+    }
+}
+
+/// One complete observation scored against one candidate under `context` — over the wider of the
+/// two flank extents where they differ (see [`fill_emissions`]).
+fn complete_emission<Model: SsrEmissionModel>(
+    model: &Model,
+    observation: &SequenceObservation,
+    allele: &SsrCandidate<'_>,
+    context: &SsrScoringContext<'_>,
+    scratch: &mut SsrRowScratch<Model::Scratch>,
+) -> f64 {
+    if observation.flank_deletion == allele.flank_deletion {
+        model.emission(
+            &observation.bases,
+            allele,
+            &with_flanks_outside(context, allele.flank_deletion),
+            scratch.model_scratch_mut(),
+        )
+    } else {
+        let wider = crate::locus_generation::FlankDeletion {
+            left: observation
+                .flank_deletion
+                .left
+                .max(allele.flank_deletion.left),
+            right: observation
+                .flank_deletion
+                .right
+                .max(allele.flank_deletion.right),
+        };
+        let (read_over, allele_over) = &mut scratch.respelled;
+        let respelled = respelled_over(
+            &observation.bases,
+            observation.flank_deletion,
+            wider,
+            allele.reference_flanks,
+            read_over,
+        )
+        .and_then(|()| {
+            respelled_over(
+                allele.bases,
+                allele.flank_deletion,
+                wider,
+                allele.reference_flanks,
+                allele_over,
+            )
+        });
+        match respelled {
+            Some(()) if read_over.len() == allele_over.len() => {
+                let (read_over, allele_over) =
+                    (std::mem::take(read_over), std::mem::take(allele_over));
+                let scored = model.emission(
+                    &read_over,
+                    &SsrCandidate {
+                        bases: &allele_over,
+                        // A bundle allele respelled over the wider extent carries the
+                        // flank bases it was given in front, and its runs move with it.
+                        bundle: allele.bundle.map(|bundle| BundleCandidate {
+                            leading_flank_bases: bundle.leading_flank_bases
+                                + u32::from(wider.left - allele.flank_deletion.left),
+                            ..bundle
+                        }),
+                        ..*allele
+                    },
+                    &with_flanks_outside(context, wider),
+                    scratch.model_scratch_mut(),
+                );
+                scratch.respelled = (read_over, allele_over);
+                scored
+            }
+            _ => {
+                let read_flank = i64::from(observation.flank_deletion.left)
+                    + i64::from(observation.flank_deletion.right);
+                let allele_flank =
+                    i64::from(allele.flank_deletion.left) + i64::from(allele.flank_deletion.right);
+                let flank_change = context
+                    .stutter
+                    .flank_length_change_probability(allele_flank - read_flank);
+                if flank_change > 0.0 {
+                    flank_change
+                        * model.emission(
+                            &observation.bases,
+                            allele,
+                            &with_flanks_outside(context, allele.flank_deletion),
+                            scratch.model_scratch_mut(),
+                        )
+                } else {
+                    0.0
+                }
+            }
         }
     }
 }
@@ -1033,6 +1117,9 @@ mod tests {
         read_groups: usize,
         candidate_bases: Vec<Vec<u8>>,
         repeat_counts: Vec<u32>,
+        /// The misread table every read group scores under: the built-in one unless a test sets
+        /// another.
+        misread_table: crate::calling::likelihood::run_context::MisreadTable,
     }
 
     impl Fixture {
@@ -1093,6 +1180,7 @@ mod tests {
                     .map(|count| a_tract(motif, *count as usize))
                     .collect(),
                 repeat_counts: repeat_counts.to_vec(),
+                misread_table: crate::calling::likelihood::run_context::MisreadTable::defaults(),
             }
         }
 
@@ -1117,13 +1205,16 @@ mod tests {
             for group in 0..self.read_groups {
                 for (candidate, allele) in candidates.iter().enumerate() {
                     let at = group * candidates.len() + candidate;
-                    contexts.push(SsrScoringContext::new(
-                        &self.motif,
-                        &self.models[at],
-                        allele,
-                        ErrorRate::try_new(self.substitution_rates[at]).expect("a valid rate"),
-                        [Provenance::FittedHere],
-                    ));
+                    contexts.push(SsrScoringContext {
+                        misread_after_runs: &self.misread_table,
+                        ..SsrScoringContext::new(
+                            &self.motif,
+                            &self.models[at],
+                            allele,
+                            ErrorRate::try_new(self.substitution_rates[at]).expect("a valid rate"),
+                            [Provenance::FittedHere],
+                        )
+                    });
                 }
             }
             contexts
@@ -1196,6 +1287,62 @@ mod tests {
         ploidy: u8,
     ) -> Vec<LogProb> {
         score_row_at(fixture, observations, ploidy, DEFAULT_OUTLIER_WEIGHT)
+    }
+
+    /// **Three reads of one strand misreading the base after a long run do not make a variant**
+    /// (`str_context_error.md`; HG002 chr20:44,076,996). The reference is `A`×16 `G` `A`×10; three
+    /// forward reads, which reach the `G` after the sixteen `A`s, show it as an `A`. Scored per
+    /// strand, the misread is cheap on them and `0/0` beats `0/1`; the same three reads from the
+    /// reverse strand had not crossed the run and still make the sample `0/1`, as every read did
+    /// under the one fitted rate before.
+    #[test]
+    fn one_strand_s_misreads_after_a_long_run_do_not_make_a_variant() {
+        let mut fixture = Fixture::of(b"A", &[26, 27]);
+        fixture.candidate_bases[0] = [&[b'A'; 16][..], b"G", &[b'A'; 10]].concat();
+        let reference = fixture.candidate_bases[0].clone();
+        let mut reference_reads = spanning(&reference, 12);
+        reference_reads.num_fwd = 5;
+        let call = |misreads_forward: u32| {
+            let mut misreads = spanning(&[b'A'; 27], 3);
+            misreads.num_fwd = misreads_forward;
+            let row = score_row(&fixture, &[reference_reads.clone(), misreads], 2);
+            // Genotypes in table order: 0/0, 0/1, 1/1.
+            (row[0].0, row[1].0)
+        };
+        let (homozygous, heterozygous) = call(3);
+        assert!(
+            homozygous > heterozygous,
+            "forward misreads: 0/0 {homozygous} against 0/1 {heterozygous}"
+        );
+        let (homozygous, heterozygous) = call(0);
+        assert!(
+            heterozygous > homozygous,
+            "reverse reads: 0/0 {homozygous} against 0/1 {heterozygous}"
+        );
+    }
+
+    /// **The read group's own table decides the charge** (`str_context_error_fit.md` §6): under a
+    /// table of zeros — what a fit finds for a library with no such misread — the same three
+    /// forward misreads after sixteen `A`s make the sample `0/1` again, as every read did under
+    /// the one fitted rate before.
+    #[test]
+    fn a_table_of_zeros_takes_the_charge_away() {
+        let mut fixture = Fixture::of(b"A", &[26, 27]);
+        fixture.candidate_bases[0] = [&[b'A'; 16][..], b"G", &[b'A'; 10]].concat();
+        let reference = fixture.candidate_bases[0].clone();
+        let mut reference_reads = spanning(&reference, 12);
+        reference_reads.num_fwd = 5;
+        let mut misreads = spanning(&[b'A'; 27], 3);
+        misreads.num_fwd = 3;
+        let observations = [reference_reads, misreads];
+        let defaulted = score_row(&fixture, &observations, 2);
+        fixture.misread_table = crate::calling::likelihood::run_context::MisreadTable::zero();
+        let zero = score_row(&fixture, &observations, 2);
+        assert!(
+            defaulted[0].0 > defaulted[1].0,
+            "the default table: 0/0 wins"
+        );
+        assert!(zero[1].0 > zero[0].0, "a table of zeros: 0/1 wins");
     }
 
     /// Whether no candidate at all can produce this observation — what makes a read *junk*
@@ -1658,6 +1805,47 @@ mod tests {
             &mut out,
             &mut scratch,
         );
+    }
+
+    /// **A flank base an allele deletes is not read back into the run before it.** The left flank
+    /// ends in `A`×8; an allele deleting its last two bases leaves a run of six before the tract,
+    /// too short to charge. A forward read of that allele showing the tract's first `G` as `A`
+    /// therefore scores the same under the default table as under a table of zeros. Reading the
+    /// whole flank before the allele's spelling would find a run of eight and charge the `A`.
+    #[test]
+    fn a_deleted_flank_base_does_not_lengthen_the_run_before_the_tract() {
+        use crate::calling::likelihood::run_context::MisreadTable;
+        const LEFT_FLANK: &[u8] = b"CGCGAAAAAAAA";
+        const RIGHT_FLANK: &[u8] = b"CCGTCAG";
+        let deletion = crate::locus_generation::FlankDeletion { left: 2, right: 0 };
+        let score_under = |table: MisreadTable| {
+            let mut fixture = Fixture::of(b"GT", &[4]);
+            fixture.misread_table = table;
+            let mut candidates = fixture.candidates();
+            candidates[0].reference_flanks = (LEFT_FLANK, RIGHT_FLANK);
+            candidates[0].flank_deletion = deletion;
+            let contexts = fixture.contexts(&candidates);
+            let context = SsrScoringContext {
+                read_direction: Some(ReadDirection::Forward),
+                flanks_for_run_context: (LEFT_FLANK, RIGHT_FLANK),
+                ..contexts[0]
+            };
+            let mut misread = spanning(b"ATGTGTGT", 1);
+            misread.flank_deletion = deletion;
+            complete_emission(
+                &StutterSubstitutionEmission,
+                &misread,
+                &candidates[0],
+                &context,
+                &mut SsrRowScratch::default(),
+            )
+        };
+        let (charged, flat) = (
+            score_under(MisreadTable::defaults()),
+            score_under(MisreadTable::zero()),
+        );
+        assert!(flat > 0.0);
+        assert_eq!(charged, flat);
     }
 
     /// **A whole-tract partial read with no recorded side takes, in each half, that side's own

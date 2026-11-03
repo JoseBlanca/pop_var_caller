@@ -39,6 +39,31 @@ pub struct RewriteTally {
     pub repeat_counts_unknown: u64,
 }
 
+impl RewriteTally {
+    /// Adds `other`'s counts to these. **Destructured exhaustively**, so a count the tally gains
+    /// later stops the build here instead of being dropped when lines are rewritten in parallel.
+    pub fn add(&mut self, other: RewriteTally) {
+        let RewriteTally {
+            sites,
+            called,
+            called_without_reads,
+            withheld,
+            genotypes_changed,
+            alleles_dropped,
+            records_dropped,
+            repeat_counts_unknown,
+        } = other;
+        self.sites += sites;
+        self.called += called;
+        self.called_without_reads += called_without_reads;
+        self.withheld += withheld;
+        self.genotypes_changed += genotypes_changed;
+        self.alleles_dropped += alleles_dropped;
+        self.records_dropped += records_dropped;
+        self.repeat_counts_unknown += repeat_counts_unknown;
+    }
+}
+
 /// **The walk's view of a line**, or `None` for a line the pass passes through: not PASS, no
 /// alternative allele, no `PL`/`GP`/`AF`, no sample with rows, or genotype rows that are not
 /// diploid.

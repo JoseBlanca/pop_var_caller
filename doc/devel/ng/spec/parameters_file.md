@@ -260,6 +260,13 @@ thing is. **Either table in a file whose `format_version` is below 4 is refused*
 such a file cannot say which format it was written in. This is the refusal the reader already gives
 a format-3 key in a file stamped 1 or 2.
 
+*Amended 2026-11-02, format 7:* a third informational table, `[repeat_tracts_left_out]` — the
+repeat tracts the stutter fit left out because their reads come from more copies than the reference
+holds, by depth and by the stutter tail, one row per stratum with the run's settings above them
+([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.6.1). No run reads it; a calling run
+carries it into the file it writes back, and a file stamped below 7 that holds it is refused naming
+it, as above.
+
 **An alternative total of exactly zero is a real answer** — a fully invariant cohort — and is not
 floored on the way in or out; the flooring belongs to the per-locus expansion.
 

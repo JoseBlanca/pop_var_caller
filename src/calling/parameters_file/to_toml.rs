@@ -68,10 +68,11 @@ use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, GroupOfNumbers, InbreedingRow, InformationalNumber, LevelOrigin, LevelSmoothing,
-    PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow,
-    SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin,
-    SlippageCurve, SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome,
-    StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow,
+    ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung,
+    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
+    SnpIndelFitStart, StartOutcome, StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant,
+    WarrantedValue,
 };
 
 impl ParametersFile {
@@ -420,6 +421,90 @@ impl ParametersFile {
                 &mut out,
                 "share_with_carriers_above_stated_frequency",
                 &an_informational_number(&duplicated.share_with_carriers_above_stated_frequency),
+            );
+        }
+        // **A section of its own, since calling reads none of it**; absent where no fit wrote it.
+        if let Some(left_out) = &self.repeat_tracts_left_out {
+            section(&mut out, "repeat_tracts_left_out");
+            note(
+                &mut out,
+                &[
+                    "The repeat tracts the stutter fit did not learn from, and why. Informational: a calling run reads none of it, every tract left out here is still called, and editing it changes nothing.",
+                    "",
+                    "A tract whose reads come from more copies than the reference holds shows reads at lengths no genotype of two alleles explains, and the fit could only explain them as slippage, which inflates its class's slip rate. Two rules leave such tracts out, beside the guard (`over_guard_threshold`: more than one read in ten of those differing from the reference differs by a non-whole number of repeats). **The depth rule** (`too_deep`) leaves out a tract whose crossing reads, summed over samples, exceed `depth_rule.times_expected` times what one copy gives, or the count one copy reaches by chance less than `depth_rule.chance` of the time where that is larger. What one copy gives is `typical_depth` — the reads the typical tract would have if every read reaching it crossed it — times the share of reaching reads that cross a tract of that class. **The stutter-tail rule** (`in_stutter_tail`) leaves out a tract where the reads off both alleles of the genotype each sample's reads favour, summed over samples, are at least `stutter_tail_rule.times_rate` times what the class's slip rate predicts and that many would occur by slippage less than `stutter_tail_rule.chance` of the time. It runs in rounds, refitting each motif length after each, until a round leaves nothing out (`settled = true`) or `stutter_tail_rule.max_rounds` rounds have run.",
+                    "",
+                    "`fitted` is how many of a class's tracts its slip rate was fitted from. A class with `fitted = 0` and tracts left out has no slippage row of its own.",
+                ],
+            );
+            if let Some(depth) = left_out.typical_depth {
+                scalar(&mut out, "typical_depth", &a_toml_float(depth));
+            }
+            if let Some(rule) = &left_out.depth_rule {
+                scalar(
+                    &mut out,
+                    "depth_rule",
+                    &format!(
+                        "{{ times_expected = {}, chance = {} }}",
+                        a_toml_float(rule.times_expected),
+                        a_toml_float(rule.chance)
+                    ),
+                );
+            }
+            if let Some(rule) = &left_out.stutter_tail_rule {
+                scalar(
+                    &mut out,
+                    "stutter_tail_rule",
+                    &format!(
+                        "{{ times_rate = {}, chance = {}, max_rounds = {} }}",
+                        a_toml_float(rule.times_rate),
+                        a_toml_float(rule.chance),
+                        rule.max_rounds
+                    ),
+                );
+            }
+            one_a_line(
+                &mut out,
+                "stutter_tail_by_period",
+                left_out.stutter_tail_by_period.iter().map(|row| {
+                    format!(
+                        "{{ period = {}, rounds = {}, settled = {} }}",
+                        row.period, row.rounds, row.settled
+                    )
+                }),
+            );
+            one_a_line(
+                &mut out,
+                "by_stratum",
+                left_out.by_stratum.iter().map(|row| {
+                    format!(
+                        "{{ period = {}, reference_repeats = {}, fitted = {}, \
+                         over_guard_threshold = {}, too_deep = {}, in_stutter_tail = {} }}",
+                        row.period,
+                        row.reference_repeats,
+                        row.fitted,
+                        row.over_guard_threshold,
+                        row.too_deep,
+                        row.in_stutter_tail
+                    )
+                }),
+            );
+        }
+
+        // **Calling reads this one**: each read group's repeat tracts are scored under its rows.
+        if let Some(misread) = &self.misread_after_runs {
+            section(&mut out, "misread_after_runs");
+            note(
+                &mut out,
+                &[
+                    "How much more often each read group's reads misread a base after a long run of one base when they were sequenced through the run than when they reached the base from the other side (doc/devel/ng/spec/str_context_error_fit.md). Calling adds these excesses to the repeat-tract substitution rate, for the reads of the direction that crossed the run only.",
+                    "",
+                    "One row per read group and entry. An entry is a run of one base, `shortest_run` to `longest_run` bases long (no `longest_run`: that long or longer), and a base either the next one after it (`base = \"next_base\"`) or one of the 19 after that (`\"further_on\"`). At the next base, `as_the_run` is the excess chance of reading the base as one more base of the run, and `other_wrong` that of any other wrong base; further on, `other_wrong` is any wrong base. `through_reads` and `arriving_first_reads` are the reads behind the two rates. An entry with fewer than 1,000 reads in either group takes the built-in default and is marked `defaulted`.",
+                ],
+            );
+            one_a_line(
+                &mut out,
+                "entries",
+                misread.entries.iter().map(a_misread_after_run_row),
             );
         }
 
@@ -1713,6 +1798,33 @@ fn the_word_for_start_outcome(ended: StartOutcome) -> &'static str {
         StartOutcome::AtThePassLimit => "at_the_pass_limit",
         StartOutcome::AgreedWithAnEarlierStart => "agreed_with_an_earlier_start",
     }
+}
+
+/// One row of `[misread_after_runs]`, on one line; a missing standard error or longest length
+/// is a key that is not there.
+fn a_misread_after_run_row(row: &MisreadAfterRunRow) -> String {
+    let mut fields = vec![
+        ("read_group", row.read_group.to_string()),
+        ("shortest_run", a_toml_integer(row.shortest_run)),
+    ];
+    if let Some(longest) = row.longest_run {
+        fields.push(("longest_run", a_toml_integer(longest)));
+    }
+    fields.push((
+        "base",
+        a_toml_string(match row.base {
+            MisreadBase::NextBase => "next_base",
+            MisreadBase::FurtherOn => "further_on",
+        }),
+    ));
+    fields.push(("as_the_run", a_warranted_value(&row.as_the_run)));
+    fields.push(("other_wrong", a_warranted_value(&row.other_wrong)));
+    fields.push(("through_reads", a_toml_integer(row.through_reads)));
+    fields.push((
+        "arriving_first_reads",
+        a_toml_integer(row.arriving_first_reads),
+    ));
+    an_inline_table(&fields)
 }
 
 fn the_word_for_warrant(warrant: Warrant) -> &'static str {

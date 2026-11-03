@@ -56,6 +56,7 @@ use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::seed_from_population_moments;
 use super::likelihood::ssr::RepeatTractOutlierWeight;
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
+use crate::calling::likelihood::run_context::{ENTRY_COUNT, MisreadTable};
 use crate::parameter_estimation::Estimate;
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::joint::contamination::{
@@ -63,6 +64,7 @@ use crate::parameter_estimation::joint::contamination::{
 };
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::parameter_estimation::misread_after_runs::{FittedMisreadEntry, table_of};
 use crate::parameter_estimation::repeat_strata::StratumKey;
 use crate::types::{
     ErrorRate, ExpectedAlternativeFrequency, ExpectedHeterozygosity, InbreedingF, Ploidy,
@@ -115,6 +117,12 @@ pub struct RunParameters {
     /// a person can change it). [`Self::assemble`] takes the default and
     /// [`Self::with_repeat_tract_outlier_weight`] is how a supplied one gets in.
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    /// **Each read group's misread excess after runs, entry by entry, as fitted or defaulted**
+    /// (`str_context_error_fit.md` §4). Empty where nothing set it: every read group then scores
+    /// under [`MisreadTable::defaults`].
+    misread_after_runs: BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>>,
+    /// The tables those entries make, built once so calling borrows them.
+    misread_tables: BTreeMap<ReadGroupId, MisreadTable>,
 }
 
 impl RunParameters {
@@ -289,6 +297,8 @@ impl RunParameters {
             // is the inherited one; a run handed a parameters file replaces it through
             // [`Self::with_repeat_tract_outlier_weight`].
             repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
+            misread_after_runs: BTreeMap::new(),
+            misread_tables: BTreeMap::new(),
         }
     }
 
@@ -381,6 +391,8 @@ impl RunParameters {
             ssr_substitution_rate,
             ploidy,
             repeat_tract_outlier_weight,
+            misread_after_runs: BTreeMap::new(),
+            misread_tables: BTreeMap::new(),
         }
     }
 
@@ -406,6 +418,41 @@ impl RunParameters {
         self
     }
 
+    /// **Score each read group's repeat tracts under its own misread table**
+    /// (`str_context_error_fit.md` §6): one entry list per read group, in table order. A read group
+    /// with none keeps [`MisreadTable::defaults`].
+    ///
+    /// # Panics
+    ///
+    /// When a read group's list is not one entry per [`RunEntry`](crate::calling::likelihood::run_context::RunEntry).
+    #[must_use]
+    pub fn with_misread_after_runs(
+        mut self,
+        fitted: BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>>,
+    ) -> Self {
+        for (group, entries) in &fitted {
+            assert_eq!(
+                entries.len(),
+                ENTRY_COUNT,
+                "read group {} has {} misread entries, not one per entry of the table",
+                group.get(),
+                entries.len()
+            );
+        }
+        self.misread_tables = fitted
+            .iter()
+            .map(|(group, entries)| (*group, table_of(entries)))
+            .collect();
+        self.misread_after_runs = fitted;
+        self
+    }
+
+    /// Each read group's misread entries, as fitted or defaulted; empty where none were set.
+    #[must_use]
+    pub fn misread_after_runs(&self) -> &BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>> {
+        &self.misread_after_runs
+    }
+
     /// What calling borrows for the whole run.
     #[must_use]
     pub fn view(&self) -> FrozenParameters<'_> {
@@ -419,6 +466,7 @@ impl RunParameters {
                 self.ploidy,
             )
             .with_repeat_tract_outlier_weight(self.repeat_tract_outlier_weight)
+            .with_misread_tables(&self.misread_tables)
         } else {
             FrozenParameters::new(
                 &self.calibration_by_read_group,
@@ -431,6 +479,7 @@ impl RunParameters {
                 self.ploidy,
             )
             .with_repeat_tract_outlier_weight(self.repeat_tract_outlier_weight)
+            .with_misread_tables(&self.misread_tables)
         }
     }
 
@@ -616,6 +665,35 @@ mod tests {
 
     fn diploid() -> Ploidy {
         Ploidy::try_new(2).expect("a diploid")
+    }
+
+    /// **Calling's view hands each read group its own misread table**, and the built-in one to a
+    /// read group the run holds none for (`str_context_error_fit.md` §6).
+    #[test]
+    fn each_read_group_scores_under_its_own_misread_table() {
+        use crate::calling::likelihood::run_context::MisreadExcess;
+        use crate::calling::parameters_file::DeclaredInbreeding;
+        use crate::read::input::read_groups::ReadGroups;
+        let read_groups = ReadGroups::of_lanes(&[("L1", "S1", "lib1"), ("L2", "S1", "lib2")]);
+        let zero = FittedMisreadEntry {
+            excess: MisreadExcess::default(),
+            standard_error: MisreadExcess::default(),
+            through_reads: 5_000,
+            arriving_first_reads: 4_000,
+            provenance: Provenance::FittedHere,
+        };
+        let run = RunParameters::of_defaults(
+            &read_groups,
+            diploid(),
+            &DeclaredInbreeding::nothing_said(),
+        )
+        .with_misread_after_runs(BTreeMap::from([(ReadGroupId(1), vec![zero; ENTRY_COUNT])]));
+        let view = run.view();
+        assert!(view.misread_table(ReadGroupId(1)).charges_nothing());
+        assert_eq!(
+            view.misread_table(ReadGroupId(0)),
+            &MisreadTable::defaults()
+        );
     }
     /// The diversity that density itself implies — **the number the seed's total is now solved
     /// from**, so a test that projects the density must hand the projection this and not a

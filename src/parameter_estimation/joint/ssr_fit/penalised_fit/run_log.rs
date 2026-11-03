@@ -53,13 +53,17 @@ pub(super) enum Line {
     StepEnded(String),
     /// A detail of the step just closed, printed as it is.
     Detail(String),
+    /// **Something a person must see whatever the log level**: a class the rules that leave
+    /// tracts out emptied, or cut by more than 1 tract in 10 (spec `parameter_prepass_ssr.md`
+    /// §4.6.1). Printed as a warning.
+    Warning(String),
 }
 
 impl Line {
     /// The line's text, however it is printed.
     pub(super) fn text(&self) -> &str {
         match self {
-            Self::StepEnded(text) | Self::Detail(text) => text,
+            Self::StepEnded(text) | Self::Detail(text) | Self::Warning(text) => text,
         }
     }
 }
@@ -72,6 +76,80 @@ fn count_of(n: usize, one: &str, many: &str) -> String {
 /// The one line printed when no repeat class is handed in.
 pub(super) fn no_classes_line() -> String {
     "no repeat classes were handed in, so there was nothing to fit".to_owned()
+}
+
+/// **What the depth rule left out** (spec `parameter_prepass_ssr.md` §4.6.1): the typical depth it
+/// measured and how many tracts it removed.
+pub(super) fn deep_tracts_line(
+    deep: &tract_exclusion::DeepTractsLeftOut,
+    rule: &tract_exclusion::DepthRule,
+) -> String {
+    match deep.typical_depth {
+        None => "depth rule: no tract was crossed by a read, so none was tested".to_owned(),
+        Some(depth) => format!(
+            "depth rule: the typical tract would have {depth:.1} reads, summed over samples, if \
+             every read reaching it crossed it; {} tract(s) left out for exceeding {} times what \
+             one copy gives, or the count one copy reaches by chance less than {} of the time",
+            deep.tracts, rule.times_expected, rule.chance
+        ),
+    }
+}
+
+/// **What the stutter-tail rule left out of one motif length**, in how many rounds, and whether
+/// it settled.
+pub(super) fn stutter_tail_line(
+    period: u8,
+    tail: &StutterTailOutcome,
+    rule: &tract_exclusion::StutterTailRule,
+) -> String {
+    let ending = if tail.settled {
+        "the last fit's test flagged none".to_owned()
+    } else {
+        format!(
+            "NOT SETTLED: the test still flagged tracts after {} rounds, the most allowed",
+            rule.max_rounds
+        )
+    };
+    format!(
+        "motif length {period}: stutter-tail rule left out {} tract(s) in {} round(s); {ending}",
+        tail.tracts, tail.rounds
+    )
+}
+
+/// **Warnings about classes the two rules emptied or cut heavily**: a class every tract of which
+/// was left out, and a class where either rule removed more than 1 tract in 10 of those the guard
+/// kept. The argument that the rules cannot bias a rate holds only while they cut a small share,
+/// and that share has been measured only in human (spec `parameter_prepass_ssr.md` §4.6.1).
+pub(super) fn heavy_exclusion_lines(classes: &[&StratumEvidence]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for evidence in classes {
+        let removed = evidence.tracts_too_deep + evidence.tracts_in_stutter_tail;
+        let before = evidence.tracts.len() as u64 + removed;
+        let name = format!(
+            "motif length {} at {} repeats",
+            evidence.stratum.period, evidence.stratum.reference_repeats
+        );
+        if removed > 0 && evidence.tracts.is_empty() {
+            lines.push(format!(
+                "WARNING: {name}: every one of its {before} tract(s) was left out ({} by depth, \
+                 {} by the stutter tail), so it has no fit of its own",
+                evidence.tracts_too_deep, evidence.tracts_in_stutter_tail
+            ));
+            continue;
+        }
+        for (rule, count) in [
+            ("depth", evidence.tracts_too_deep),
+            ("stutter-tail", evidence.tracts_in_stutter_tail),
+        ] {
+            if count * 10 > before {
+                lines.push(format!(
+                    "WARNING: {name}: the {rule} rule left out {count} of its {before} tracts, \
+                     more than 1 in 10"
+                ));
+            }
+        }
+    }
+    lines
 }
 
 /// The line that opens the stage: how many classes, of how many motif lengths, and the prior
@@ -662,13 +740,14 @@ mod tests {
         let mut lines = Vec::new();
         let rounds = std::cell::RefCell::new(Vec::new());
         let outcomes = fit_repeat_tracts_logging(
-            strata,
+            &mut strata.to_vec(),
             homozygote_excess,
             &a_narrow_production_fit(),
+            &TractExclusion::none(),
             &mut |line| lines.push(line),
             &|period, round, _| rounds.borrow_mut().push((period, round)),
         );
-        (outcomes, lines, rounds.into_inner())
+        (outcomes.0, lines, rounds.into_inner())
     }
 
     /// The one line that starts with `prefix`.
@@ -707,7 +786,7 @@ mod tests {
         let (outcomes, lines, rounds) = fit_log_and_rounds(&strata, &excess);
         assert_eq!(
             outcomes,
-            fit_repeat_tracts(&strata, &excess, &a_narrow_production_fit()),
+            fit_repeat_tracts_keeping_every_tract(&strata, &excess, &a_narrow_production_fit()),
             "logging changes no number"
         );
 
@@ -955,9 +1034,10 @@ mod tests {
 
         let mut lines = Vec::new();
         fit_repeat_tracts_logging(
-            &strata,
+            &mut strata.to_vec(),
             &[0.3; 3],
             &none,
+            &TractExclusion::none(),
             &mut |line| lines.push(line),
             &|_, _, _| {},
         );
@@ -970,9 +1050,10 @@ mod tests {
         };
         let mut lines = Vec::new();
         fit_repeat_tracts_logging(
-            &strata,
+            &mut strata.to_vec(),
             &[0.3; 3],
             &heavier,
+            &TractExclusion::none(),
             &mut |line| lines.push(line),
             &|_, _, _| {},
         );
@@ -1202,7 +1283,7 @@ mod tests {
             standard_errors: false,
             ..a_narrow_production_fit()
         };
-        let outcomes = fit_repeat_tracts(&strata, &[0.3; 3], &config);
+        let outcomes = fit_repeat_tracts_keeping_every_tract(&strata, &[0.3; 3], &config);
         assert_eq!(withheld_errors_line(&outcomes), None);
     }
 

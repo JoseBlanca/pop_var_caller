@@ -523,6 +523,7 @@ fn fit_and_assemble(
         &terms,
         segmentation.inputs().repeat_tract_criteria(),
         &fit.generic,
+        &fit.tracts_left_out,
     );
     Ok((a_file_the_next_run_can_read(file)?, samples))
 }
