@@ -13,12 +13,12 @@ use std::sync::OnceLock;
 use super::capture::LARGEST_ERROR_PHRED;
 use super::fragments::FragmentAllele;
 
-/// **`T_link`, ln 199**: reads make or keep a link at odds of at least 199 to 1, one wrong link in
+/// **`T_link`, ln 199, in natural-log odds**: reads make or keep a link at odds of at least 199 to 1, one wrong link in
 /// 200 if the error model holds (§2.5). With the error floor at 0.01 one fragment is worth at most
 /// 3.90 nats, so a link needs two good fragments that agree.
 pub const LINK_MIN: f64 = 5.293_304_824_724_492;
 
-/// **`T_break`, ln 9**: reads that contradict a population link at odds of 9 to 1 or more break it
+/// **`T_break`, ln 9, in natural-log odds**: reads that contradict a population link at odds of 9 to 1 or more break it
 /// (§2.5, §2.7). Lower than [`LINK_MIN`] because breaking a link costs block length and a wrong
 /// link costs much more; one fragment can reach it.
 pub const BREAK_MIN: f64 = 2.197_224_577_336_219_6;
@@ -40,7 +40,7 @@ pub const GQ_MIN: u8 = 30;
 /// opposite relation, and Phred 0 to 3 is real input — the walk gives the losing mate of an
 /// overlapping pair base quality 0. Clamped at one half, such a read allele weighs exactly zero.
 #[must_use]
-pub fn error_of(error_phred: u8) -> f64 {
+pub fn error_from_phred(error_phred: u8) -> f64 {
     let error = crate::float::powf(10.0, -f64::from(error_phred) / 10.0);
     error.clamp(ERROR_FLOOR, 0.5)
 }
@@ -53,7 +53,7 @@ pub fn weight(error_phred_i: u8, error_phred_j: u8) -> f64 {
         let mut table = [[0.0; PHREDS]; PHREDS];
         for (i, row) in table.iter_mut().enumerate() {
             for (j, cell) in row.iter_mut().enumerate() {
-                let (e_i, e_j) = (error_of(i as u8), error_of(j as u8));
+                let (e_i, e_j) = (error_from_phred(i as u8), error_from_phred(j as u8));
                 let agree = (1.0 - e_i) * (1.0 - e_j) + e_i * e_j;
                 let disagree = e_i * (1.0 - e_j) + e_j * (1.0 - e_i);
                 *cell = crate::float::ln(agree / disagree);
@@ -71,14 +71,38 @@ const PHREDS: usize = LARGEST_ERROR_PHRED as usize + 1;
 /// Each pair of Phreds' weight, computed once: the link sums look a weight up per fragment.
 static WEIGHTS: OnceLock<[[f64; PHREDS]; PHREDS]> = OnceLock::new();
 
-/// A heterozygous genotype's two alleles, the lower first.
+/// A heterozygous genotype's two alleles, the lower first. Built only by [`Heterozygote::of`], so
+/// `lower < upper` always holds: which allele is the lower decides the sign of every read link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Heterozygote {
-    pub lower: u16,
-    pub upper: u16,
+    lower: u16,
+    upper: u16,
 }
 
 impl Heterozygote {
+    /// The lower-numbered allele.
+    #[must_use]
+    pub fn lower(self) -> u16 {
+        self.lower
+    }
+
+    /// The higher-numbered allele.
+    #[must_use]
+    pub fn upper(self) -> u16 {
+        self.upper
+    }
+
+    /// The two alleles in the order a copy-0-first `GT` writes them: the upper first when
+    /// `upper_on_copy_0`.
+    #[must_use]
+    pub fn on_copies(self, upper_on_copy_0: bool) -> (u16, u16) {
+        if upper_on_copy_0 {
+            (self.upper, self.lower)
+        } else {
+            (self.lower, self.upper)
+        }
+    }
+
     /// The two alleles in either order; `None` when they are one allele.
     #[must_use]
     pub fn of(one: u16, other: u16) -> Option<Self> {
@@ -119,6 +143,23 @@ pub enum Relation {
     Trans,
 }
 
+impl Relation {
+    /// **The relation between two records written with these orientations** — each `true` where
+    /// copy 0 carries the record's lower allele, or each `true` where it carries the upper; only
+    /// whether the two agree matters.
+    #[must_use]
+    pub fn between(one: bool, other: bool) -> Self {
+        if one == other { Self::Cis } else { Self::Trans }
+    }
+
+    /// **The orientation a record takes when linked by this relation to one with `orientation`**,
+    /// in the same convention: the same under cis, the opposite under trans.
+    #[must_use]
+    pub fn carry(self, orientation: bool) -> bool {
+        orientation ^ (self == Self::Trans)
+    }
+}
+
 impl ReadLink {
     /// **The relation the reads make**: `Some` when `|L|` reaches [`LINK_MIN`].
     #[must_use]
@@ -148,7 +189,7 @@ impl ReadLink {
 ///
 /// The sum runs in fragment order, in `f64`, so it is the same at any thread count (§2.5).
 #[must_use]
-pub fn read_link(
+pub fn score_read_link(
     at_one: &[FragmentAllele],
     one: Heterozygote,
     at_other: &[FragmentAllele],

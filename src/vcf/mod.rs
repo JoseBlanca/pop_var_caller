@@ -39,6 +39,7 @@
 pub mod assemble;
 pub mod encode;
 pub mod header;
+pub(crate) mod line_fields;
 pub mod writer;
 
 pub use assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput, assemble_record};

@@ -24,11 +24,11 @@ fn the_thresholds_are_ln_199_and_ln_9() {
 /// 0.01, Phred 13 as about 0.05, and Phred 0, 2 and 3 — an error of 1, 0.63 and 0.50 — as one half.
 #[test]
 fn an_error_is_floored_and_capped() {
-    assert_eq!(error_of(40), ERROR_FLOOR);
-    assert!((error_of(20) - 0.01).abs() < 1e-15);
-    assert!((error_of(13) - 0.050_118_723).abs() < 1e-9);
+    assert_eq!(error_from_phred(40), ERROR_FLOOR);
+    assert!((error_from_phred(20) - 0.01).abs() < 1e-15);
+    assert!((error_from_phred(13) - 0.050_118_723).abs() < 1e-9);
     for phred in [0, 2, 3] {
-        assert_eq!(error_of(phred), 0.5, "Phred {phred}");
+        assert_eq!(error_from_phred(phred), 0.5, "Phred {phred}");
     }
 }
 
@@ -58,7 +58,7 @@ fn a_read_allele_at_one_half_weighs_exactly_nothing() {
             assert_eq!(weight(other, phred), 0.0);
         }
     }
-    let link = read_link(
+    let link = score_read_link(
         &[fragment(1, 0, 2), fragment(2, 0, 30), fragment(3, 0, 30)],
         het(0, 1),
         &[fragment(1, 1, 30), fragment(2, 0, 30), fragment(3, 0, 30)],
@@ -92,7 +92,7 @@ fn the_sum_runs_over_fragments_at_both_records_with_alleles_of_both_genotypes() 
     ];
     let w = weight(30, 30);
 
-    let two_and_one = read_link(&at_one, one, &at_other, other);
+    let two_and_one = score_read_link(&at_one, one, &at_other, other);
     assert_eq!(two_and_one.fragments, 3);
     assert_eq!(two_and_one.log_odds, w - w + w);
     assert_eq!(
@@ -101,9 +101,9 @@ fn the_sum_runs_over_fragments_at_both_records_with_alleles_of_both_genotypes() 
         "one fragment's worth is not a link"
     );
 
-    let two = read_link(&at_one[..1], one, &at_other[..1], other);
+    let two = score_read_link(&at_one[..1], one, &at_other[..1], other);
     assert_eq!(two.relation(), None);
-    let agreeing = read_link(
+    let agreeing = score_read_link(
         &[at_one[0], at_one[4]],
         one,
         &[at_other[0], at_other[3]],
@@ -112,7 +112,7 @@ fn the_sum_runs_over_fragments_at_both_records_with_alleles_of_both_genotypes() 
     assert_eq!(agreeing.log_odds, w + w);
     assert_eq!(agreeing.relation(), Some(Relation::Cis));
 
-    let trans = read_link(
+    let trans = score_read_link(
         &[fragment(1, 0, 30), fragment(2, 1, 30)],
         one,
         &[fragment(1, 2, 30), fragment(2, 0, 30)],
@@ -142,4 +142,26 @@ fn a_contradiction_is_at_or_beyond_the_break_threshold_against_the_relation() {
         fragments: 2,
     };
     assert_eq!(at_link.relation(), Some(Relation::Cis));
+}
+
+/// **The two orientation rules are each other's inverse**: two records written the same way round
+/// are cis, opposite ways trans, and carrying an orientation through a relation gives back one
+/// that relation holds with.
+#[test]
+fn relation_between_and_carry_are_inverses() {
+    for one in [false, true] {
+        for other in [false, true] {
+            let relation = Relation::between(one, other);
+            assert_eq!(relation == Relation::Cis, one == other);
+            assert_eq!(relation.carry(one), other);
+        }
+    }
+}
+
+/// **No stored Phred is finer than the error floor**: the largest one stored, 60, is an error far
+/// below 0.01, so capping Phreds there changes no weight (§2.2). Keeps the two constants coupled.
+#[test]
+fn the_largest_stored_phred_is_below_the_error_floor() {
+    assert!(crate::float::powf(10.0, -f64::from(LARGEST_ERROR_PHRED) / 10.0) < ERROR_FLOOR);
+    assert_eq!(weight(LARGEST_ERROR_PHRED, 20), weight(u8::MAX, 20));
 }

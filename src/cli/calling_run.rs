@@ -497,6 +497,13 @@ pub fn report_read_phase(finished: &FinishedVcf) {
             run_output::with_thousands(tally.links),
             run_output::with_thousands(tally.links_refused_by_an_earlier_record),
         );
+        if tally.lines_not_read > 0 {
+            tracing::warn!(
+                "phase from reads alone: {} lines could not be read and were written without PS; \
+                 every line comes from this program's encoder, so this is a defect to report",
+                run_output::with_thousands(tally.lines_not_read),
+            );
+        }
     }
     if finished.pass_read_counts.is_empty() {
         return;

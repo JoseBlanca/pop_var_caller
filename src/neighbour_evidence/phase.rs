@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use super::model::HaplotypePair;
 use crate::read_phase::fragments::FragmentAllele;
-use crate::read_phase::link::{GQ_MIN, Heterozygote, ReadLink, Relation, read_link};
+use crate::read_phase::link::{GQ_MIN, Heterozygote, ReadLink, Relation, score_read_link};
 
 /// **Paths drawn per averaged round besides the round's own** (spec §2.3): with 8, the 64-founder
 /// simulated cohort's links inside blocks were wrong 0.35% of the time, against 1.43% with 4
@@ -523,11 +523,18 @@ impl SiteReads<'_> {
         other_alleles: (usize, usize),
     ) -> ReadLink {
         let at = |site: usize| self.fragments.get(site).copied().unwrap_or(&[]);
-        let het = |(a, b): (usize, usize)| Heterozygote {
-            lower: a as u16,
-            upper: b as u16,
+        let heterozygote = |(a, b): (usize, usize)| {
+            // PANIC-FREE: the alleles index the line's alleles, which calling numbers as
+            // `AlleleId`, a `u16`; and the pass phases only a heterozygote, two different alleles.
+            let allele = |allele: usize| u16::try_from(allele).expect("an allele index fits a u16");
+            Heterozygote::of(allele(a), allele(b)).expect("a heterozygote's two alleles differ")
         };
-        read_link(at(one), het(one_alleles), at(other), het(other_alleles))
+        score_read_link(
+            at(one),
+            heterozygote(one_alleles),
+            at(other),
+            heterozygote(other_alleles),
+        )
     }
 
     /// Whether a link may rest on reads at `site`: its written `GQ` is at least [`GQ_MIN`].

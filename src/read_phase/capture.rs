@@ -53,7 +53,7 @@ pub fn error_phred_of_mean_ln_error(mean_ln_error: f64) -> u8 {
 /// after other ground, where the raw id is not; `splitmix64` is the hash the psp read cap already
 /// thins by, and it is a bijection, so two reads never share a key.
 #[must_use]
-pub fn cap_key(read: ChainId, chain_id_base: u64) -> u64 {
+pub(crate) fn cap_key(read: ChainId, chain_id_base: u64) -> u64 {
     splitmix64(read.wrapping_sub(chain_id_base))
 }
 

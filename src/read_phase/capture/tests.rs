@@ -20,7 +20,9 @@ fn a_mean_log_error_becomes_its_rounded_phred() {
         LARGEST_ERROR_PHRED
     );
     assert_eq!(error_phred_of_mean_ln_error(f64::NAN), 0);
-    // An error the walk set to one, the losing mate of an overlapping pair (§2.5).
+    // A mean ln error of −∞ is an error of zero, capped at Phred 60; +∞ is no error a read can
+    // have, read as Phred 0. (An error of one, the losing mate of an overlapping pair, is ln 0,
+    // asserted above.)
     assert_eq!(error_phred_of_mean_ln_error(f64::NEG_INFINITY), 60);
     assert_eq!(error_phred_of_mean_ln_error(f64::INFINITY), 0);
 }
