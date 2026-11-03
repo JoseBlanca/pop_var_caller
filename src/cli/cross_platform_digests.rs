@@ -451,7 +451,11 @@ mod tests {
     /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
     /// Taking those back out reproduces the previous checksum, `c8201d16bc0d8574c123c88f082846fd`, exactly
     /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
-    const CALLS_MD5: &str = "f6a351a2d1ab5ed90b039229431a0fce";
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `f6a351a2d1ab5ed90b039229431a0fce`, exactly. Recorded on macOS (arm64).
+    const CALLS_MD5: &str = "e08be2db651369d44307e515b61eda00";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -723,7 +727,11 @@ mod tests {
     /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
     /// Taking those back out reproduces the previous checksum, `9c7bbea51346dd01e20110add15602bd`, exactly
     /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "9854cc0eb1e1e45a103174d1027bf52c";
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `9854cc0eb1e1e45a103174d1027bf52c`, exactly. Recorded on macOS (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "40e146816e3f6aef6dee3527e71c3d82";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -1024,7 +1032,11 @@ mod tests {
     /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
     /// Taking those back out reproduces the previous checksum, `7cf07f4fe020c7c469bcfc58d3d40fa4`, exactly
     /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "2d033ca39c8b3f0b00111c43da652db9";
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `2d033ca39c8b3f0b00111c43da652db9`, exactly. Recorded on macOS (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "2edd6173ada3831ec06e0f926343e74c";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

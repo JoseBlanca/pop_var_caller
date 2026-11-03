@@ -69,9 +69,14 @@ fn the_cap_keeps_the_same_reads_whatever_was_walked_before() {
         .collect();
 
     let mut kept_alone = alone.clone();
-    settle(&mut kept_alone, 0);
+    let dropped = settle(&mut kept_alone, 0);
     let mut kept_after = after_other_ground;
     settle(&mut kept_after, shift);
+    assert_eq!(
+        dropped,
+        alone.len() - READ_ALLELES_KEPT,
+        "the cap reports what it removed"
+    );
 
     assert_eq!(kept_alone.len(), READ_ALLELES_KEPT);
     assert!(

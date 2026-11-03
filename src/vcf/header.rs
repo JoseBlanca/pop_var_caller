@@ -701,7 +701,7 @@ pub fn header_text(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> String {
     }
     // Stated whenever the run phases from reads alone, phased or not, so the header does not
     // depend on the data (read phase spec §3).
-    let phased_from_reads_alone = reads_phase_alone(metadata, ploidy);
+    let phased_from_reads_alone = writes_phase_from_reads_alone(metadata, ploidy);
     if phased_from_reads_alone {
         lines.push(format!(
             "##readBackedPhase={}",
@@ -750,7 +750,7 @@ pub fn header_text(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> String {
 /// neighbour-evidence pass does not run, at ploidy two. The writer runs the stage and the header
 /// declares what it writes on this one condition, so the two cannot disagree.
 #[must_use]
-pub fn reads_phase_alone(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> bool {
+pub fn writes_phase_from_reads_alone(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> bool {
     ploidy.get() == 2
         && !metadata
             .neighbour_evidence()
@@ -762,11 +762,13 @@ pub fn reads_phase_alone(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> bool {
 #[must_use]
 pub fn read_backed_phase_header_value() -> String {
     format!(
-        "<link_min={:.2},error_floor={},gq_min={},reach={}>",
+        "<link_min={:.2},break_min={:.2},error_floor={},gq_min={},reach={},read_cap={}>",
         crate::read_phase::link::LINK_MIN,
+        crate::read_phase::link::BREAK_MIN,
         crate::read_phase::link::ERROR_FLOOR,
         crate::read_phase::link::GQ_MIN,
         crate::read_phase::fragments::READ_REACH,
+        crate::read_phase::capture::READ_ALLELES_KEPT,
     )
 }
 
@@ -985,7 +987,7 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         assert_eq!(
             header_text(&metadata, Ploidy::try_new(2).expect("diploid")),
             expected(
-                "##readBackedPhase=<link_min=5.29,error_floor=0.01,gq_min=30,reach=1000>\n",
+                "##readBackedPhase=<link_min=5.29,break_min=2.20,error_floor=0.01,gq_min=30,reach=1000,read_cap=32>\n",
                 &phased_format.join("\n")
             )
         );

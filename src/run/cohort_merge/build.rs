@@ -660,7 +660,7 @@ impl AlleleTable {
     /// are never written.
     fn assemble_capturing(
         locus: &ClosedLocus<'_>,
-        mut read_alleles: Option<&mut Vec<SampleReadAllele>>,
+        mut read_alleles: Option<&mut CapturedReadAlleles>,
     ) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
@@ -769,18 +769,20 @@ impl AlleleTable {
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
             // One sample's records inside one cohort locus come from one walked region: a locus
             // never crosses a segment boundary, so they share its first id.
-            if let Some(entries) = read_alleles.as_deref_mut() {
-                settle(
+            if let Some(capture) = read_alleles.as_deref_mut() {
+                capture.dropped_by_the_cap += settle(
                     &mut captured,
                     records.first().map_or(0, |record| record.chain_id_base),
-                );
+                ) as u64;
                 // PANIC-FREE: a run's samples are counted in a `u32` everywhere downstream; a
                 // cohort of four billion samples is not a run this program can hold.
                 let sample = u32::try_from(sample).expect("a run's samples are counted in a u32");
-                entries.extend(captured.iter().map(|&read_allele| SampleReadAllele {
-                    sample,
-                    read_allele,
-                }));
+                capture
+                    .entries
+                    .extend(captured.iter().map(|&read_allele| SampleReadAllele {
+                        sample,
+                        read_allele,
+                    }));
             }
 
             // **Not sorted here.** The rows are put into ascending `(allele, read group)` order
@@ -836,7 +838,7 @@ impl AlleleTable {
         // read, and each read is listed once.
         for entry in read_alleles
             .iter_mut()
-            .flat_map(|entries| entries.iter_mut())
+            .flat_map(|capture| capture.entries.iter_mut())
         {
             entry.read_allele.allele = moved_to[entry.read_allele.allele as usize] as u32;
         }
@@ -1181,13 +1183,23 @@ impl LocusReads<'_, '_> {
     /// **Which allele each read of each covering sample showed**, each entry naming its run
     /// sample, sorted by sample and then by read: one entry a read, at most
     /// [`READ_ALLELES_KEPT`](crate::read_phase::capture::READ_ALLELES_KEPT) a sample, numbered
-    /// against the observation's allele table.
+    /// against the observation's allele table; and how many the cap removed.
     #[must_use]
-    pub fn read_alleles(&self) -> Vec<SampleReadAllele> {
-        let mut entries = Vec::new();
-        let _ = AlleleTable::assemble_capturing(self.locus, Some(&mut entries));
-        entries
+    pub fn read_alleles(&self) -> CapturedReadAlleles {
+        let mut captured = CapturedReadAlleles::default();
+        let _ = AlleleTable::assemble_capturing(self.locus, Some(&mut captured));
+        captured
     }
+}
+
+/// **What the merge captured at one locus** ([`LocusReads::read_alleles`]).
+#[derive(Debug, Default)]
+pub struct CapturedReadAlleles {
+    /// Every covering sample's read alleles, sorted by sample and then by read.
+    pub entries: Vec<SampleReadAllele>,
+    /// Read alleles the cap of [`READ_ALLELES_KEPT`](crate::read_phase::capture::READ_ALLELES_KEPT)
+    /// a sample removed, over every sample.
+    pub dropped_by_the_cap: u64,
 }
 
 #[cfg(test)]
@@ -1211,6 +1223,7 @@ pub(crate) fn captured_at_one_record(record: &SampleLocusObservations) -> Vec<(C
     );
     LocusReads { locus: &locus }
         .read_alleles()
+        .entries
         .into_iter()
         .map(|entry| {
             (
@@ -5842,6 +5855,7 @@ mod tests {
         let observed = CohortObservation::over(locus, &no_measurement());
         LocusReads { locus }
             .read_alleles()
+            .entries
             .iter()
             .filter(|entry| entry.sample as usize == sample)
             .map(|entry| entry.read_allele)

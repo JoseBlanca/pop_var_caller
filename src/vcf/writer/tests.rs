@@ -392,9 +392,9 @@ fn a_stream_of_records_is_written_in_the_order_it_yields_them() {
 
     let stream = [100u64, 200, 300]
         .into_iter()
-        .map(|position| snp_at(0, position))
+        .map(|position| (snp_at(0, position), RecordFragments::default()))
         // A filter in the middle, as the run will have.
-        .filter(|record| record.region().start != Position(200));
+        .filter(|(record, _)| record.region().start != Position(200));
 
     writer.write_stream(stream).expect("the stream writes");
     // Counted once finished: phase from reads holds lines until the stream is past them.
@@ -420,7 +420,7 @@ fn a_stream_that_reorders_its_records_is_refused_rather_than_written() {
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     let stream = [300u64, 100]
         .into_iter()
-        .map(|position| snp_at(0, position));
+        .map(|position| (snp_at(0, position), RecordFragments::default()));
     assert!(matches!(
         writer.write_stream(stream),
         Err(VcfWriteError::OutOfOrder { .. })
@@ -452,7 +452,7 @@ fn a_line_written_without_its_record_reaches_the_file_exactly() {
     writer
         .write_line(
             place(0, 100, false),
-            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1".to_vec(),
             RecordFragments::default(),
         )
         .expect("the line");
@@ -495,7 +495,7 @@ fn writing_a_record_and_writing_its_line_produce_the_same_bytes() {
     writer
         .write_line(
             place(0, 100, false),
-            line.as_bytes(),
+            line.clone().into_bytes(),
             RecordFragments::default(),
         )
         .expect("the line");
@@ -516,9 +516,17 @@ fn a_line_that_runs_backwards_is_refused_as_a_record_would_be() {
     let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
 
     writer
-        .write_line(place(0, 200, false), b"x", RecordFragments::default())
+        .write_line(
+            place(0, 200, false),
+            b"x".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("the first line");
-    let outcome = writer.write_line(place(0, 100, false), b"y", RecordFragments::default());
+    let outcome = writer.write_line(
+        place(0, 100, false),
+        b"y".to_vec(),
+        RecordFragments::default(),
+    );
 
     assert!(matches!(
         outcome,
@@ -539,20 +547,20 @@ fn a_line_may_take_the_one_legal_tie_and_no_other() {
     writer
         .write_line(
             place(0, 100, false),
-            b"a generic locus",
+            b"a generic locus".to_vec(),
             RecordFragments::default(),
         )
         .expect("the first");
     writer
         .write_line(
             place(0, 100, true),
-            b"a tract padded onto it",
+            b"a tract padded onto it".to_vec(),
             RecordFragments::default(),
         )
         .expect("the tract may share the position");
     let a_third = writer.write_line(
         place(0, 100, true),
-        b"another tract",
+        b"another tract".to_vec(),
         RecordFragments::default(),
     );
 
@@ -569,7 +577,11 @@ fn a_line_counts_towards_the_records_written() {
         .write_record(&snp_at(0, 100), RecordFragments::default())
         .expect("a record");
     writer
-        .write_line(place(0, 200, false), b"a line", RecordFragments::default())
+        .write_line(
+            place(0, 200, false),
+            b"a line".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("a line");
 
     // Counted once finished: phase from reads holds lines until the stream is past them.
@@ -588,13 +600,13 @@ fn a_refused_line_leaves_the_writer_where_it_was() {
     writer
         .write_line(
             place(0, 200, false),
-            b"the one that got in",
+            b"the one that got in".to_vec(),
             RecordFragments::default(),
         )
         .expect("the first line");
     let refused = writer.write_line(
         place(0, 100, false),
-        b"backwards",
+        b"backwards".to_vec(),
         RecordFragments::default(),
     );
 
@@ -603,7 +615,7 @@ fn a_refused_line_leaves_the_writer_where_it_was() {
         matches!(
             writer.write_line(
                 place(0, 150, false),
-                b"behind the last written line",
+                b"behind the last written line".to_vec(),
                 RecordFragments::default()
             ),
             Err(VcfWriteError::OutOfOrder { .. })
@@ -634,14 +646,14 @@ fn the_order_is_checked_against_the_place_and_not_the_line() {
     writer
         .write_line(
             place(0, 100, false),
-            b"SL4.0ch01\t900\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+            b"SL4.0ch01\t900\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1".to_vec(),
             RecordFragments::default(),
         )
         .expect("the place ascends, so the writer is content");
     writer
         .write_line(
             place(0, 200, false),
-            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1".to_vec(),
             RecordFragments::default(),
         )
         .expect("the place ascends, so the writer is content");

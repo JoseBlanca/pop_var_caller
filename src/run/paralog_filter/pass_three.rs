@@ -255,7 +255,7 @@ pub fn write_the_records_the_filter_kept_explaining(
         )?;
 
         writer
-            .write_line(RecordPlace::from(&entry), &line, fragments)
+            .write_line(RecordPlace::from(&entry), line, fragments)
             .map_err(|source| PassThreeError::Write {
                 contig: entry.contig.get(),
                 position: entry.position.get(),

@@ -69,8 +69,9 @@ pub(crate) fn cap_key(read: ChainId, chain_id_base: u64) -> u64 {
 ///   in read order.
 ///
 /// `chain_id_base` is the walked region's first id, shared by every minted record of one sample
-/// inside one cohort locus: a locus never crosses a segment boundary.
-pub fn settle(read_alleles: &mut Vec<ReadAllele>, chain_id_base: u64) {
+/// inside one cohort locus: a locus never crosses a segment boundary. Returns how many read
+/// alleles the cap removed, for the run's report.
+pub fn settle(read_alleles: &mut Vec<ReadAllele>, chain_id_base: u64) -> usize {
     read_alleles.sort_unstable();
     read_alleles.dedup_by(|later, kept| later.read == kept.read && later.allele == kept.allele);
     // After that, a read still listed twice showed two alleles.
@@ -89,13 +90,15 @@ pub fn settle(read_alleles: &mut Vec<ReadAllele>, chain_id_base: u64) {
         at = end;
     }
     read_alleles.truncate(kept);
-    if read_alleles.len() > READ_ALLELES_KEPT {
+    let over_the_cap = read_alleles.len().saturating_sub(READ_ALLELES_KEPT);
+    if over_the_cap > 0 {
         read_alleles.select_nth_unstable_by_key(READ_ALLELES_KEPT - 1, |read_allele| {
             cap_key(read_allele.read, chain_id_base)
         });
         read_alleles.truncate(READ_ALLELES_KEPT);
         read_alleles.sort_unstable();
     }
+    over_the_cap
 }
 
 #[cfg(test)]

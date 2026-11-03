@@ -31,7 +31,7 @@ use thiserror::Error;
 
 use super::VcfRecord;
 use super::encode::record_line;
-use super::header::{VcfHeaderMetadata, header_text, reads_phase_alone};
+use super::header::{VcfHeaderMetadata, header_text, writes_phase_from_reads_alone};
 use crate::neighbour_evidence::line::RewriteTally;
 use crate::neighbour_evidence::phase::PassReadCounts;
 use crate::neighbour_evidence::refine::FillCheck;
@@ -89,15 +89,24 @@ pub struct VcfWriter {
     metadata: VcfHeaderMetadata,
     last: Option<RecordPlace>,
     records_written: u64,
-    /// **The neighbour-evidence pass, when the run decided to run it** (header metadata): every
-    /// line goes through it and comes back, in order, once its window is solved
-    /// (`neighbour_evidence_pass.md` §2.1). `None` writes each line as it arrives.
-    neighbour_evidence: Option<Box<NeighbourEvidenceStage>>,
-    /// **Phase from reads alone**, where the pass does not run and the ploidy is two (read phase
-    /// spec §2.6): every line goes through it and comes back, in order, with `PS`.
-    read_phase: Option<Box<ReadPhaseStage>>,
+    /// **What rewrites each line before it is written**, if anything: the run has at most one.
+    stage: LineStage,
     /// Lines the pass has handed back and not yet written; kept to reuse its allocation.
     released: Vec<(RecordPlace, Vec<u8>)>,
+}
+
+/// **What rewrites each line before the writer writes it.** One enum rather than two options, so a
+/// run cannot hold both stages and route every line through whichever is tested first.
+enum LineStage {
+    /// Each line is written as it arrives.
+    None,
+    /// **The neighbour-evidence pass, when the run decided to run it** (header metadata): every
+    /// line goes through it and comes back, in order, once its window is solved
+    /// (`neighbour_evidence_pass.md` §2.1).
+    Refinement(Box<NeighbourEvidenceStage>),
+    /// **Phase from reads alone**, where the pass does not run and the ploidy is two (read phase
+    /// spec §2.6): every line goes through it and comes back, in order, with `PS`.
+    ReadsAlone(Box<ReadPhaseStage>),
 }
 
 /// **What a finished file holds**: the records written, and what the neighbour-evidence pass did
@@ -109,7 +118,7 @@ pub struct FinishedVcf {
     /// The pass's counts, when it ran.
     pub neighbour_evidence: Option<RewriteTally>,
     /// What phase from reads alone did, when it ran.
-    pub read_phase: Option<ReadPhaseTally>,
+    pub read_phase_tally: Option<ReadPhaseTally>,
     /// Each sample's fill check, by name in the VCF's sample order, when the pass ran; empty
     /// otherwise.
     pub fill_checks: Vec<(String, FillCheck)>,
@@ -139,19 +148,25 @@ impl VcfWriter {
                 tmp_path: tmp_path_for(final_path),
                 source,
             })?;
-        let neighbour_evidence = metadata
+        // One condition each, and `writes_phase_from_reads_alone` is itself "the pass did not run,
+        // at ploidy two", which is what the header declares from.
+        let stage = match metadata
             .neighbour_evidence()
             .filter(|decision| decision.ran)
-            .map(|decision| {
+        {
+            Some(decision) => {
                 let lengths = metadata
                     .contigs()
                     .iter()
                     .map(|contig| contig.length)
                     .collect();
-                Box::new(NeighbourEvidenceStage::new(decision, lengths))
-            });
-        let read_phase = (neighbour_evidence.is_none() && reads_phase_alone(&metadata, ploidy))
-            .then(|| Box::new(ReadPhaseStage::new(metadata.sample_names().len())));
+                LineStage::Refinement(Box::new(NeighbourEvidenceStage::new(decision, lengths)))
+            }
+            None if writes_phase_from_reads_alone(&metadata, ploidy) => {
+                LineStage::ReadsAlone(Box::new(ReadPhaseStage::new(metadata.sample_names().len())))
+            }
+            None => LineStage::None,
+        };
         Ok(Self {
             sink,
             final_path: final_path.to_path_buf(),
@@ -159,8 +174,7 @@ impl VcfWriter {
             metadata,
             last: None,
             records_written: 0,
-            neighbour_evidence,
-            read_phase,
+            stage,
             released: Vec::new(),
         })
     }
@@ -178,11 +192,11 @@ impl VcfWriter {
     /// genuinely starts there and the tract's starts one base later. A second record at the same
     /// position, a tract followed by a generic one, or two tracts, are refused.
     ///
-    /// # Errors
-    ///
     /// **`fragments` are the record's reads that reach another record** (read phase spec §2.4),
     /// handed beside it because the line never carries them: whichever stage writes phase reads
     /// them, and nothing writes them to the file.
+    ///
+    /// # Errors
     ///
     /// If the record runs backwards, if it forms a tie that is not the legal one, or if the
     /// write fails.
@@ -191,8 +205,8 @@ impl VcfWriter {
         record: &VcfRecord,
         fragments: RecordFragments,
     ) -> Result<(), VcfWriteError> {
-        let line = record_line(record, self.metadata.contigs(), self.ploidy);
-        self.write_line(place_of(record), line.as_bytes(), fragments)
+        let line = record_line(record, self.metadata.contigs(), self.ploidy).into_bytes();
+        self.write_line(place_of(record), line, fragments)
     }
 
     /// **Write a line that has already been encoded**, saying where it sits.
@@ -215,32 +229,35 @@ impl VcfWriter {
     /// [`place_of`] for a record — rather than typing the fields at the call site. Separately, a
     /// line holding a `\n` becomes two record lines in the file and counts as one.
     ///
+    /// **The line carries no fragments**, so a caller that rebuilds a record from its line, as
+    /// the hidden-duplication filter's pass three does, hands them in from wherever it kept them
+    /// (read phase spec §6). A line written with none is phased by the population alone. The
+    /// line is taken by value: a stage holds it until its window or reach has passed.
+    ///
     /// # Errors
     ///
     /// If the `place` runs backwards, if it forms a tie that is not the legal one, or if the
-    /// **The line carries no fragments**, so a caller that rebuilds a record from its line, as
-    /// the hidden-duplication filter's pass three does, hands them in from wherever it kept them
-    /// (read phase spec §6). A line written with none is phased by the population alone.
-    ///
     /// write fails. Note that these are properties of the `place`, not of the line's bytes.
     pub fn write_line(
         &mut self,
         place: RecordPlace,
-        line: &[u8],
+        line: Vec<u8>,
         fragments: RecordFragments,
     ) -> Result<(), VcfWriteError> {
         if let Some(last) = self.last {
             self.check_order(last, place)?;
         }
         self.last = Some(place);
-        if let Some(stage) = self.neighbour_evidence.as_mut() {
-            stage.push(place, line.to_vec(), fragments, &mut self.released);
-            self.write_released()
-        } else if let Some(stage) = self.read_phase.as_mut() {
-            stage.push(place, line.to_vec(), fragments, &mut self.released);
-            self.write_released()
-        } else {
-            self.write_checked_line(line)
+        match &mut self.stage {
+            LineStage::None => self.write_checked_line(&line),
+            LineStage::Refinement(stage) => {
+                stage.push(place, line, fragments, &mut self.released);
+                self.write_released()
+            }
+            LineStage::ReadsAlone(stage) => {
+                stage.push(place, line, fragments, &mut self.released);
+                self.write_released()
+            }
         }
     }
 
@@ -323,12 +340,15 @@ impl VcfWriter {
     ///
     /// The first record that runs backwards, forms an illegal tie, or cannot be written stops
     /// the stream and returns.
+    ///
+    /// **Each record comes with its fragments**, so a caller cannot write a stream without them
+    /// by accident: a record without reads that reach another is paired with an empty list.
     pub fn write_stream(
         &mut self,
-        records: impl IntoIterator<Item = VcfRecord>,
+        records: impl IntoIterator<Item = (VcfRecord, RecordFragments)>,
     ) -> Result<(), VcfWriteError> {
-        for record in records {
-            self.write_record(&record, RecordFragments::default())?;
+        for (record, fragments) in records {
+            self.write_record(&record, fragments)?;
         }
         Ok(())
     }
@@ -352,7 +372,9 @@ impl VcfWriter {
         let mut neighbour_evidence = None;
         let mut fill_checks = Vec::new();
         let mut pass_read_counts = Vec::new();
-        if let Some(stage) = self.neighbour_evidence.as_mut() {
+        let mut read_phase_tally = None;
+        let mut stage = std::mem::replace(&mut self.stage, LineStage::None);
+        if let LineStage::Refinement(stage) = &mut stage {
             stage.finish(&mut self.released);
             neighbour_evidence = Some(stage.tally());
             fill_checks = self
@@ -371,10 +393,9 @@ impl VcfWriter {
                 .collect();
             self.write_released()?;
         }
-        let mut read_phase = None;
-        if let Some(stage) = self.read_phase.as_mut() {
+        if let LineStage::ReadsAlone(stage) = &mut stage {
             stage.finish(&mut self.released);
-            read_phase = Some(stage.tally());
+            read_phase_tally = Some(stage.tally());
             self.write_released()?;
         }
         let records_written = self.records_written;
@@ -382,7 +403,7 @@ impl VcfWriter {
         Ok(FinishedVcf {
             records_written,
             neighbour_evidence,
-            read_phase,
+            read_phase_tally,
             fill_checks,
             pass_read_counts,
         })

@@ -566,14 +566,17 @@ longer links. Whether to use it as a rule that tightens population-only links by
 - **No fragment field, anywhere** (owner decision 4).
 - **Refinement runs:** as the phase output spec §3, with phase now from both sources under one `PS`.
   The `##neighbourEvidence=` header line gains `read_link_min=5.29,read_break_min=2.20,
-  read_error_floor=0.01,read_gq_min=30,read_reach=1000`. It keeps its name, which names the pass
-  rather than the option.
+  read_error_floor=0.01,read_gq_min=30,read_reach=1000,read_cap=32`. It keeps its name, which names
+  the pass rather than the option.
 - **Refinement does not run, ploidy two:** `GT` written `a|b` and a `PS` field appended after the
   existing `FORMAT` keys on read-phased heterozygotes, `.` elsewhere. `PS` is written on every record,
   so the `FORMAT` string is the same on every line. The header declares `GT` and `PS` with the
   declarations the pass already uses (`src/vcf/header.rs:607`, `:610`), and gains
-  `##readBackedPhase=<link_min=5.29,error_floor=0.01,gq_min=30,reach=1000>`. The declarations are
-  written even when no record is phased, so the header does not depend on the data.
+  `##readBackedPhase=<link_min=5.29,break_min=2.20,error_floor=0.01,gq_min=30,reach=1000,read_cap=32>`.
+  The declarations are written even when no record is phased, so the header does not depend on the
+  data. `break_min` and `read_cap` were added after the review of 2026-11-03: the stage ends a
+  block at `break_min`, and at the deep end of the depth range the cap of 32 read alleles a sample
+  a record decides which reads phase, so both are thresholds the output depends on.
 - **This changes calling's output in every run where refinement does not run**, including every
   one-sample run: the `GT` declaration, the `PS` column, and `|` where reads phase. Every recorded
   byte-identity digest (`src/cli/cross_platform_digests.rs`) has to be re-recorded.

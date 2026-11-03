@@ -122,6 +122,7 @@ fn a_read_at_two_records_is_kept_one_at_one_is_not_and_one_beyond_reach_is_dropp
     assert_eq!(
         counts,
         KeeperCounts {
+            read_alleles_over_the_cap: 0,
             read_alleles_in: 6,
             read_alleles_kept: 4,
             read_alleles_alone: 1,
@@ -253,4 +254,19 @@ fn a_read_met_again_after_it_was_forgotten_is_a_new_fragment() {
         ]
     );
     assert_eq!(counts.read_alleles_beyond_reach, 0);
+}
+
+/// **What the cap removed at capture reaches the keeper's counts**, summed over records (review
+/// Mi8): the cap's work is otherwise invisible in the log at the deep end of the depth range.
+#[test]
+fn the_read_alleles_the_cap_removed_are_counted() {
+    let mut keeper: FragmentKeeper<()> = FragmentKeeper::default();
+    let mut released = Vec::new();
+    for (position, over_the_cap) in [(100, 3), (200, 5)] {
+        let mut record = snp_at(0, position, &[]);
+        let read_alleles = record.replace_read_alleles(Default::default());
+        record.replace_read_alleles(read_alleles.with_dropped_by_the_cap(over_the_cap));
+        keeper.accept(record, (), &mut released);
+    }
+    assert_eq!(keeper.counts().read_alleles_over_the_cap, 8);
 }

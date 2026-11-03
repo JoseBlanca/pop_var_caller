@@ -44,7 +44,7 @@ fn the_header_line_states_the_decision() {
          core=2000000,margin=1000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
          hidden_share=0.05,extra_paths=8,lean_min=0.5,path_agreement=1,join_records=3,\
          alignment_costs=1/2,read_link_min=5.29,read_break_min=2.20,read_error_floor=0.01,\
-         read_gq_min=30,read_reach=1000>"
+         read_gq_min=30,read_reach=1000,read_cap=32>"
     );
     let decision = decide(NeighbourEvidenceSwitch::Auto, &[0.0; 2], diploid());
     assert_eq!(

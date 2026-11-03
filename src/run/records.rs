@@ -597,11 +597,13 @@ pub fn read_alleles_for_record(
     remap: &AlleleRemap,
     reads: &LocusReads<'_, '_>,
 ) -> RecordReadAlleles {
-    RecordReadAlleles::from_merge(reads.read_alleles(), |merge_allele| {
+    let captured = reads.read_alleles();
+    RecordReadAlleles::from_merge(captured.entries, |merge_allele| {
         remap
             .candidate_for(merge_allele as usize)
             .map(|written| u32::from(written.get()))
     })
+    .with_dropped_by_the_cap(captured.dropped_by_the_cap)
 }
 
 /// **Everything a record needs that the called locus does not already carry**, gathered while

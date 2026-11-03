@@ -487,7 +487,7 @@ pub const MIN_FILL_CHECK_SITES: u32 = 30;
 /// it ran, and where the neighbour-evidence pass ran, the read check of its population links — in
 /// total in the log, and per sample at debug level.
 pub fn report_read_phase(finished: &FinishedVcf) {
-    if let Some(tally) = finished.read_phase {
+    if let Some(tally) = finished.read_phase_tally {
         tracing::info!(
             "phase from reads alone: {} sample columns written phased, in {} blocks of two records or \
              more; {} links made by reads, {} refused because a read over an earlier record of the \
@@ -514,12 +514,15 @@ pub fn report_read_phase(finished: &FinishedVcf) {
     }
     tracing::info!(
         "reads in the neighbour-evidence pass: the read check — of the population links reads \
-         reach at odds of 199 to 1 with GQ 30 or more at both ends, {} of {} contradicted by the \
+         reach at odds of {:.0} to 1 with GQ {} or more at both ends, {} of {} contradicted by the \
          reads, a check of the population links that does not come from the model, for links \
-         under 1 kb and not acted on; {} population links broken by reads, {} links made by reads, \
-         {} heterozygotes the consensus did not lean on attached by reads",
+         under {} bases and not acted on; {} population links broken by reads, {} links made by \
+         reads, {} heterozygotes the consensus did not lean on attached by reads",
+        crate::float::exp(crate::read_phase::link::LINK_MIN),
+        crate::read_phase::link::GQ_MIN,
         total.population_links_contradicted,
         total.population_links_reached,
+        crate::read_phase::fragments::READ_REACH,
         total.population_links_broken,
         total.links_made_by_reads,
         total.records_attached_by_reads,

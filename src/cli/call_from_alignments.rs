@@ -262,7 +262,9 @@ pub struct CallFromAlignmentsArgs {
     /// Whether to re-call each sample's genotypes with the evidence of the samples it shares
     /// stretches of chromosome with, and of its own neighbouring sites. `auto` runs it on a
     /// diploid cohort of at least 10 samples whose median inbreeding is at least 0.5; the VCF
-    /// header says whether it ran and why.
+    /// header says whether it ran and why. Where it does not run, on a diploid cohort, phase is
+    /// written from reads alone (`GT` `a|b` with a `PS`); the header's `##readBackedPhase=` line
+    /// states its thresholds.
     #[arg(
         long,
         value_enum,

@@ -20,6 +20,8 @@ pub struct SampleReadAllele {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecordReadAlleles {
     entries: Vec<SampleReadAllele>,
+    /// Read alleles the cap removed at capture, for the run's report.
+    dropped_by_the_cap: u64,
 }
 
 impl RecordReadAlleles {
@@ -48,7 +50,25 @@ impl RecordReadAlleles {
             }
             None => false,
         });
-        Self { entries }
+        Self {
+            entries,
+            dropped_by_the_cap: 0,
+        }
+    }
+
+    /// The same, recording that the cap removed `count` read alleles at capture.
+    #[must_use]
+    pub fn with_dropped_by_the_cap(self, count: u64) -> Self {
+        Self {
+            dropped_by_the_cap: count,
+            ..self
+        }
+    }
+
+    /// How many read alleles the cap of 32 a sample removed at capture, over every sample.
+    #[must_use]
+    pub fn dropped_by_the_cap(&self) -> u64 {
+        self.dropped_by_the_cap
     }
 
     /// **Renumber the alleles as the record renumbered its own** (§2.3, step 2): `renumbered[old]`

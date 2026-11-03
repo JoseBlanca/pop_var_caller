@@ -22,7 +22,11 @@ calls and each sample's inbreeding coefficient from the parameters file.
 | `on` | runs on any diploid cohort of two or more samples |
 | `off` | does not run |
 
-The VCF header states whether it ran and why, in a `##neighbourEvidence=` line.
+The VCF header states whether it ran and why, in a `##neighbourEvidence=` line. **Where it does
+not run, on a diploid cohort, the phase is written from the reads alone**: `GT` becomes `a|b` and a
+`PS` field is added wherever two good fragments link two heterozygotes of a sample, and the header
+gains a `##readBackedPhase=` line stating the thresholds (see [the VCF page](vcf.md#phase-from-reads)).
+`off` therefore turns refinement off, not phase.
 
 The pass runs only inside a calling run. To compare the same cohort with and without it, call it
 twice, with `--refine-genotypes on` and `off`.

@@ -91,7 +91,7 @@ impl NeighbourEvidenceDecision {
                  lean_min={LEAN_MIN},path_agreement={},join_records={SHARED_RECORDS_TO_JOIN},\
                  alignment_costs={DISAGREEMENT_COST}/{SWITCH_COST},\
                  read_link_min={:.2},read_break_min={:.2},read_error_floor={},read_gq_min={},\
-                 read_reach={}>",
+                 read_reach={},read_cap={}>",
                 self.sizes.core_bases,
                 self.sizes.margin_bases,
                 self.path_agreement.get(),
@@ -100,6 +100,7 @@ impl NeighbourEvidenceDecision {
                 crate::read_phase::link::ERROR_FLOOR,
                 crate::read_phase::link::GQ_MIN,
                 crate::read_phase::fragments::READ_REACH,
+                crate::read_phase::capture::READ_ALLELES_KEPT,
             )
         } else {
             format!("<ran=no,why=\"{why}\">")

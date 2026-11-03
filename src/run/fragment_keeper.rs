@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 
 use ahash::AHashMap;
 
-use crate::read_phase::capture::ReadAllele;
+use crate::read_phase::capture::{READ_ALLELES_KEPT, ReadAllele};
 use crate::read_phase::fragments::{FragmentAllele, READ_REACH, RecordFragments};
 use crate::types::{ChainId, ContigId};
 use crate::vcf::VcfRecord;
@@ -20,6 +20,9 @@ use crate::vcf::VcfRecord;
 /// What the keeper did with the read alleles it was handed, for the run's report.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct KeeperCounts {
+    /// Read alleles the cap of [`READ_ALLELES_KEPT`] a sample a record removed at capture, before
+    /// the keeper: what the cap did, at the deep end of the depth range.
+    pub read_alleles_over_the_cap: u64,
     /// Read alleles handed in, over every record and sample.
     pub read_alleles_in: u64,
     /// Kept: their read reached another record within [`READ_REACH`] of its first.
@@ -33,9 +36,12 @@ pub struct KeeperCounts {
 /// **The keeper's counts in the run log**, once every record has left it.
 pub fn log_counts(counts: KeeperCounts) {
     tracing::info!(
-        "read-backed phase: {} of {} read alleles kept, their reads seen at two records or more \
-         within {} bases; {} dropped as their read's only one, {} as more than {} bases past \
-         their read's first",
+        "read-backed phase: {} read alleles over the cap of {} a sample a record dropped at \
+         capture; {} of {} read alleles kept, their reads seen at two records or more within {} \
+         bases; {} dropped as their read's only one, {} as more than {} bases past their read's \
+         first",
+        counts.read_alleles_over_the_cap,
+        READ_ALLELES_KEPT,
         counts.read_alleles_kept,
         counts.read_alleles_in,
         READ_REACH,
@@ -175,6 +181,7 @@ impl<P> FragmentKeeper<P> {
         );
 
         let read_alleles = record.replace_read_alleles(Default::default());
+        self.counts.read_alleles_over_the_cap += read_alleles.dropped_by_the_cap();
         let mut within_reach = Vec::with_capacity(read_alleles.len());
         for entry in read_alleles.entries() {
             self.counts.read_alleles_in += 1;
