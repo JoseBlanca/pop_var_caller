@@ -710,6 +710,7 @@ impl ParametersFile {
             duplicated_positions: _,
             // Informational too: which tracts the fit left out, and nothing a run reads.
             repeat_tracts_left_out: _,
+            misread_after_runs,
             repeat_tracts,
             stated_constants,
             // Carries no warrant: it is what the run typed, not what a fit found, so there is
@@ -755,6 +756,12 @@ impl ParametersFile {
         } in substitution_rate_by_stratum
         {
             rate.warrant = no_better_than_supplied(rate.warrant);
+        }
+        if let Some(misread) = misread_after_runs {
+            for row in &mut misread.entries {
+                row.as_the_run.warrant = no_better_than_supplied(row.as_the_run.warrant);
+                row.other_wrong.warrant = no_better_than_supplied(row.other_wrong.warrant);
+            }
         }
         let StatedConstants {
             repeat_tract_outlier_weight,

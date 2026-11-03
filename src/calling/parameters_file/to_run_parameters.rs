@@ -56,9 +56,9 @@ use std::collections::BTreeMap;
 use super::validate::refuse;
 use super::{
     BetweenLocusShare, ContaminationFittedFrom, ContaminationMeasurement, CurveReach,
-    EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError, SeedRung, ShareCurve,
-    ShareCurveRung, ShareShape, ShareSmoothing, SlippageCurve, Warrant, concentration_error_of,
-    concentration_of,
+    EvidenceCount, LevelSmoothing, MisreadBase, ParametersFile, ParametersFileError, SeedRung,
+    ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SlippageCurve, Warrant,
+    concentration_error_of, concentration_of,
 };
 use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
 use crate::calling::likelihood::ssr::RepeatTractOutlierWeight;
@@ -80,6 +80,7 @@ use crate::parameter_estimation::joint::ssr_fit::{
 use crate::parameter_estimation::joint::stratum_fits::{
     FittedAlleleLengthVariation, FittedSlippage, OwnFitStandardErrors, StratumFits,
 };
+use crate::parameter_estimation::misread_after_runs::FittedMisreadEntry;
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::read::input::read_groups::ReadGroups;
@@ -264,7 +265,8 @@ impl ParametersFile {
                 self.substitution_rates()?,
                 a_ploidy("ploidy", self.ploidy)?,
                 self.outlier_weight(),
-            ),
+            )
+            .with_misread_after_runs(self.misread_after_runs(read_group_count)?),
             reads_behind_each_calibration,
             inbreeding_by_sample,
         })
@@ -546,6 +548,114 @@ impl ParametersFile {
             );
         }
         Ok(rates)
+    }
+
+    /// **Each read group's misread table after runs**, as the file's rows give it
+    /// (`str_context_error_fit.md` §5) — empty where the file has no `[misread_after_runs]`, and
+    /// every read group then scores under the built-in table.
+    ///
+    /// **A read group with rows has one for every entry, and only those**: a row naming no entry
+    /// of the table, an entry twice, an excess that is not a probability, or a read group with a
+    /// gap is refused, naming the row.
+    fn misread_after_runs(
+        &self,
+        read_group_count: usize,
+    ) -> Result<BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>>, ParametersFileError> {
+        use crate::calling::likelihood::run_context::{ENTRY_COUNT, MisreadExcess, RunEntry};
+        let Some(misread) = &self.misread_after_runs else {
+            return Ok(BTreeMap::new());
+        };
+        let mut by_group: BTreeMap<ReadGroupId, Vec<Option<FittedMisreadEntry>>> = BTreeMap::new();
+        for row in &misread.entries {
+            let at = format!(
+                "misread_after_runs.entries[read_group = {}, shortest_run = {}, base = {:?}]",
+                row.read_group, row.shortest_run, row.base
+            );
+            if row.read_group as usize >= read_group_count {
+                return Err(refuse(
+                    at,
+                    format!("names a read group the run's {read_group_count} do not include"),
+                ));
+            }
+            let distance = match row.base {
+                MisreadBase::NextBase => 1,
+                MisreadBase::FurtherOn => 2,
+            };
+            let entry = usize::try_from(row.shortest_run)
+                .ok()
+                .and_then(|shortest| RunEntry::of(shortest, distance))
+                .filter(|entry| {
+                    let (shortest, longest) = entry.lengths();
+                    shortest as u64 == row.shortest_run
+                        && longest.map(|top| top as u64) == row.longest_run
+                })
+                .ok_or_else(|| {
+                    refuse(
+                        at.clone(),
+                        "is not an entry of the misread table: no entry has these run \
+                         lengths and this base"
+                            .to_string(),
+                    )
+                })?;
+            for (name, value) in [
+                ("as_the_run", row.as_the_run.value),
+                ("other_wrong", row.other_wrong.value),
+            ] {
+                if !(0.0..1.0).contains(&value) {
+                    return Err(refuse(
+                        format!("{at}.{name}"),
+                        format!("is {value}, and an excess misread rate is a probability below 1"),
+                    ));
+                }
+            }
+            // **Further on, the whole excess is `other_wrong`**: scoring never reads `as_the_run`
+            // there, so a value in it would look as if it applied and change nothing.
+            if row.base == MisreadBase::FurtherOn && row.as_the_run.value != 0.0 {
+                return Err(refuse(
+                    format!("{at}.as_the_run"),
+                    format!(
+                        "is {}, but a base further on than the next has no favourite wrong base: \
+                         its whole excess is `other_wrong`, and this must be 0",
+                        row.as_the_run.value
+                    ),
+                ));
+            }
+            let slots = by_group
+                .entry(ReadGroupId(row.read_group))
+                .or_insert_with(|| vec![None; ENTRY_COUNT]);
+            if slots[entry.index()].is_some() {
+                return Err(refuse(at, "is a second row for one entry".to_string()));
+            }
+            slots[entry.index()] = Some(FittedMisreadEntry {
+                excess: MisreadExcess {
+                    as_the_run: row.as_the_run.value,
+                    other_wrong: row.other_wrong.value,
+                },
+                standard_error: MisreadExcess {
+                    as_the_run: row.as_the_run.standard_error.unwrap_or(0.0),
+                    other_wrong: row.other_wrong.standard_error.unwrap_or(0.0),
+                },
+                through_reads: row.through_reads,
+                arriving_first_reads: row.arriving_first_reads,
+                // The weaker of the two: a row whose two numbers were warranted apart (by hand)
+                // is no better than its weaker one.
+                provenance: Provenance::from(row.as_the_run.warrant)
+                    .weaker_of(row.other_wrong.warrant.into()),
+            });
+        }
+        by_group
+            .into_iter()
+            .map(|(group, slots)| {
+                let missing = slots.iter().filter(|slot| slot.is_none()).count();
+                if missing > 0 {
+                    return Err(refuse(
+                        format!("misread_after_runs.entries[read_group = {}]", group.get()),
+                        format!("lacks {missing} of the table's {ENTRY_COUNT} entries"),
+                    ));
+                }
+                Ok((group, slots.into_iter().flatten().collect()))
+            })
+            .collect()
     }
 
     /// The one stated constant, and which of its two warrants the file gave it.
@@ -1151,6 +1261,8 @@ pub(super) mod tests {
             .allele_length_variation_by_period
             .clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
+        // The fixture's misread rows name read group 1, which a one-read-group run lacks.
+        small.misread_after_runs = None;
         // **A run that fitted no stratum states the compiled-in flat concentration**, which is
         // what `defaulted` says: the fixture's `fitted_here` at 3.5 is a claim about a median
         // over strata this file no longer has.
@@ -1228,6 +1340,37 @@ pub(super) mod tests {
         };
         assert_eq!(field, "sequencing_batches.by_read_group[read_group = 1]");
         assert!(problem.contains("TS-1"), "it names the sample: {problem}");
+    }
+
+    /// **A further-on misread row carrying an excess "as the run" is refused**: scoring never
+    /// reads it there, so the file would claim a charge that does not happen.
+    #[test]
+    fn a_further_on_misread_row_with_an_excess_as_the_run_is_refused() {
+        let mut file = a_file_using_every_shape();
+        assert!(
+            file.to_run_parameters().is_ok(),
+            "the fixture itself is usable"
+        );
+        let row = file
+            .misread_after_runs
+            .as_mut()
+            .expect("the fixture carries the table")
+            .entries
+            .iter_mut()
+            .find(|row| row.base == super::MisreadBase::FurtherOn)
+            .expect("a further-on row");
+        row.as_the_run.value = 0.05;
+
+        let error = file
+            .to_run_parameters()
+            .expect_err("the excess would be silently ignored");
+        let ParametersFileError::Meaningless { field, .. } = &error else {
+            panic!("{error:?}")
+        };
+        assert!(
+            field.starts_with("misread_after_runs.entries[") && field.ends_with(".as_the_run"),
+            "{field}"
+        );
     }
 
     /// **The three newtypes whose rules no range check states**, each refused naming its key
@@ -2234,6 +2377,8 @@ mod the_north_star_round_trip {
                 .allele_length_variation_by_period
                 .clear();
             small.repeat_tracts.substitution_rate_by_stratum.clear();
+            // The fixture's misread rows name read group 1, which a one-read-group run lacks.
+            small.misread_after_runs = None;
             // A run that fitted no stratum states the flat constant, marked `defaulted`.
             small.repeat_tracts.fallback_between_locus_share = super::super::WarrantedValue {
                 value: the_built_in_fallback_share(),

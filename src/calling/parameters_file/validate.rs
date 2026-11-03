@@ -117,21 +117,31 @@ impl ParametersFile {
         self.the_prior_seed_is_a_pair_of_concentrations()?;
         self.the_informational_tables_hold_numbers()?;
         self.the_tracts_left_out_hold_numbers()?;
+        self.the_misread_table_is_not_older_than_its_format()?;
         self.the_repeat_tract_numbers_are_what_they_claim()?;
         self.every_stated_constant_is_in_range()?;
         Ok(())
     }
 
-    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
-    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
-    /// a spread, and a number marked `separately_determined = false` refused if it carries a
-    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
-    /// and not the population.
-    ///
-    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
-    /// says version 3 and holds one cannot say which format it was written in — the refusal the
-    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
-    /// the tables.
+    /// **`[misread_after_runs]` is not in a file stamped before format 8**, which had no such
+    /// table. Its rows are checked where they are read (`to_run_parameters`), which names the row.
+    fn the_misread_table_is_not_older_than_its_format(&self) -> Result<(), ParametersFileError> {
+        if self.misread_after_runs.is_some()
+            && self.format_version < FORMAT_THAT_ADDED_THE_MISREAD_TABLE
+        {
+            return Err(refuse(
+                "misread_after_runs",
+                format!(
+                    "is a format-{FORMAT_THAT_ADDED_THE_MISREAD_TABLE} table in a file whose \
+                     `format_version` says {}, so it is not clear which format the file was \
+                     written in; set `format_version` to the format the file was written in",
+                    self.format_version
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// **`[repeat_tracts_left_out]` holds finite numbers, and is not in a file stamped before format
     /// 7**, which had no such table — the same refusal [`Self::the_informational_tables_hold_numbers`]
     /// gives format 4's tables. Nothing else is checked: no run reads it.
@@ -171,6 +181,16 @@ impl ParametersFile {
         Ok(())
     }
 
+    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
+    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
+    /// a spread, and a number marked `separately_determined = false` refused if it carries a
+    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
+    /// and not the population.
+    ///
+    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
+    /// says version 3 and holds one cannot say which format it was written in — the refusal the
+    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
+    /// the tables.
     fn the_informational_tables_hold_numbers(&self) -> Result<(), ParametersFileError> {
         if self.format_version < FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES {
             let tables = [
@@ -1335,6 +1355,10 @@ fn the_unit_of(count: EvidenceCount) -> &'static str {
 /// 4. A file stamped with an earlier version and holding either is refused.
 const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
 
+/// **The format that added `[misread_after_runs]`**: 8. A file stamped earlier and holding it is
+/// refused.
+const FORMAT_THAT_ADDED_THE_MISREAD_TABLE: u32 = 8;
+
 /// **The format that added `[repeat_tracts_left_out]`**: 7. A file stamped earlier and holding it is
 /// refused.
 const FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT: u32 = 7;
@@ -2211,6 +2235,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2220,6 +2245,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             as_written_before_format_6(file);
@@ -2227,14 +2253,20 @@ mod tests {
         accepted(|file| {
             file.format_version = 5;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             as_written_before_format_6(file);
         });
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
         });
-        accepted(|file| file.format_version = 7);
-        let (field, _) = refused(|file| file.format_version = 8);
+        accepted(|file| {
+            file.format_version = 7;
+            file.misread_after_runs = None;
+        });
+        accepted(|file| file.format_version = 8);
+        let (field, _) = refused(|file| file.format_version = 9);
         assert_eq!(field, "format_version");
     }
 
@@ -2252,6 +2284,7 @@ mod tests {
         let (field, _) = refused(|file| {
             file.format_version = 5;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
         });
         assert_eq!(field, "stated_constants.repeat_tract_outlier_weight");
     }
@@ -2327,6 +2360,7 @@ mod tests {
         let (field, problem) = refused(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             file.duplicated_positions = None;
         });
         assert_eq!(field, "ordinary_site_prior.fitted_density");
@@ -2335,12 +2369,14 @@ mod tests {
         let (field, _) = refused(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             file.ordinary_site_prior.fitted_density = None;
         });
         assert_eq!(field, "duplicated_positions");
         accepted(|file| {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2351,6 +2387,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             file.stated_constants.repeat_tract_outlier_weight.value =
@@ -2369,6 +2406,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
         });
     }
 
@@ -2380,6 +2418,7 @@ mod tests {
         let (field, problem) = refused(|file| {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
+            file.misread_after_runs = None;
         });
         assert_eq!(
             field,
@@ -2553,6 +2592,7 @@ mod tests {
         let mut file = a_file_using_every_shape();
         file.format_version = 1;
         file.repeat_tracts_left_out = None;
+        file.misread_after_runs = None;
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;

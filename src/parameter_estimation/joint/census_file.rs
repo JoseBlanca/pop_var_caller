@@ -34,6 +34,7 @@
 //!   magic     8 bytes   "NGCENSUS"
 //!   version   u16       1
 //!   header              the sample's name, its read groups, their minted read-error totals,
+//!                       their counts of misreads after runs,
 //!                       the twelve terms it was recorded under, and one byte that is always
 //!                       zero (`encode_header`)
 //!   directory u32 n, then n × (section key, offset u64, length u64)
@@ -53,9 +54,11 @@
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
+use crate::calling::likelihood::run_context::ENTRY_COUNT;
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::depth_bins::CENSUS_DEPTH_BIN_COUNT;
 use crate::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
+use crate::parameter_estimation::misread_after_runs::{MisreadCounts, MisreadCountsByEntry};
 use crate::repeat_catalog::StratumCounts;
 use crate::types::{ContigId, ReadGroupId};
 use std::collections::BTreeMap;
@@ -81,12 +84,14 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 /// every depth to the cap — a version-1 file's depth array is a different number of bytes for
 /// the same position count and its codes index a different ladder, so nothing about it can be
 /// salvaged by reading it more carefully. 3 on 2026-09-05, when the census began recording who
-/// its read groups are; 4 the same day, when it began carrying what the base qualities claimed.
+/// its read groups are; 4 the same day, when it began carrying what the base qualities claimed; 5 on
+/// 2026-11-02, when it began counting misreads after runs per read group
+/// (`str_context_error_fit.md` §3).
 ///
 /// **Public because a psp's census is judged before it is decoded** (`psp_census_pair.md` §4.2):
 /// [`CensusVerdict`](crate::run::CensusVerdict) compares the version word at a trailer's
 /// front against this, and names both numbers when they differ.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// **The version, written out as a literal, so that changing it is a deliberate edit in two
 /// places.**
@@ -96,7 +101,7 @@ pub const VERSION: u16 = 4;
 /// accident. Every other test compares the file's version word against the constant, so they all
 /// pass whichever value it holds.
 #[cfg(test)]
-const THE_VERSION_THIS_BUILD_WRITES: u16 = 4;
+const THE_VERSION_THIS_BUILD_WRITES: u16 = 5;
 
 /// **How many bytes of a census say which format it is** — the magic above and the version word
 /// behind it, which is all [`version_word_of`] reads.
@@ -235,6 +240,26 @@ fn encode_header(out: &mut Vec<u8>, census: &SampleCensusEvidence) {
         put_u64(out, totals.reads());
     }
 
+    // **How often each library misread a base after a run**, through it and from the other
+    // side, at each entry of the table (`str_context_error_fit.md` §3.3): its own length for the
+    // same reason as the table above, and the entry count written so that a table of another
+    // shape is refused rather than read into the wrong entries.
+    let misread = census.misread_after_runs();
+    put_u32(out, misread.len() as u32);
+    for (id, counts) in misread {
+        put_u32(out, id.get());
+        put_u32(out, counts.entries().len() as u32);
+        for totals in counts.entries() {
+            put_u64(out, totals.through_reads);
+            put_u64(out, totals.through_as_the_run);
+            put_u64(out, totals.through_other_wrong);
+            put_u64(out, totals.arriving_first_reads);
+            put_u64(out, totals.arriving_first_as_the_run);
+            put_u64(out, totals.arriving_first_other_wrong);
+            out.extend_from_slice(&totals.through_as_the_run_log_error_steps.to_le_bytes());
+        }
+    }
+
     let terms = &census.terms;
 
     put_u16(out, terms.selection.fields().len() as u16);
@@ -366,7 +391,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     if cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, declared, minted, terms) = decode_header(&mut cursor)?;
+    let (sample, declared, minted, misread, terms) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     let mut sections = std::collections::BTreeMap::new();
@@ -380,7 +405,8 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     }
 
     Ok(CensusFile {
-        census: SampleCensusEvidence::resident(sample, terms, declared, minted, sections),
+        census: SampleCensusEvidence::resident(sample, terms, declared, minted, sections)
+            .with_misread_after_runs(misread),
     })
 }
 
@@ -446,7 +472,7 @@ pub fn open_census_within(
     if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
         return Err(CensusError::Malformed);
     }
-    let (sample, declared, minted, terms) = decode_header(&mut cursor)?;
+    let (sample, declared, minted, misread, terms) = decode_header(&mut cursor)?;
     let directory = decode_directory(&mut cursor)?;
 
     // **Every section ends inside the census, checked once here rather than at each read.** A
@@ -471,13 +497,15 @@ pub fn open_census_within(
         path.to_path_buf(),
         census.offset(),
         directory.into_iter().collect(),
-    ))
+    )
+    .with_misread_after_runs(misread))
 }
 
 /// How much of a census file's front is read to find its header and its directory.
 ///
 /// **One read rather than a walk of growing reads.** A census of tomato's 141 strata over a
-/// handful of read groups has a directory of a few thousand bytes and a header of a few hundred;
+/// handful of read groups has a directory of a few thousand bytes and a header of about 1.1 kB a
+/// read group, most of it the counts of misreads after runs (19 entries of 56 bytes);
 /// a megabyte covers a directory of about 40,000 sections, and reading it costs one seekless read
 /// of a file that is megabytes long anyway. A file shorter than this is read whole.
 const HEAD_READ_BYTES: usize = 1 << 20;
@@ -536,6 +564,7 @@ type Header = (
     String,
     BTreeMap<ReadGroupId, NamedReadGroup>,
     BTreeMap<ReadGroupId, MintedReadErrors>,
+    BTreeMap<ReadGroupId, MisreadCountsByEntry>,
     RecordingTerms,
 );
 
@@ -570,6 +599,38 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
         );
         if minted
             .insert(id, MintedReadErrors::from_parts(sum, cursor.u64()?))
+            .is_some()
+        {
+            return Err(CensusError::Malformed);
+        }
+    }
+
+    let misread_count = cursor.u32()? as usize;
+    let mut misread = BTreeMap::new();
+    for _ in 0..misread_count {
+        let id = ReadGroupId(cursor.u32()?);
+        if cursor.u32()? as usize != ENTRY_COUNT {
+            return Err(CensusError::Malformed);
+        }
+        let mut entries = [MisreadCounts::default(); ENTRY_COUNT];
+        for totals in &mut entries {
+            *totals = MisreadCounts {
+                through_reads: cursor.u64()?,
+                through_as_the_run: cursor.u64()?,
+                through_other_wrong: cursor.u64()?,
+                arriving_first_reads: cursor.u64()?,
+                arriving_first_as_the_run: cursor.u64()?,
+                arriving_first_other_wrong: cursor.u64()?,
+                through_as_the_run_log_error_steps: i64::from_le_bytes(
+                    cursor
+                        .take(8)?
+                        .try_into()
+                        .map_err(|_| CensusError::Malformed)?,
+                ),
+            };
+        }
+        if misread
+            .insert(id, MisreadCountsByEntry::from_entries(entries))
             .is_some()
         {
             return Err(CensusError::Malformed);
@@ -641,6 +702,7 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
         sample,
         declared,
         minted,
+        misread,
         RecordingTerms {
             selection: SelectionTermsDigest::from_fields(fields),
             kept_loci: CensusLociDigest::from_parts(whole, blocks),
@@ -1914,6 +1976,44 @@ mod tests {
              claim from an entry whose sum is zero over some reads — and the table carries its \
              own length so the two stay apart on the wire",
         );
+    }
+
+    /// **The misread counts survive the round trip, entry by entry and under their own read
+    /// group** (`str_context_error_fit.md` §3.6), including a negative summed log error.
+    #[test]
+    fn the_misread_counts_survive_the_round_trip() {
+        use crate::calling::likelihood::run_context::RunEntry;
+        let mut entries = [MisreadCounts::default(); ENTRY_COUNT];
+        let entry = RunEntry::of(20, 1).expect("an entry");
+        entries[entry.index()] = MisreadCounts {
+            through_reads: 5_000,
+            through_as_the_run: 151,
+            through_other_wrong: 3,
+            arriving_first_reads: 4_200,
+            arriving_first_as_the_run: 75,
+            arriving_first_other_wrong: 2,
+            through_as_the_run_log_error_steps: -1_234_567,
+        };
+        entries[ENTRY_COUNT - 1].through_reads = 9;
+        let counts = MisreadCountsByEntry::from_entries(entries);
+        let census = SampleCensusEvidence::resident(
+            "misreads".to_string(),
+            terms(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                SectionKey::Generic(ReadGroupId(0)),
+                Section::Generic(GenericEvidence::never_walked(3)),
+            )]),
+        )
+        .with_misread_after_runs(BTreeMap::from([(ReadGroupId(2), counts.clone())]));
+
+        let read = round_trip(&census);
+
+        let misread = read.census.misread_after_runs();
+        assert_eq!(misread.len(), 1);
+        assert_eq!(misread[&ReadGroupId(2)], counts);
+        assert_eq!(read.census, census);
     }
 
     /// **A census naming one read group twice is malformed**, not a last-one-wins.
