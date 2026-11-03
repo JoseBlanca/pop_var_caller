@@ -36,7 +36,9 @@ use std::num::{NonZeroU8, NonZeroU32};
 use crate::alignment::StutterModel;
 use crate::alignment::emission::{BaseScores, Emission, FlatEmission};
 use crate::alignment::stutter::{MAX_PART_REPEAT_SLIP, MAX_WHOLE_REPEAT_SLIP};
-use crate::calling::likelihood::run_context::{ReadDirection, letters_after_runs};
+use crate::calling::likelihood::run_context::{
+    DEFAULT_MISREAD_TABLE, MisreadTable, ReadDirection, letters_after_runs,
+};
 use crate::float;
 use crate::locus_generation::HeldFlank;
 use crate::parameter_estimation::Provenance;
@@ -205,6 +207,9 @@ pub struct SsrScoringContext<'a> {
     /// The locus's reference flanks, which a run reaching the candidate's first or last base may
     /// begin in. Empty where `read_direction` is `None`.
     pub flanks_for_run_context: (&'a [u8], &'a [u8]),
+    /// **The read group's misread excess after runs**, charged where
+    /// `read_direction` is set ([`MisreadTable`]).
+    pub misread_after_runs: &'a MisreadTable,
 }
 
 impl<'a> SsrScoringContext<'a> {
@@ -238,6 +243,7 @@ impl<'a> SsrScoringContext<'a> {
             weakest_provenance,
             read_direction: None,
             flanks_for_run_context: (&[], &[]),
+            misread_after_runs: &DEFAULT_MISREAD_TABLE,
         }
     }
 
@@ -294,6 +300,7 @@ impl<'a> SsrScoringContext<'a> {
             weakest_provenance,
             read_direction: None,
             flanks_for_run_context: (&[], &[]),
+            misread_after_runs: &DEFAULT_MISREAD_TABLE,
         }
     }
 
@@ -1262,6 +1269,7 @@ fn letters_against_stretching_followed_by(
             context.flanks_for_run_context,
             direction,
             context.substitution_rate,
+            context.misread_after_runs,
         )
         .unwrap_or(0.0);
     }
@@ -1379,7 +1387,7 @@ struct MatchedPrefixLetters {
     /// **Where a complete read is compared under the misread rate after a long run**: its
     /// direction and the locus's flanks ([`run_context`](super::run_context)). `None` after every
     /// [`Self::prepare`], so only a caller that sets it gets it.
-    run_context: Option<(ReadDirection, Vec<u8>, Vec<u8>)>,
+    run_context: Option<(ReadDirection, Vec<u8>, Vec<u8>, MisreadTable)>,
 }
 
 impl MatchedPrefixLetters {
@@ -1420,7 +1428,7 @@ impl MatchedPrefixLetters {
         if observation.len() != resized_candidate.len() {
             return 0.0;
         }
-        if let Some((direction, left, right)) = &self.run_context {
+        if let Some((direction, left, right, table)) = &self.run_context {
             let rate = self.rate.expect("set with the rate");
             return letters_after_runs(
                 observation,
@@ -1428,6 +1436,7 @@ impl MatchedPrefixLetters {
                 (left, right),
                 *direction,
                 rate,
+                table,
             )
             .unwrap_or(0.0);
         }
@@ -1818,7 +1827,12 @@ fn bundle_emission(
         .prepare(context.substitution_rate, observation.len());
     if let Some(direction) = context.read_direction {
         let (left, right) = context.flanks_for_run_context;
-        scratch.matched.run_context = Some((direction, left.to_vec(), right.to_vec()));
+        scratch.matched.run_context = Some((
+            direction,
+            left.to_vec(),
+            right.to_vec(),
+            context.misread_after_runs.clone(),
+        ));
     }
 
     // Each run's stretch, split into whole copies and interruptions once for the whole walk.

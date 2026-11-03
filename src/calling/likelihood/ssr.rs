@@ -66,7 +66,7 @@
 //! frozen.
 
 use super::ContaminationView;
-use super::run_context::{ReadDirection, SHORTEST_RUN_CHARGED, longest_run};
+use super::run_context::{ReadDirection, a_run_may_reach_a_charged_length};
 use super::ssr_emission::{
     BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over,
 };
@@ -825,7 +825,7 @@ fn fill_emissions<Model: SsrEmissionModel>(
             // **Scored once per strand where a long run sits in or beside the candidate**
             // (`str_context_error.md`): a read sequenced through the run misreads the bases after
             // it, and only the reads of one strand were. Everywhere else one score serves both.
-            if a_run_may_reach_a_charged_length(allele) {
+            if a_run_may_reach_a_charged_length_beside(allele, context) {
                 let scored_from = |direction| SsrScoringContext {
                     read_direction: Some(direction),
                     flanks_for_run_context: allele.reference_flanks,
@@ -901,13 +901,15 @@ fn fill_emissions<Model: SsrEmissionModel>(
     }
 }
 
-/// Whether a run of one base in `allele`, or beside it in the locus's flanks, is one repeat short
-/// of the shortest run whose following bases are charged more — a whole-unit slip can lengthen it
-/// to that length in the stretching a read is compared with.
-fn a_run_may_reach_a_charged_length(allele: &SsrCandidate<'_>) -> bool {
+/// Whether a repeat in `allele`, or beside it in the locus's flanks, is long enough to be charged
+/// or one unit short of it ([`a_run_may_reach_a_charged_length`]).
+fn a_run_may_reach_a_charged_length_beside(
+    allele: &SsrCandidate<'_>,
+    context: &SsrScoringContext<'_>,
+) -> bool {
     let (left, right) = allele.reference_flanks;
     let around: Vec<u8> = [left, allele.bases, right].concat();
-    longest_run(&around) + 1 >= SHORTEST_RUN_CHARGED
+    a_run_may_reach_a_charged_length(&around, context.misread_after_runs)
 }
 
 /// One complete observation scored against one candidate under `context` — over the wider of the
@@ -1094,6 +1096,9 @@ mod tests {
         read_groups: usize,
         candidate_bases: Vec<Vec<u8>>,
         repeat_counts: Vec<u32>,
+        /// The misread table every read group scores under: the built-in one unless a test sets
+        /// another.
+        misread_table: crate::calling::likelihood::run_context::MisreadTable,
     }
 
     impl Fixture {
@@ -1154,6 +1159,7 @@ mod tests {
                     .map(|count| a_tract(motif, *count as usize))
                     .collect(),
                 repeat_counts: repeat_counts.to_vec(),
+                misread_table: crate::calling::likelihood::run_context::MisreadTable::defaults(),
             }
         }
 
@@ -1178,13 +1184,16 @@ mod tests {
             for group in 0..self.read_groups {
                 for (candidate, allele) in candidates.iter().enumerate() {
                     let at = group * candidates.len() + candidate;
-                    contexts.push(SsrScoringContext::new(
-                        &self.motif,
-                        &self.models[at],
-                        allele,
-                        ErrorRate::try_new(self.substitution_rates[at]).expect("a valid rate"),
-                        [Provenance::FittedHere],
-                    ));
+                    contexts.push(SsrScoringContext {
+                        misread_after_runs: &self.misread_table,
+                        ..SsrScoringContext::new(
+                            &self.motif,
+                            &self.models[at],
+                            allele,
+                            ErrorRate::try_new(self.substitution_rates[at]).expect("a valid rate"),
+                            [Provenance::FittedHere],
+                        )
+                    });
                 }
             }
             contexts
@@ -1289,6 +1298,30 @@ mod tests {
             heterozygous > homozygous,
             "reverse reads: 0/0 {homozygous} against 0/1 {heterozygous}"
         );
+    }
+
+    /// **The read group's own table decides the charge** (`str_context_error_fit.md` §6): under a
+    /// table of zeros — what a fit finds for a library with no such misread — the same three
+    /// forward misreads after sixteen `A`s make the sample `0/1` again, as every read did under
+    /// the one fitted rate before.
+    #[test]
+    fn a_table_of_zeros_takes_the_charge_away() {
+        let mut fixture = Fixture::of(b"A", &[26, 27]);
+        fixture.candidate_bases[0] = [&[b'A'; 16][..], b"G", &[b'A'; 10]].concat();
+        let reference = fixture.candidate_bases[0].clone();
+        let mut reference_reads = spanning(&reference, 12);
+        reference_reads.num_fwd = 5;
+        let mut misreads = spanning(&[b'A'; 27], 3);
+        misreads.num_fwd = 3;
+        let observations = [reference_reads, misreads];
+        let defaulted = score_row(&fixture, &observations, 2);
+        fixture.misread_table = crate::calling::likelihood::run_context::MisreadTable::zero();
+        let zero = score_row(&fixture, &observations, 2);
+        assert!(
+            defaulted[0].0 > defaulted[1].0,
+            "the default table: 0/0 wins"
+        );
+        assert!(zero[1].0 > zero[0].0, "a table of zeros: 0/1 wins");
     }
 
     /// Whether no candidate at all can produce this observation — what makes a read *junk*

@@ -254,7 +254,11 @@ use serde::{Deserialize, Serialize};
 /// by depth and by the stutter tail (`doc/devel/ng/spec/parameter_prepass_ssr.md` §4.6.1). No run
 /// reads it. A version-6 build refuses a version-7 file that carries it; this build reads a
 /// version-6 file with the table absent.
-pub const FORMAT_VERSION: u32 = 7;
+///
+/// **Version 8** adds `[misread_after_runs]`, each read group's misread excess after runs
+/// (`doc/devel/ng/spec/str_context_error_fit.md` §5). Calling reads it. This build reads a version-7
+/// file with the table absent, and every read group then scores under the built-in table.
+pub const FORMAT_VERSION: u32 = 8;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -603,6 +607,11 @@ pub struct ParametersFile {
     /// fit, and in a file written before version 7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_tracts_left_out: Option<RepeatTractsLeftOut>,
+    /// **Each read group's misread excess after runs** (`str_context_error_fit.md` §5) — read
+    /// by calling. Absent in a file written before version 8, and then every read group scores
+    /// under the built-in defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub misread_after_runs: Option<MisreadAfterRuns>,
     /// How often a read slips a repeat, and what lengths a tract's chromosomes are spread over
     /// (spec §3.7).
     pub repeat_tracts: RepeatTracts,
@@ -1156,6 +1165,50 @@ pub struct RepeatTractsLeftOut {
     pub stutter_tail_by_period: Vec<StutterTailPeriodRow>,
     /// One row a class: the tracts the fit read and the tracts each rule left out.
     pub by_stratum: Vec<TractsLeftOutRow>,
+}
+
+/// **`[misread_after_runs]`: how much more often each read group's reads misread a base after
+/// a long run of one base when they were sequenced through it** (`str_context_error_fit.md` §5).
+/// Calling reads it: every read group with rows is scored under them, one with none under the
+/// built-in table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MisreadAfterRuns {
+    /// One row per read group and entry of the table.
+    pub entries: Vec<MisreadAfterRunRow>,
+}
+
+/// Where a base sits after the run a row names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MisreadBase {
+    /// The base right after the run.
+    NextBase,
+    /// One of the 2nd to 20th bases after it.
+    FurtherOn,
+}
+
+/// One read group's excess at one entry: a range of run lengths and a distance after it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MisreadAfterRunRow {
+    /// The run's dense read-group index.
+    pub read_group: u32,
+    /// The shortest run, in bases, the entry covers.
+    pub shortest_run: u64,
+    /// The longest; absent for the open top class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longest_run: Option<u64>,
+    pub base: MisreadBase,
+    /// The excess chance of reading the base as one more base of the run (next base only), with its
+    /// warrant; its `observations` are the through reads where it was fitted.
+    pub as_the_run: WarrantedValue,
+    /// The excess chance of reading any other wrong base (any wrong base, further on).
+    pub other_wrong: WarrantedValue,
+    /// Reads sequenced through the run at the counted positions.
+    pub through_reads: u64,
+    /// Reads reaching the same positions from the other side.
+    pub arriving_first_reads: u64,
 }
 
 /// The depth rule's settings as the run used them.
@@ -2107,6 +2160,46 @@ mod tests {
                     in_stutter_tail: 2,
                 }],
             }),
+            // **Every entry for read group 1**, since a read group with rows needs all of them;
+            // the first fitted with both standard errors, the rest defaulted without, so both
+            // shapes of a row are in the file. The single-length entries carry their length twice
+            // (`shortest_run` and `longest_run`), the one equal pair of fields here.
+            misread_after_runs: Some(MisreadAfterRuns {
+                entries: crate::calling::likelihood::run_context::RunEntry::all()
+                    .map(|entry| {
+                        let (shortest, longest) = entry.lengths();
+                        let index = entry.index() as f64;
+                        let first = entry.index() == 0;
+                        MisreadAfterRunRow {
+                            read_group: 1,
+                            shortest_run: shortest as u64,
+                            longest_run: longest.map(|top| top as u64),
+                            base: match entry.distance() {
+                                crate::calling::likelihood::run_context::DistanceAfterRun::NextBase => {
+                                    MisreadBase::NextBase
+                                }
+                                crate::calling::likelihood::run_context::DistanceAfterRun::FurtherOn => {
+                                    MisreadBase::FurtherOn
+                                }
+                            },
+                            as_the_run: WarrantedValue {
+                                value: 0.001 * (index + 1.5),
+                                warrant: if first { Warrant::FittedHere } else { Warrant::Defaulted },
+                                observations: first.then_some(EvidenceCount::Reads(4_321)),
+                                standard_error: first.then_some(0.000_75),
+                            },
+                            other_wrong: WarrantedValue {
+                                value: 0.0001 * (index + 2.25),
+                                warrant: if first { Warrant::FittedHere } else { Warrant::Defaulted },
+                                observations: first.then_some(EvidenceCount::Reads(4_321)),
+                                standard_error: first.then_some(0.000_125),
+                            },
+                            through_reads: if first { 4_321 } else { 17 },
+                            arriving_first_reads: if first { 3_456 } else { 23 },
+                        }
+                    })
+                    .collect(),
+            }),
             repeat_tracts: RepeatTracts {
                 // **`fitted_here`, and the value is the median it says it is.** This fixture
                 // has one stratum with an allele length variation of its own, at a between-locus
@@ -2712,12 +2805,14 @@ mod tests {
             [
                 ".base_quality_calibration.by_read_group.error_probability_multiplier",
                 ".inbreeding.by_sample.inbreeding_coefficient",
+                ".misread_after_runs.entries.as_the_run",
+                ".misread_after_runs.entries.other_wrong",
                 ".repeat_tracts.fallback_between_locus_share",
                 ".repeat_tracts.fallback_between_locus_share_with_own_shares",
                 ".repeat_tracts.substitution_rate_by_stratum.rate",
                 ".stated_constants.repeat_tract_outlier_weight",
             ],
-            "these six numbers carry a warrant and nothing else does"
+            "these eight numbers carry a warrant and nothing else does"
         );
 
         for (path, table) in &found {
@@ -3203,9 +3298,9 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_seven() {
-        assert_eq!(FORMAT_VERSION, 7);
-        assert_eq!(a_file_using_every_shape().format_version, 7);
+    fn the_format_version_this_build_writes_is_eight() {
+        assert_eq!(FORMAT_VERSION, 8);
+        assert_eq!(a_file_using_every_shape().format_version, 8);
     }
 
     /// **A version-3 file reads, with both informational tables absent** — the fixture with its
@@ -3216,12 +3311,13 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// know, so the written text of either table, put in a file whose shape lacks it, is refused
     /// naming the key.
     #[test]
-    fn a_version_three_file_reads_without_the_tables_and_a_version_eight_file_is_refused() {
+    fn a_version_three_file_reads_without_the_tables_and_a_version_nine_file_is_refused() {
         let mut version_three = a_file_using_every_shape();
         version_three.format_version = 3;
         version_three.ordinary_site_prior.fitted_density = None;
         version_three.duplicated_positions = None;
         version_three.repeat_tracts_left_out = None;
+        version_three.misread_after_runs = None;
         version_three
             .repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
@@ -3237,10 +3333,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         read.validate()
             .expect("a version-3 file passes the checks a run applies");
 
-        let mut version_eight = a_file_using_every_shape();
-        version_eight.format_version = 8;
-        let read = ParametersFile::from_toml(&version_eight.to_toml())
-            .expect("a version-8 file with this build's keys parses");
+        let mut version_nine = a_file_using_every_shape();
+        version_nine.format_version = 9;
+        let read = ParametersFile::from_toml(&version_nine.to_toml())
+            .expect("a version-9 file with this build's keys parses");
         assert!(matches!(
             read.validate(),
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"

@@ -18,13 +18,14 @@ use super::{
     BaseQualityCalibration, BaseQualityCalibrationRow, BetweenLocusShare, CensusIdentity,
     Contamination, ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, FORMAT_VERSION, FittedDensity, FittedDuplicatedPositions, Inbreeding,
-    InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing, OrdinarySitePrior,
-    ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting,
-    RepeatTracts, RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve,
-    ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
-    SlippageRow, SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow,
-    SubstitutionRateRow, Warrant, WarrantedValue, between_locus_share_error_of,
-    between_locus_share_of, concentration_error_of,
+    InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing, MisreadAfterRunRow,
+    MisreadAfterRuns, MisreadBase, OrdinarySitePrior, ParametersFile,
+    PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting, RepeatTracts,
+    RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
+    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
+    SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow, SubstitutionRateRow,
+    Warrant, WarrantedValue, between_locus_share_error_of, between_locus_share_of,
+    concentration_error_of,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -449,6 +450,7 @@ impl ParametersFile {
             },
             duplicated_positions: None,
             repeat_tracts_left_out: None,
+            misread_after_runs: misread_after_runs_of(run),
             repeat_routing: repeat_routing.map(RepeatRouting::of),
             repeat_tracts: repeat_tracts_of(run),
             stated_constants: StatedConstants {
@@ -515,6 +517,48 @@ impl ParametersFile {
         self.repeat_tracts_left_out = repeat_tracts_left_out;
         self
     }
+}
+
+/// **`[misread_after_runs]` from what the run scores under** — `None` where the run holds no
+/// read group's table, so a file written under the defaults says nothing and reads back the same.
+fn misread_after_runs_of(run: &RunParameters) -> Option<MisreadAfterRuns> {
+    use crate::calling::likelihood::run_context::{DistanceAfterRun, RunEntry};
+    if run.misread_after_runs().is_empty() {
+        return None;
+    }
+    let entries = run
+        .misread_after_runs()
+        .iter()
+        .flat_map(|(group, fitted)| {
+            RunEntry::all().zip(fitted).map(move |(entry, fit)| {
+                let (shortest, longest) = entry.lengths();
+                let fitted_here = fit.provenance == Provenance::FittedHere;
+                // **A fitted excess carries its error and the reads it rests on; a defaulted one
+                // neither**, which is the file's rule for every warranted number.
+                let warranted = |value: f64, standard_error: f64| WarrantedValue {
+                    value,
+                    warrant: fit.provenance.into(),
+                    observations: (fitted_here && fit.through_reads > 0)
+                        .then_some(EvidenceCount::Reads(fit.through_reads)),
+                    standard_error: fitted_here.then_some(standard_error),
+                };
+                MisreadAfterRunRow {
+                    read_group: group.get(),
+                    shortest_run: shortest as u64,
+                    longest_run: longest.map(|top| top as u64),
+                    base: match entry.distance() {
+                        DistanceAfterRun::NextBase => MisreadBase::NextBase,
+                        DistanceAfterRun::FurtherOn => MisreadBase::FurtherOn,
+                    },
+                    as_the_run: warranted(fit.excess.as_the_run, fit.standard_error.as_the_run),
+                    other_wrong: warranted(fit.excess.other_wrong, fit.standard_error.other_wrong),
+                    through_reads: fit.through_reads,
+                    arriving_first_reads: fit.arriving_first_reads,
+                }
+            })
+        })
+        .collect();
+    Some(MisreadAfterRuns { entries })
 }
 
 /// One row a read group: the multiplier and its warrant from the run, the count from whichever of

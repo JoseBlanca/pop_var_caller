@@ -471,7 +471,7 @@ impl SampleObservationGatherer {
         // **Built before the walk**, with every generic stretch already marked walked —
         // `CensusPlan::writer_for` says why.
         let census = census.map(|plan| {
-            plan.writer_for(
+            let mut writer = plan.writer_for(
                 header.sample.clone(),
                 read_groups
                     .iter()
@@ -486,7 +486,11 @@ impl SampleObservationGatherer {
                     })
                     .collect(),
                 &segmentation,
-            )
+            );
+            // **The misread count reads the reference around each position** for the runs
+            // before it (`str_context_error_fit.md` §3), through an accessor of its own.
+            writer.count_misreads_after_runs(Box::new(walk_reference.accessor()));
+            writer
         });
         Ok(Self {
             header,

@@ -224,6 +224,11 @@ term to decide anything. A read matching the reference still pays a small charge
    counts repeats of period 2 to 4 the same way as runs of one base, and each read group's data
    decide what they charge.** The fitted version is specified in
    [`str_context_error_fit.md`](str_context_error_fit.md).
+4. **2026-11-03, after the fitted build was measured: runs of one base only.** Charging after
+   repeats of 2 to 4 bases changed no more than 6 calls on HG002, the bases it charged carried high
+   base quality, and the sequencer has no reason to misread after a repeat that alternates between
+   bases. The table neither charges nor counts them
+   (`str_context_error_fit.md` §1).
 
 ### 6.3 The prototype on main, re-measured (2026-11-02)
 
@@ -260,8 +265,8 @@ route; in its 50-sample 3× cohort, of about 150,000 sample-segment cells, false
 
 ## 7. Open
 
-1. **Short tandem repeats beyond homopolymers** (§2's `GT` case): settled by §6.2 item 3 — the
-   fitted table counts periods 2 to 4 and the data decide.
+1. **Short tandem repeats beyond homopolymers** (§2's `GT` case): settled by §6.2 item 4 — not
+   charged.
 2. **The distance cut-off of 20 bases** is where the measurement stopped, not where the effect does.
 3. **Whether the table should also enter the delimiter's measurement** of where a tract ends, which
    is where the four one-strand flank misreads of §1 arise. That belongs with the flank redesign

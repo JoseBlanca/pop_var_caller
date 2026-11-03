@@ -77,7 +77,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 7
+format_version = 8
 ploidy = 2
 
 [fitted_from]
@@ -321,6 +321,44 @@ stutter_tail_by_period = [
 ]
 by_stratum = [
     { period = 5, reference_repeats = 9, fitted = 50, over_guard_threshold = 1, too_deep = 7, in_stutter_tail = 2 },
+]
+
+[misread_after_runs]
+# How much more often each read group's reads misread a base after a long run of
+# one base when they were sequenced through the run than when they reached the
+# base from the other side (doc/devel/ng/spec/str_context_error_fit.md). Calling
+# adds these excesses to the repeat-tract substitution rate, for the reads of
+# the direction that crossed the run only.
+#
+# One row per read group and entry. An entry is a run of one base,
+# `shortest_run` to `longest_run` bases long (no `longest_run`: that long or
+# longer), and a base either the next one after it (`base = "next_base"`) or one
+# of the 19 after that (`"further_on"`). At the next base, `as_the_run` is the
+# excess chance of reading the base as one more base of the run, and
+# `other_wrong` that of any other wrong base; further on, `other_wrong` is any
+# wrong base. `through_reads` and `arriving_first_reads` are the reads behind
+# the two rates. An entry with fewer than 1,000 reads in either group takes the
+# built-in default and is marked `defaulted`.
+entries = [
+    { read_group = 1, shortest_run = 8, longest_run = 8, base = "next_base", as_the_run = { value = 0.0015, standard_error = 0.00075, warrant = "fitted_here", observations = { reads = 4321 } }, other_wrong = { value = 0.00022500000000000002, standard_error = 0.000125, warrant = "fitted_here", observations = { reads = 4321 } }, through_reads = 4321, arriving_first_reads = 3456 },
+    { read_group = 1, shortest_run = 9, longest_run = 9, base = "next_base", as_the_run = { value = 0.0025, warrant = "defaulted" }, other_wrong = { value = 0.00032500000000000004, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 10, longest_run = 10, base = "next_base", as_the_run = { value = 0.0035, warrant = "defaulted" }, other_wrong = { value = 0.00042500000000000003, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 11, longest_run = 11, base = "next_base", as_the_run = { value = 0.0045000000000000005, warrant = "defaulted" }, other_wrong = { value = 0.0005250000000000001, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 12, longest_run = 12, base = "next_base", as_the_run = { value = 0.0055, warrant = "defaulted" }, other_wrong = { value = 0.000625, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 13, longest_run = 13, base = "next_base", as_the_run = { value = 0.006500000000000001, warrant = "defaulted" }, other_wrong = { value = 0.0007250000000000001, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 14, longest_run = 14, base = "next_base", as_the_run = { value = 0.0075, warrant = "defaulted" }, other_wrong = { value = 0.000825, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 15, longest_run = 15, base = "next_base", as_the_run = { value = 0.0085, warrant = "defaulted" }, other_wrong = { value = 0.000925, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 16, longest_run = 16, base = "next_base", as_the_run = { value = 0.0095, warrant = "defaulted" }, other_wrong = { value = 0.001025, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 17, longest_run = 17, base = "next_base", as_the_run = { value = 0.0105, warrant = "defaulted" }, other_wrong = { value = 0.0011250000000000001, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 18, longest_run = 18, base = "next_base", as_the_run = { value = 0.0115, warrant = "defaulted" }, other_wrong = { value = 0.001225, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 19, longest_run = 19, base = "next_base", as_the_run = { value = 0.0125, warrant = "defaulted" }, other_wrong = { value = 0.001325, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 20, longest_run = 20, base = "next_base", as_the_run = { value = 0.0135, warrant = "defaulted" }, other_wrong = { value = 0.001425, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 21, longest_run = 21, base = "next_base", as_the_run = { value = 0.0145, warrant = "defaulted" }, other_wrong = { value = 0.001525, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 22, longest_run = 22, base = "next_base", as_the_run = { value = 0.0155, warrant = "defaulted" }, other_wrong = { value = 0.0016250000000000001, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 23, base = "next_base", as_the_run = { value = 0.0165, warrant = "defaulted" }, other_wrong = { value = 0.0017250000000000002, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 8, longest_run = 11, base = "further_on", as_the_run = { value = 0.0175, warrant = "defaulted" }, other_wrong = { value = 0.001825, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 12, longest_run = 15, base = "further_on", as_the_run = { value = 0.0185, warrant = "defaulted" }, other_wrong = { value = 0.001925, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 16, base = "further_on", as_the_run = { value = 0.0195, warrant = "defaulted" }, other_wrong = { value = 0.002025, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
 ]
 
 [repeat_tracts]
