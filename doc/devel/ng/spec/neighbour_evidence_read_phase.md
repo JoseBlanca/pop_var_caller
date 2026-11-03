@@ -23,6 +23,15 @@ through calling's chain ids", and uses the method of
    removed, and `--neighbour-evidence {auto,on,off}` is renamed `--refine-genotypes {auto,on,off}`
    on `call-from-psps` and `call-from-alignments` (§5).*
 6. *A downstream phaser reading pvc's fragments is not a requirement.*
+7. *No floor on the posterior (2026-11-03, the former Q1): read alleles are kept at every sample and
+   record, including where the sample is almost certainly homozygous. The memory and spill this
+   costs at the top of the range (§4.1) is a known limit, re-evaluated when the build is optimised
+   for performance.*
+8. *psp files gain each walked region's first chain id, and the format version rises with **no
+   backward compatibility**: a psp written before the change is refused, with a message saying to
+   regenerate it (§2.4).*
+9. *`R` = 1,000 bases and the cap of 32 (§2.4), reporting the read check without acting on it
+   (§2.8), and phase from reads alone in a one-sample run (§2.6) are adopted as recommended.*
 
 *Revised the same day after an adversarial review,
 [`neighbour_evidence_read_phase_spec_review_2026-11-03.md`](../../reports/reviews/neighbour_evidence_read_phase_spec_review_2026-11-03.md).
@@ -337,9 +346,8 @@ is unmeasured.
   walked region, its `base`: 8 bytes a walked region, a few megabytes for a whole genome walked as
   several hundred thousand generic regions. Where it sits is the psp format spec's decision
   (`psp_file_format.md`), and the format version rises. The reader hands `base` with each minted
-  record it decodes. A psp written before the change has none; for it the key falls back to the raw
-  id, and the run log says that the phase of samples deeper than 32 reads then depends on the walked
-  ground.
+  record it decodes. **A psp written before the change is refused** (owner, 2026-11-03: no backward
+  compatibility), with a message naming the file and saying to regenerate it.
 - **In memory**: `SampleLocusObservations` gains `chain_id_base: u64`, 8 bytes a minted record.
 
 **The guarantee, stated: the same output whenever the walked regions are the same, in either mode;
@@ -620,9 +628,10 @@ a kilobase, that is about 100,000 records. Records at both scales are dense, so 
 
 **At the top of the range this does not fit, because reads are kept at every sample and record,
 including the many where the sample is certainly homozygous.** There a read allele says nothing about
-phase, since both copies carry one allele. Q1 proposes a floor: drop read alleles where calling's
-probability that the sample is heterozygous is below 10⁻³. The cost then scales with the number of
-plausibly heterozygous genotypes. *Unmeasured*: the share of sample-record pairs above such a floor.
+phase, since both copies carry one allele. **The owner ruled to keep them for now** (decision 7) and
+to re-evaluate when the build is optimised for performance. The fix then on the table is a floor:
+drop read alleles where calling's probability that the sample is heterozygous is below 10⁻³, so the
+cost scales with the number of plausibly heterozygous genotypes. *Unmeasured*: the share of sample-record pairs above such a floor.
 At 30× and above it is close to the share of heterozygous calls: in human data, a sample is
 heterozygous at roughly 4 records in 100 of a large cohort's records, which would bring the
 3,000-sample, 30× window to about 1.1 GB. **At 3× the floor saves much less**: a sample showing three
@@ -645,11 +654,11 @@ Whole-genome arithmetic at 3,000 samples and 30×, before compression, at a reco
 
 - the spill today: a line of about 150 kB plus 48 kB of sample rows, about 200 kB a record, about
   17 TB;
-- fragments without Q1's floor: 3,000 × 30 × 6 bytes = 540 kB a record, about 48 TB more;
-- fragments with the floor, at 4 heterozygous samples in 100: about 22 kB a record, about 2 TB more.
+- fragments as built (no floor): 3,000 × 30 × 6 bytes = 540 kB a record, about 48 TB more;
+- fragments with the floor, if adopted later, at 4 heterozygous samples in 100: about 22 kB a record, about 2 TB more.
 
 At that scale the spill is already beyond any ordinary disk, so the comparison that matters is
-relative: fragments triple the spill without the floor and add about a tenth with it.
+relative: fragments as built triple the spill; a floor would add about a tenth instead.
 
 ### 4.2 Time
 
@@ -658,7 +667,8 @@ relative: fragments triple the spill without the floor and add about a tenth wit
 - **The fragment keeper**: one hash-map lookup per read allele, on the ordered thread. At 3,000
   samples and 30× without the floor, a record carries 90,000 read alleles; at tens of nanoseconds
   each that is a few milliseconds a record, and at a record every 35 bases a few minutes of one thread
-  a megabase. That would be the run's bottleneck. Q1's floor divides it by about 25; the fan-out over
+  a megabase. That would be the run's bottleneck. A posterior floor (decision 7, deferred) would
+  divide it by about 25; the fan-out over
   sample chunks (§2.4) divides it by the thread count. *Must be measured* at 200 samples first.
 - **The link sums**: per fragment per tested link, a handful of floating-point operations.
 
@@ -783,7 +793,8 @@ still *refinement* (glossary); "refine-genotypes" is only the option's name.
    made between a whole-contig run and a `--regions` run over one walked region. The captured
    `(rank, allele)` lists are also compared directly between the two modes.
 6. **Cost**: the capture, the keeper, the pass's held fragments and the spill, at 50 and 200 simulated
-   samples and on tomato at 3×, with and without Q1's floor; extrapolated to 3,000 samples with the
+   samples and on tomato at 3×, together with the share of read alleles a posterior floor of 10⁻³
+   would drop (the input to decision 7's re-evaluation); extrapolated to 3,000 samples with the
    assumption stated. The capture's share of the merge time decides §2.2's condition. The ordered
    thread's time is reported on its own.
 7. **Real data**:
@@ -812,35 +823,18 @@ still *refinement* (glossary); "refine-genotypes" is only the option's name.
 
 ---
 
-## 9. Questions for the owner
+## 9. Questions ruled
 
-The starting values of §2.5 (`T_link` = ln 199, `T_break` = ln 9, `e_floor` = 0.01, `GQ` ≥ 30) are
-in the text and are checked by §7; they need no ruling now.
+All ruled by the owner on 2026-11-03 (decisions 7 to 9 at the top):
 
-**Q1. Drop read alleles where the sample is almost certainly homozygous?** Owner decision 2 keeps
-reads whatever the *called* genotype, because refinement can make a homozygote heterozygous. This
-proposes a floor on the *posterior*, not on the call: keep a sample's read alleles at a record only
-where calling's probability that the sample is heterozygous there is at least 10⁻³. **Recommend:
-adopt it.** Without it, at 3,000 samples and 30×, the pass holds about 28 GB of fragments a window,
-the spill triples, and the ordered thread does 90,000 lookups a record (§4); with it, all three follow
-the plausible heterozygotes. **The saving is at 30× and above, and at rare variants.** At 3× a sample
-with three reference reads at a common variant stays above the floor (§4.1), so the 3,000-sample, 3×
-case stays near 2.8 GB a window either way. What the floor gives up: a sample whose reads say
-homozygous with odds over 1,000 to 1 that refinement nonetheless turns heterozygous loses read
-evidence there. §7.6 measures both sides.
+- **Q1. A floor on the posterior that the sample is heterozygous?** Not now. Every read allele of a
+  fragment is kept; the cost at 3,000 samples and 30× (§4.1) is a known limit, re-evaluated during
+  performance work, with §7.6's measurement of what a 10⁻³ floor would drop as its input.
+- **The psp format change for the cap's key** (§2.4): adopted, with no backward compatibility.
+- **Q2. `R` = 1,000 bases and the cap of 32:** adopted as starting values.
+- **Q3. Should the read check tighten population-only links by itself?** Not now: reported only,
+  decided after §7.3.
+- **Q5. Phase from reads alone in a one-sample run?** Yes.
 
-**Q2. `R` = 1,000 bases, and the cap of 32 read alleles per sample per record?** **Recommend: both,
-as starting values.** `R` covers standard inserts; a long-insert library loses links beyond it, and
-raising `R` costs only held records. The cap keeps 300× samples from costing ten times what 30×
-costs; WhatsHap uses 15.
-
-**Q3. Should the read check (§2.8) tighten population-only links by itself?** The phase output spec
-asks for "a signal that tightens on its own where the phase is poor, never by excluding the cohort".
-Where reads find, say, more than 1 in 100 confident population links contradicted for a sample,
-population links that no read confirms could be refused for that sample. **Recommend: report the check
-now and decide after §7.3.** The counts per sample are small at 3×: showing a rate under 1 in 100 with
-no contradiction takes about 300 reached links. The rate is also biased towards short links (§2.8).
-
-**Q5. Phase from reads alone in a one-sample run?** It follows from decision 3 and costs little.
-**Recommend: yes.** It is the one place a single deep sample gets any phase. At 3× it writes little
-(§2.6). (Q4, on the thresholds, is folded into §2.5 as starting values.)
+The starting values of §2.5 (`T_link` = ln 199, `T_break` = ln 9, `e_floor` = 0.01, `GQ` ≥ 30) need no
+ruling; §7 checks them.
