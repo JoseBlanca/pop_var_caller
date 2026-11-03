@@ -1674,7 +1674,6 @@ impl<R: std::io::Read> BlockStream<R> {
                 block.contig,
                 self.cursor.measured_from,
                 &mut self.live_reads,
-                &self.layout,
             ) {
                 Ok(found) => {
                     let head = found.head;
@@ -1786,7 +1785,6 @@ impl<R: std::io::Read> BlockStream<R> {
             block.contig,
             self.cursor.measured_from,
             &mut self.live_reads,
-            &self.layout,
         ) {
             Ok(found) => found,
             // The head alone is past the ceiling: nothing to skip by, so the refusal stands.
