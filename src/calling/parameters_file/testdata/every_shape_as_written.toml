@@ -356,9 +356,9 @@ entries = [
     { read_group = 1, shortest_run = 21, longest_run = 21, base = "next_base", as_the_run = { value = 0.0145, warrant = "defaulted" }, other_wrong = { value = 0.001525, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
     { read_group = 1, shortest_run = 22, longest_run = 22, base = "next_base", as_the_run = { value = 0.0155, warrant = "defaulted" }, other_wrong = { value = 0.0016250000000000001, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
     { read_group = 1, shortest_run = 23, base = "next_base", as_the_run = { value = 0.0165, warrant = "defaulted" }, other_wrong = { value = 0.0017250000000000002, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
-    { read_group = 1, shortest_run = 8, longest_run = 11, base = "further_on", as_the_run = { value = 0.0175, warrant = "defaulted" }, other_wrong = { value = 0.001825, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
-    { read_group = 1, shortest_run = 12, longest_run = 15, base = "further_on", as_the_run = { value = 0.0185, warrant = "defaulted" }, other_wrong = { value = 0.001925, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
-    { read_group = 1, shortest_run = 16, base = "further_on", as_the_run = { value = 0.0195, warrant = "defaulted" }, other_wrong = { value = 0.002025, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 8, longest_run = 11, base = "further_on", as_the_run = { value = 0.0, warrant = "defaulted" }, other_wrong = { value = 0.001825, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 12, longest_run = 15, base = "further_on", as_the_run = { value = 0.0, warrant = "defaulted" }, other_wrong = { value = 0.001925, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
+    { read_group = 1, shortest_run = 16, base = "further_on", as_the_run = { value = 0.0, warrant = "defaulted" }, other_wrong = { value = 0.002025, warrant = "defaulted" }, through_reads = 17, arriving_first_reads = 23 },
 ]
 
 [repeat_tracts]

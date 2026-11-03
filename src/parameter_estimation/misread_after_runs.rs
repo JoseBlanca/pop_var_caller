@@ -20,7 +20,7 @@ use crate::calling::likelihood::run_context::{
 };
 use crate::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
 use crate::parameter_estimation::Provenance;
-use crate::ref_seq::RefSeq;
+use crate::ref_seq::{RefSeq, RefSeqError};
 use crate::types::{ContigId, ReadGroupId};
 
 /// **The seven totals one entry keeps for one read group** (`str_context_error_fit.md` §3.3).
@@ -253,36 +253,28 @@ impl MisreadCounter {
         let fetch_from = first.saturating_sub(CONTEXT_MARGIN).max(1);
         let before = first - fetch_from;
         let wanted = before + CACHED_STRETCH + CONTEXT_MARGIN;
-        // **A fetch past the contig's end is refused, so near the end the stretch is cut at the
-        // end exactly**: the longest fetch that succeeds, found by halving the gap between one
-        // that does and one that does not. Anything shorter than the end would leave its last
-        // positions without the bases after them, and the positions past it uncached.
-        let reached_the_end = self
-            .reference
-            .fetch_into(contig, fetch_from, wanted, &mut self.fetched)
-            .is_err();
-        if reached_the_end {
-            let fits = |reference: &dyn RefSeq, length: u64, into: &mut Vec<u8>| {
-                reference
-                    .fetch_into(contig, fetch_from, length, into)
-                    .is_ok()
-            };
-            let (mut fitting, mut too_long) = (before + 1, wanted);
-            if !fits(self.reference.as_ref(), fitting, &mut self.fetched) {
-                return None;
-            }
-            while too_long - fitting > 1 {
-                let middle = fitting + (too_long - fitting) / 2;
-                if fits(self.reference.as_ref(), middle, &mut self.fetched) {
-                    fitting = middle;
-                } else {
-                    too_long = middle;
+        // **A fetch past the contig's end is refused with the contig's length, so near the end
+        // the stretch is cut at the end exactly.** Anything shorter than the end would leave its
+        // last positions without the bases after them, and the positions past it uncached.
+        let reached_the_end =
+            match self
+                .reference
+                .fetch_into(contig, fetch_from, wanted, &mut self.fetched)
+            {
+                Ok(()) => false,
+                Err(RefSeqError::OutOfBounds { contig_length, .. }) if contig_length >= first => {
+                    self.reference
+                        .fetch_into(
+                            contig,
+                            fetch_from,
+                            contig_length - fetch_from + 1,
+                            &mut self.fetched,
+                        )
+                        .ok()?;
+                    true
                 }
-            }
-            self.reference
-                .fetch_into(contig, fetch_from, fitting, &mut self.fetched)
-                .ok()?;
-        }
+                Err(_) => return None,
+            };
         let fetched_len = self.fetched.len() as u64;
         let last_covered = if reached_the_end {
             fetched_len
@@ -473,7 +465,6 @@ pub fn quality_checks(
 mod tests {
     use super::*;
     use crate::locus_generation::SequenceObservation;
-    use crate::ref_seq::RefSeqError;
     use crate::types::{GenomeRegion, Position, SummedLogError};
 
     /// One contig's bases, served as the walk's reference is.

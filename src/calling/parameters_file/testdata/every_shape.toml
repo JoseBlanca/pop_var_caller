@@ -542,7 +542,7 @@ through_reads = 17
 arriving_first_reads = 23
 
 [misread_after_runs.entries.as_the_run]
-value = 0.0175
+value = 0.0
 warrant = "defaulted"
 
 [misread_after_runs.entries.other_wrong]
@@ -558,7 +558,7 @@ through_reads = 17
 arriving_first_reads = 23
 
 [misread_after_runs.entries.as_the_run]
-value = 0.0185
+value = 0.0
 warrant = "defaulted"
 
 [misread_after_runs.entries.other_wrong]
@@ -573,7 +573,7 @@ through_reads = 17
 arriving_first_reads = 23
 
 [misread_after_runs.entries.as_the_run]
-value = 0.0195
+value = 0.0
 warrant = "defaulted"
 
 [misread_after_runs.entries.other_wrong]

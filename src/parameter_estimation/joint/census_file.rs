@@ -504,8 +504,8 @@ pub fn open_census_within(
 /// How much of a census file's front is read to find its header and its directory.
 ///
 /// **One read rather than a walk of growing reads.** A census of tomato's 141 strata over a
-/// handful of read groups has a directory of a few thousand bytes and a header of about 2.5 kB a
-/// read group, most of it the counts of misreads after runs;
+/// handful of read groups has a directory of a few thousand bytes and a header of about 1.1 kB a
+/// read group, most of it the counts of misreads after runs (19 entries of 56 bytes);
 /// a megabyte covers a directory of about 40,000 sections, and reading it costs one seekless read
 /// of a file that is megabytes long anyway. A file shorter than this is read whole.
 const HEAD_READ_BYTES: usize = 1 << 20;

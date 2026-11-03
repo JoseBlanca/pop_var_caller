@@ -123,16 +123,6 @@ impl ParametersFile {
         Ok(())
     }
 
-    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
-    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
-    /// a spread, and a number marked `separately_determined = false` refused if it carries a
-    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
-    /// and not the population.
-    ///
-    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
-    /// says version 3 and holds one cannot say which format it was written in — the refusal the
-    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
-    /// the tables.
     /// **`[misread_after_runs]` is not in a file stamped before format 8**, which had no such
     /// table. Its rows are checked where they are read (`to_run_parameters`), which names the row.
     fn the_misread_table_is_not_older_than_its_format(&self) -> Result<(), ParametersFileError> {
@@ -191,6 +181,16 @@ impl ParametersFile {
         Ok(())
     }
 
+    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
+    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
+    /// a spread, and a number marked `separately_determined = false` refused if it carries a
+    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
+    /// and not the population.
+    ///
+    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
+    /// says version 3 and holds one cannot say which format it was written in — the refusal the
+    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
+    /// the tables.
     fn the_informational_tables_hold_numbers(&self) -> Result<(), ParametersFileError> {
         if self.format_version < FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES {
             let tables = [

@@ -908,8 +908,29 @@ fn a_run_may_reach_a_charged_length_beside(
     context: &SsrScoringContext<'_>,
 ) -> bool {
     let (left, right) = allele.reference_flanks;
-    let around: Vec<u8> = [left, allele.bases, right].concat();
-    a_run_may_reach_a_charged_length(&around, context.misread_after_runs)
+    a_run_may_reach_a_charged_length(
+        left.iter().chain(allele.bases).chain(right),
+        context.misread_after_runs,
+    )
+}
+
+/// **`context` with the flanks the run context reads cut back to what lies outside `extent`**:
+/// a sequence over a flank extent already covers that many flank bases on each side — deleted at
+/// an edge-deletion allele, spelled out where it was respelled over a wider extent — so the bases
+/// before and after it are the flanks less those. Without the cut, the run context would read the
+/// covered flank bases twice, or read deleted ones back in, and could find a run that is not there.
+fn with_flanks_outside<'a>(
+    context: &SsrScoringContext<'a>,
+    extent: crate::locus_generation::FlankDeletion,
+) -> SsrScoringContext<'a> {
+    let (left, right) = context.flanks_for_run_context;
+    SsrScoringContext {
+        flanks_for_run_context: (
+            &left[..left.len().saturating_sub(usize::from(extent.left))],
+            &right[usize::from(extent.right).min(right.len())..],
+        ),
+        ..*context
+    }
 }
 
 /// One complete observation scored against one candidate under `context` — over the wider of the
@@ -925,7 +946,7 @@ fn complete_emission<Model: SsrEmissionModel>(
         model.emission(
             &observation.bases,
             allele,
-            context,
+            &with_flanks_outside(context, allele.flank_deletion),
             scratch.model_scratch_mut(),
         )
     } else {
@@ -973,7 +994,7 @@ fn complete_emission<Model: SsrEmissionModel>(
                         }),
                         ..*allele
                     },
-                    context,
+                    &with_flanks_outside(context, wider),
                     scratch.model_scratch_mut(),
                 );
                 scratch.respelled = (read_over, allele_over);
@@ -992,7 +1013,7 @@ fn complete_emission<Model: SsrEmissionModel>(
                         * model.emission(
                             &observation.bases,
                             allele,
-                            context,
+                            &with_flanks_outside(context, allele.flank_deletion),
                             scratch.model_scratch_mut(),
                         )
                 } else {
@@ -1784,6 +1805,47 @@ mod tests {
             &mut out,
             &mut scratch,
         );
+    }
+
+    /// **A flank base an allele deletes is not read back into the run before it.** The left flank
+    /// ends in `A`×8; an allele deleting its last two bases leaves a run of six before the tract,
+    /// too short to charge. A forward read of that allele showing the tract's first `G` as `A`
+    /// therefore scores the same under the default table as under a table of zeros. Reading the
+    /// whole flank before the allele's spelling would find a run of eight and charge the `A`.
+    #[test]
+    fn a_deleted_flank_base_does_not_lengthen_the_run_before_the_tract() {
+        use crate::calling::likelihood::run_context::MisreadTable;
+        const LEFT_FLANK: &[u8] = b"CGCGAAAAAAAA";
+        const RIGHT_FLANK: &[u8] = b"CCGTCAG";
+        let deletion = crate::locus_generation::FlankDeletion { left: 2, right: 0 };
+        let score_under = |table: MisreadTable| {
+            let mut fixture = Fixture::of(b"GT", &[4]);
+            fixture.misread_table = table;
+            let mut candidates = fixture.candidates();
+            candidates[0].reference_flanks = (LEFT_FLANK, RIGHT_FLANK);
+            candidates[0].flank_deletion = deletion;
+            let contexts = fixture.contexts(&candidates);
+            let context = SsrScoringContext {
+                read_direction: Some(ReadDirection::Forward),
+                flanks_for_run_context: (LEFT_FLANK, RIGHT_FLANK),
+                ..contexts[0]
+            };
+            let mut misread = spanning(b"ATGTGTGT", 1);
+            misread.flank_deletion = deletion;
+            complete_emission(
+                &StutterSubstitutionEmission,
+                &misread,
+                &candidates[0],
+                &context,
+                &mut SsrRowScratch::default(),
+            )
+        };
+        let (charged, flat) = (
+            score_under(MisreadTable::defaults()),
+            score_under(MisreadTable::zero()),
+        );
+        assert!(flat > 0.0);
+        assert_eq!(charged, flat);
     }
 
     /// **A whole-tract partial read with no recorded side takes, in each half, that side's own

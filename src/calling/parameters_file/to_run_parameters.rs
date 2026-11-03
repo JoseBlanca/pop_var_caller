@@ -608,6 +608,18 @@ impl ParametersFile {
                     ));
                 }
             }
+            // **Further on, the whole excess is `other_wrong`**: scoring never reads `as_the_run`
+            // there, so a value in it would look as if it applied and change nothing.
+            if row.base == MisreadBase::FurtherOn && row.as_the_run.value != 0.0 {
+                return Err(refuse(
+                    format!("{at}.as_the_run"),
+                    format!(
+                        "is {}, but a base further on than the next has no favourite wrong base: \
+                         its whole excess is `other_wrong`, and this must be 0",
+                        row.as_the_run.value
+                    ),
+                ));
+            }
             let slots = by_group
                 .entry(ReadGroupId(row.read_group))
                 .or_insert_with(|| vec![None; ENTRY_COUNT]);
@@ -1328,6 +1340,37 @@ pub(super) mod tests {
         };
         assert_eq!(field, "sequencing_batches.by_read_group[read_group = 1]");
         assert!(problem.contains("TS-1"), "it names the sample: {problem}");
+    }
+
+    /// **A further-on misread row carrying an excess "as the run" is refused**: scoring never
+    /// reads it there, so the file would claim a charge that does not happen.
+    #[test]
+    fn a_further_on_misread_row_with_an_excess_as_the_run_is_refused() {
+        let mut file = a_file_using_every_shape();
+        assert!(
+            file.to_run_parameters().is_ok(),
+            "the fixture itself is usable"
+        );
+        let row = file
+            .misread_after_runs
+            .as_mut()
+            .expect("the fixture carries the table")
+            .entries
+            .iter_mut()
+            .find(|row| row.base == super::MisreadBase::FurtherOn)
+            .expect("a further-on row");
+        row.as_the_run.value = 0.05;
+
+        let error = file
+            .to_run_parameters()
+            .expect_err("the excess would be silently ignored");
+        let ParametersFileError::Meaningless { field, .. } = &error else {
+            panic!("{error:?}")
+        };
+        assert!(
+            field.starts_with("misread_after_runs.entries[") && field.ends_with(".as_the_run"),
+            "{field}"
+        );
     }
 
     /// **The three newtypes whose rules no range check states**, each refused naming its key

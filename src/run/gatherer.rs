@@ -294,12 +294,17 @@ impl CensusPlan {
     /// the generic locus generator emits nothing where there is no read — measured on tomato
     /// SRR7279482 at 25×, 1 in 21 kept positions, every one of them data that would be reported
     /// as a defect (`census.rs`'s own note on `mark_walked`).
+    ///
+    /// **`reference` is what the count of misreads after runs reads the bases around each position
+    /// through** (`str_context_error_fit.md` §3) — taken here, not attached by the caller, so a
+    /// producer cannot build a census without that count.
     #[must_use]
     pub fn writer_for(
         &self,
         sample: String,
         declared: BTreeMap<ReadGroupId, NamedReadGroup>,
         segmentation: &Segmentation,
+        reference: Box<dyn crate::ref_seq::RefSeq + Send>,
     ) -> CensusWriter {
         let contigs = Arc::clone(&self.contigs);
         let contig_of = move |name: &str| {
@@ -331,6 +336,7 @@ impl CensusPlan {
         // **Satellites handed to the generic path are walked and called, and not counted**
         // (`--call-satellites` changes nothing in the fit, `command_line.md` §4.4.1).
         writer.leave_out(segmentation.satellites_on_the_generic_path());
+        writer.count_misreads_after_runs(reference);
         writer
     }
 
@@ -471,7 +477,7 @@ impl SampleObservationGatherer {
         // **Built before the walk**, with every generic stretch already marked walked —
         // `CensusPlan::writer_for` says why.
         let census = census.map(|plan| {
-            let mut writer = plan.writer_for(
+            plan.writer_for(
                 header.sample.clone(),
                 read_groups
                     .iter()
@@ -486,11 +492,9 @@ impl SampleObservationGatherer {
                     })
                     .collect(),
                 &segmentation,
-            );
-            // **The misread count reads the reference around each position** for the runs
-            // before it (`str_context_error_fit.md` §3), through an accessor of its own.
-            writer.count_misreads_after_runs(Box::new(walk_reference.accessor()));
-            writer
+                // The misread count's own accessor to the walk's reference.
+                Box::new(walk_reference.accessor()),
+            )
         });
         Ok(Self {
             header,

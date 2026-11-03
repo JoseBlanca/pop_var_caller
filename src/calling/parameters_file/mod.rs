@@ -2182,8 +2182,15 @@ mod tests {
                                     MisreadBase::FurtherOn
                                 }
                             },
+                            // Further on the whole excess is `other_wrong`, and a file saying
+                            // otherwise is refused.
                             as_the_run: WarrantedValue {
-                                value: 0.001 * (index + 1.5),
+                                value: match entry.distance() {
+                                    crate::calling::likelihood::run_context::DistanceAfterRun::NextBase => {
+                                        0.001 * (index + 1.5)
+                                    }
+                                    crate::calling::likelihood::run_context::DistanceAfterRun::FurtherOn => 0.0,
+                                },
                                 warrant: if first { Warrant::FittedHere } else { Warrant::Defaulted },
                                 observations: first.then_some(EvidenceCount::Reads(4_321)),
                                 standard_error: first.then_some(0.000_75),

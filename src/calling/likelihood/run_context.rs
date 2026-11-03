@@ -271,14 +271,28 @@ pub fn contexts_along(met: &[u8], out: &mut Vec<Option<ContextAfterRun>>) {
 /// under a table that charges anything** — what decides whether a candidate is scored once per
 /// read direction at all: a one-base slip can lengthen such a run to a charged length in the
 /// stretching a read is compared with. A table of zeros costs no second scoring.
+///
+/// `bases` is walked once, so a caller can hand over several slices chained without joining them.
 #[must_use]
-pub fn a_run_may_reach_a_charged_length(bases: &[u8], table: &MisreadTable) -> bool {
+pub fn a_run_may_reach_a_charged_length<'b>(
+    bases: impl IntoIterator<Item = &'b u8>,
+    table: &MisreadTable,
+) -> bool {
     if table.charges_nothing() {
         return false;
     }
-    bases
-        .chunk_by(|a, b| a == b)
-        .any(|run| run.len() + 1 >= SHORTEST_RUN_CHARGED)
+    let (mut previous, mut length) = (None, 0_usize);
+    for &base in bases {
+        if previous == Some(base) {
+            length += 1;
+        } else {
+            (previous, length) = (Some(base), 1);
+        }
+        if length + 1 >= SHORTEST_RUN_CHARGED {
+            return true;
+        }
+    }
+    false
 }
 
 /// **How probable `observed`'s letters are against `candidate`**, both over the same bases, for a
