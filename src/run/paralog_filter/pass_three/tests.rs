@@ -200,7 +200,12 @@ fn write_and_read_back(
 #[test]
 fn a_record_the_verdict_does_not_touch_is_written_unchanged() {
     let parked = a_record(0, 100, "PASS");
-    let untouched = String::from_utf8(parked.line.clone()).expect("the line is text");
+    // The writer is diploid without refinement, so phase from reads alone appends `PS` to
+    // `FORMAT` and `.` to the unphased column — as it does with the filter off, so the oracle
+    // between the two runs is unchanged (read phase spec §3).
+    let untouched = String::from_utf8(parked.line.clone())
+        .expect("the line is text")
+        .replace("\tGT:AD\t0/1:5,5", "\tGT:AD:PS\t0/1:5,5:.");
     let (spill, output) = a_spill_and_an_output(
         "a_record_the_verdict_does_not_touch_is_written_unchanged",
         vec![parked],

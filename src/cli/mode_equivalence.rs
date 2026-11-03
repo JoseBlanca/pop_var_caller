@@ -81,8 +81,9 @@ mod tests {
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
     use crate::cli::test_fixtures::{
-        AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SATELLITE, SECOND_SAMPLES_SUBSTITUTION, TRACT,
-        VARYING_CONTIG, a_varying_cohort_on_disk, a_varying_cohort_with_a_satellite_on_disk,
+        AVaryingCohort, FIRST_SAMPLES_SECOND_SUBSTITUTION, FIRST_SAMPLES_SUBSTITUTION, SATELLITE,
+        SECOND_SAMPLES_SUBSTITUTION, TRACT, VARYING_CONTIG, a_varying_cohort_on_disk,
+        a_varying_cohort_with_a_phased_pair_on_disk, a_varying_cohort_with_a_satellite_on_disk,
     };
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
@@ -454,6 +455,88 @@ mod tests {
         assert_eq!(
             from_alignments, from_psps,
             "one cohort filtered two ways must give one VCF, whole",
+        );
+    }
+
+    /// Sample `one`'s `GT` and `PS` at each record, by `POS`.
+    fn first_samples_phase(lines: &[String]) -> Vec<(u64, String, String)> {
+        lines
+            .iter()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let columns: Vec<&str> = line.split('\t').collect();
+                let keys: Vec<&str> = columns[8].split(':').collect();
+                let values: Vec<&str> = columns[9].split(':').collect();
+                let value_of = |key: &str| {
+                    keys.iter()
+                        .position(|name| *name == key)
+                        .and_then(|at| values.get(at))
+                        .map_or(String::new(), |value| (*value).to_owned())
+                };
+                (
+                    columns[1].parse().expect("a POS"),
+                    value_of("GT"),
+                    value_of("PS"),
+                )
+            })
+            .collect()
+    }
+
+    /// **Reads phase the first sample's two sites together, and the same phase comes out of
+    /// either route, at one thread or four, and with the hidden-duplication filter on or off**
+    /// (read phase spec §2.6, §7.5).
+    ///
+    /// The first sample is heterozygous at 121 and 161 (1-based), in cis on the same reads, about a
+    /// dozen of which cover both: the two are written `0|1` in the phase set 121. Two samples are
+    /// too few for refinement, so this is phase from reads alone. It is one corner of the range —
+    /// twenty reads a position, single-end reads 100 bases long — and it pins the route the read
+    /// alleles take, not how often reads phase.
+    #[test]
+    fn reads_phase_a_pair_alike_whatever_the_route_the_threads_or_the_filter() {
+        let cohort = a_varying_cohort_with_a_phased_pair_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let mut one_thread = alignments_args(&cohort, &output);
+        one_thread.threads = 1;
+        run_call_from_alignments(&one_thread).expect("the cohort calls on one thread");
+        let from_alignments = comparable(&output);
+        let phase = first_samples_phase(&from_alignments);
+        let at = |position: u64| {
+            phase
+                .iter()
+                .find(|(pos, _, _)| *pos == position)
+                .map(|(_, genotype, phase_set)| (genotype.as_str(), phase_set.as_str()))
+        };
+        let first = FIRST_SAMPLES_SUBSTITUTION as u64 + 1;
+        let second = FIRST_SAMPLES_SECOND_SUBSTITUTION as u64 + 1;
+        assert_eq!(at(first), Some(("0|1", "121")), "{phase:?}");
+        assert_eq!(at(second), Some(("0|1", "121")), "{phase:?}");
+
+        let mut four_threads = alignments_args(&cohort, &output);
+        four_threads.threads = 4;
+        run_call_from_alignments(&four_threads).expect("the cohort calls on four threads");
+        assert_eq!(
+            comparable(&output),
+            from_alignments,
+            "one thread and four write one VCF"
+        );
+
+        let from_psps = called_from_psps(&cohort, &output, &["one", "two"]);
+        assert_eq!(
+            from_psps, from_alignments,
+            "both routes write one VCF, phase included"
+        );
+
+        let mut filtered = alignments_args(&cohort, &output);
+        filtered.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_alignments(&filtered).expect("the cohort calls, filtered");
+        assert_eq!(
+            without_the_filters_info_fields(&without_the_filters_header_lines(&comparable(
+                &output
+            ))),
+            from_alignments,
+            "the filter, flagging nothing, leaves the phase as it was: the fragments reach pass \
+             three through the spill",
         );
     }
 

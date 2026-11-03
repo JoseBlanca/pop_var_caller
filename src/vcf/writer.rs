@@ -31,11 +31,12 @@ use thiserror::Error;
 
 use super::VcfRecord;
 use super::encode::record_line;
-use super::header::{VcfHeaderMetadata, header_text};
+use super::header::{VcfHeaderMetadata, header_text, reads_phase_alone};
 use crate::neighbour_evidence::line::RewriteTally;
 use crate::neighbour_evidence::refine::FillCheck;
 use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
 use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::stage::{ReadPhaseStage, ReadPhaseTally};
 use crate::types::{GenomePosition, Ploidy, Position};
 
 /// The 28-byte empty-block marker every well-formed bgzf file ends with.
@@ -91,6 +92,9 @@ pub struct VcfWriter {
     /// line goes through it and comes back, in order, once its window is solved
     /// (`neighbour_evidence_pass.md` §2.1). `None` writes each line as it arrives.
     neighbour_evidence: Option<Box<NeighbourEvidenceStage>>,
+    /// **Phase from reads alone**, where the pass does not run and the ploidy is two (read phase
+    /// spec §2.6): every line goes through it and comes back, in order, with `PS`.
+    read_phase: Option<Box<ReadPhaseStage>>,
     /// Lines the pass has handed back and not yet written; kept to reuse its allocation.
     released: Vec<(RecordPlace, Vec<u8>)>,
 }
@@ -103,6 +107,8 @@ pub struct FinishedVcf {
     pub records_written: u64,
     /// The pass's counts, when it ran.
     pub neighbour_evidence: Option<RewriteTally>,
+    /// What phase from reads alone did, when it ran.
+    pub read_phase: Option<ReadPhaseTally>,
     /// Each sample's fill check, by name in the VCF's sample order, when the pass ran; empty
     /// otherwise.
     pub fill_checks: Vec<(String, FillCheck)>,
@@ -122,7 +128,7 @@ impl VcfWriter {
         metadata: VcfHeaderMetadata,
         ploidy: Ploidy,
     ) -> Result<Self, VcfWriteError> {
-        let header = header_text(&metadata);
+        let header = header_text(&metadata, ploidy);
         let mut sink = Sink::open_tmp(final_path)?;
         sink.write_all(header.as_bytes())
             .map_err(|source| VcfWriteError::Write {
@@ -140,6 +146,8 @@ impl VcfWriter {
                     .collect();
                 Box::new(NeighbourEvidenceStage::new(decision, lengths))
             });
+        let read_phase = (neighbour_evidence.is_none() && reads_phase_alone(&metadata, ploidy))
+            .then(|| Box::new(ReadPhaseStage::new(metadata.sample_names().len())));
         Ok(Self {
             sink,
             final_path: final_path.to_path_buf(),
@@ -148,6 +156,7 @@ impl VcfWriter {
             last: None,
             records_written: 0,
             neighbour_evidence,
+            read_phase,
             released: Vec::new(),
         })
     }
@@ -220,12 +229,14 @@ impl VcfWriter {
             self.check_order(last, place)?;
         }
         self.last = Some(place);
-        match self.neighbour_evidence.as_mut() {
-            None => self.write_checked_line(line),
-            Some(stage) => {
-                stage.push(place, line.to_vec(), fragments, &mut self.released);
-                self.write_released()
-            }
+        if let Some(stage) = self.neighbour_evidence.as_mut() {
+            stage.push(place, line.to_vec(), fragments, &mut self.released);
+            self.write_released()
+        } else if let Some(stage) = self.read_phase.as_mut() {
+            stage.push(place, line.to_vec(), fragments, &mut self.released);
+            self.write_released()
+        } else {
+            self.write_checked_line(line)
         }
     }
 
@@ -348,11 +359,18 @@ impl VcfWriter {
                 .collect();
             self.write_released()?;
         }
+        let mut read_phase = None;
+        if let Some(stage) = self.read_phase.as_mut() {
+            stage.finish(&mut self.released);
+            read_phase = Some(stage.tally());
+            self.write_released()?;
+        }
         let records_written = self.records_written;
         self.sink.finish(&self.final_path)?;
         Ok(FinishedVcf {
             records_written,
             neighbour_evidence,
+            read_phase,
             fill_checks,
         })
     }

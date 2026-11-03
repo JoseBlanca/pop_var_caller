@@ -668,6 +668,20 @@ pub enum RefineGenotypesArg {
     Off,
 }
 
+/// **Warn when reads phase records with the hidden-duplication filter off** (read phase spec
+/// §2.5): reads from a collapsed duplication err together, every one carrying the other copy's
+/// alleles, which the error model does not cover; the filter is what keeps such records out of
+/// `PASS`. Phase from reads runs at ploidy two whether or not refinement does.
+pub fn warn_of_read_phase_without_the_duplication_filter(filter_on: bool, ploidy: Ploidy) {
+    if !filter_on && ploidy.get() == 2 {
+        tracing::warn!(
+            "the hidden-duplication filter is off (--hidden-dup-fdr 0), and phase is written from \
+             reads: in a collapsed duplication every read carries the other copy's alleles, which \
+             can link two records confidently and wrongly"
+        );
+    }
+}
+
 /// **`--phase-min-path-agreement`'s value**: a share in `(0, 1]` (phase output spec §9).
 ///
 /// # Errors

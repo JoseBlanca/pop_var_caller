@@ -673,6 +673,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // **The run's own scratch directory, made only where something will be parked in it**, and
     // removed when `scratch` is dropped — at the end of this function, on its success or on any
     // error that returns through it.
+    calling_run::warn_of_read_phase_without_the_duplication_filter(asked_for.is_some(), ploidy);
     let scratch = match asked_for {
         Some(_) => Some(calling_run::scratch_directory_for(
             &args.output,

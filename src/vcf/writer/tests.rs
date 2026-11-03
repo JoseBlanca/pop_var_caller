@@ -150,8 +150,11 @@ fn records_in_genome_order_are_accepted() {
     writer
         .write_record(&snp_at(1, 5), RecordFragments::default())
         .expect("a later contig");
-    assert_eq!(writer.records_written(), 4);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        4
+    );
 }
 
 #[test]
@@ -198,8 +201,11 @@ fn a_generic_locus_and_a_tract_padded_onto_it_may_share_a_position() {
     writer
         .write_record(&tract_at(0, 101, true), RecordFragments::default())
         .expect("the tract padded onto it");
-    assert_eq!(writer.records_written(), 2);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        2
+    );
 }
 
 #[test]
@@ -359,8 +365,11 @@ fn a_run_that_called_nothing_still_writes_a_header() {
     // meet a well-formed file saying so rather than an absent one.
     let path = scratch("no_records").join("out.vcf");
     let writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    assert_eq!(writer.records_written(), 0);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        0
+    );
 
     let written = fs::read_to_string(&path).expect("the finished file");
     assert!(written.contains("#CHROM\t"));
@@ -388,8 +397,11 @@ fn a_stream_of_records_is_written_in_the_order_it_yields_them() {
         .filter(|record| record.region().start != Position(200));
 
     writer.write_stream(stream).expect("the stream writes");
-    assert_eq!(writer.records_written(), 2);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        2
+    );
 
     let written = fs::read_to_string(&path).expect("the finished file");
     let positions: Vec<&str> = written
@@ -448,6 +460,8 @@ fn a_line_written_without_its_record_reaches_the_file_exactly() {
 
     // The whole body, not a suffix: `ends_with` is also satisfied by a writer that emits the
     // line twice, or that puts something extra in front of it.
+    // At ploidy two without refinement the line passes through phase from reads alone, which
+    // appends `PS` to `FORMAT` and `.` to the column it does not phase, and changes nothing else.
     let written = fs::read_to_string(&output).expect("the file");
     let records: Vec<&str> = written
         .lines()
@@ -455,7 +469,7 @@ fn a_line_written_without_its_record_reaches_the_file_exactly() {
         .collect();
     assert_eq!(
         records,
-        vec!["SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1"],
+        vec!["SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT:PS\t0/1:."],
         "the line reached the file changed:\n{written}"
     );
 }
@@ -558,7 +572,8 @@ fn a_line_counts_towards_the_records_written() {
         .write_line(place(0, 200, false), b"a line", RecordFragments::default())
         .expect("a line");
 
-    assert_eq!(writer.records_written(), 2);
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(writer.finish().expect("the file").records_written, 2);
 }
 
 #[test]
@@ -584,11 +599,6 @@ fn a_refused_line_leaves_the_writer_where_it_was() {
     );
 
     assert!(matches!(refused, Err(VcfWriteError::OutOfOrder { .. })));
-    assert_eq!(
-        writer.records_written(),
-        1,
-        "a line the writer refused was counted as written"
-    );
     assert!(
         matches!(
             writer.write_line(
@@ -599,6 +609,12 @@ fn a_refused_line_leaves_the_writer_where_it_was() {
             Err(VcfWriteError::OutOfOrder { .. })
         ),
         "the refused line became the order the next one is checked against"
+    );
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file").records_written,
+        1,
+        "a line the writer refused was counted as written"
     );
 }
 

@@ -226,7 +226,7 @@ fn a_target_of_zero_is_no_filter_rather_than_a_filter_that_removes_nothing() {
 /// it wrote before the filter existed, and spec §10's first oracle a property of the code.
 #[test]
 fn a_header_without_the_filter_declares_none_of_it() {
-    let text = crate::vcf::header_text(&metadata_over(2));
+    let text = crate::vcf::header_text(&metadata_over(2), Ploidy::try_new(2).expect("diploid"));
 
     assert!(!text.contains("##paralogFilter="));
     assert!(!text.contains("PARALOG_LR"));
