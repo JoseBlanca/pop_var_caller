@@ -8,7 +8,7 @@
 
 use super::{CalledRecordSink, entry_for};
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position};
 use crate::vcf::encode::record_line;
 use crate::vcf::{

@@ -29,7 +29,7 @@ use std::collections::VecDeque;
 
 use ahash::AHashMap;
 
-use super::keeper::{FragmentAllele, READ_REACH, RecordFragments};
+use super::fragments::{FragmentAllele, READ_REACH, RecordFragments};
 use super::link::{GQ_MIN, Heterozygote, Relation, read_link};
 use crate::types::ContigId;
 use crate::vcf::RecordPlace;

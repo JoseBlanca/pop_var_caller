@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use super::model::HaplotypePair;
-use crate::read_phase::keeper::FragmentAllele;
+use crate::read_phase::fragments::FragmentAllele;
 use crate::read_phase::link::{GQ_MIN, Heterozygote, ReadLink, Relation, read_link};
 
 /// **Paths drawn per averaged round besides the round's own** (spec §2.3): with 8, the 64-founder

@@ -81,7 +81,7 @@ use thiserror::Error;
 
 use super::WindowCoverage;
 use crate::psp::varint::{MAX_VARINT_BYTES, VarintError, decode_u64_leb128, encode_u64_leb128};
-use crate::read_phase::keeper::{FragmentAllele, RecordFragments};
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 use crate::types::{ContigId, Position};
 
 /// The field names the decoder reports, one per field of the layout above.

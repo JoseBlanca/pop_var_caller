@@ -19,7 +19,7 @@
 //!
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md` §3.4, §3.6.
 
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::types::Ploidy;
 use crate::vcf::encode::{record_line, written_position};
 use crate::vcf::{HeaderContig, VcfRecord, VcfWriteError, VcfWriter};

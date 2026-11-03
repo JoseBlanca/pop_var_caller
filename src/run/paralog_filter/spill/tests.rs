@@ -21,7 +21,7 @@ use proptest::prelude::*;
 
 use super::{EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
 use crate::psp::varint::encode_u64_leb128;
-use crate::read_phase::keeper::{FragmentAllele, RecordFragments};
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 use crate::run::paralog_filter::WindowCoverage;
 use crate::types::{ContigId, Position};
 

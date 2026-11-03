@@ -104,6 +104,7 @@ pub mod regions;
 pub mod repeat_catalog;
 pub mod run;
 pub mod segmentation_inputs;
+pub mod splitmix;
 pub mod tandem_repeat;
 pub mod types;
 pub mod vcf;

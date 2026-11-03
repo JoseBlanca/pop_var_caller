@@ -11,7 +11,7 @@
 use std::sync::OnceLock;
 
 use super::capture::LARGEST_ERROR_PHRED;
-use super::keeper::FragmentAllele;
+use super::fragments::FragmentAllele;
 
 /// **`T_link`, ln 199**: reads make or keep a link at odds of at least 199 to 1, one wrong link in
 /// 200 if the error model holds (§2.5). With the error floor at 0.01 one fragment is worth at most
@@ -143,7 +143,7 @@ impl ReadLink {
 }
 
 /// **`L` for one sample's link between two records**, from that sample's fragments at each, both
-/// in fragment order as [`RecordFragments::of_sample`](super::keeper::RecordFragments::of_sample)
+/// in fragment order as [`RecordFragments::of_sample`](super::fragments::RecordFragments::of_sample)
 /// gives them.
 ///
 /// The sum runs in fragment order, in `f64`, so it is the same at any thread count (§2.5).

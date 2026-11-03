@@ -53,7 +53,7 @@ use crate::read::input::SampleReads;
 use crate::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::read::input::reference::OpenReference;
 use crate::read::input::{AssemblyMismatch, check_assembly};
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::run::cohort_merge::build::CohortObservation;
@@ -837,7 +837,7 @@ impl AlignedFilesVariantCaller {
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
             // Then the fragment keeper (read phase spec §2.4), as in psp mode.
-            let mut keeper = crate::read_phase::keeper::FragmentKeeper::default();
+            let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
@@ -857,7 +857,7 @@ impl AlignedFilesVariantCaller {
                 released.extend(keeper.accept(record, windows));
             }
             released.extend(keeper.finish());
-            crate::read_phase::keeper::log_counts(keeper.counts());
+            crate::run::fragment_keeper::log_counts(keeper.counts());
             for (record, windows, fragments) in released {
                 hand_over(&record, &windows, fragments).map_err(|source| {
                     RunError::RecordNotWritten {

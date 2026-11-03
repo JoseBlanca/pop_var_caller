@@ -40,6 +40,7 @@
 use crate::locus_generation::{SampleLocusObservations, SequenceObservation};
 use crate::psp::{Header, ParameterValue};
 use crate::run::gatherer::MAX_READS_PER_POSITION_KEY;
+use crate::splitmix::splitmix64;
 use crate::types::SummedLogError;
 
 /// Whether a run capping at `run_cap` reads per read group has to thin the records of the psp
@@ -137,16 +138,6 @@ fn scale(observation: &mut SequenceObservation, fraction: f64) {
     observation.mapq_sum = (f64::from(observation.mapq_sum) * exact).round() as u32;
     observation.mapq_sum_sq = (observation.mapq_sum_sq as f64 * exact).round() as u64;
     observation.num_obs = kept;
-}
-
-/// The splitmix64 finaliser: a bijection that spreads consecutive identifiers across the whole
-/// range, so "lowest hash" is not "lowest identifier" — which would keep the reads that arrived
-/// first, a sample tilted towards early alignment starts.
-pub(crate) fn splitmix64(value: u64) -> u64 {
-    let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 #[cfg(test)]

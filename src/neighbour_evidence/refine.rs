@@ -43,7 +43,7 @@ use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.

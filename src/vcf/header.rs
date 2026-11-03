@@ -766,7 +766,7 @@ pub fn read_backed_phase_header_value() -> String {
         crate::read_phase::link::LINK_MIN,
         crate::read_phase::link::ERROR_FLOOR,
         crate::read_phase::link::GQ_MIN,
-        crate::read_phase::keeper::READ_REACH,
+        crate::read_phase::fragments::READ_REACH,
     )
 }
 

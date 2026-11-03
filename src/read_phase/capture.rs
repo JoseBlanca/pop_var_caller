@@ -2,7 +2,7 @@
 //! the merge where the reads' chain ids and the composed alleles meet, and nowhere later
 //! (read phase spec §2.2).
 
-use crate::run::psp_source::read_cap::splitmix64;
+use crate::splitmix::splitmix64;
 use crate::types::ChainId;
 
 /// **The most read alleles one sample keeps at one record** (§2.4), a starting value adopted by the

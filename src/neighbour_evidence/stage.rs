@@ -30,7 +30,7 @@ use super::refine::{
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
 
@@ -99,7 +99,7 @@ impl NeighbourEvidenceDecision {
                 crate::read_phase::link::BREAK_MIN,
                 crate::read_phase::link::ERROR_FLOOR,
                 crate::read_phase::link::GQ_MIN,
-                crate::read_phase::keeper::READ_REACH,
+                crate::read_phase::fragments::READ_REACH,
             )
         } else {
             format!("<ran=no,why=\"{why}\">")

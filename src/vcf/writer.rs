@@ -36,7 +36,7 @@ use crate::neighbour_evidence::line::RewriteTally;
 use crate::neighbour_evidence::phase::PassReadCounts;
 use crate::neighbour_evidence::refine::FillCheck;
 use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::read_phase::stage::{ReadPhaseStage, ReadPhaseTally};
 use crate::types::{GenomePosition, Ploidy, Position};
 

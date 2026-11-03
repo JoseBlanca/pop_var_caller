@@ -515,7 +515,7 @@ fn fragments_a_line_carries_reach_the_pass_and_break_a_link_they_contradict() {
             entries
                 .iter()
                 .map(
-                    |&(fragment, allele)| crate::read_phase::keeper::FragmentAllele {
+                    |&(fragment, allele)| crate::read_phase::fragments::FragmentAllele {
                         sample: sample as u32,
                         fragment,
                         allele,

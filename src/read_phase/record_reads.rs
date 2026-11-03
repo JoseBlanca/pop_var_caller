@@ -23,9 +23,8 @@ pub struct RecordReadAlleles {
 
 impl RecordReadAlleles {
     /// **The merge's lists, in the record's numbering**: `lists` holds `(run sample, that
-    /// sample's read alleles)` in ascending sample order, each list in read order, as
-    /// [`LocusReads::read_alleles`](crate::run::cohort_merge::build::LocusReads::read_alleles)
-    /// and the observation's covering samples give them; `written` takes a merge allele index to
+    /// sample's read alleles)` in ascending sample order, each list in read order, as the merge's
+    /// per-sample lists give them; `written` takes a merge allele index to
     /// the record's, `None` where candidate selection dropped the allele, and such a read allele
     /// is dropped with it (§2.3, step 1).
     ///

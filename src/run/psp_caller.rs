@@ -48,7 +48,7 @@ use crate::read::input::read_groups::{
     NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
 };
 use crate::read::input::reference::OpenReference;
-use crate::read_phase::keeper::RecordFragments;
+use crate::read_phase::fragments::RecordFragments;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
 use crate::types::{Bp, Phred, ReadGroupId};
@@ -795,7 +795,7 @@ impl PspVariantCaller {
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
             // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
             // the same order, with only the read alleles of reads seen at two records or more.
-            let mut keeper = crate::read_phase::keeper::FragmentKeeper::default();
+            let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
             };
@@ -835,7 +835,7 @@ impl PspVariantCaller {
                 released.extend(keeper.accept(record, windows));
             }
             released.extend(keeper.finish());
-            crate::read_phase::keeper::log_counts(keeper.counts());
+            crate::run::fragment_keeper::log_counts(keeper.counts());
             for (record, windows, fragments) in released {
                 let locus = record.region();
                 prepare(record, &windows, fragments)
