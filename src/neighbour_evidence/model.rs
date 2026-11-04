@@ -926,16 +926,17 @@ fn joint_along(
     Some(joint)
 }
 
-/// Row and column sums of a `k × k` matrix stored row by row.
+/// Row and column sums of a `k × k` matrix stored row by row, each summed in index order.
 fn margins(matrix: &[f64], k: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut rows = vec![0.0; k];
+    let mut rows = Vec::with_capacity(k);
     let mut columns = vec![0.0; k];
-    for first in 0..k {
-        for second in 0..k {
-            let value = matrix[first * k + second];
-            rows[first] += value;
-            columns[second] += value;
+    for row in matrix.chunks_exact(k) {
+        let mut row_total = 0.0;
+        for (column, &value) in columns.iter_mut().zip(row) {
+            row_total += value;
+            *column += value;
         }
+        rows.push(row_total);
     }
     (rows, columns)
 }
