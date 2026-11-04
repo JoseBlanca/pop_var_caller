@@ -143,10 +143,41 @@ becomes:
 3. **The multipliers, with the curves held** (§3.4), from the same expected counts, then **scaled**
    (§2.2).
 
-The first round starts at every multiplier one. **The loop stops as today**, when no number moves by
-more than the tolerance (10⁻⁷) or the rounds run out (2,000), and the multipliers count among the
-numbers that must stop moving. The duplicated-tract rules run as today, between fits of the motif
-length (§5).
+**The loop starts where one stutter for every read group settles** (amended 2026-11-04): the motif
+length is first fitted with every read group at the class's rate, its rows pooled, until no number
+moves; then the multipliers enter, all at one, and the rounds above run from there. **The loop stops
+as today**, when no number moves by more than the tolerance (10⁻⁷) or the rounds run out (2,000),
+and the multipliers count among the numbers that must stop moving. The duplicated-tract rules run as
+today, between fits of the motif length (§5).
+
+*Why the start, measured 2026-11-04.* A pooled round scores the pooled rows, which at 960 read
+groups are about a twentieth of the keyed ones, so the climb from the starting stutter is done
+cheaply and only the last stretch, the multipliers finding their places, is paid at the keyed
+price. On drawn homopolymer cohorts (9 classes of 100 loci at 3 reads, one read group a sample, 6
+threads, `measure_the_fit_time_against_the_read_groups`):
+
+| read groups | one stutter for every read group | keyed from the first round | pooled start, then keyed |
+|---|---|---|---|
+| 60 | 1.5 s, 209 rounds | 7.1 s, 183 rounds | 6.4 s, 320 rounds |
+| 960 | 4.3 s, 178 rounds | 115–126 s, 188 rounds | 82 s, 281 rounds |
+
+On tomato2 (59 read groups, the multipliers example, macOS, 6 threads) the run takes 79 s against
+108 s, reading the psps included; the homopolymer fit runs 198 pooled rounds, then 199 keyed.
+
+**What it changes in the answer**: the multipliers agree with the fit keyed from the first round to
+within 0.02% at every motif length on tomato2, against errors of 3% and more. The slip rates agree to
+0.1% except at the long ends of the dinucleotide and trinucleotide curves, classes of 1 to 52 loci,
+which move by up to 1.3%: the curves' stiffness is chosen in the loop's first 200 rounds
+(`rounds_choosing_strength`), which now fall in the pooled stretch. Each of those classes' errors is
+far wider. **This is not ruling 1's shared stutter first and a multiplier after**: the pooled fit is
+only where the loop begins, and the class rates are refitted with the multipliers in place, round
+after round, until both settle.
+
+*What it leaves*: at 960 read groups the fit still takes about 20 times its one-stutter time,
+because each keyed round and the standard errors score about 20 times the rows; at 3 reads the
+keyed stretch is still about a hundred rounds, because the reads place a multiplier slowly when
+each off-length read may be stutter or an allele. Kimura's cohort has 7.3 times the rows keyed
+(§3.2); its fit has not been rerun.
 
 **Why this answers ruling 1.** The class rates and the multipliers are fitted in the same loop, from
 the same expected counts, each round; at no point is a pooled stutter fitted to convergence and a

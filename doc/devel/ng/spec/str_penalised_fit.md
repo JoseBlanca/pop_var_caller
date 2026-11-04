@@ -332,6 +332,16 @@ these**:
 Both change no number beyond about 10⁻⁶ (`cost_2026-10-14.md`). **Their gain falls with depth**: at
 30 reads a row repeats 3.6 times, at 300 reads 1.2 times.
 
+
+*Tried and dropped, 2026-11-04: jumping a steady approach to its end.* Near its answer the loop
+creeps, each round's step about 0.93 times the last; moving every number to where the geometric
+series of steps ends, once three rounds agreed on the direction and the ratio, cut the rounds on
+drawn cohorts (183 → 72) with the same answer to 6 decimals. **On tomato2 it did harm**: the
+tetranucleotide fit never settled in 2,000 rounds (still moving by 2×10⁻⁴), and the homopolymer
+fit took 763 rounds with read groups apart where it takes 199 without. Real classes are thin and
+their curves stiffen and ease as the numbers move, so a jump lands where the next rounds must
+undo it. Not built.
+
 ### 2.9 What the run logs
 
 Per motif length: rounds, the five stiffness strengths and where bends were eased, the time in each

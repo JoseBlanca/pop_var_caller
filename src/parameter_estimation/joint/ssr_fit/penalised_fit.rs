@@ -893,6 +893,15 @@ fn fitted_period(
         );
     }
     let mut period = Period::new(classes, fit)?;
+    // With read groups fitted apart, the loop starts where one stutter for every read group
+    // settles: a round at one stutter scores the pooled rows, several times fewer than the keyed
+    // ones, so most of the climb is cheap, and the rounds that follow, each read group at its own
+    // rate alternating with the class numbers until both settle, are the fit (ruling 1).
+    let multipliers = period.multipliers.take();
+    if multipliers.is_some() {
+        period.count(classes, homozygote_excess, fit, false, round_ended);
+    }
+    period.multipliers = multipliers;
     period.count(classes, homozygote_excess, fit, false, round_ended);
     for alternation in 0..fit.pair_alternations {
         let started = Instant::now();
@@ -5980,6 +5989,95 @@ mod tests {
         for class in with_them.classes[5..].iter().flatten() {
             let point = (class.stratum.reference_repeats - curve.first_repeats) as usize;
             assert_eq!(class.slippage.level, curve.values[point]);
+        }
+    }
+
+    /// **Measurement, not a check**: how a homopolymer fit's time grows with the number of read
+    /// groups, one a sample, fitted with one stutter for every read group and with each read
+    /// group's multiplier; each fit's own log lines say where its time went. Run with `--ignored
+    /// --nocapture`; `PERF_SAMPLES` (comma-separated) and `PERF_LOCI` override the cohort.
+    #[test]
+    #[ignore = "a measurement that prints; minutes"]
+    fn measure_the_fit_time_against_the_read_groups() {
+        use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
+            CohortModel, LociPerClass, StutterRegime, draw_period,
+        };
+        let sizes: Vec<usize> = std::env::var("PERF_SAMPLES")
+            .unwrap_or_else(|_| "60,240,960".into())
+            .split(',')
+            .map(|size| size.parse().expect("a sample count"))
+            .collect();
+        let loci: usize = std::env::var("PERF_LOCI").map_or(300, |n| n.parse().expect("loci"));
+        for samples in sizes {
+            let mut model = CohortModel::tomato_like(1, StutterRegime::Pcr);
+            model.repeat_counts = Some((8..=16).collect());
+            model.loci = LociPerClass::Each(loci);
+            model.samples = samples;
+            model.depth = 3.0;
+            // One read group a sample, log-uniform from 0.5 to 2.
+            model.read_group_multipliers = (0..samples)
+                .map(|s| {
+                    float::exp(float::ln(2.0) * (2.0 * (s as f64 + 0.5) / samples as f64 - 1.0))
+                })
+                .collect();
+            model.seed = 3;
+            let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
+            for (label, pull) in [
+                ("one stutter", None),
+                (
+                    "per read group",
+                    PenalisedFitConfig::production().read_group_multiplier_pull,
+                ),
+            ] {
+                let config = PenalisedFitConfig {
+                    read_group_multiplier_pull: pull,
+                    ..PenalisedFitConfig::production()
+                };
+                let mut strata = drawn.strata.clone();
+                let rounds = std::cell::Cell::new(0);
+                let start = std::time::Instant::now();
+                let mut lines = Vec::new();
+                let fitted = fit_repeat_tracts_logging(
+                    &mut strata,
+                    &drawn.homozygote_excess,
+                    &config,
+                    &TractExclusion::none(),
+                    &mut |line| {
+                        let text = line.text().to_owned();
+                        if text.contains(" time ") || text.contains("distinct rows") {
+                            lines.push(text);
+                        }
+                    },
+                    &|_, round, _| rounds.set(round),
+                );
+                println!(
+                    "{samples} samples, {loci} loci a class: {label}: {:.1} s, {} rounds",
+                    start.elapsed().as_secs_f64(),
+                    rounds.get()
+                );
+                for line in lines {
+                    if std::env::var("PERF_LINES").is_ok() {
+                        println!("    {line}");
+                    }
+                }
+                let levels: Vec<String> = fitted
+                    .outcomes
+                    .iter()
+                    .filter_map(|outcome| outcome.slippage().first().copied().flatten())
+                    .map(|slippage| format!("{:.6}", slippage.level))
+                    .collect();
+                println!("    slip rates {}", levels.join(" "));
+                for (_, multipliers) in &fitted.read_group_multipliers {
+                    let shown: Vec<String> = multipliers
+                        .multipliers
+                        .iter()
+                        .step_by((samples / 8).max(1))
+                        .map(|m| format!("{m:.6}"))
+                        .collect();
+                    println!("    multipliers {}", shown.join(" "));
+                }
+            }
         }
     }
 

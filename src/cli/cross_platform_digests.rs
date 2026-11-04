@@ -290,7 +290,12 @@ mod tests {
     /// `format_version` and the new `stutter_multiplier_by_read_group` table with its note, and by
     /// nothing else — taking both out reproduces the old checksum, `ea978f24444117cc4aa0b8592079f718`, exactly.
     /// Recorded in the Linux container (arm64).
-    const FITTED_PARAMETERS_MD5: &str = "e901c340b920b887256274ad5cd493d4";
+    /// **Re-recorded 2026-11-04** when the repeat-tract fit began each motif length with one stutter
+    /// for every read group, the multipliers entering once it settles (`str_library_stutter.md`
+    /// §3.1): the fit stops at another point within its tolerance, and
+    /// a between-locus share moves from 0.25414575 to 0.25414573, a slip rate in its 12th digit and the multipliers in their 13th. It was `e901c340b920b887256274ad5cd493d4`. Recorded on the
+    /// macOS host (arm64) and in the Linux container (arm64), which agree.
+    const FITTED_PARAMETERS_MD5: &str = "07dd485da3fd17b375fe6be3985ae8a4";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -467,7 +472,10 @@ mod tests {
     /// **Re-recorded 2026-11-03** with parameters file format 8: only the `##pvcParameters` line
     /// moves, which names the parameters file's checksum. It was `a5d975a05904fa2ce6dc868a04262806`. Recorded in the
     /// Linux container (arm64).
-    const CALLS_MD5: &str = "fa736a0151d9000c8ef1438659b919d9";
+    /// **Re-recorded 2026-11-04** with the fit started from one stutter: only the `##pvcParameters` line moves,
+    /// which names the parameters file's checksum. It was `fa736a0151d9000c8ef1438659b919d9`. Recorded on the macOS host
+    /// (arm64) and in the Linux container (arm64), which agree.
+    const CALLS_MD5: &str = "a0a300f1492b6a90dac4cac8f2d4f2c7";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -600,7 +608,12 @@ mod tests {
     /// `format_version` and the new `stutter_multiplier_by_read_group` table with its note, and by
     /// nothing else — taking both out reproduces the old checksum, `5e4c1b74d5ef345a12de513258d55652`, exactly.
     /// Recorded in the Linux container (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "110c3129448b280ad39337581c42bcd0";
+    /// **Re-recorded 2026-11-04** when the repeat-tract fit began each motif length with one stutter
+    /// for every read group, the multipliers entering once it settles (`str_library_stutter.md`
+    /// §3.1): the fit stops at another point within its tolerance, and
+    /// a between-locus share moves from 0.25414575 to 0.25414573, a slip rate in its 12th digit and the multipliers in their 13th. It was `110c3129448b280ad39337581c42bcd0`. Recorded on the
+    /// macOS host (arm64) and in the Linux container (arm64), which agree.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "5fe3d062a2de1be73e770e11269042fe";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -755,7 +768,10 @@ mod tests {
     /// **Re-recorded 2026-11-03** with parameters file format 8: only the `##pvcParameters` line
     /// moves, which names the parameters file's checksum. It was `73881956d9d2bf64a8256b617d07de85`. Recorded in the
     /// Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "72840a48ffc161e4e1ff3ec2053e27a6";
+    /// **Re-recorded 2026-11-04** with the fit started from one stutter: only the `##pvcParameters` line moves,
+    /// which names the parameters file's checksum. It was `72840a48ffc161e4e1ff3ec2053e27a6`. Recorded on the macOS host
+    /// (arm64) and in the Linux container (arm64), which agree.
+    const WITH_ERRORS_CALLS_MD5: &str = "d86ea0d4c06d0056e4df8098f5af19bb";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -901,7 +917,12 @@ mod tests {
     /// `format_version` and the new `stutter_multiplier_by_read_group` table with its note, and by
     /// nothing else — taking both out reproduces the old checksum, `f34a4d2c703f158a27bc3640c7a6aeb4`, exactly.
     /// Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "617bdfd1b38087e6412a65bac2383e2f";
+    /// **Re-recorded 2026-11-04** when the repeat-tract fit began each motif length with one stutter
+    /// for every read group, the multipliers entering once it settles (`str_library_stutter.md`
+    /// §3.1): the fit stops at another point within its tolerance, and
+    /// a between-locus share moves in its 11th digit and the allele-length shares in their 13th. It was `617bdfd1b38087e6412a65bac2383e2f`. Recorded on the
+    /// macOS host (arm64) and in the Linux container (arm64), which agree.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "1965e6321bb9a454dad2d8268609ea42";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1072,7 +1093,10 @@ mod tests {
     /// **Re-recorded 2026-11-03** with parameters file format 8: only the `##pvcParameters` line
     /// moves, which names the parameters file's checksum. It was `e6fbf1ff12b25f63cc5e7192dda22efc`. Recorded in the
     /// Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "0202f5e4ca2f1e7c04238cf63c1e11a5";
+    /// **Re-recorded 2026-11-04** with the fit started from one stutter: only the `##pvcParameters` line moves,
+    /// which names the parameters file's checksum. It was `0202f5e4ca2f1e7c04238cf63c1e11a5`. Recorded on the macOS host
+    /// (arm64) and in the Linux container (arm64), which agree.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "b1ee069b58448fe0320d1637696e76ae";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
