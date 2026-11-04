@@ -107,6 +107,9 @@ struct SiteTerms {
     autozygous: Vec<f64>,
     /// The emission of each pair state, `K × K`, row `k₁`.
     pairs: Vec<f64>,
+    /// The sample's likelihood as a symmetric `A × A` matrix, `L(a/b)` at `[a][b]` and `[b][a]`;
+    /// every path's haplotypes read it.
+    by_alleles: Vec<f64>,
 }
 
 fn site_terms(
@@ -195,6 +198,7 @@ fn site_terms(
         blurred,
         autozygous,
         pairs: pair_emissions,
+        by_alleles,
     }
 }
 
@@ -446,15 +450,7 @@ fn walk_with_draw(
         &streams,
     )
     .iter()
-    .map(|states| {
-        haplotypes_along(
-            sites,
-            &terms,
-            states,
-            &mut genotype_pairs,
-            reads.as_deref_mut(),
-        )
-    })
+    .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
     .collect();
     let drawn = draws_own.then(|| paths.remove(0));
     let extra_paths = paths;
@@ -815,7 +811,6 @@ fn haplotypes_along(
     sites: &[WalkSite<'_>],
     terms: &[SiteTerms],
     states: &[State],
-    genotype_pairs: &mut GenotypePairs,
     reads: Option<&mut DrawReads<'_>>,
 ) -> Vec<HaplotypePair> {
     let mut joints: Vec<Option<Vec<f64>>> = sites
@@ -823,15 +818,12 @@ fn haplotypes_along(
         .zip(terms)
         .zip(states)
         .map(|((site, site_terms), &state)| {
-            let alleles = site.allele_count;
-            let mut by_alleles = vec![0.0; alleles * alleles];
-            for (&(first, second), &likelihood) in
-                genotype_pairs.of(alleles).iter().zip(site.likelihoods)
-            {
-                by_alleles[first * alleles + second] = likelihood;
-                by_alleles[second * alleles + first] = likelihood;
-            }
-            joint_along(state, &site_terms.blurred, &by_alleles, alleles)
+            joint_along(
+                state,
+                &site_terms.blurred,
+                &site_terms.by_alleles,
+                site.allele_count,
+            )
         })
         .collect();
     if let Some(reads) = reads {
