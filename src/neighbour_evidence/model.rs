@@ -1066,32 +1066,27 @@ const LANES: usize = 8;
 /// alone, so the bits are the same on every machine and pool width, and the lanes vectorise where
 /// one running total — each addition waiting for the one before — cannot (`float_portability.md`).
 fn lane_sum(values: &[f64]) -> f64 {
-    let chunks = values.chunks_exact(LANES);
-    let rest: f64 = chunks.remainder().iter().sum();
+    let (chunks, rest) = values.as_chunks::<LANES>();
     let mut lanes = [0.0; LANES];
     for chunk in chunks {
         for (lane, value) in lanes.iter_mut().zip(chunk) {
             *lane += value;
         }
     }
-    lanes.iter().sum::<f64>() + rest
+    lanes.iter().sum::<f64>() + rest.iter().sum::<f64>()
 }
 
 /// **[`lane_sum`] of the products of `one` and `other`**, pair by pair.
 fn lane_dot(one: &[f64], other: &[f64]) -> f64 {
-    let (one_chunks, other_chunks) = (one.chunks_exact(LANES), other.chunks_exact(LANES));
-    let rest: f64 = one_chunks
-        .remainder()
-        .iter()
-        .zip(other_chunks.remainder())
-        .map(|(a, b)| a * b)
-        .sum();
+    let ((one_chunks, one_rest), (other_chunks, other_rest)) =
+        (one.as_chunks::<LANES>(), other.as_chunks::<LANES>());
     let mut lanes = [0.0; LANES];
-    for (a, b) in one_chunks.zip(other_chunks) {
+    for (a, b) in one_chunks.iter().zip(other_chunks) {
         for ((lane, a), b) in lanes.iter_mut().zip(a).zip(b) {
             *lane += a * b;
         }
     }
+    let rest: f64 = one_rest.iter().zip(other_rest).map(|(a, b)| a * b).sum();
     lanes.iter().sum::<f64>() + rest
 }
 
