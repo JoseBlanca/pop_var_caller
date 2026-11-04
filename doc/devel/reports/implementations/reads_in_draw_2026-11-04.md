@@ -70,10 +70,35 @@ The run logs of the 64-founder dense cohort count what the link test's reads did
 | read check: population links contradicted, of those reads reach | 125 of 3,339 (3.7%) | 1 of 8,034 (0.01%) |
 
 The link test's reads now rarely act, because the paths already carry what they would have done.
-**The read check no longer estimates the error** (review M1): with the draw off it found 3.7%
+**The read check no longer estimated the error** (review M1): with the draw off it found 3.7%
 against a true 3.5%; with it on, 0.01% against a true 2.0%. It compares the population's links with
-the reads, and the population's links are now built from those same reads. Restoring an independent
-check is an owner decision, open below.
+the reads, and the population's links were now built from those same reads. The next section is the
+fix.
+
+### The read check restored: records held out of the draw
+
+On the owner's ruling, one in twenty of each sample's core records with fragments is held out of the
+draw, and the read check counts only links with a held-out or hidden end (spec §2.6). The same two
+cohorts, the draw with every record's reads against the draw with the held-out records:
+
+| | 64 founders: all reads in the draw | 64: held out | 16 founders: all reads in the draw | 16: held out |
+|---|---|---|---|---|
+| wrong links | 916 of 45,443 (2.0%) | 912 of 43,484 (2.1%) | 30 of 57,168 (0.05%) | 35 of 56,017 (0.06%) |
+| true heterozygotes phased | 61,688 | 59,396 | 74,989 | 73,517 |
+| wrong genotypes where the sample has reads | 33,656 | 33,841 | 14,476 | 14,758 |
+| **read check: contradicted, of links counted** | 1 of 8,034 (0.01%) | **9 of 474 (1.9%)** | — | **0 of 683** |
+| links made by reads in the link test | 93 | 264 | 121 | 284 |
+
+**The check tracks the error again.** At 64 founders it reads 1.9% against a true 2.1% over all
+links; with 474 links, its own sampling spread is about ±0.6 points. At 16 founders it reads none in
+683 against a true 6 in 10,000, where it could not see that rate. It is computed on links the
+sample's reads did not shape at one end, so it estimates what those links get wrong, an upper bound
+for the rest; here the two are within the spread. The run log did not list which records were held
+out, so the true error of the very links the check counted was not scored.
+
+**The cost is small.** Phased heterozygotes fall by 3.7% and 2.0%. Wrong genotypes rise by 185 and
+282 (0.6% and 1.9%), inside the spread between seeds of about 5%. The link test's reads make more
+links than with every record in the draw, which recovers part of the phase the held-out records lose.
 
 ### `HET_MASS_MIN`
 
@@ -133,6 +158,10 @@ In `src/neighbour_evidence/model/tests.rs`, the spec §6 list:
 - `an_unlinked_site_keeps_its_joint`, `reads_that_link_nothing_change_no_bit`,
   `reads_change_the_haplotypes_and_not_the_walk`.
 
+For the read check's held-out records: `read_check_records_are_one_in_twenty_and_never_hidden`
+(`refine/tests.rs`) and `the_read_check_counts_only_links_with_an_end_held_out_of_the_draw`
+(`phase/tests.rs`).
+
 **Thread invariance** is the stage test `the_pass_with_reads_writes_the_same_bytes_at_any_thread_count`
 (one thread against eight, refinement on, fragments at every heterozygote), which now also checks
 that its output differs from the same run with reads kept out of the draw. Spec §6 point 5 named
@@ -147,7 +176,10 @@ do. The test now keeps the fragments out of the draw, so it checks the link test
 
 ## What is left
 
-- **The 64-founder dense cohort is at 2.0%**, above the ceiling. The next step is spec §2.4's exact
+- **The other tables predate the held-out records.** The nine cohorts and the threshold table were
+  measured with every record's reads in the draw; the section above measures what holding one in
+  twenty out changes on the two dense cohorts.
+- **The 64-founder dense cohort is at 2.1%**, above the ceiling. The next step is spec §2.4's exact
   draw, reads in the path; an owner decision, not part of this branch.
 - **Real data** (spec §6 point 6): the tomato read check and HG002's segmental duplications, after
   merging.

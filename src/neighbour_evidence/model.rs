@@ -214,8 +214,10 @@ pub(crate) type ReadLinkOf<'a> =
 pub(crate) struct DrawReads<'a> {
     /// The sample's read links.
     pub link: &'a ReadLinkOf<'a>,
-    /// Whether a walk site is one of the sample's hidden records, which never joins a chain (§5).
-    pub hidden: &'a dyn Fn(usize) -> bool,
+    /// Whether the sample's reads at a walk site are kept out of the draw: one of its hidden
+    /// records (§5) or of its records held out for the read check (§2.6). Such a site never joins a
+    /// chain.
+    pub kept_out: &'a dyn Fn(usize) -> bool,
     /// `HET_MASS_MIN`: the smallest heterozygous mass of an orientable record.
     pub het_mass_min: f64,
     /// The orientations' stream, read only where a read-linked group exists.
@@ -735,7 +737,7 @@ fn orient_by_reads(
     let orientable: Vec<(usize, (usize, usize))> = joints
         .iter()
         .enumerate()
-        .filter(|&(site, _)| !(reads.hidden)(site))
+        .filter(|&(site, _)| !(reads.kept_out)(site))
         .filter_map(|(site, joint)| {
             let joint = joint.as_deref()?;
             orientable_pair(joint, sites[site].allele_count, reads.het_mass_min)

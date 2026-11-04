@@ -282,6 +282,12 @@ impl Phasing {
         self.rounds > 1
     }
 
+    /// Whether the haplotype draw uses a window's reads: phasing on, the switch on, and the window
+    /// has `fragments`.
+    fn draws_with_reads(self, fragments: &[RecordFragments]) -> bool {
+        self.is_on() && self.reads_in_draw && !fragments.is_empty()
+    }
+
     /// Whether `round`'s results enter the written mean: round 1 alone without phasing, rounds 2
     /// on with it — round 1 is the pass without phasing.
     fn averages(self, round: usize) -> bool {
@@ -319,6 +325,11 @@ pub const HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW: usize = 50;
 /// lose much of a sample's evidence to the check. Set at the first build with the 50 above; on the
 /// 2-Mb simulated cohorts it moved wrong genotypes within the seed spread (phasing spec §4.1).
 pub const MAX_HIDDEN_SHARE: f64 = 0.05;
+
+/// **The share of a sample's core records with fragments whose reads are held out of the haplotype
+/// draw**, so the read check scores links the draw never shaped with the same reads (reads-in-draw
+/// spec §2.6). Set at 1 in 20 like [`MAX_HIDDEN_SHARE`], before measurement.
+pub const READ_CHECK_SHARE: f64 = 0.05;
 
 /// **Solves one window**: `records` is the whole window, `core` the indices of the records it
 /// writes, `contig_length` the contig's length if the header gives it (for §4.2's rule at the
@@ -517,6 +528,9 @@ struct SampleRounds {
     previous_posteriors: Vec<Vec<f64>>,
     /// Record indices hidden from the rounds for the fill check, ascending; empty without phasing.
     hidden: Vec<usize>,
+    /// Record indices whose reads are held out of the haplotype draw for the read check, ascending;
+    /// empty unless the draw uses reads (reads-in-draw spec §2.6).
+    read_check: Vec<usize>,
     /// Positions of its informative records, for §4.2's evidence-nearby rule.
     informative_positions: Vec<u64>,
     /// The parameters round 1 fitted or read.
@@ -639,6 +653,7 @@ pub fn refine_window_with_reads(
         .map(|&index| records[index].allele_count)
         .collect();
     let pairs = PairLayout::new(allele_counts.iter().copied());
+    let draws_with_reads = phasing.draws_with_reads(fragments);
 
     let mut states: Vec<SampleRounds> = (0..samples)
         .into_par_iter()
@@ -655,10 +670,16 @@ pub fn refine_window_with_reads(
             } else {
                 Vec::new()
             };
+            let read_check = if draws_with_reads && templates.is_some() {
+                draw_read_check_records(fragments, &layout, sample, &hidden, phasing.window_key)
+            } else {
+                Vec::new()
+            };
             SampleRounds {
                 compared: compared_records(records, sample),
                 previous_posteriors: Vec::new(),
                 hidden,
+                read_check,
                 informative_positions,
                 parameters: None,
                 sums: Vec::new(),
@@ -828,6 +849,40 @@ fn draw_hidden_records(
     hidden
 }
 
+/// **Draws the core records of `sample` whose reads are held out of the haplotype draw** for the
+/// read check (reads-in-draw spec §2.6): each core record where the sample has a fragment and that
+/// is not in `hidden` is held out with probability [`READ_CHECK_SHARE`], one uniform a record in
+/// record order from the window's [`StreamPurpose::ReadCheck`] stream. Returned as record indices,
+/// ascending.
+fn draw_read_check_records(
+    fragments: &[RecordFragments],
+    layout: &WindowLayout,
+    sample: usize,
+    hidden: &[usize],
+    window_key: u64,
+) -> Vec<usize> {
+    let mut uniforms = Uniforms::new(StreamPurpose::ReadCheck, window_key, sample, 0);
+    layout
+        .core_sites
+        .iter()
+        .map(|&site| layout.record_of_site[site])
+        .filter(|&index| {
+            fragments
+                .get(index)
+                .is_some_and(|fragments| !fragments.of_sample(sample as u32).is_empty())
+                && hidden.binary_search(&index).is_err()
+        })
+        .filter(|_| uniforms.next_uniform() < READ_CHECK_SHARE)
+        .collect()
+}
+
+/// Whether the draw keeps a sample's reads at record `index` out: one of its `hidden` records, or
+/// of its records held out for the `read_check` (reads-in-draw spec §2.6). Two lists, not
+/// [`SampleRounds`], so the round's solve can hold it while the sample's phase is borrowed mutably.
+fn keeps_reads_out(hidden: &[usize], read_check: &[usize], index: usize) -> bool {
+    hidden.binary_search(&index).is_ok() || read_check.binary_search(&index).is_ok()
+}
+
 /// **One sample's walk in one round**: its posteriors at its compared records and, in averaged
 /// rounds, its core sites' quantities go into `state`; with phasing its drawn haplotypes go into
 /// `row`, its row of the round being written. Nothing happens for a sample not walked in the
@@ -940,15 +995,12 @@ fn solve_round(
             |one: usize, one_pair: (usize, usize), other: usize, other_pair: (usize, usize)| {
                 draw_link(fragments_at(one), one_pair, fragments_at(other), other_pair)
             };
-        let hidden = |site: usize| {
-            state
-                .hidden
-                .binary_search(&layout.record_of_site[site])
-                .is_ok()
-        };
-        let mut draw_reads = (phasing.reads_in_draw && !fragments.is_empty()).then(|| DrawReads {
+        let (hidden, read_check) = (&state.hidden, &state.read_check);
+        let kept_out =
+            |site: usize| keeps_reads_out(hidden, read_check, layout.record_of_site[site]);
+        let mut draw_reads = phasing.draws_with_reads(fragments).then(|| DrawReads {
             link: &link,
-            hidden: &hidden,
+            kept_out: &kept_out,
             het_mass_min: HET_MASS_MIN,
             uniforms: Uniforms::new(
                 StreamPurpose::Orientation,
@@ -1172,6 +1224,15 @@ fn final_solution(
                     })
                     .collect(),
                 genotype_qualities,
+                drawn_without_reads: if phasing.draws_with_reads(fragments) {
+                    layout
+                        .record_of_site
+                        .iter()
+                        .map(|&index| keeps_reads_out(&state.hidden, &state.read_check, index))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             };
             let (phased, read_counts) = phase.phase_heterozygotes(
                 pairs_layout,

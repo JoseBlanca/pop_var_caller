@@ -132,8 +132,9 @@ changes is what other samples copy and what the phase step reads.
 For one sample along one path, write `J_r(a, b)` for the joint at record `r`, normalised to sum to
 one, and `H_r = Σ_{a≠b} J_r(a, b)` for its heterozygous mass.
 
-**Orientable records.** A record is orientable when `H_r ≥ ½` (`HET_MASS_MIN`) and it is not one of
-the sample's hidden records (phasing spec §4.1). Below one half the path says the sample is more
+**Orientable records.** A record is orientable when `H_r ≥ ½` (`HET_MASS_MIN`) and it is neither
+one of the sample's hidden records (phasing spec §4.1) nor one of its records held out for the read
+check (§2.6). Below one half the path says the sample is more
 likely homozygous there, and the record's orientation would be drawn for alleles it probably does not
 carry.
 
@@ -220,7 +221,62 @@ twice.
 The walk, its posterior and every genotype it gives; the parameter fit; template choice; the
 averaging over rounds; the no-read rules and the fill check; the consensus and its alignment of
 rounds (`SamplePhase::add_round`, `src/neighbour_evidence/phase.rs:237`); the link test and its read
-rows; the read check; the phase writer of reads alone, where refinement does not run.
+rows; the phase writer of reads alone, where refinement does not run. The read check changes which
+links it counts (§2.6).
+
+### 2.6 The read check, kept independent
+
+**The problem.** The read check (read phase spec §2.8) compares the population's links with the
+reads, and was the pass's one estimate of its phase error that does not come from its own draws.
+With reads in the draw, the population's links are drawn from those same reads, so the check
+compares the reads with themselves. On the 64-founder dense cohort it fell from 125 of 3,339 links
+contradicted, against a true error of 3.5%, to 1 of 8,034, against a true error of 2.0% (review M1,
+`reads_in_draw_2026-11-04.md`).
+
+**The rule: hold some records out of the draw, and check only at them.** The fill check does the
+same with genotypes: it hides a few records from the rounds and tests the prediction there
+(phasing spec §4.1).
+
+1. **Which records.** Before the rounds, for each sample in each window, every core record where the
+   sample has at least one fragment and that is not one of its hidden records is held out with
+   probability `READ_CHECK_SHARE` = 1/20, one uniform a record in record order, from a stream of its
+   own (`StreamPurpose::ReadCheck`, keyed by the window and the sample, round 0).
+2. **What holding out does.** A held-out record never joins a read-linked group, in any round or
+   path, exactly as a hidden record does: the orientable records either side are linked across it
+   (§2.2). Unlike a hidden record it keeps its genotype likelihoods in the walk, so its genotype and
+   its fill are unchanged. Only its reads are kept from the draw.
+3. **Which links the check counts.** A population link enters the check only when at least one of
+   its two records is held out or hidden: a record where the draw never used the sample's reads.
+   The other conditions of the read phase spec §2.8 stay (`|L|` ≥ `T_link`, `GQ` ≥ 30 at both ends).
+   Where the draw used no reads, because the switch is off or the window has no fragments, every
+   link counts as before.
+4. **The link test is unchanged.** Its read rows still act at a held-out record after the rounds,
+   so a wrong population link there can still be broken by reads. The check is counted before that,
+   as now.
+
+**Why the estimate is independent again.** At a held-out record `q`, the orientation the paths give
+it relative to a neighbour `p` comes from the sample's templates and its own likelihoods. The
+templates are other samples' haplotypes, drawn with *their* reads; none of them used this sample's
+fragments at `q`, because none of this sample's draws did. The fragments the check scores between
+`p` and `q` were therefore never scored in any draw. A fragment over `p` and `q` may also reach a
+third record linked to `p` in the draw, but what the check reads from it, which allele it carries
+at `q` beside the one at `p`, the draw never saw.
+
+**What the estimate is of.** The links at held-out records are links the sample's own reads did not
+shape at one end, so the check estimates the population's error *without the sample's reads* at that
+record, with templates that carry the rest of the cohort's reads. Links that rest on reads at both
+ends should be wrong less often, so the check is an upper bound for them. Held-out records are a
+uniform draw among records with fragments, so they are not chosen by how hard they are to phase.
+Like the check before, it sees only links reads reach, under the read reach.
+
+**What it costs.** One record in twenty with fragments gives up its reads in the draw. The check's
+denominator shrinks to the links that touch those records, about one link in ten of those reads
+reach, each record having two neighbours; on the 64-founder dense cohort that should be several
+hundred links. §6 measures both.
+
+**Why not hold out pairs of records.** The pairs the check scores are consecutive heterozygotes the
+pass writes, and which records those are is known only after the rounds. A held-out record makes
+every link that touches it independent, whichever its neighbours turn out to be.
 
 ---
 
@@ -233,6 +289,8 @@ rows; the read check; the phase writer of reads alone, where refinement does not
 | a link's log-odds | `score_read_link` (`src/read_phase/link.rs:192`) | unchanged, called from the new step |
 | the stream | `Uniforms`, `StreamPurpose` (`src/neighbour_evidence/random.rs:16`) | a new purpose, `Orientation`, keyed like `Path`: one stream a sample a round, read by the round's own path and then by its extra paths, in that order |
 | the switch | — | `Phasing::with_reads_in_draw` and `NeighbourEvidenceDecision::reads_in_draw`, on wherever the pass runs; off only in the test of the link test's own `GQ` rule. No option sets it |
+| the read check's records (§2.6) | — | `draw_read_check_records` in `refine.rs`, beside `draw_hidden_records`, into `SampleRounds::read_check`; a new purpose, `ReadCheck`; the draw's `kept_out` closure answers for hidden and held-out records alike |
+| the read check's links (§2.6) | `link_to_next` (`phase.rs`), counting into `PassReadCounts` | `SiteReads::drawn_without_reads`, one flag a site, gates the two counts; empty when the draw used no reads, and then every link counts |
 
 The draw lives in `model.rs` because the joints do; the walk does not know about reads, so the new
 step takes a closure or a small trait that, given two record indices and their heterozygotes,
@@ -289,12 +347,14 @@ order (read phase spec §2.5). The draw is the same at any thread count, as the 
   (read phase spec §2.5). The chain's only gate is the heterozygous mass of ½ given the path, so it
   orients records below `GQ` 30 too, and the population may then write them phased: the stage test
   of the link test's `GQ` rule met one at `GQ` 14. Such a record's orientation is drawn, not
-  vetoed, and a false heterozygote has little mass on the chain's own weights. *Owner ruling
-  pending.*
-- **The read check is no longer independent** (review M1). It compares the population's links with
-  the reads (read phase spec §2.8), and the population's links are now drawn from those same reads.
-  On the 64-founder dense cohort it fell from 125 of 3,339 contradicted (true error 3.5%) to 1 of
-  8,034 (true error 2.0%). *Owner ruling pending* on how to restore an independent check.
+  vetoed, and a false heterozygote has little mass on the chain's own weights. **Accepted by the
+  owner, 2026-11-04**: at 3× most heterozygotes are called below `GQ` 30, so a guard would remove
+  most of the gain, and phased heterozygotes with a wrong genotype rose only with the phasing
+  (1.2% to 1.5% at 64 founders) while genotypes improved overall.
+- **The read check must not count links the draw shaped with the same reads** (review M1). Without
+  §2.6 it fell from 125 of 3,339 contradicted (true error 3.5%) to 1 of 8,034 (true error 2.0%).
+  Any later change that lets reads reach a held-out record — a link across it, a fragment it shares
+  with a grouped record counted as its own — makes the check circular again.
 
 ---
 
@@ -314,7 +374,10 @@ order (read phase spec §2.5). The draw is the same at any thread count, as the 
      still linked across it;
    - a `1/2` heterozygote at a three-allele record reads alleles 1 and 2;
    - the written joint keeps every homozygous mass and moves the whole heterozygous mass;
-   - no fragments: the haplotypes equal today's, bit for bit.
+   - no fragments: the haplotypes equal today's, bit for bit;
+   - the read check's records: about one in twenty of a sample's core records with fragments, never
+     a hidden one, the same at any thread count; and the check counts a link only where one end is
+     held out or hidden while the draw uses reads, and every link when it does not.
 3. **The simulated cells, against today's main** (`grid_table.py`, `read_phase_score.py`, the cells
    of `read_phase_2026-11-03.md`), one seed each, then a second seed where a difference decides:
    - the two dense outbred cohorts: wrong links, population only and with reads; heterozygotes
@@ -325,6 +388,9 @@ order (read phase spec §2.5). The draw is the same at any thread count, as the 
    - `HET_MASS_MIN` at ¼ and ¾ on the two dense cohorts;
    - the share of fragment-linked heterozygote pairs the chain loses because a fragment skips an
      orientable record (§2.2).
+   - the read check (§2.6) on the two dense cohorts: its estimate against the true error of the
+     links it counts and of all links, with its denominator; and what holding one record in twenty
+     out costs in wrong links and phased heterozygotes.
 4. **Cost**: the pass's time with and without the step, at 50 and 200 samples.
 5. **Thread invariance**: the end-to-end test of `mode_equivalence.rs` at one thread and four, on a
    fixture with a read-linked group.
@@ -358,6 +424,9 @@ it. If the dense 64-founder cohort stays above 1 in 100, the next step is the ex
 
 **Ruled 2026-11-04: the owner accepted all three recommendations.** The cheap draw is built first,
 as a prototype behind a constant, with `HET_MASS_MIN` at ½ and ¼, ¾ measured.
+
+**Ruled 2026-11-04, after the review:** the read check is restored by holding records out of the
+draw (§2.6, review M1), and the draw has no `GQ` guard (§5, review Mi1).
 
 1. **Build the draw given the path first, and the exact draw only if it falls short?** *Recommended:
    yes.* The cheap draw costs a few percent of a walk; the exact one doubles to quadruples the walk,

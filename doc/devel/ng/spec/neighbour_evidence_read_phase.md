@@ -555,6 +555,10 @@ stage counts, per sample and in total, the population links reads reached that w
 those the reads contradicted.** The run log and the run report state the counts. This is the run-level
 check the phase output spec §8 deferred "to phase from reads".
 
+**Since reads enter the pass's haplotype draw**, the check counts only links with one end held out
+of that draw, so the reads it scores were never used to shape the link
+([`neighbour_evidence_reads_in_draw.md`](neighbour_evidence_reads_in_draw.md) §2.6).
+
 It is reported, not acted on, in this stage. The counts are biased: reads reach only links under `R`,
 and short links are probably the population model's most accurate, so the rate is a lower bound for
 longer links. Whether to use it as a rule that tightens population-only links by itself is Q3.

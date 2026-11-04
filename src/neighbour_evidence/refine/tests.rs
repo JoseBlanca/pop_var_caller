@@ -832,3 +832,71 @@ fn the_draws_link_is_positive_for_cis() {
     assert_eq!(draw_link(&cis_one, (0, 1), &[allele(7, 0)], (0, 1)), None);
     assert_eq!(draw_link(&[], (0, 1), &cis_other, (0, 1)), None);
 }
+
+/// **About one in twenty of a sample's core records with fragments is held out for the read check,
+/// never a hidden one, and the draw depends on the window and the sample alone** (reads-in-draw
+/// spec §2.6). Sample 0 has a fragment at every record of a 3,000-record window, sample 1 at every
+/// other one; records 0–99 are hidden.
+#[test]
+fn read_check_records_are_one_in_twenty_and_never_hidden() {
+    let records = 3_000;
+    let cohort = test_cohort(CohortShape {
+        records,
+        depth: 30.0,
+        ..SHAPE
+    });
+    let layout = WindowLayout::new(&cohort.records, &(0..records));
+    let fragments: Vec<RecordFragments> = (0..records)
+        .map(|index| {
+            let entry = |sample: u32| FragmentAllele {
+                sample,
+                fragment: index as u32,
+                allele: 0,
+                error_phred: 30,
+            };
+            let mut entries = vec![entry(0)];
+            if index % 2 == 0 {
+                entries.push(entry(1));
+            }
+            RecordFragments::from_entries(entries)
+        })
+        .collect();
+    let hidden: Vec<usize> = (0..100).collect();
+    let with_fragments = |sample: usize| {
+        layout
+            .core_sites
+            .iter()
+            .map(|&site| layout.record_of_site[site])
+            .filter(|&index| sample == 0 || index % 2 == 0)
+            .filter(|index| !hidden.contains(index))
+            .count()
+    };
+    for sample in [0, 1] {
+        let held_out = draw_read_check_records(&fragments, &layout, sample, &hidden, 5);
+        assert!(held_out.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(held_out.iter().all(|index| !hidden.contains(index)));
+        assert!(
+            held_out
+                .iter()
+                .all(|&index| !fragments[index].of_sample(sample as u32).is_empty())
+        );
+        // Binomial(n, 1/20) within five standard deviations.
+        let n = with_fragments(sample) as f64;
+        let expected = n * READ_CHECK_SHARE;
+        let spread = 5.0 * (n * READ_CHECK_SHARE * (1.0 - READ_CHECK_SHARE)).sqrt();
+        assert!(
+            (held_out.len() as f64 - expected).abs() <= spread,
+            "sample {sample}: {} held out of {n}",
+            held_out.len()
+        );
+        assert_eq!(
+            held_out,
+            draw_read_check_records(&fragments, &layout, sample, &hidden, 5)
+        );
+        assert_ne!(
+            held_out,
+            draw_read_check_records(&fragments, &layout, sample, &hidden, 6),
+            "another window draws other records"
+        );
+    }
+}

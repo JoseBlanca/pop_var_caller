@@ -442,7 +442,7 @@ fn oriented(
     let is_hidden = |site: usize| hidden.contains(&site);
     let mut reads = DrawReads {
         link: &link,
-        hidden: &is_hidden,
+        kept_out: &is_hidden,
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, seed, 0, 1),
     };
@@ -551,7 +551,7 @@ fn an_unlinked_site_keeps_its_joint() {
     let is_hidden = |_: usize| false;
     let mut reads = DrawReads {
         link: &link,
-        hidden: &is_hidden,
+        kept_out: &is_hidden,
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, 3, 0, 1),
     };
@@ -610,7 +610,7 @@ fn a_one_two_heterozygote_is_read_as_alleles_one_and_two() {
     let is_hidden = |_: usize| false;
     let mut reads = DrawReads {
         link: &link,
-        hidden: &is_hidden,
+        kept_out: &is_hidden,
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, 1, 0, 1),
     };
@@ -648,7 +648,7 @@ fn reads_that_link_nothing_change_no_bit() {
     let is_hidden = |_: usize| false;
     let mut reads = DrawReads {
         link: &link,
-        hidden: &is_hidden,
+        kept_out: &is_hidden,
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, 5, 2, 3),
     };
@@ -683,7 +683,7 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
     let is_hidden = |_: usize| false;
     let mut reads = DrawReads {
         link: &link,
-        hidden: &is_hidden,
+        kept_out: &is_hidden,
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, 9, 0, 2),
     };

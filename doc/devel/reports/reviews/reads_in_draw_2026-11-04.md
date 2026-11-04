@@ -2,7 +2,7 @@
 **Date:** 2026-11-04
 **Reviewer:** rust-code-review skill (single reviewer, no fan-out)
 **Scope:** reads in the neighbour-evidence pass's haplotype draw, branch `reads-in-draw`, diff `480c6341..1e5c94ab`
-**Status:** Approve-with-changes; fixes applied 2026-11-04 except M1 and Mi1, which await the owner (§11)
+**Status:** Approve-with-changes; every finding disposed 2026-11-04 (§11): M1 fixed by holding records out of the draw, Mi1 accepted by the owner
 
 ---
 
@@ -242,9 +242,9 @@ test's work, and it bears on M1. **Fix:** add the three counts for both dense co
 
 | finding | disposition |
 |---|---|
-| M1, the read check is no longer independent | **Confirmed; awaiting the owner.** Recorded as a trap in spec §5 and in the implementation report; the log line keeps its wording until the ruling decides what the check becomes. |
+| M1, the read check is no longer independent | **Fixed, on the owner's ruling.** One in twenty of each sample's core records with fragments is held out of the draw, and the check counts only links with an end held out (spec §2.6). On the 64-founder dense cohort it reads 9 of 474 (1.9%) against a true 2.1%; the implementation report has the cost. |
 | M2, no test pins the sign of `L` | **Fixed.** The closure's body is now `refine::draw_link`; `the_draws_link_is_positive_for_cis` checks cis, trans and a `1/2` heterozygote, and fails under the §10 mutation. |
-| Mi1, no `GQ` guard in the draw | **Recorded; awaiting the owner.** A trap in spec §5. |
+| Mi1, no `GQ` guard in the draw | **Accepted by the owner.** No guard; the reasons are in spec §5. |
 | Mi2, a test that passes on a draw doing nothing | **Fixed.** It now asserts the haplotypes with reads differ from those without. |
 | Mi3, the link test's read rows | **Fixed.** A table in the implementation report. |
 | Nit, redundant guard in `orient_group` | Fixed. |
