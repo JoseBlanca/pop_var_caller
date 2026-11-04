@@ -156,15 +156,32 @@ fn site_terms(
                 .sum();
         }
     }
-    // Rows by slices rather than indices, so the inner products carry no bounds checks; each sum
-    // adds the same terms in the same order.
+    // Each first template's row of emissions is built one allele at a time across every second
+    // template, so the inner loop runs over templates and vectorises; each emission still adds its
+    // alleles' terms in order, so the bits are those of a sum per pair.
+    let mut by_allele = vec![0.0; alleles * templates];
+    for (template, shares) in blurred.chunks_exact(alleles).enumerate() {
+        for (allele, &share) in shares.iter().enumerate() {
+            by_allele[allele * templates + template] = share;
+        }
+    }
     let mut pair_emissions = vec![0.0; templates * templates];
     for (out, first) in pair_emissions
         .chunks_exact_mut(templates)
         .zip(weighted.chunks_exact(alleles))
     {
-        for (value, second) in out.iter_mut().zip(blurred.chunks_exact(alleles)) {
-            *value = first.iter().zip(second).map(|(w, q)| w * q).sum();
+        for (allele, (&weight, second)) in first
+            .iter()
+            .zip(by_allele.chunks_exact(templates))
+            .enumerate()
+        {
+            for (value, &share) in out.iter_mut().zip(second) {
+                if allele == 0 {
+                    *value = weight * share;
+                } else {
+                    *value += weight * share;
+                }
+            }
         }
     }
     let autozygous = (0..templates)
@@ -502,14 +519,17 @@ fn walk_with_draw(
                 )
             })
             .collect();
-        let state_pairs: Vec<f64> = (0..k * k)
-            .map(|state| {
-                without_emission(
+        // Column by column, `[second][first]`, for the spreading over alleles below.
+        let mut by_second = vec![0.0; k * k];
+        for (second, column) in by_second.chunks_exact_mut(k).enumerate() {
+            for (first, value) in column.iter_mut().enumerate() {
+                let state = first * k + second;
+                *value = without_emission(
                     forward_pairs[index][state] * backward_pairs[state],
                     site_terms.pairs[state],
-                )
-            })
-            .collect();
+                );
+            }
+        }
         let both_autozygous: f64 = (0..k)
             .map(|state| forward_autozygous[index][state] * backward_autozygous[state])
             .sum();
@@ -535,28 +555,25 @@ fn walk_with_draw(
         // first-copy template's weight spread over the second copy's alleles (K² · A), then over
         // the first copy's (K · A²) — not K² · A² by summing every state over every pair.
         let blurred = &site_terms.blurred;
-        let mut second_copy = vec![0.0; k * alleles];
-        for (out, weights) in second_copy
-            .chunks_exact_mut(alleles)
-            .zip(state_pairs.chunks_exact(k))
-        {
-            for (&weight, shares) in weights.iter().zip(blurred.chunks_exact(alleles)) {
-                for (value, share) in out.iter_mut().zip(shares) {
+        // `second_copy[b][first]`: the second templates taken in order, each adding its share of
+        // allele `b` to every first template at once — the same terms in the same order as a sum
+        // per first template, but the inner loop runs over templates and vectorises.
+        let mut second_copy = vec![0.0; alleles * k];
+        for (column, shares) in by_second.chunks_exact(k).zip(blurred.chunks_exact(alleles)) {
+            for (out, &share) in second_copy.chunks_exact_mut(k).zip(shares) {
+                for (value, &weight) in out.iter_mut().zip(column) {
                     *value += weight * share;
                 }
             }
         }
         let mut pair_weight = vec![0.0; alleles * alleles];
-        for (first_shares, spread) in blurred
-            .chunks_exact(alleles)
-            .zip(second_copy.chunks_exact(alleles))
-        {
+        for (first, first_shares) in blurred.chunks_exact(alleles).enumerate() {
             for (&first_share, out) in first_shares
                 .iter()
                 .zip(pair_weight.chunks_exact_mut(alleles))
             {
-                for (value, second) in out.iter_mut().zip(spread) {
-                    *value += first_share * second;
+                for (value, spread) in out.iter_mut().zip(second_copy.chunks_exact(k)) {
+                    *value += first_share * spread[first];
                 }
             }
         }
