@@ -694,6 +694,7 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
     assert_eq!(walked, walked_again);
     // Templates even between the alleles: without reads both copies are the same margin.
     assert!(without.iter().all(|[one, two]| one == two));
+    assert_ne!(with, without, "the reads changed the haplotypes");
     // With every pair linked at cis, every heterozygous site carries one orientation.
     let first_copy_reference: Vec<bool> = with.iter().map(|[one, _]| one[0] > 0.5).collect();
     assert!(

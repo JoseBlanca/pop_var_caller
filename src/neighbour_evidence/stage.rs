@@ -71,7 +71,7 @@ pub struct NeighbourEvidenceDecision {
     /// Whether each sample's fragments orient its haplotypes in the rounds' draws
     /// (`neighbour_evidence_reads_in_draw.md`); [`decide`] sets it. Off only where a test needs
     /// the link test's reads alone.
-    pub reads_in_draw: bool,
+    pub(crate) reads_in_draw: bool,
 }
 
 impl NeighbourEvidenceDecision {

@@ -43,7 +43,7 @@ use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
-use crate::read_phase::fragments::RecordFragments;
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 use crate::read_phase::link::{Heterozygote, score_read_link};
 use crate::vcf::encode::written_genotype_quality;
 
@@ -262,7 +262,7 @@ impl Phasing {
     /// The same, each sample's fragments orienting its drawn haplotypes or not
     /// (`neighbour_evidence_reads_in_draw.md`; on unless a test needs the link test's reads alone).
     #[must_use]
-    pub fn with_reads_in_draw(self, reads_in_draw: bool) -> Self {
+    pub(crate) fn with_reads_in_draw(self, reads_in_draw: bool) -> Self {
         Self {
             reads_in_draw,
             ..self
@@ -762,6 +762,32 @@ pub fn refine_window_with_reads(
     }
 }
 
+/// **`L` for the draw's link between two records** (reads-in-draw spec §2.2): a sample's fragments
+/// at each, the heterozygote the chain reads at each, the lower allele first. Positive is *cis*,
+/// which the chain reads as the two records taking the same orientation; `None` where no fragment
+/// counts at both.
+fn draw_link(
+    at_one: &[FragmentAllele],
+    one_pair: (usize, usize),
+    at_other: &[FragmentAllele],
+    other_pair: (usize, usize),
+) -> Option<f64> {
+    if at_one.is_empty() || at_other.is_empty() {
+        return None;
+    }
+    let heterozygote = |(a, b): (usize, usize)| {
+        // PANIC-FREE: a chain's pair has two different alleles, the lower first.
+        Heterozygote::of(a as u16, b as u16).expect("a chain's pair is a heterozygote")
+    };
+    let found = score_read_link(
+        at_one,
+        heterozygote(one_pair),
+        at_other,
+        heterozygote(other_pair),
+    );
+    (found.fragments > 0).then_some(found.log_odds)
+}
+
 fn add_to(sum: &mut [f64], values: &[f64]) {
     for (total, value) in sum.iter_mut().zip(values) {
         *total += value;
@@ -912,21 +938,7 @@ fn solve_round(
         };
         let link =
             |one: usize, one_pair: (usize, usize), other: usize, other_pair: (usize, usize)| {
-                let heterozygote = |(a, b): (usize, usize)| {
-                    // PANIC-FREE: a chain's pair has two different alleles, the lower first.
-                    Heterozygote::of(a as u16, b as u16).expect("a chain's pair is a heterozygote")
-                };
-                let (at_one, at_other) = (fragments_at(one), fragments_at(other));
-                if at_one.is_empty() || at_other.is_empty() {
-                    return None;
-                }
-                let found = score_read_link(
-                    at_one,
-                    heterozygote(one_pair),
-                    at_other,
-                    heterozygote(other_pair),
-                );
-                (found.fragments > 0).then_some(found.log_odds)
+                draw_link(fragments_at(one), one_pair, fragments_at(other), other_pair)
             };
         let hidden = |site: usize| {
             state

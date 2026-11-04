@@ -801,3 +801,34 @@ fn more_rounds_than_the_link_test_holds_are_refused() {
     let _ = Phasing::new(8, 0);
     let _ = Phasing::new(9, 0);
 }
+
+/// **The draw's link is positive where the reads say cis** (reads-in-draw spec §2.2; review M2):
+/// fragments that show the lower allele at both records, or the upper at both, give a positive `L`,
+/// which the chain reads as the same orientation; fragments that pair a lower with an upper give a
+/// negative one. At a `1/2` heterozygote the lower allele is 1, not the reference.
+#[test]
+fn the_draws_link_is_positive_for_cis() {
+    let allele = |fragment: u32, allele: u16| FragmentAllele {
+        sample: 0,
+        fragment,
+        allele,
+        error_phred: 30,
+    };
+    // Two fragments, each the lower allele at both records or the upper at both: cis.
+    let cis_one = [allele(0, 0), allele(1, 1)];
+    let cis_other = [allele(0, 0), allele(1, 1)];
+    let cis = draw_link(&cis_one, (0, 1), &cis_other, (0, 1)).expect("two fragments count");
+    assert!(cis > 0.0, "{cis}");
+    // The same fragments with the second record's alleles swapped: trans, the same size.
+    let trans_other = [allele(0, 1), allele(1, 0)];
+    let trans = draw_link(&cis_one, (0, 1), &trans_other, (0, 1)).expect("two fragments count");
+    assert_eq!(trans, -cis);
+    // A 1/2 heterozygote beside a 0/1: allele 1 there is the lower, so 1 with 0 is cis.
+    let one_two = [allele(0, 1), allele(1, 2)];
+    let zero_one = [allele(0, 0), allele(1, 1)];
+    let multi = draw_link(&one_two, (1, 2), &zero_one, (0, 1)).expect("two fragments count");
+    assert_eq!(multi, cis);
+    // No fragment at both records: no link.
+    assert_eq!(draw_link(&cis_one, (0, 1), &[allele(7, 0)], (0, 1)), None);
+    assert_eq!(draw_link(&[], (0, 1), &cis_other, (0, 1)), None);
+}

@@ -85,7 +85,7 @@ multiplies it into the second half of the pass's draw only, the haplotypes given
 The terms of the phasing and read phase specs, plus four:
 
 - **Joint at a record**: for one sample, given its path, the probability that copy 0 carries allele
-  `a` and copy 1 allele `b`, for every ordered pair `(a, b)` (phasing spec §2.1, `copies_along` in
+  `a` and copy 1 allele `b`, for every ordered pair `(a, b)` (phasing spec §2.1, `joint_along` in
   `src/neighbour_evidence/model.rs:677`). Each copy's haplotype is a margin of it.
 - **Heterozygous mass**: the joint's total over `a ≠ b` — how likely the sample is heterozygous at
   the record, given its path.
@@ -139,7 +139,7 @@ carry.
 
 **The heterozygote a link reads.** At a biallelic record it is alleles 0 and 1. At a record with more
 alleles it is the pair `a < b` with the largest `J_r(a, b) + J_r(b, a)`, ties to the lower pair in
-the order the loops of `copies_along` visit them; that is the `Heterozygote` handed to
+the order the loops of `orientable_pair` visit them; that is the `Heterozygote` handed to
 `score_read_link` (`src/read_phase/link.rs:192`).
 
 **Links.** For consecutive orientable records `r` and `s` of the sample, `L_rs` is
@@ -229,7 +229,7 @@ rows; the read check; the phase writer of reads alone, where refinement does not
 | what | where now | change |
 |---|---|---|
 | the window's fragments | `refine_window_with_reads` (`src/neighbour_evidence/refine.rs:586`), handed only to `final_solution` | also handed to `solve_round`, one sample's slice a record |
-| the draw | `draw_haplotypes` and `copies_along` (`model.rs:578`, `:677`) | `copies_along` returns the joint; a new step after the per-record joints applies §2.2, then takes the margins |
+| the draw | `draw_haplotypes` and `copies_along` (`model.rs`) | the joint is `joint_along`, its margins `copies_of`; between them `orient_by_reads` and `orient_group` apply §2.2 |
 | a link's log-odds | `score_read_link` (`src/read_phase/link.rs:192`) | unchanged, called from the new step |
 | the stream | `Uniforms`, `StreamPurpose` (`src/neighbour_evidence/random.rs:16`) | a new purpose, `Orientation`, keyed like `Path`: one stream a sample a round, read by the round's own path and then by its extra paths, in that order |
 | the switch | — | `Phasing::with_reads_in_draw` and `NeighbourEvidenceDecision::reads_in_draw`, on wherever the pass runs; off only in the test of the link test's own `GQ` rule. No option sets it |
@@ -284,6 +284,17 @@ order (read phase spec §2.5). The draw is the same at any thread count, as the 
   heterozygote with fragments that confidently link it. The link test keeps such contradictions from
   being written (read phase spec §2.7); here they can shape templates. The hidden-duplication filter
   removes most before the pass; §6 checks HG002's segmental duplications.
+- **No `GQ` guard** (review Mi1). The link test requires `GQ` 30 at both ends of a link resting on
+  reads, because a heterozygote that is really homozygous gives a confident link of random sign
+  (read phase spec §2.5). The chain's only gate is the heterozygous mass of ½ given the path, so it
+  orients records below `GQ` 30 too, and the population may then write them phased: the stage test
+  of the link test's `GQ` rule met one at `GQ` 14. Such a record's orientation is drawn, not
+  vetoed, and a false heterozygote has little mass on the chain's own weights. *Owner ruling
+  pending.*
+- **The read check is no longer independent** (review M1). It compares the population's links with
+  the reads (read phase spec §2.8), and the population's links are now drawn from those same reads.
+  On the 64-founder dense cohort it fell from 125 of 3,339 contradicted (true error 3.5%) to 1 of
+  8,034 (true error 2.0%). *Owner ruling pending* on how to restore an independent check.
 
 ---
 

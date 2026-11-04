@@ -57,13 +57,31 @@ beyond the records reads link — the hypothesis of spec §1.1. **The 1-in-100 c
 64 founders**: 2.0% remains. Phased heterozygotes with a wrong genotype rise with the phasing,
 from 504 to 950 at 64 founders (1.2% to 1.5% of those phased).
 
+### The link test's read rows, and the read check
+
+The run logs of the 64-founder dense cohort count what the link test's reads did after the rounds
+(read phase spec §2.7):
+
+| | draw off | draw on |
+|---|---|---|
+| links made by reads | 1,997 | 93 |
+| population links broken by reads | 480 | 12 |
+| heterozygotes attached by reads | 837 | 145 |
+| read check: population links contradicted, of those reads reach | 125 of 3,339 (3.7%) | 1 of 8,034 (0.01%) |
+
+The link test's reads now rarely act, because the paths already carry what they would have done.
+**The read check no longer estimates the error** (review M1): with the draw off it found 3.7%
+against a true 3.5%; with it on, 0.01% against a true 2.0%. It compares the population's links with
+the reads, and the population's links are now built from those same reads. Restoring an independent
+check is an owner decision, open below.
+
 ### `HET_MASS_MIN`
 
-| threshold | 64 founders: wrong links | heterozygotes phased | wrong genotypes with reads | 16 founders: wrong links |
-|---|---|---|---|---|
-| ¼ | 917 of 43,824 (2.1%) | 59,650 | 34,026 | 31 of 55,806 |
-| **½** | **916 of 45,443 (2.0%)** | **61,688** | **33,656** | **30 of 57,168** |
-| ¾ | 967 of 44,136 (2.2%) | 59,915 | 34,007 | 40 of 56,049 |
+| threshold | 64 founders: wrong links | heterozygotes phased | wrong genotypes with reads | 16 founders: wrong links | heterozygotes phased |
+|---|---|---|---|---|---|
+| ¼ | 917 of 43,824 (2.1%) | 59,650 | 34,026 | 31 of 55,806 | 73,548 |
+| **½** | **916 of 45,443 (2.0%)** | **61,688** | **33,656** | **30 of 57,168** | **74,989** |
+| ¾ | 967 of 44,136 (2.2%) | 59,915 | 34,007 | 40 of 56,049 | 73,514 |
 
 ½ is best on every column; it stays.
 

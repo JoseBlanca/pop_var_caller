@@ -822,10 +822,10 @@ fn orient_group(
     let mut drawn = vec![0; group.len()];
     for index in (0..group.len()).rev() {
         let weights = match drawn.get(index + 1) {
-            Some(&after) if index + 1 < group.len() => [0, 1].map(|orientation| {
+            Some(&after) => [0, 1].map(|orientation| {
                 forward[index][orientation] * same(links[index], orientation, after)
             }),
-            _ => forward[index],
+            None => forward[index],
         };
         drawn[index] = pick(&weights, uniforms.next_uniform());
     }
