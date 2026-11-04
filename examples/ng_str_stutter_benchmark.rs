@@ -114,6 +114,8 @@
 //! | `design` | `pcr` | `clean`, `pcr_free`, `pcr`, `heavy` or `one_outlier` (spec §4.1) |
 //! | `samples` | 1 | how many samples are sequenced |
 //! | `depth` | 30 | reads a position, both mates counted, averaged over the genome |
+//! | `deep_samples` | 0 | how many samples, the first by name, are sequenced at `deep_depth` instead of `depth` |
+//! | `deep_depth` | 30 | the reads a position of the `deep_samples` |
 //! | `segments_per_period` | 500 | STR segments of each motif length |
 //! | `bundles` | 500 | STR bundles, all motif lengths together; `0` lays none and leaves every other output as it was without them |
 //! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle separated, as before hard shapes existed |
@@ -123,6 +125,7 @@
 //! | `founders` | 0 | how many founder haplotypes the cohort descends from (spec §12); `0` draws every site's genotype on its own, byte for byte as before |
 //! | `segment_kb` | 300 | with founders: the mean stretch one copy copies from one founder |
 //! | `run_kb` | 2000 | with founders: the mean autozygous run |
+//! | `snp_rate` | 0.001 | SNPs away from the segments, per base; a dense setting such as 0.01 gives tomato-like short gaps between heterozygotes, for read-backed phase (read phase spec §7.3) |
 //! | `threads` | all | how many samples are sequenced at once |
 //! | `seed` | 20261009 | the draw's seed; the whole output is a function of it and the rest |
 //!
@@ -185,7 +188,7 @@ const HIGHEST_STUTTER_SHARE: f64 = 0.95;
 /// The standard deviation of a library's multiplier on the log scale (spec §3.3).
 const LIBRARY_MULTIPLIER_LOG_SD: f64 = 0.4;
 
-/// Variants away from the segments, per base (spec §4.2).
+/// SNPs away from the segments, per base, unless `snp_rate` says otherwise (spec §4.2).
 const SNP_RATE: f64 = 1e-3;
 const INDEL_RATE: f64 = 1e-4;
 
@@ -585,6 +588,9 @@ struct Settings {
     design: Design,
     samples: usize,
     depth: f64,
+    /// How many samples, the first by name, are sequenced at `deep_depth` instead of `depth`.
+    deep_samples: usize,
+    deep_depth: f64,
     segments_per_period: usize,
     bundles: usize,
     /// The share of bundles laid in a hard shape ([`draw_hard_bundle_shape`]); the rest are laid
@@ -603,6 +609,8 @@ struct Settings {
     run_kb: f64,
     threads: usize,
     seed: u64,
+    /// SNPs away from the segments, per base.
+    snp_rate: f64,
 }
 
 impl Default for Settings {
@@ -611,6 +619,8 @@ impl Default for Settings {
             design: Design::Pcr,
             samples: 1,
             depth: 30.0,
+            deep_samples: 0,
+            deep_depth: 30.0,
             segments_per_period: 500,
             bundles: DEFAULT_BUNDLES,
             hard_bundle_share: DEFAULT_HARD_BUNDLE_SHARE,
@@ -622,6 +632,7 @@ impl Default for Settings {
             run_kb: 2_000.0,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             seed: 20_261_009,
+            snp_rate: SNP_RATE,
         }
     }
 }
@@ -644,6 +655,8 @@ impl Settings {
                 "design" => settings.design = Design::parse(value)?,
                 "samples" => settings.samples = number()? as usize,
                 "depth" => settings.depth = number()?,
+                "deep_samples" => settings.deep_samples = number()? as usize,
+                "deep_depth" => settings.deep_depth = number()?,
                 "segments_per_period" => settings.segments_per_period = number()? as usize,
                 "bundles" => settings.bundles = number()? as usize,
                 "hard_bundle_share" => settings.hard_bundle_share = number()?,
@@ -655,6 +668,7 @@ impl Settings {
                 "run_kb" => settings.run_kb = number()?,
                 "threads" => settings.threads = number()? as usize,
                 "seed" => settings.seed = number()? as u64,
+                "snp_rate" => settings.snp_rate = number()?,
                 other => return Err(format!("unknown setting `{other}`")),
             }
         }
@@ -667,11 +681,23 @@ impl Settings {
         if !(0.0..=1.0).contains(&settings.inbreeding) {
             return Err("inbreeding must be between 0 and 1".to_string());
         }
+        if !(settings.snp_rate > 0.0 && settings.snp_rate < 0.1) {
+            return Err(format!(
+                "snp_rate must be above 0 and below 0.1, got {}",
+                settings.snp_rate
+            ));
+        }
         if settings.samples == 0 || settings.contigs == 0 || settings.threads == 0 {
             return Err("samples, contigs and threads must all be at least one".to_string());
         }
         if settings.depth.is_nan() || settings.depth <= 0.0 {
             return Err(format!("depth must be above zero, got {}", settings.depth));
+        }
+        if settings.deep_depth.is_nan() || settings.deep_depth <= 0.0 {
+            return Err(format!(
+                "deep_depth must be above zero, got {}",
+                settings.deep_depth
+            ));
         }
         if !(0.0..=1.0).contains(&settings.hard_bundle_share) {
             return Err(format!(
@@ -2553,18 +2579,22 @@ impl GenericVariant {
     }
 }
 
-fn draw_generic_variants(contigs: &[Contig], draw: &mut Draw) -> Vec<GenericVariant> {
+fn draw_generic_variants(
+    contigs: &[Contig],
+    snp_rate: f64,
+    draw: &mut Draw,
+) -> Vec<GenericVariant> {
     let mut variants = Vec::new();
     for (contig_index, contig) in contigs.iter().enumerate() {
         for &(start, end) in &contig.ordinary {
             let mut position = start + GENERIC_VARIANT_SPACING;
             loop {
-                position += (draw.exponential() / (SNP_RATE + INDEL_RATE)) as usize;
+                position += (draw.exponential() / (snp_rate + INDEL_RATE)) as usize;
                 if position + LONGEST_GENERIC_INDEL + GENERIC_VARIANT_SPACING >= end {
                     break;
                 }
                 let bases = &contig.bases;
-                let (reference, alternative) = if draw.unit() < INDEL_RATE / (SNP_RATE + INDEL_RATE)
+                let (reference, alternative) = if draw.unit() < INDEL_RATE / (snp_rate + INDEL_RATE)
                 {
                     let mut len = 1;
                     while len < LONGEST_GENERIC_INDEL && draw.unit() < 0.5 {
@@ -2809,7 +2839,7 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
         let window = &contigs[bundle.contig].bases[bundle.window_start()..bundle.window_end()];
         bundle.alleles = draw_bundle_alleles(bundle, window, &mut bundle_draw);
     }
-    let generic = draw_generic_variants(&contigs, draw);
+    let generic = draw_generic_variants(&contigs, settings.snp_rate, draw);
     let samples: Vec<String> = (0..settings.samples)
         .map(|index| format!("sim{index:03}"))
         .collect();
@@ -3733,7 +3763,8 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
     write_tables(out_dir, &cohort)?;
 
     let genome_len: usize = cohort.contigs.iter().map(|one| one.bases.len()).sum();
-    let fragments = (settings.depth * genome_len as f64 / (2 * READ_LEN) as f64).round() as usize;
+    let fragments_at =
+        |depth: f64| (depth * genome_len as f64 / (2 * READ_LEN) as f64).round() as usize;
     let next = AtomicUsize::new(0);
     let threads = settings.threads.min(settings.samples);
     let counts: Vec<(usize, SampleCounts)> = std::thread::scope(|scope| {
@@ -3747,7 +3778,13 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
                             return Ok(done);
                         }
                         let seed = sample_seed(settings.seed, sample);
-                        let one = sequence_sample(&cohort, sample, fragments, seed, out_dir)?;
+                        let depth = if sample < settings.deep_samples {
+                            settings.deep_depth
+                        } else {
+                            settings.depth
+                        };
+                        let one =
+                            sequence_sample(&cohort, sample, fragments_at(depth), seed, out_dir)?;
                         done.push((sample, one));
                     }
                 })
@@ -3828,8 +3865,11 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
         cohort.generic.iter().filter(|one| one.is_snp()).count()
     );
     println!(
-        "fragments a sample  : {fragments} ({} reads)",
-        2 * fragments
+        "fragments a sample  : {} ({} reads); the {} deep samples {}",
+        fragments_at(settings.depth),
+        2 * fragments_at(settings.depth),
+        settings.deep_samples,
+        fragments_at(settings.deep_depth)
     );
     println!("stutter events      : {stutter_events} over all samples");
     println!("settings            : {settings:?}");

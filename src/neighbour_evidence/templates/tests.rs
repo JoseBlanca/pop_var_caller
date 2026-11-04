@@ -61,10 +61,10 @@ fn ties_break_by_sample_order_and_never_choose_the_sample() {
     assert_eq!(choose_templates(&records, 2, 16), Some(vec![0, 1, 3, 4]));
 }
 
-/// **An absent sample is a template of equal shares**: half a copy's difference from a homozygous
-/// sample at every record, so it ranks between a sample that agrees and one that disagrees.
+/// **An absent sample shares no record, so it ranks last**: after one that agrees and even after
+/// one that disagrees everywhere, whose rate is at least measured.
 #[test]
-fn an_absent_sample_compares_as_equal_shares() {
+fn an_absent_sample_ranks_last() {
     fn never(_: usize) -> bool {
         false
     }
@@ -72,7 +72,68 @@ fn an_absent_sample_compares_as_equal_shares() {
         true
     }
     let records = window(&[Some(never), Some(always), None, Some(never)], 10);
-    assert_eq!(choose_templates(&records, 0, 3), Some(vec![3, 2, 1]));
+    assert_eq!(choose_templates(&records, 0, 3), Some(vec![3, 1, 2]));
+}
+
+const FLAT: ([u32; 3], [f64; 3]) = ([0, 0, 0], [0.5, 0.0, 0.5]);
+
+/// A window of 400 records where `column(sample, record)` gives each sample's `PL` and `GP`.
+fn window_of(
+    samples: usize,
+    column: impl Fn(usize, usize) -> &'static ([u32; 3], [f64; 3]),
+) -> Vec<SiteRecord> {
+    (0..400)
+        .map(|record| {
+            let columns: Vec<Option<SampleColumns<'_>>> = (0..samples)
+                .map(|sample| {
+                    let (phred, posteriors) = column(sample, record);
+                    Some(SampleColumns {
+                        phred_likelihoods: phred,
+                        genotype_posteriors: posteriors,
+                    })
+                })
+                .collect();
+            SiteRecord::new(1 + record as u64 * 100, &[0.5], &columns)
+        })
+        .collect()
+}
+
+fn carrier(carries: bool) -> &'static ([u32; 3], [f64; 3]) {
+    if carries {
+        &HOMOZYGOUS_ALTERNATIVE
+    } else {
+        &HOMOZYGOUS_REFERENCE
+    }
+}
+
+/// **A shallow relative is judged where it has reads**: sample 1 agrees with sample 0 wherever it
+/// has reads, which is one record in five; sample 2 has reads everywhere and disagrees at one record
+/// in ten. Counting the records without reads as disagreement would put sample 2 first.
+#[test]
+fn a_shallow_relative_is_not_taken_for_a_distant_sample() {
+    let records = window_of(3, |sample, record| match sample {
+        0 => carrier(record % 2 == 0),
+        1 if record % 5 == 0 => carrier(record % 2 == 0),
+        1 => &FLAT,
+        _ => carrier((record % 2 == 0) != (record % 10 == 1)),
+    });
+    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+}
+
+/// **Between two that disagree about as little, the one with more data**: sample 1 agrees
+/// everywhere it has reads, one record in four; sample 2 has reads everywhere and disagrees at one
+/// record in a hundred. Sample 3, with reads everywhere and disagreeing at one in ten, is further than
+/// both.
+#[test]
+fn a_near_tie_goes_to_the_sample_with_more_data() {
+    let records = window_of(4, |sample, record| match sample {
+        0 => carrier(record % 2 == 0),
+        1 if record % 4 == 0 => carrier(record % 2 == 0),
+        1 => &FLAT,
+        2 => carrier((record % 2 == 0) != (record % 100 == 1)),
+        _ => carrier((record % 2 == 0) != (record % 10 == 1)),
+    });
+    assert_eq!(choose_templates(&records, 0, 3), Some(vec![2, 1, 3]));
 }
 
 /// **A sample with no informative record in the window has no templates**, so it is not
@@ -119,4 +180,86 @@ fn the_records_compared_are_spread_over_the_window() {
     assert_eq!(templates, vec![1, 2], "a tie, broken by sample order");
     let records = window(&[Some(always), Some(second_half), Some(first_half)], 2_000);
     assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+}
+
+/// **A phasing round's haplotype choice takes each sample's better copy, one a sample** (phasing
+/// spec §2.3): sample 0 is homozygous for the alternative; sample 1 carries it on copy 1 only,
+/// sample 2 on neither, sample 3 on both. Samples 1 and 3 tie at no disagreement and come first in
+/// sample order, each with the copy that carries the alternative (copy 0 for sample 3, on the tie
+/// between its two); sample 2 offers its copy 0 last.
+#[test]
+fn a_round_takes_each_samples_better_haplotype_once() {
+    let records = window_of(4, |_, _| &HOMOZYGOUS_ALTERNATIVE);
+    let compared = compared_records(&records, 0);
+    assert_eq!(compared.len(), 400.min(AGREEMENT_RECORDS));
+    let homozygous_alternative = vec![vec![0.0, 0.0, 1.0]; compared.len()];
+    let reference = [1.0, 0.0];
+    let alternative = [0.0, 1.0];
+    let haplotype = |other: usize, copy: usize, _: usize, out: &mut Vec<f64>| {
+        out.clear();
+        out.extend_from_slice(match (other, copy) {
+            (1, 1) | (3, _) => &alternative,
+            _ => &reference,
+        });
+    };
+    let chosen = choose_haplotypes(
+        &records,
+        0,
+        &compared,
+        &homozygous_alternative,
+        &haplotype,
+        3,
+    );
+    assert_eq!(chosen, vec![(1, 1), (3, 0), (2, 0)]);
+    let chosen = choose_haplotypes(
+        &records,
+        0,
+        &compared,
+        &homozygous_alternative,
+        &haplotype,
+        1,
+    );
+    assert_eq!(chosen, vec![(1, 1)]);
+}
+
+/// **The haplotype choice at three alleles** (code review 2026-11-02): sample 0's previous genotype
+/// is 2/2, so a haplotype lacks nothing only where it carries allele 2. Sample 1's copy 0 carries
+/// allele 2 and its copy 1 allele 0; sample 2 carries allele 1 on both. Sample 1 offers copy 0 and
+/// comes first.
+#[test]
+fn the_haplotype_choice_reads_every_allele() {
+    use crate::neighbour_evidence::records::SampleColumns;
+    let informative = [60_u32, 60, 60, 30, 30, 0];
+    let posteriors = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let records: Vec<SiteRecord> = (0..50)
+        .map(|record| {
+            let columns: Vec<Option<SampleColumns<'_>>> = (0..3)
+                .map(|_| {
+                    Some(SampleColumns {
+                        phred_likelihoods: &informative,
+                        genotype_posteriors: &posteriors,
+                    })
+                })
+                .collect();
+            SiteRecord::new(1 + record * 100, &[0.2, 0.3], &columns)
+        })
+        .collect();
+    let compared = compared_records(&records, 0);
+    let previous = vec![posteriors.to_vec(); compared.len()];
+    let allele = |carried: usize| -> [f64; 3] {
+        let mut shares = [0.0; 3];
+        shares[carried] = 1.0;
+        shares
+    };
+    let (two, zero, one) = (allele(2), allele(0), allele(1));
+    let haplotype = |other: usize, copy: usize, _: usize, out: &mut Vec<f64>| {
+        out.clear();
+        out.extend_from_slice(match (other, copy) {
+            (1, 0) => &two,
+            (1, 1) => &zero,
+            _ => &one,
+        });
+    };
+    let chosen = choose_haplotypes(&records, 0, &compared, &previous, &haplotype, 2);
+    assert_eq!(chosen, vec![(1, 0), (2, 0)]);
 }

@@ -45,15 +45,19 @@ pass must re-measure them (§8).
 
 ### 1.2 Non-goals
 
-- **Phasing.** The pass infers which samples a sample copies, not which of its alleles sit on one
-  chromosome; `GT` stays unphased.
+- **Phasing — in two companion specs.** The pass phases samples to give each other haplotype
+  templates ([`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md)) and writes the phase
+  in confident blocks ([`neighbour_evidence_phase_output.md`](neighbour_evidence_phase_output.md))
+  (owner, 2026-11-02).
 - **New loci.** A locus pvc did not build stays unbuilt; the pass changes genotypes only. On one
   tomato accession alone at 3×, 42% of the true non-reference genotypes were at such loci (report
   §5.2); that loss belongs to candidate generation, not here.
 - **Read linkage** — reads covering two sites. Left out by the owner's ruling (report §11).
-- **Outbred cohorts.** Using shared haplotypes there needs phased templates and repeated sweeps over
-  the cohort ([`07_decision`](../research/phasing_imputation/07_decision_separate_tool_and_route.md)
-  §2); this pass does neither and is off there (§5).
+- **Outbred cohorts, without phased templates.** Using shared haplotypes there needs phased templates
+  and repeated sweeps over the cohort
+  ([`07_decision`](../research/phasing_imputation/07_decision_separate_tool_and_route.md) §2); this
+  spec's pass does neither and is off there (§5). Partly outbred cohorts are what
+  [`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md) adds.
 
 ### 1.3 Vocabulary
 
@@ -151,11 +155,24 @@ What a record contributes depends on what it carries:
 
 ### 3.3 The templates
 
-For each sample and window, the `K = min(16, N − 1)` other samples whose allele shares agree best with
-its own, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the sample's informative records
-in the window — on a fixed sample of at most 500 of them, spread evenly over them by record order
-(the `i`-th of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and
-weighs the whole window, not its left margin. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
+For each sample and window, the `K = min(16, N − 1)` other samples that disagree with it least,
+**judged only where both have reads, with more data preferred between two that disagree about as
+little** (owner, 2026-11-02). The records compared are the sample's informative records in the
+window — a fixed sample of at most 500 of them, spread evenly over them by record order (the `i`-th
+of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and weighs the whole
+window, not its left margin. Of those, a candidate is compared at the `n` where it is informative
+too; at each, the two disagree by `½ Σ_a |q_self(a) − q_other(a)|`, from 0 to 1, summing to `d`. The
+candidate's score is the mean of the disagreement rate's Beta(`d + 1`, `n − d + 1`) posterior plus
+two of its standard deviations — pessimistic, so a rate measured on few records scores worse — and
+the `K` lowest are the templates. Ties break by sample order.
+
+Why only where both have reads: a sample without reads carries the cohort's frequency, and counting
+that as disagreement would rank a shallow close relative below a deep distant one. On the founder
+simulator the change from the earlier rule, which did count it, moved fills and errors by at most a
+dozen genotypes in any cohort, uniform or mixed in depth (10 samples at 30× among 40 at 3× or 5×; 5
+among 15), because a 3× sample has reads at about 95% of records and the earlier rule's charge for
+the rest was small. It is kept as the rule that says what it measures; where it should matter — 1×
+shallow samples among deep ones, cohorts far larger than `K` — is not measured. **The sample itself is never a template.** `K` = 16 was
 what the prototype ran; how accuracy and cost move with `K` is a measurement (§8).
 
 **A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
@@ -309,6 +326,39 @@ not say which samples a sample copies leaves its posterior near the cohort's fre
 (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1). *This narrows ruling Q1 to the cases its
 reason covers; the owner's to confirm, §11 Q1.*
 
+**And only if the sample is copying the background template there with probability at most 0.1**
+(owner, 2026-11-02): the walk's posterior probability that the autozygous state copies the
+background, or either copy of a pair does (§3.3). Where no other sample carries the sample's
+haplotype, the call is the cohort's frequency again, however confident its `GQ`. On the founder
+simulator's inbred cohorts, the calls this withholds between 0.1 and 0.5 were wrong 13 times in 165,
+and those above 0.5 85 times in 719, against 1 to 2 in 100 for the calls kept; at 10 samples and 1×
+the limit keeps 101 of 294 calls, 2 of them wrong, from 47 (same report, the background-copy
+section).
+
+### 4.3 Each sample's fills, checked on its own data
+
+The test of hiding genotypes the reads settled and asking the pass for them is done for every
+sample at every such record, at no cost (owner, 2026-11-02): the walk's prediction without the
+sample's own reads at a record is what a no-read call there would be written with. At each core
+record where the sample's own evidence settles its genotype — posterior at least 0.999 from its
+reads and calling's prior, the cohort's allele frequencies and its inbreeding — and where the §4.2
+rules would have written the prediction as a call, the prediction's genotype is compared with the
+settled one. The prior has to be in "settled": at 3× reads alone never tell a homozygote from a
+heterozygote with confidence, and a check that needed them ran on no shallow sample — the samples
+that are filled.
+
+The run reports, for each sample, the no-read calls written, the records checked and how many the
+prediction got wrong: in a table beside the VCF, `<name>.fill_check.tsv`, and summarised in the log,
+with the share given only for samples checked at 30 records or more. It is a best case — a record
+no read reached can be harder than one where the sample had reads.
+
+On the founder simulator (`validate_fill_check.py`): at 3× the cohort's estimated fill error rate
+against its true one was 1.10% against 1.52%, 0.63% against 0.49%, 0.13% against 0.15%, and on the
+outbred cohorts 4.16% against 2.90% and 5.52% against 4.55%; samples reported at 0–0.5% were truly
+wrong at 0.17% of their fills, at 2–5% at 1.5%. At 1× almost no sample has a settled genotype and
+the share is not given — the corner where fills are worst (2–2.5% wrong) goes unestimated, and the
+log says so.
+
 ---
 
 ## 5. When it runs
@@ -323,7 +373,8 @@ taken once, before the first record is written:
 - **The cohort's median fitted inbreeding coefficient at least `F_min`.** Starting value 0.5. The
   outbred simulation gained nothing; between the two ends is unmeasured.
 
-Both are starting values, to be set from §8's measurements. `--neighbour-evidence auto|on|off`,
+Both are starting values, to be set from §8's measurements. `--refine-genotypes auto|on|off` (named
+`--neighbour-evidence` until 2026-11-03),
 `auto` the default, overrides the decision either way — except that `on` cannot run the pass on one
 sample or at a ploidy other than two. The median of an even count is the mean of the middle two.
 Within a window a sample's `K` is fixed at `min(16, N − 1)`; a template without a row at a record
@@ -349,10 +400,11 @@ the file**, since the pass can drop records.
     1.5-Mb windows this cohort size needs (below) about 1,800 windows, 8 × 10¹² over the genome —
     about half an hour.
   - *The walks*: forward and backward cost about `2 · 3 · (K² + K)` ≈ 1,600 operations a sample a
-    record, and the posterior `K²·A + K·A²` ≈ 580; with every record walked twice (once in its core,
-    once in a neighbour's margin) about 4,400 a sample a record. Over 24 million records and 3,000
-    samples that is 3 × 10¹⁴ operations, **about 21 core-hours** at 4 × 10⁹ a second; at 57 samples,
-    25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
+    record, and the posterior `K²·A + K·A²` ≈ 580. Every record is walked in its core and in its
+    neighbours' margins: twice at the default sizes (a 2-Mb core, 1-Mb margins), three times at the
+    floor this cohort size reaches (0.5-Mb core and margins) — about 6,500 a sample a record. Over
+    24 million records and 3,000 samples that is 4.7 × 10¹⁴ operations, **about 33 core-hours** at
+    4 × 10⁹ a second; at 57 samples, at default sizes, 25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
 - **Three reads a position.** Where it helps: the prototype's gains are all at 1× and 3×.
 - **Three hundred reads.** The sample's own likelihood dominates every emission and the posterior is
   the calling's; the pass costs time and changes nearly nothing. It still runs if the switch says so:
@@ -365,8 +417,9 @@ twice that at three alleles, 400 at ten. At 3,000 samples and tomato's density a
 sample-records, about 5 GB biallelic — by shrinking the core first and the margins to their 500-kb
 floor; at 3,000 samples that is a 1.5-Mb window. Past the floor, at about 3,000 samples, the budget
 is exceeded rather than the margins shortened, and the run report says by how much. A walk keeps its
-forward vectors, `K² + K` numbers a record: as `f32`, 44 MB a sample over a 40,000-record window, one
-per thread.
+forward vectors, `K² + K` numbers a record, and its per-site terms for the backward sweep
+(`SiteTerms`, about as many): as `f64`, about 207 MB a sample over a 40,000-record window, one per
+thread.
 
 ---
 
@@ -451,6 +504,9 @@ All four as recommended.
    `##refineGenotypesCommandline=`. The pass always runs (it is the command's purpose); a cohort
    it cannot run on — one sample, a ploidy other than two — is an error naming why. On the
    20-sample simulated cohort its records are byte-identical to those the in-run pass wrote.
+
+   *Removed 2026-11-03* (owner; read phase spec §5): refinement runs only inside a calling run,
+   because read evidence never reaches a VCF, so a refinement of a file could not use it.
 
 ---
 

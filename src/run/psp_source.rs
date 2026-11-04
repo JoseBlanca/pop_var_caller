@@ -355,6 +355,9 @@ pub struct KeptRecord {
     /// killed at a pile-up where the copies came to 160 MB a sample; the source now keeps what
     /// changed between records and rebuilds a set when a body is built ([`held_live_sets`]).
     pub ordinal: u64,
+    /// The walked region's first chain id, from the head (read phase spec §2.4): the body does
+    /// not carry it, so the record built from this one gets it from here.
+    pub chain_id_base: u64,
 }
 
 /// What a source's thinning has removed so far: the records it thinned, by ordinal, and the
@@ -563,6 +566,7 @@ impl<'a> PspSummarySource<'a> {
         );
         Some(Ok(Summarised::Kept(KeptRecord {
             summary: LocusSummary::from(&streamed.head),
+            chain_id_base: streamed.head.chain_id_base,
             body,
             ordinal,
         })))
@@ -908,6 +912,7 @@ impl ObservationSource for PspSummarySource<'_> {
             non_reference_reads: kept.summary.non_reference_reads,
             reads_compared_with_reference: kept.summary.reads_compared_with_reference,
             reads_discarded_by_cap: kept.summary.reads_discarded_by_cap,
+            chain_id_base: kept.chain_id_base,
             body_bytes: u32::try_from(body.len()).expect("a body this source wrote down"),
         };
         let found = LocatedRecord {
@@ -1893,6 +1898,7 @@ mod tests {
         let live: Vec<u64> = Vec::new();
         for (at, kept_record) in kept.iter().enumerate().rev() {
             let head = crate::psp::RecordHead {
+                chain_id_base: 0,
                 region: kept_record.summary.region(),
                 non_reference_reads: kept_record.summary.non_reference_reads,
                 reads_compared_with_reference: kept_record.summary.reads_compared_with_reference,

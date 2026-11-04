@@ -39,6 +39,7 @@ use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
 use crate::cli::run_output;
 use crate::fasta::ContigList;
+use crate::neighbour_evidence::phase::PathAgreement;
 use crate::neighbour_evidence::stage::{
     NeighbourEvidenceDecision, NeighbourEvidenceSwitch, decide,
 };
@@ -477,14 +478,79 @@ pub fn round_shape_for(
     )
 }
 
-/// **What the neighbour-evidence pass did**, one line in the log, when it ran.
-pub fn log_neighbour_evidence(finished: &FinishedVcf) {
+/// **The fewest checked sites a sample's fill disagreement rate is stated from**: below it, the
+/// table gives the counts and the log counts the sample as not measured. At 30 sites a rate of one
+/// in ten is known to within about a factor of two.
+pub const MIN_FILL_CHECK_SITES: u32 = 30;
+
+/// **Reports what reads did to the phase** (read phase spec §2.6, §2.8): phase from reads alone where
+/// it ran, and where the neighbour-evidence pass ran, the read check of its population links — in
+/// total in the log, and per sample at debug level.
+pub fn report_read_phase(finished: &FinishedVcf) {
+    if let Some(tally) = finished.read_phase_tally {
+        tracing::info!(
+            "phase from reads alone: {} sample columns written phased, in {} blocks of two records or \
+             more; {} links made by reads, {} refused because a read over an earlier record of the \
+             block contradicted them",
+            run_output::with_thousands(tally.columns_phased),
+            run_output::with_thousands(tally.blocks),
+            run_output::with_thousands(tally.links),
+            run_output::with_thousands(tally.links_refused_by_an_earlier_record),
+        );
+        if tally.lines_not_read > 0 {
+            tracing::warn!(
+                "phase from reads alone: {} lines could not be read and were written without PS; \
+                 every line comes from this program's encoder, so this is a defect to report",
+                run_output::with_thousands(tally.lines_not_read),
+            );
+        }
+    }
+    if finished.pass_read_counts.is_empty() {
+        return;
+    }
+    let mut total = crate::neighbour_evidence::phase::PassReadCounts::default();
+    for (_, counts) in &finished.pass_read_counts {
+        total += *counts;
+    }
+    tracing::info!(
+        "reads in the neighbour-evidence pass: the read check — of the population links reads \
+         reach at odds of {:.0} to 1 with GQ {} or more at both ends, {} of {} contradicted by the \
+         reads, a check of the population links that does not come from the model, for links \
+         under {} bases and not acted on; {} population links broken by reads, {} links made by \
+         reads, {} heterozygotes the consensus did not lean on attached by reads",
+        crate::float::exp(crate::read_phase::link::LINK_MIN),
+        crate::read_phase::link::GQ_MIN,
+        total.population_links_contradicted,
+        total.population_links_reached,
+        crate::read_phase::fragments::READ_REACH,
+        total.population_links_broken,
+        total.links_made_by_reads,
+        total.records_attached_by_reads,
+    );
+    for (sample, counts) in &finished.pass_read_counts {
+        tracing::debug!(
+            "  {sample}: read check {} of {} population links contradicted; {} broken, {} made, {} \
+             attached by reads",
+            counts.population_links_contradicted,
+            counts.population_links_reached,
+            counts.population_links_broken,
+            counts.links_made_by_reads,
+            counts.records_attached_by_reads,
+        );
+    }
+}
+
+/// **Reports what the neighbour-evidence pass did**, when it ran: its counts in the log, and each
+/// sample's fill check (`FillCheck`) — summarised in the log, and in full in a table beside the VCF,
+/// `<vcf name>.fill_check.tsv`, unless the VCF went to standard output. A table that cannot be
+/// written is a warning, not a failed run: the VCF is already whole.
+pub fn report_neighbour_evidence(finished: &FinishedVcf, vcf_path: &Path) {
     let Some(tally) = finished.neighbour_evidence else {
         return;
     };
     tracing::info!(
         "neighbour-evidence pass: {} records re-called; {} genotypes called ({} of them where the \
-         sample had no reads), {} withheld for lack of evidence nearby, {} changed; {} alleles \
+         sample had no reads), {} left ./. where the sample had no reads, {} changed; {} alleles \
          and {} records dropped as no longer called; {} repeat counts unknown",
         run_output::with_thousands(tally.sites),
         run_output::with_thousands(tally.called),
@@ -495,11 +561,162 @@ pub fn log_neighbour_evidence(finished: &FinishedVcf) {
         run_output::with_thousands(tally.records_dropped),
         run_output::with_thousands(tally.repeat_counts_unknown),
     );
+
+    let mut rates: Vec<(f64, &str)> = finished
+        .fill_checks
+        .iter()
+        .filter(|(_, check)| check.checked >= MIN_FILL_CHECK_SITES)
+        .map(|(sample, check)| {
+            (
+                f64::from(check.disagreed) / f64::from(check.checked),
+                sample.as_str(),
+            )
+        })
+        .collect();
+    rates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let table = fill_check_table_path(vcf_path);
+    let table_note = table.as_ref().map_or(String::new(), |path| {
+        format!("; each sample in {}", path.display())
+    });
+    let unmeasured = finished.fill_checks.len() - rates.len();
+    if rates.is_empty() {
+        tracing::info!(
+            "fill check: no sample had {MIN_FILL_CHECK_SITES} sites where its reads settle its \
+             genotype and its neighbours would have filled it, so no fill error rate is \
+             estimated{table_note}"
+        );
+    } else {
+        let percent = |rate: f64| format!("{:.1}%", 100.0 * rate);
+        let worst: Vec<String> = rates
+            .iter()
+            .rev()
+            .take(3)
+            .map(|&(rate, sample)| format!("{sample} {}", percent(rate)))
+            .collect();
+        tracing::info!(
+            "fill check — each sample's no-read calls tried at records hidden from the phasing \
+             rounds where its reads settle its genotype, the neighbours' prediction against the \
+             reads: {} of {} samples checked \
+             at {MIN_FILL_CHECK_SITES} sites or more, wrong at a median of {} of sites (from {} to \
+             {}; highest {}); {unmeasured} with fewer sites, not estimated. A best case: a site no \
+             read reached can be harder{table_note}",
+            rates.len(),
+            finished.fill_checks.len(),
+            percent(rates[rates.len() / 2].0),
+            percent(rates[0].0),
+            percent(rates[rates.len() - 1].0),
+            worst.join(", "),
+        );
+    }
+    warn_of_poor_fills(&finished.fill_checks, table_note.as_str());
+    if let Some(path) = table
+        && let Err(error) = write_fill_check_table(&path, &finished.fill_checks)
+    {
+        tracing::warn!("fill check: could not write {}: {error}", path.display());
+    }
 }
 
-/// **`--neighbour-evidence`'s three values** (`neighbour_evidence_pass.md` §5, ruled §9 Q3).
+/// **The fill error rate above which a run warns** (owner, 2026-11-02): over the whole cohort, or
+/// for a sample whose rate is plausibly above it ([`FillCheck::wrong_share_at_least`](crate::neighbour_evidence::refine::FillCheck::wrong_share_at_least)).
+pub const POOR_FILL_SHARE: f64 = 0.02;
+
+/// **Warns when the pass's fills look poor**, so the user can look at why: the cohort's fills, all
+/// samples' checks pooled, wrong at more than [`POOR_FILL_SHARE`]; or samples whose own rate is
+/// above it beyond the chance of their few checked sites. On the founder simulator the pooled rule
+/// warned on both outbred cohorts (estimated 4.2% and 5.5%) and on no inbred one; the per-sample rule
+/// named 8 and 6 samples of 50 in the outbred cohorts and one sample in all the inbred ones, where a
+/// plain share above 2% named up to 10 samples of 50 in a cohort whose true fill error was 1.5%. A
+/// run where no sample was checked — at 1× — says nothing here.
+fn warn_of_poor_fills(
+    checks: &[(String, crate::neighbour_evidence::refine::FillCheck)],
+    table_note: &str,
+) {
+    let (checked, disagreed) = checks.iter().fold((0_u64, 0_u64), |(n, d), (_, check)| {
+        (n + u64::from(check.checked), d + u64::from(check.disagreed))
+    });
+    let poor: Vec<String> = checks
+        .iter()
+        .filter(|(_, check)| {
+            check.checked >= MIN_FILL_CHECK_SITES && check.wrong_share_at_least() > POOR_FILL_SHARE
+        })
+        .map(|(sample, check)| format!("{sample} ({} of {})", check.disagreed, check.checked))
+        .collect();
+    let pooled = if checked > 0 {
+        disagreed as f64 / checked as f64
+    } else {
+        0.0
+    };
+    if checked >= u64::from(MIN_FILL_CHECK_SITES) && pooled > POOR_FILL_SHARE {
+        tracing::warn!(
+            "the neighbour-evidence pass's fills look poor: where the samples' reads settle their \
+             genotype, the neighbours alone predicted it wrong at {:.1}% of {} sites, above {:.0}%. \
+             The pass is built for cohorts of inbred lines; in an outbred cohort, or one whose \
+             samples share few haplotypes, its fills are less reliable. Consider \
+             --refine-genotypes off{table_note}",
+            100.0 * pooled,
+            run_output::with_thousands(checked),
+            100.0 * POOR_FILL_SHARE,
+        );
+    }
+    if !poor.is_empty() {
+        let shown = poor.len().min(10);
+        tracing::warn!(
+            "{} sample(s) whose fills look poor, wrong at more than {:.0}% of the sites checked \
+             beyond what chance explains — wrong of checked: {}{}{table_note}",
+            poor.len(),
+            100.0 * POOR_FILL_SHARE,
+            poor[..shown].join(", "),
+            if poor.len() > shown { ", …" } else { "" },
+        );
+    }
+}
+
+/// `<vcf name without .vcf, .vcf.gz or .vcf.bgz>.fill_check.tsv` beside the VCF; `None` when the VCF
+/// went to standard output.
+fn fill_check_table_path(vcf_path: &Path) -> Option<PathBuf> {
+    if vcf_path.as_os_str() == "-" {
+        return None;
+    }
+    let name = vcf_path.file_name()?.to_string_lossy().into_owned();
+    let lower = name.to_ascii_lowercase();
+    let stem = [".vcf.gz", ".vcf.bgz", ".vcf"]
+        .iter()
+        .find(|suffix| lower.ends_with(*suffix))
+        .map_or(name.as_str(), |suffix| &name[..name.len() - suffix.len()]);
+    Some(vcf_path.with_file_name(format!("{stem}.fill_check.tsv")))
+}
+
+fn write_fill_check_table(
+    path: &Path,
+    checks: &[(String, crate::neighbour_evidence::refine::FillCheck)],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(
+        out,
+        "sample\tfilled\tsites_checked\tfills_wrong_there\twrong_share"
+    )?;
+    for (sample, check) in checks {
+        let share = if check.checked >= MIN_FILL_CHECK_SITES {
+            format!(
+                "{:.4}",
+                f64::from(check.disagreed) / f64::from(check.checked)
+            )
+        } else {
+            ".".to_string()
+        };
+        writeln!(
+            out,
+            "{sample}\t{}\t{}\t{}\t{share}",
+            check.filled, check.checked, check.disagreed
+        )?;
+    }
+    out.flush()
+}
+
+/// **`--refine-genotypes`'s three values** (`neighbour_evidence_pass.md` §5, ruled §9 Q3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum NeighbourEvidenceArg {
+pub enum RefineGenotypesArg {
     /// Run where the cohort is at least 10 samples with median inbreeding at least 0.5.
     Auto,
     /// Run wherever it can: two or more samples, diploid.
@@ -508,22 +725,50 @@ pub enum NeighbourEvidenceArg {
     Off,
 }
 
+/// **Warn when reads phase records with the hidden-duplication filter off** (read phase spec
+/// §2.5): reads from a collapsed duplication err together, every one carrying the other copy's
+/// alleles, which the error model does not cover; the filter is what keeps such records out of
+/// `PASS`. Phase from reads runs at ploidy two whether or not refinement does.
+pub fn warn_of_read_phase_without_the_duplication_filter(filter_on: bool, ploidy: Ploidy) {
+    if !filter_on && ploidy.get() == 2 {
+        tracing::warn!(
+            "the hidden-duplication filter is off (--hidden-dup-fdr 0), and phase is written from \
+             reads: in a collapsed duplication every read carries the other copy's alleles, which \
+             can link two records confidently and wrongly"
+        );
+    }
+}
+
+/// **`--phase-min-path-agreement`'s value**: a share in `(0, 1]` (phase output spec §9).
+///
+/// # Errors
+///
+/// A value that is not a number in `(0, 1]`.
+pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
+    let share: f64 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number"))?;
+    PathAgreement::try_new(share).ok_or_else(|| format!("`{text}` is not a share in (0, 1]"))
+}
+
 /// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
 /// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
-/// header is written, and stated in it either way.
+/// header is written, and stated in it either way. `path_agreement` is
+/// `--phase-min-path-agreement`.
 #[must_use]
 pub fn neighbour_evidence_decision(
-    asked: NeighbourEvidenceArg,
+    asked: RefineGenotypesArg,
     inbreeding_by_sample: &[InbreedingF],
     ploidy: Ploidy,
+    path_agreement: PathAgreement,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
-        NeighbourEvidenceArg::Auto => NeighbourEvidenceSwitch::Auto,
-        NeighbourEvidenceArg::On => NeighbourEvidenceSwitch::On,
-        NeighbourEvidenceArg::Off => NeighbourEvidenceSwitch::Off,
+        RefineGenotypesArg::Auto => NeighbourEvidenceSwitch::Auto,
+        RefineGenotypesArg::On => NeighbourEvidenceSwitch::On,
+        RefineGenotypesArg::Off => NeighbourEvidenceSwitch::Off,
     };
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
-    let decision = decide(switch, &inbreeding, ploidy);
+    let decision = decide(switch, &inbreeding, ploidy).with_path_agreement(path_agreement);
     tracing::info!(
         "neighbour-evidence pass: {} ({})",
         if decision.ran { "runs" } else { "off" },

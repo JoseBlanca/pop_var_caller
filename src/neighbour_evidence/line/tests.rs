@@ -1,4 +1,5 @@
 use super::*;
+use crate::neighbour_evidence::phase::WrittenPhase;
 
 fn line(columns: &[&str], alternatives: &str, info: &str, format: &str) -> Vec<u8> {
     format!(
@@ -13,10 +14,22 @@ fn rewrite(
     outcomes: Vec<Outcome>,
     posteriors: Vec<f64>,
 ) -> (Option<String>, RewriteTally) {
+    let phases = vec![None; outcomes.len()];
+    rewrite_phased(line, outcomes, posteriors, phases)
+}
+
+fn rewrite_phased(
+    line: &[u8],
+    outcomes: Vec<Outcome>,
+    posteriors: Vec<f64>,
+    phases: Vec<Option<WrittenPhase>>,
+) -> (Option<String>, RewriteTally) {
     let mut tally = RewriteTally::default();
     let rewritten = rewrite_line(
         line,
         &RefinedRecord {
+            background_copy: vec![0.0; outcomes.len()],
+            phases,
             outcomes,
             posteriors,
         },
@@ -85,8 +98,8 @@ fn a_recalled_sample_gets_genotype_quality_and_posterior() {
     let text = text.expect("kept");
     assert!(text.contains("\tAF=0.5;AC=4;AN=4;DP=5\t"), "{text}");
     let columns = sample_columns(&text);
-    assert_eq!(columns[0], "1/1:27:5:0,5:60,15,0:0,0.002,0.998");
-    assert_eq!(columns[1], "1/1:10:0:0,0:0,0,0:0.01,0.09,0.9");
+    assert_eq!(columns[0], "1/1:27:5:0,5:60,15,0:0,0.002,0.998:.");
+    assert_eq!(columns[1], "1/1:10:0:0,0:0,0,0:0.01,0.09,0.9:.");
     assert_eq!(tally.called, 2);
     assert_eq!(tally.called_without_reads, 1);
     assert_eq!(tally.genotypes_changed, 1);
@@ -112,7 +125,7 @@ fn a_withheld_sample_is_a_no_call_with_the_posterior() {
     );
     let text = text.expect("kept");
     assert!(text.contains("\tAF=0.5;AC=2;AN=2\t"), "{text}");
-    assert_eq!(sample_columns(&text)[1], "./.:.:0:0,0:0,0,0:0.6,0.3,0.1");
+    assert_eq!(sample_columns(&text)[1], "./.:.:0:0,0:0,0,0:0.6,0.3,0.1:.");
     assert_eq!(tally.withheld, 1);
 }
 
@@ -145,9 +158,9 @@ fn an_uncalled_alternative_is_dropped_everywhere() {
     assert_eq!(fields[4], "C");
     assert_eq!(fields[7], "AF=0.3;AC=4;AN=6;DP=14;MQALT=60.00;MQDIFF=0.00");
     let columns = sample_columns(&text);
-    assert_eq!(columns[0], "0/1:30:6:3,3:30,0,30:0,1,0");
-    assert_eq!(columns[1], "1/1:99:5:2,0:20,10,0:0,0,1");
-    assert_eq!(columns[2], "0/1:4:3:0,0:0,0,0:0,0.556,0.444");
+    assert_eq!(columns[0], "0/1:30:6:3,3:30,0,30:0,1,0:.");
+    assert_eq!(columns[1], "1/1:99:5:2,0:20,10,0:0,0,1:.");
+    assert_eq!(columns[2], "0/1:4:3:0,0:0,0,0:0,0.556,0.444:.");
     assert_eq!(tally.alleles_dropped, 1);
 }
 
@@ -207,7 +220,7 @@ fn repeat_counts_come_from_columns_naming_the_allele() {
             .chain([0.0; 3])
             .collect(),
     );
-    assert!(sample_columns(&text.expect("kept"))[1].ends_with(":9,10"));
+    assert!(sample_columns(&text.expect("kept"))[1].ends_with(":9,10:."));
 
     let source = line(
         &[
@@ -223,6 +236,89 @@ fn repeat_counts_come_from_columns_naming_the_allele() {
         vec![Outcome::Unchanged, Outcome::Called],
         vec![0.0, 0.0, 0.0, 0.1, 0.8, 0.1],
     );
-    assert!(sample_columns(&text.expect("kept"))[1].ends_with(":.,10"));
+    assert!(sample_columns(&text.expect("kept"))[1].ends_with(":.,10:."));
     assert_eq!(tally.repeat_counts_unknown, 1);
+}
+
+/// **A phased column is written `a|b` with its block in `PS`, through the allele renumbering, and
+/// its repeat counts in the same order** (phase output spec §3): the record's allele 1 is carried
+/// by no one and dropped, so the pass's `2|0` — copy 0 on allele 2 — is written `1|0`, with copy
+/// 0's repeat count first (`9,7`); an
+/// unphased heterozygote stays `/` with `PS` `.`, `FORMAT` gains `PS` last, and a column that
+/// dropped trailing fields gets `.` up to it.
+#[test]
+fn a_phased_column_is_written_with_its_block() {
+    let format = "GT:GQ:DP:AD:PL:GP:REPCN";
+    let flat = "0,0,0,0,0,0";
+    let source = line(
+        &[
+            &format!("0/2:20:5:2,0,3:{flat}:0,0,0,1,0,0:7,9"),
+            &format!("0/2:20:5:2,0,3:{flat}:0,0,0,1,0,0:7,9"),
+            "./.",
+        ],
+        "C,G",
+        "AF=0.1,0.4;AC=0,2;AN=4",
+        format,
+    );
+    // 0/0, 0/1, 1/1, 0/2, 1/2, 2/2 — every sample re-called 0/2.
+    let heterozygous = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let posteriors: Vec<f64> = heterozygous.iter().copied().cycle().take(18).collect();
+    let phases = vec![
+        Some(WrittenPhase {
+            copy_0_allele: 2,
+            copy_1_allele: 0,
+            phase_set: 40,
+        }),
+        None,
+        // A phase for a genotype the column is not written with is ignored.
+        Some(WrittenPhase {
+            copy_0_allele: 1,
+            copy_1_allele: 0,
+            phase_set: 40,
+        }),
+    ];
+    let (text, _) = rewrite_phased(&source, vec![Outcome::Called; 3], posteriors, phases);
+    let text = text.expect("kept");
+    let fields: Vec<&str> = text.split('\t').collect();
+    assert_eq!(fields[4], "G");
+    assert_eq!(fields[8], "GT:GQ:DP:AD:PL:GP:REPCN:PS");
+    let columns = sample_columns(&text);
+    assert!(columns[0].starts_with("1|0:"), "{}", columns[0]);
+    assert!(columns[0].ends_with(":9,7:40"), "{}", columns[0]);
+    assert!(columns[1].starts_with("0/1:"), "{}", columns[1]);
+    assert!(columns[1].ends_with(":7,9:."), "{}", columns[1]);
+    assert!(columns[2].starts_with("0/1:"), "{}", columns[2]);
+    assert_eq!(columns[2].split(':').count(), 8, "{}", columns[2]);
+    assert!(columns[2].ends_with(":."), "{}", columns[2]);
+}
+
+/// **A phase is written only on a column the pass called** (phase output spec §7.4): the same
+/// phase on an unchanged column and on a withheld one writes no `|` and `PS` `.`.
+#[test]
+fn a_phase_on_an_uncalled_column_is_not_written() {
+    let source = line(
+        &[
+            "0/1:20:5:2,3:30,0,30:0,1,0",
+            "./.:.:0:0,0:0,0,0:0.25,0.5,0.25",
+        ],
+        "C",
+        "AF=0.5;AC=1;AN=2",
+        BIALLELIC_FORMAT,
+    );
+    let phase = Some(WrittenPhase {
+        copy_0_allele: 1,
+        copy_1_allele: 0,
+        phase_set: 100,
+    });
+    let (text, _) = rewrite_phased(
+        &source,
+        vec![Outcome::Unchanged, Outcome::Withheld],
+        vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+        vec![phase, phase],
+    );
+    let text = text.expect("kept");
+    let columns = sample_columns(&text);
+    assert_eq!(columns[0], "0/1:20:5:2,3:30,0,30:0,1,0:.");
+    assert!(columns[1].starts_with("./.:"), "{}", columns[1]);
+    assert!(columns[1].ends_with(":."), "{}", columns[1]);
 }

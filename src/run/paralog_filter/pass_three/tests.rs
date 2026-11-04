@@ -21,6 +21,7 @@ use crate::paralog::{
     CalibrationConfig, ParalogCalibration, ParalogFdrCurve, ParalogPrior,
     calibrate_from_the_ratio_histogram,
 };
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::paralog_filter::{
     LrHistogramShape, ParalogVerdicts, SpillEntry, SpillFile, SpilledSample, WindowCoverage,
 };
@@ -134,7 +135,9 @@ fn a_spill_and_an_output(test_name: &str, entries: Vec<SpillEntry>) -> (SpillFil
     let _ = fs::remove_file(SpillFile::beside(&output).path());
     let mut spill = SpillFile::beside(&output);
     for entry in &entries {
-        spill.append(entry).expect("the entry is appended");
+        spill
+            .append(entry, &RecordFragments::default())
+            .expect("the entry is appended");
     }
     spill.finish_writing().expect("the spill is flushed");
     (spill, output)
@@ -199,7 +202,12 @@ fn write_and_read_back(
 #[test]
 fn a_record_the_verdict_does_not_touch_is_written_unchanged() {
     let parked = a_record(0, 100, "PASS");
-    let untouched = String::from_utf8(parked.line.clone()).expect("the line is text");
+    // The writer is diploid without refinement, so phase from reads alone appends `PS` to
+    // `FORMAT` and `.` to the unphased column — as it does with the filter off, so the oracle
+    // between the two runs is unchanged (read phase spec §3).
+    let untouched = String::from_utf8(parked.line.clone())
+        .expect("the line is text")
+        .replace("\tGT:AD\t0/1:5,5", "\tGT:AD:PS\t0/1:5,5:.");
     let (spill, output) = a_spill_and_an_output(
         "a_record_the_verdict_does_not_touch_is_written_unchanged",
         vec![parked],

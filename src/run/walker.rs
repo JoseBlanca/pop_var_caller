@@ -495,6 +495,7 @@ mod tests {
                 let start = self.segment.start.get() + u64::from(self.emitted);
                 self.emitted += 1;
                 return Ok(Some(SampleLocusObservations {
+                    chain_id_base: 0,
                     region: GenomeRegion {
                         contig: self.segment.contig,
                         start: Position(start),
@@ -877,6 +878,7 @@ mod tests {
         );
 
         let spare = || SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(1),
                 start: Position(199),
@@ -1361,7 +1363,7 @@ mod walking_the_real_generator {
 
     /// One segment walked alone against the same span inside the whole walk — the
     /// segment-independence oracle of `doc/devel/ng/spec/run_streaming.md` §12, compared on
-    /// everything but the chain-id numbering (see [`with_chain_ids_renumbered`]).
+    /// everything, chain ids as ranks in their walked region (see [`with_chain_ids_as_ranks`]).
     ///
     /// **A segment is reached in one of two states, and they are not the same test.** On a
     /// contig the walk has just entered, nothing is carried: the generic generator mints a
@@ -1407,8 +1409,8 @@ mod walking_the_real_generator {
 
         assert_eq!(walked_alone.len(), expected_loci);
         assert_eq!(
-            with_chain_ids_renumbered(walked_alone),
-            with_chain_ids_renumbered(inside_the_whole_walk),
+            with_chain_ids_as_ranks(walked_alone),
+            with_chain_ids_as_ranks(inside_the_whole_walk),
         );
     }
 
@@ -1429,39 +1431,30 @@ mod walking_the_real_generator {
         walked_alone_matches_the_whole_walk(segment(RegionKind::Generic, 0, 29, 50), 16);
     }
 
-    /// The same observations with every chain id replaced by the order in which it first
-    /// appears — so two walks are compared on **which reads were grouped together**, not on
-    /// what those reads were called.
+    /// The same observations with every chain id replaced by its rank in its walked region,
+    /// `id − chain_id_base`, and the base itself zeroed.
     ///
-    /// **Chain ids are walk-relative and the type says so**: "an id names a read within one
-    /// walk" ([`SequenceObservation::chain_ids`](crate::locus_generation::SequenceObservation)).
-    /// The `chr2` read is id 0 when its segment is walked alone and id 4 when two `chr1`
-    /// segments and a satellite came first, because the allocator counts up across a whole walk.
-    /// Comparing the raw numbers would therefore fail on a property nobody claims, while
-    /// comparing the grouping still catches what matters — a read split into two, two reads
-    /// merged into one, or a locus that lost its witnesses.
-    ///
-    /// **This is the one field of spec §12's fourth oracle that is not literally equal.** The
-    /// oracle says a segment walked alone emits *exactly* what it emits inside a whole walk;
-    /// measured, everything is equal but this, and this cannot be, by the design of the
-    /// allocator. Recorded, not worked around.
-    fn with_chain_ids_renumbered(
+    /// **Raw chain ids are walk-relative**: the `chr2` read is id 0 when its segment is walked alone
+    /// and id 4 when two `chr1` segments and a satellite came first, because the allocator counts
+    /// up across a whole walk. **The rank is not** (read phase spec §2.4): a walked region is walked
+    /// identically alone or inside a longer walk, so its ids differ between the two only by the
+    /// region's first id, which each record carries. Read-backed phase keys its read cap on this
+    /// rank, so the equality below is the guarantee that a `--regions` run phases as a whole-genome
+    /// one does. Until 2026-11-03 this compared ids renumbered by first appearance, which checks
+    /// the grouping but not that the base is right.
+    fn with_chain_ids_as_ranks(
         mut loci: Vec<SampleLocusObservations>,
     ) -> Vec<SampleLocusObservations> {
-        let mut first_seen: Vec<u64> = Vec::new();
         for locus in &mut loci {
+            let base = locus.chain_id_base;
             for observed in &mut locus.observations {
                 for id in &mut observed.chain_ids {
-                    let rank = first_seen
-                        .iter()
-                        .position(|seen| seen == id)
-                        .unwrap_or_else(|| {
-                            first_seen.push(*id);
-                            first_seen.len() - 1
-                        });
-                    *id = rank as u64;
+                    *id = id
+                        .checked_sub(base)
+                        .expect("no read of a walked region has an id below its first");
                 }
             }
+            locus.chain_id_base = 0;
         }
         loci
     }
@@ -1477,6 +1470,7 @@ mod walking_the_real_generator {
         let (walked, _) = walked_directly();
         let (drawn, _) = drawn_through_the_source(|| {
             Some(SampleLocusObservations {
+                chain_id_base: 0,
                 region: GenomeRegion {
                     contig: ContigId(1),
                     start: Position(199),

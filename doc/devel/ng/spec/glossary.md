@@ -49,3 +49,20 @@ path calls the whole callable genome, STR segments included, and the STR path ca
 segments in parallel; at the end the generic call is kept on generic regions, and on each STR
 segment the two calls are compared and combined (`tract_dual_path.md`). With the default,
 `tract-only`, each STR segment is called by the STR path alone.
+
+## After calling: refinement, fill and phase
+
+*Agreed with the owner on 2026-11-03. "Imputation" in the literature covers both of the first two
+terms; this project keeps them apart.*
+
+**Refinement.** What the neighbour-evidence pass (the step at the end of a calling run that
+`--refine-genotypes` switches) does to every genotype: the other samples' haplotypes act as a prior, the
+sample's own reads (its genotype likelihoods) as the evidence, and the posterior can overturn the
+genotype the reads alone gave. Beagle's and GATK's documentation call this *genotype refinement*.
+
+**Fill.** Refinement of a sample with no reads at a record: there is no evidence, so the posterior is
+the prior. A filled genotype is one the reads never saw.
+
+**Imputation.** Used only when naming the literature or other tools: classically, filling sites a
+genotyping array never measured from a reference panel; in low-coverage tools (STITCH, QUILT,
+GLIMPSE), what this project calls refinement. Not used for anything pvc does.

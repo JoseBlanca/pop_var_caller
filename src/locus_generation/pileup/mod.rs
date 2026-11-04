@@ -171,6 +171,8 @@ fn assert_same_evidence_up_to_chain_renaming(
 
     let without_ids = |locus: &SampleLocusObservations| {
         let mut stripped = locus.clone();
+        // The region's first id goes with the ids: two walked regions are two numberings.
+        stripped.chain_id_base = 0;
         for observation in &mut stripped.observations {
             observation.chain_ids.clear();
         }
@@ -236,6 +238,7 @@ mod chain_renaming_tests {
     /// One position covered by one read, named `chain`.
     fn locus_named(position: u64, chain: ChainId) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(position),

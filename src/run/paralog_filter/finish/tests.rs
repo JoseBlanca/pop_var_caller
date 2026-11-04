@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use super::{WhatTheOperatorAskedFor, fit_score_and_write_the_calls, what_to_tell_the_operator};
 use crate::paralog::CoverageFitConfig;
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::paralog_filter::{SpillEntry, SpillFile, SpilledSample, TargetFdr, WindowCoverage};
 use crate::types::{ContigId, InbreedingF, Ploidy, Position};
 use crate::vcf::{HeaderContig, VcfHeaderMetadata};
@@ -92,7 +93,9 @@ fn a_spill_and_an_output(test_name: &str, entries: Vec<SpillEntry>) -> (SpillFil
     let _ = fs::remove_file(SpillFile::beside(&output).path());
     let mut spill = SpillFile::beside(&output);
     for entry in &entries {
-        spill.append(entry).expect("the entry is appended");
+        spill
+            .append(entry, &RecordFragments::default())
+            .expect("the entry is appended");
     }
     spill.finish_writing().expect("the spill is flushed");
     // **The calling pass is given something to measure.** `calling` is the interval from the
@@ -225,7 +228,7 @@ fn a_target_of_zero_is_no_filter_rather_than_a_filter_that_removes_nothing() {
 /// it wrote before the filter existed, and spec §10's first oracle a property of the code.
 #[test]
 fn a_header_without_the_filter_declares_none_of_it() {
-    let text = crate::vcf::header_text(&metadata_over(2));
+    let text = crate::vcf::header_text(&metadata_over(2), Ploidy::try_new(2).expect("diploid"));
 
     assert!(!text.contains("##paralogFilter="));
     assert!(!text.contains("PARALOG_LR"));

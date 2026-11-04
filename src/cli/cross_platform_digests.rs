@@ -452,7 +452,20 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `443a89c2b2066d269a43107f4e253a16`, exactly. Recorded in the Linux container (arm64).
-    const CALLS_MD5: &str = "796b4dc302a7fe575e3ce34e9eae05be";
+    /// **Re-recorded 2026-11-03** when calling began writing phase from reads alone where refinement
+    /// does not run, at ploidy two (`neighbour_evidence_read_phase.md` §2.6, §3): the header gains
+    /// `##readBackedPhase=` and the `PS` declaration, `GT`'s declaration becomes the phased one, and
+    /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
+    /// Taking those back out reproduces the previous checksum, `c8201d16bc0d8574c123c88f082846fd`, exactly
+    /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `f6a351a2d1ab5ed90b039229431a0fce`, exactly. Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
+    /// had moved this checksum to `796b4dc302a7fe575e3ce34e9eae05be`: taking the read-phase changes back out of the merged
+    /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
+    const CALLS_MD5: &str = "b3864ddbf3a7042c1f2af1427d9167ed";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -725,7 +738,20 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `35933d51ad28e7a7f30ac8272e18c6d5`, exactly. Recorded in the Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "2bf380c922ce33cb988c4de366b73449";
+    /// **Re-recorded 2026-11-03** when calling began writing phase from reads alone where refinement
+    /// does not run, at ploidy two (`neighbour_evidence_read_phase.md` §2.6, §3): the header gains
+    /// `##readBackedPhase=` and the `PS` declaration, `GT`'s declaration becomes the phased one, and
+    /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
+    /// Taking those back out reproduces the previous checksum, `9c7bbea51346dd01e20110add15602bd`, exactly
+    /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `9854cc0eb1e1e45a103174d1027bf52c`, exactly. Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
+    /// had moved this checksum to `2bf380c922ce33cb988c4de366b73449`: taking the read-phase changes back out of the merged
+    /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "287c3582f20bf55bf771b587d2020ed3";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -1027,7 +1053,20 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `c21340eb1a9d52d3b5f540a95e45969c`, exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "7d056dac9045e6d78ca5dfc75ccacd7c";
+    /// **Re-recorded 2026-11-03** when calling began writing phase from reads alone where refinement
+    /// does not run, at ploidy two (`neighbour_evidence_read_phase.md` §2.6, §3): the header gains
+    /// `##readBackedPhase=` and the `PS` declaration, `GT`'s declaration becomes the phased one, and
+    /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
+    /// Taking those back out reproduces the previous checksum, `7cf07f4fe020c7c469bcfc58d3d40fa4`, exactly
+    /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `2d033ca39c8b3f0b00111c43da652db9`, exactly. Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
+    /// had moved this checksum to `7d056dac9045e6d78ca5dfc75ccacd7c`: taking the read-phase changes back out of the merged
+    /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "06e7857efabae5c3301911df9b5a26f0";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -1089,7 +1128,8 @@ mod tests {
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
-            neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
+            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
+            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,

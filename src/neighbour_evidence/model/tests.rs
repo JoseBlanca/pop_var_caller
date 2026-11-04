@@ -228,3 +228,160 @@ fn a_zero_emission_state_contributes_nothing() {
         assert!((posterior[1] - 1.0).abs() < 1e-12, "{posterior:?}");
     }
 }
+
+/// **A path follows the only template that fits** (phasing spec §8.3): with no mismatch, a sample
+/// homozygous for the alternative at every site, one template carrying the alternative and the
+/// other carrying the reference, every drawn state copies the first, so both copies carry the
+/// alternative everywhere — at any seed.
+#[test]
+fn a_drawn_path_follows_the_only_template_that_fits() {
+    use crate::neighbour_evidence::random::{StreamPurpose, Uniforms};
+    let likelihoods = [0.0, 0.0, 1.0];
+    let shares = [0.0, 1.0, 1.0, 0.0];
+    let sites: Vec<WalkSite<'_>> = (0..40)
+        .map(|index| WalkSite {
+            position: 1 + index * 1_000,
+            allele_count: 2,
+            likelihoods: &likelihoods,
+            template_shares: &shares,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.5,
+        mismatch: 0.0,
+    };
+    for seed in 0..20 {
+        let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
+        let (_, haplotypes) = walk_and_draw(&sites, 2, parameters, &mut uniforms);
+        for pair in &haplotypes {
+            for copy in pair {
+                assert!((copy[1] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
+            }
+        }
+    }
+}
+
+/// **The re-estimation is the owner's subtraction as a special case** (phasing spec §8.3): copy one
+/// on a homozygous-reference template, copy two on a template even between the alleles, and reads
+/// that allow only the heterozygote give copy one the reference and copy two the alternative, each
+/// with probability `1 − ε/2`.
+#[test]
+fn the_re_estimation_subtracts_a_known_haplotype() {
+    let mismatch = 0.01;
+    let blurred = [1.0 - mismatch / 2.0, mismatch / 2.0, 0.5, 0.5];
+    let only_heterozygous = [0.0, 1.0, 1.0, 0.0];
+    let [first, second] = copies_along(State::Pair(0, 1), &blurred, &only_heterozygous, 2);
+    assert!((first[0] - (1.0 - mismatch / 2.0)).abs() < 1e-12);
+    assert!((second[1] - (1.0 - mismatch / 2.0)).abs() < 1e-12);
+    // Autozygous on the reference template, with reads that allow only the alternative homozygote:
+    // the blur alone carries it.
+    let only_alternative = [0.0, 0.0, 0.0, 1.0];
+    let [first, second] = copies_along(State::Autozygous(0), &blurred, &only_alternative, 2);
+    assert!((first[1] - 1.0).abs() < 1e-12 && (second[1] - 1.0).abs() < 1e-12);
+}
+
+/// **At three alleles a path still follows the only template that fits** (code review 2026-11-02:
+/// nothing tested phasing beyond two alleles): a sample homozygous for allele 2, one template
+/// carrying allele 2 and one carrying allele 0, no mismatch — both copies carry allele 2 at every
+/// site, the genotype table's six genotypes read in VCF order.
+#[test]
+fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
+    use crate::neighbour_evidence::random::{StreamPurpose, Uniforms};
+    // 0/0, 0/1, 1/1, 0/2, 1/2, 2/2
+    let likelihoods = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    let shares = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+    let sites: Vec<WalkSite<'_>> = (0..30)
+        .map(|index| WalkSite {
+            position: 1 + index * 1_000,
+            allele_count: 3,
+            likelihoods: &likelihoods,
+            template_shares: &shares,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.5,
+        mismatch: 0.0,
+    };
+    for seed in 0..10 {
+        let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
+        let (_, haplotypes) = walk_and_draw(&sites, 2, parameters, &mut uniforms);
+        for pair in &haplotypes {
+            for copy in pair {
+                assert_eq!(copy.len(), 3);
+                assert!((copy[2] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
+            }
+        }
+    }
+}
+
+/// **The re-estimation at three alleles**: copy one on a template carrying allele 1, copy two on a
+/// template even over the three, and reads allowing only the genotype 1/2 — copy two carries
+/// allele 2 with probability `(1/3)·(1 − ε·2/3) / ((1/3)·(1 − ε·2/3) + (1/3)·(ε/3))`, given copy
+/// one's allele 1, and allele 1 when copy one drew allele 2 instead; computed here.
+#[test]
+fn the_re_estimation_at_three_alleles() {
+    let mismatch: f64 = 0.03;
+    let carrying_one = [mismatch / 3.0, 1.0 - 2.0 * mismatch / 3.0, mismatch / 3.0];
+    let even = [1.0 / 3.0; 3];
+    let blurred: Vec<f64> = carrying_one.iter().chain(&even).copied().collect();
+    // Symmetric 3×3 likelihood: only the pair {1, 2}.
+    let mut by_alleles = [0.0; 9];
+    by_alleles[3 + 2] = 1.0;
+    by_alleles[2 * 3 + 1] = 1.0;
+    let [first, second] = copies_along(State::Pair(0, 1), &blurred, &by_alleles, 3);
+    let one_then_two = carrying_one[1] * even[2];
+    let two_then_one = carrying_one[2] * even[1];
+    let total = one_then_two + two_then_one;
+    assert!((first[1] - one_then_two / total).abs() < 1e-12);
+    assert!((second[2] - one_then_two / total).abs() < 1e-12);
+    assert!((second[1] - two_then_one / total).abs() < 1e-12);
+    assert!(first[0].abs() < 1e-12 && second[0].abs() < 1e-12);
+}
+
+/// **Extra paths change nothing the round passes on** (phase output spec §2.3): the walk and the
+/// round's own path are [`walk_and_draw`]'s exactly, bit for bit, and the extra paths are a
+/// function of their own stream — the same stream gives the same paths, another gives others.
+#[test]
+fn extra_paths_leave_the_round_unchanged() {
+    use crate::neighbour_evidence::random::{StreamPurpose, Uniforms};
+    // A sample even between the alleles, two templates of opposite alleles: every path is a
+    // genuine draw, so two streams disagree somewhere.
+    let likelihoods = [0.2, 1.0, 0.2];
+    let shares = [0.9, 0.1, 0.1, 0.9];
+    let sites: Vec<WalkSite<'_>> = (0..60)
+        .map(|index| WalkSite {
+            position: 1 + index * 2_000,
+            allele_count: 2,
+            likelihoods: &likelihoods,
+            template_shares: &shares,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.3,
+        mismatch: 0.01,
+    };
+    let mut alone = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
+    let (walked, own) = walk_and_draw(&sites, 2, parameters, &mut alone);
+    let mut with = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
+    let mut extra = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
+    let (walked_again, own_again, paths) =
+        walk_and_draw_paths(&sites, 2, parameters, &mut with, &mut extra, 4);
+    assert_eq!(walked, walked_again);
+    assert_eq!(own, own_again);
+    assert_eq!(paths.len(), 4);
+    let mut extra_again = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
+    let mut with_again = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
+    let (_, _, paths_again) =
+        walk_and_draw_paths(&sites, 2, parameters, &mut with_again, &mut extra_again, 4);
+    assert_eq!(paths, paths_again);
+    assert!(
+        paths.iter().any(|path| *path != own),
+        "an extra path is a draw of its own"
+    );
+}

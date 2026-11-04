@@ -156,6 +156,14 @@ pub(crate) const SATELLITE: (usize, usize) = (380, 500);
 pub(crate) const FIRST_SAMPLES_SUBSTITUTION: usize = 120;
 /// The second sample's, which the first carries no read at.
 pub(crate) const SECOND_SAMPLES_SUBSTITUTION: usize = 455;
+/// **A second substitution of the first sample**, in [`a_varying_cohort_with_a_phased_pair_on_disk`]
+/// only: 40 bases after its first, carried by the same reads, so the two are heterozygous in cis and
+/// the reads that cover both phase them (read phase spec §2.6).
+pub(crate) const FIRST_SAMPLES_SECOND_SUBSTITUTION: usize = 160;
+/// **A second substitution of the second sample**, in the deep phased-pair cohort only: 40 bases after
+/// its first, in cis, in the walked region after the repeat tract — so a `--regions` run over that
+/// region alone numbers its reads from a different first chain id than a whole-contig run does.
+pub(crate) const SECOND_SAMPLES_SECOND_SUBSTITUTION: usize = 495;
 
 /// A cohort whose samples **vary from the reference**, so that a run over it writes VCF records.
 ///
@@ -273,7 +281,7 @@ fn a_base_that_is_not(reference: u8) -> u8 {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false, false)
+    a_varying_cohort_built(false, 0, false, false, false, 5)
 }
 
 /// **The same cohort with a sequencing error in about one read in four**, at an offset and to a base
@@ -287,7 +295,7 @@ pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
 /// error, and the tract's substitution count is no longer zero
 /// (`cli::cross_platform_digests`, plan `fit_precision.md`, checkpoint E).
 pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0, false, false)
+    a_varying_cohort_built(true, 0, false, false, false, 5)
 }
 
 /// **The same, with `further_samples` samples beside the first two**, each read from one library
@@ -298,7 +306,7 @@ pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohor
 pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
     further_samples: usize,
 ) -> AVaryingCohort {
-    a_varying_cohort_built(true, further_samples, false, false)
+    a_varying_cohort_built(true, further_samples, false, false, false, 5)
 }
 
 /// **The cohort with sequencing errors, whose first sample's header lists its read groups in the
@@ -309,20 +317,41 @@ pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
 /// tell a run that sorts a sample's read groups by declared ID from one that keeps the header's
 /// order. A walk numbers groups in header order, so this one gives `rg-one-b` the first number.
 pub(crate) fn a_varying_cohort_declaring_read_groups_out_of_order_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0, true, false)
+    a_varying_cohort_built(true, 0, true, false, false, 5)
 }
 
 /// **The varying cohort with a satellite in its reference** ([`SATELLITE`]), over which the second
 /// sample's substitution falls. Everything else is [`a_varying_cohort_on_disk`]'s.
 pub(crate) fn a_varying_cohort_with_a_satellite_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false, true)
+    a_varying_cohort_built(false, 0, false, true, false, 5)
 }
 
+/// **The varying cohort whose first sample is heterozygous at two sites 40 bases apart, in cis**
+/// ([`FIRST_SAMPLES_SECOND_SUBSTITUTION`]): about a dozen of its reads cover both, so a diploid run
+/// without refinement writes the two phased together, `0|1` in one phase set. Everything else is
+/// [`a_varying_cohort_on_disk`]'s.
+pub(crate) fn a_varying_cohort_with_a_phased_pair_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(false, 0, false, false, true, 5)
+}
+
+/// **The phased-pair cohort read every 2 bases instead of 5**: 50 reads a position, so each sample's
+/// read alleles at a record are cut to the 32 the read cap keeps (read phase spec §2.4), and the
+/// second sample carries a pair too, [`SECOND_SAMPLES_SECOND_SUBSTITUTION`], after the tract.
+pub(crate) fn a_deep_varying_cohort_with_phased_pairs_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(false, 0, false, false, true, 2)
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "a private builder behind six one-line functions, each of which names its shape"
+)]
 fn a_varying_cohort_built(
     with_sequencing_errors: bool,
     further_samples: usize,
     first_samples_header_reversed: bool,
     with_a_satellite: bool,
+    with_a_phased_pair: bool,
+    stride: usize,
 ) -> AVaryingCohort {
     use crate::read::input::test_fixtures::{
         FixtureReadGroup, header_with_read_groups, indexed_named_bam,
@@ -382,25 +411,26 @@ fn a_varying_cohort_built(
     // filters keep them: a read of arbitrary bases would exceed the mismatch fraction and be
     // dropped, and the cohort would call nothing while every file looked full.
     let reads_of = |sample: &str,
-                    substitution: usize,
+                    substitutions: &[usize],
                     shortens_the_tract: bool,
                     read_groups: &[String]|
      -> Vec<RecordBuf> {
         const READ: usize = 100;
-        const STRIDE: usize = 5;
         let (tract_from, tract_to) = TRACT;
-        (0..(length / STRIDE))
+        (0..(length / stride))
             .map(|index| {
-                let start = index * STRIDE;
+                let start = index * stride;
                 let mut sequence = bases[start..(start + READ).min(length)].to_vec();
                 // **Every second read carries the alternative**, which is a heterozygote — the
                 // genotype a cohort of two can be called at.
                 let carries_the_alternative = index % 2 == 0;
-                if carries_the_alternative
-                    && substitution >= start
-                    && substitution < start + sequence.len()
-                {
-                    sequence[substitution - start] = a_base_that_is_not(bases[substitution]);
+                for &substitution in substitutions {
+                    if carries_the_alternative
+                        && substitution >= start
+                        && substitution < start + sequence.len()
+                    {
+                        sequence[substitution - start] = a_base_that_is_not(bases[substitution]);
+                    }
                 }
                 // **A tract shorter by one copy of its motif**, which is what a repeat-tract
                 // genotype is about: the record has to carry the motif and both flanks, and the
@@ -438,7 +468,7 @@ fn a_varying_cohort_built(
                     // About one read in four, each to one of the three other bases, so two reads
                     // rarely err at one position and two that do rarely agree.
                     let errs = (hash >> 40).is_multiple_of(4);
-                    if errs && start + offset != substitution {
+                    if errs && !substitutions.contains(&(start + offset)) {
                         let mut others = [0_u8; 3];
                         for (slot, base) in b"ACGT"
                             .iter()
@@ -498,7 +528,7 @@ fn a_varying_cohort_built(
 
     let file_of = |sample: &str,
                    file: &str,
-                   substitution: usize,
+                   substitutions: &[usize],
                    shortens_the_tract: bool,
                    read_groups: &[String],
                    header_reversed: bool| {
@@ -512,7 +542,7 @@ fn a_varying_cohort_built(
         }
         indexed_named_bam(
             &header_with_read_groups(Some("coordinate"), &[(name, length, None)], &declared),
-            &reads_of(sample, substitution, shortens_the_tract, read_groups),
+            &reads_of(sample, substitutions, shortens_the_tract, read_groups),
             file,
         )
     };
@@ -523,7 +553,14 @@ fn a_varying_cohort_built(
     let (first, first_bam) = file_of(
         "one",
         "one.bam",
-        FIRST_SAMPLES_SUBSTITUTION,
+        if with_a_phased_pair {
+            &[
+                FIRST_SAMPLES_SUBSTITUTION,
+                FIRST_SAMPLES_SECOND_SUBSTITUTION,
+            ][..]
+        } else {
+            &[FIRST_SAMPLES_SUBSTITUTION][..]
+        },
         true,
         &first_groups,
         first_samples_header_reversed,
@@ -531,7 +568,14 @@ fn a_varying_cohort_built(
     let (second, second_bam) = file_of(
         "two",
         "two.bam",
-        SECOND_SAMPLES_SUBSTITUTION,
+        if with_a_phased_pair && stride < 5 {
+            &[
+                SECOND_SAMPLES_SUBSTITUTION,
+                SECOND_SAMPLES_SECOND_SUBSTITUTION,
+            ][..]
+        } else {
+            &[SECOND_SAMPLES_SUBSTITUTION][..]
+        },
         false,
         &second_groups,
         false,
@@ -557,7 +601,7 @@ fn a_varying_cohort_built(
         let (file, bam) = file_of(
             &sample,
             &format!("{sample}.bam"),
-            site,
+            &[site],
             false,
             &[format!("rg-{sample}")],
             false,

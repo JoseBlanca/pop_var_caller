@@ -1145,6 +1145,7 @@ mod tests {
     fn observation(region: GenomeRegion, non_reference_reads: u32) -> SampleLocusObservations {
         let width = region.len().max(1) as usize;
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: vec![b'A'; width].into_boxed_slice(),
             observations: vec![sequence(&vec![b'C'; width], non_reference_reads)],
@@ -1168,6 +1169,7 @@ mod tests {
     ) -> SampleLocusObservations {
         let width = region.len().max(1) as usize;
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: vec![b'A'; width].into_boxed_slice(),
             observations: vec![
@@ -1191,6 +1193,7 @@ mod tests {
         // `SampleLocusObservations` should be a compile error here, not something filled
         // in silently from a base expression.
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: vec![b'A'; width].into_boxed_slice(),
             observations: vec![sequence(&vec![b'A'; width], reference_reads)],
@@ -1853,6 +1856,7 @@ mod tests {
     #[test]
     fn a_locus_at_the_coordinate_ceiling_is_judged_on_its_true_width() {
         let at_the_ceiling = [SampleLocusObservations {
+            chain_id_base: 0,
             region: region(u64::MAX - 3, u64::MAX),
             reference_bases: Box::from(&b"AAAA"[..]),
             observations: vec![sequence(b"CCCC", 5)],

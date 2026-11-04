@@ -98,6 +98,7 @@ pub(super) mod fixtures {
         observed_bases: &[u8],
     ) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: Box::from(reference_bases),
             observations: vec![SequenceObservation {

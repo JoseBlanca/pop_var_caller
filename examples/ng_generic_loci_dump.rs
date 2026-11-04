@@ -1727,6 +1727,7 @@ mod tests {
     /// One hand-built locus, so `push_locus`'s guard can be aimed at rather than waited for.
     fn locus_witnessing(runs: &[(u16, u16)], footprint: u64) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(1),
@@ -1749,6 +1750,8 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3600,
                 placed_left: 0,
+                num_low_quality: 0,
+                flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
                 chain_ids: Vec::new(),
             }],
             reads_without_observation: 0,

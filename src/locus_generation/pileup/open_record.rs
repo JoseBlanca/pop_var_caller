@@ -1224,6 +1224,7 @@ impl OpenPileupRecord {
         };
 
         let locus = SampleLocusObservations {
+            chain_id_base: 0,
             // `GenomeRegion` is 1-based **inclusive**, so the end is the last covered
             // position rather than one past it (spec §6).
             region: GenomeRegion {

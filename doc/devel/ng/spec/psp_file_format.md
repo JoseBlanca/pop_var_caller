@@ -517,6 +517,28 @@ second count for one observation is refused.
 every count zero (`RecordLayout::from_manifest` recognises the field list without it), so the test
 charges nothing on it; a reader from before the field walks past it as an unknown final field.
 
+#### Format 1.1 — each record's walked-region first chain id (2026-11-03)
+
+**The head gains `chain-id-base-change`**, a signed varint between the discarded-read copy and the
+body's byte count: the first chain id the walk issued in the walked region the record came from,
+written as the change from the previous record's value, and from zero at a block's first record.
+The reader rebuilds the absolute value, `RecordHead::chain_id_base`, and puts it on the record it
+builds. Read-backed phase needs it: a read's rank in its walked region, `id − base`, is what keys its
+read cap, and unlike the raw id it does not depend on what ground was walked first
+([`neighbour_evidence_read_phase.md`](neighbour_evidence_read_phase.md) §2.4;
+[`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §1.1).
+
+**In the head, not the body, because it is a running value.** A reader decodes every head and skips
+most bodies; a running value in a skipped body would leave every later record's base wrong. The
+value moves only where a walked region begins and where an STR record (base zero) sits between two
+generic ones, so the field is a zero byte on almost every record. Measured on the fuzz fixture (two
+samples, 20 kb of ground, about 17,500 records each): 224 and 551 bytes more on psps of 111 kB, 2 to
+5 bytes in 1,000.
+
+**The version rises to 1.1, and a 1.0 psp is refused** (owner, 2026-11-03: no backward
+compatibility), as `WrittenByAnotherPvc` with the message to write it again. The reader now refuses
+a minor below its own, not only another major.
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

@@ -14,6 +14,9 @@ statistical models behind the calls, see [doc/methods/](../methods/) *(in prepar
   file.
 - [Options](options.md): ploidy, inbreeding, which sites are written, depth and locus-size limits,
   and what counts as a repeat, with when to change each.
+- [Genotypes from neighbouring sites and related samples](neighbour_evidence.md): how pvc fills
+  missing genotypes and corrects low-depth ones in a cohort of inbred lines, how to judge the fills,
+  and when not to use it.
 - [The VCF](vcf.md): the header, QUAL and GQ, every INFO, FORMAT and FILTER field, and how STRs
   are written.
 - [Overlapping variants](overlapping_variants.md): how variants that overlap, such as a SNP

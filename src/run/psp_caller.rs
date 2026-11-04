@@ -48,6 +48,7 @@ use crate::read::input::read_groups::{
     NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
 };
 use crate::read::input::reference::OpenReference;
+use crate::read_phase::fragments::RecordFragments;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
 use crate::types::{Bp, Phred, ReadGroupId};
@@ -653,7 +654,7 @@ impl PspVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage], RecordFragments) -> Result<(), E>,
     ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
     where
         G: LocusGenotyper<S> + Sync,
@@ -662,8 +663,10 @@ impl PspVariantCaller {
     {
         self.call_cohort_preparing_each_record(
             genotyper,
-            &|record, _| Ok(record),
-            &mut |record: VcfRecord, windows| hand_over(&record, windows),
+            &|record, _, fragments| Ok((record, fragments)),
+            &mut |(record, fragments): (VcfRecord, RecordFragments), windows| {
+                hand_over(&record, windows, fragments)
+            },
         )
     }
 
@@ -682,7 +685,7 @@ impl PspVariantCaller {
     pub fn call_cohort_preparing_each_record<S, G, P, E>(
         self,
         genotyper: &G,
-        prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+        prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
         hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
     ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
     where
@@ -790,6 +793,10 @@ impl PspVariantCaller {
             // are prepared here, on this thread, as the gathering releases them.
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
+            // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
+            // the same order, with only the read alleles of reads seen at two records or more.
+            let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
+            let mut kept = Vec::new();
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
             };
@@ -797,7 +804,10 @@ impl PspVariantCaller {
                               _: &[WindowCoverage]|
              -> Result<(), E> {
                 for (record, windows) in gathering.accept(record, windows) {
-                    hand_over(prepare(record, &windows)?, &windows)?;
+                    keeper.accept(record, windows, &mut kept);
+                    for (record, windows, fragments) in kept.drain(..) {
+                        hand_over(prepare(record, &windows, fragments)?, &windows)?;
+                    }
                 }
                 Ok(())
             };
@@ -822,9 +832,15 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
+            let mut released = Vec::new();
             for (record, windows) in gathering.finish() {
+                keeper.accept(record, windows, &mut released);
+            }
+            keeper.finish(&mut released);
+            crate::run::fragment_keeper::log_counts(keeper.counts());
+            for (record, windows, fragments) in released {
                 let locus = record.region();
-                prepare(record, &windows)
+                prepare(record, &windows, fragments)
                     .and_then(|ready| hand_over(ready, &windows))
                     .map_err(|source| RunError::RecordNotWritten {
                         locus,
@@ -2372,7 +2388,7 @@ mod tests {
         let (tallies, stored) = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record: &VcfRecord, _window_coverage: &[WindowCoverage]| {
+                &mut |record: &VcfRecord, _window_coverage: &[WindowCoverage], _fragments| {
                     handed.push(record.region());
                     Ok::<(), std::io::Error>(())
                 },

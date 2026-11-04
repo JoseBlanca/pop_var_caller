@@ -254,6 +254,7 @@ fn the_report_states_what_the_gathering_of_the_calls_did() {
             samples_paired_from_the_cohort: 4,
             generic_calls_lost_to_an_str_no_call: 1,
             generic_records_left_unmerged: 0,
+            read_alleles_lost_to_a_merge: 0,
         });
 
     let text = rendered(

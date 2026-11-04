@@ -529,6 +529,7 @@ mod tests {
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
             kind: LocusKind::Generic,
+            chain_id_base: 0,
         }
     }
 

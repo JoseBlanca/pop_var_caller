@@ -142,20 +142,29 @@ fn records_in_genome_order_are_accepted() {
     let path = scratch("in_order").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     for position in [100, 200, 300] {
-        writer.write_record(&snp_at(0, position)).expect("in order");
+        writer
+            .write_record(&snp_at(0, position), RecordFragments::default())
+            .expect("in order");
     }
     // A later contig starts over at a lower position, and that is forward, not backward.
-    writer.write_record(&snp_at(1, 5)).expect("a later contig");
-    assert_eq!(writer.records_written(), 4);
-    writer.finish().expect("the file finishes");
+    writer
+        .write_record(&snp_at(1, 5), RecordFragments::default())
+        .expect("a later contig");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        4
+    );
 }
 
 #[test]
 fn a_record_that_runs_backwards_is_refused() {
     let path = scratch("backwards").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    writer.write_record(&snp_at(0, 200)).expect("the first");
-    let refused = writer.write_record(&snp_at(0, 100));
+    writer
+        .write_record(&snp_at(0, 200), RecordFragments::default())
+        .expect("the first");
+    let refused = writer.write_record(&snp_at(0, 100), RecordFragments::default());
     assert!(matches!(
         refused,
         Err(VcfWriteError::OutOfOrder {
@@ -170,9 +179,11 @@ fn a_record_that_runs_backwards_is_refused() {
 fn an_earlier_contig_after_a_later_one_is_refused() {
     let path = scratch("contig_backwards").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    writer.write_record(&snp_at(1, 100)).expect("the first");
+    writer
+        .write_record(&snp_at(1, 100), RecordFragments::default())
+        .expect("the first");
     assert!(matches!(
-        writer.write_record(&snp_at(0, 100)),
+        writer.write_record(&snp_at(0, 100), RecordFragments::default()),
         Err(VcfWriteError::OutOfOrder { .. })
     ));
 }
@@ -185,13 +196,16 @@ fn a_generic_locus_and_a_tract_padded_onto_it_may_share_a_position() {
     let path = scratch("legal_tie").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     writer
-        .write_record(&snp_at(0, 100))
+        .write_record(&snp_at(0, 100), RecordFragments::default())
         .expect("the generic one");
     writer
-        .write_record(&tract_at(0, 101, true))
+        .write_record(&tract_at(0, 101, true), RecordFragments::default())
         .expect("the tract padded onto it");
-    assert_eq!(writer.records_written(), 2);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        2
+    );
 }
 
 #[test]
@@ -201,10 +215,10 @@ fn a_tract_followed_by_a_generic_locus_at_one_position_is_refused() {
     let path = scratch("tie_wrong_way").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     writer
-        .write_record(&tract_at(0, 101, true))
+        .write_record(&tract_at(0, 101, true), RecordFragments::default())
         .expect("the tract first");
     assert!(matches!(
-        writer.write_record(&snp_at(0, 100)),
+        writer.write_record(&snp_at(0, 100), RecordFragments::default()),
         Err(VcfWriteError::IllegalTie {
             position: 100,
             previous_was_repeat_tract: true,
@@ -218,9 +232,11 @@ fn a_tract_followed_by_a_generic_locus_at_one_position_is_refused() {
 fn two_generic_records_at_one_position_are_refused() {
     let path = scratch("two_generic").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    writer.write_record(&snp_at(0, 100)).expect("the first");
+    writer
+        .write_record(&snp_at(0, 100), RecordFragments::default())
+        .expect("the first");
     assert!(matches!(
-        writer.write_record(&snp_at(0, 100)),
+        writer.write_record(&snp_at(0, 100), RecordFragments::default()),
         Err(VcfWriteError::IllegalTie { .. })
     ));
 }
@@ -231,13 +247,13 @@ fn a_third_record_at_one_position_is_refused() {
     let path = scratch("third_at_one_position").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     writer
-        .write_record(&snp_at(0, 100))
+        .write_record(&snp_at(0, 100), RecordFragments::default())
         .expect("the generic one");
     writer
-        .write_record(&tract_at(0, 101, true))
+        .write_record(&tract_at(0, 101, true), RecordFragments::default())
         .expect("the tract padded onto it");
     assert!(matches!(
-        writer.write_record(&tract_at(0, 101, true)),
+        writer.write_record(&tract_at(0, 101, true), RecordFragments::default()),
         Err(VcfWriteError::IllegalTie {
             previous_was_repeat_tract: true,
             ..
@@ -253,11 +269,15 @@ fn the_order_is_checked_on_the_written_position_not_the_span_start() {
     let path = scratch("written_position").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     writer
-        .write_record(&tract_at(0, 101, true))
+        .write_record(&tract_at(0, 101, true), RecordFragments::default())
         .expect("written at 100");
     // 100 would be a legal *span* successor to 101-padded-to-100 only if the check used the
     // span; against the written position it is a tie in the wrong order.
-    assert!(writer.write_record(&snp_at(0, 100)).is_err());
+    assert!(
+        writer
+            .write_record(&snp_at(0, 100), RecordFragments::default())
+            .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -268,8 +288,12 @@ fn the_order_is_checked_on_the_written_position_not_the_span_start() {
 fn the_finished_file_holds_the_header_and_every_record() {
     let path = scratch("whole_file").join("out.vcf");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    writer.write_record(&snp_at(0, 100)).expect("a record");
-    writer.write_record(&snp_at(0, 200)).expect("a record");
+    writer
+        .write_record(&snp_at(0, 100), RecordFragments::default())
+        .expect("a record");
+    writer
+        .write_record(&snp_at(0, 200), RecordFragments::default())
+        .expect("a record");
     writer.finish().expect("the file finishes");
 
     let written = fs::read_to_string(&path).expect("the finished file");
@@ -294,7 +318,9 @@ fn nothing_appears_at_the_output_path_until_the_writer_finishes() {
     let _ = fs::remove_file(&path);
 
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    writer.write_record(&snp_at(0, 100)).expect("a record");
+    writer
+        .write_record(&snp_at(0, 100), RecordFragments::default())
+        .expect("a record");
     assert!(!path.exists(), "the output must not exist yet");
     assert!(
         directory.join("out.vcf.tmp").exists(),
@@ -313,7 +339,9 @@ fn nothing_appears_at_the_output_path_until_the_writer_finishes() {
 fn a_gzipped_name_gets_a_bgzf_file_ending_in_the_marker_htslib_requires() {
     let path = scratch("bgzf").join("out.vcf.gz");
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    writer.write_record(&snp_at(0, 100)).expect("a record");
+    writer
+        .write_record(&snp_at(0, 100), RecordFragments::default())
+        .expect("a record");
     writer.finish().expect("the file finishes");
 
     let bytes = fs::read(&path).expect("the finished file");
@@ -337,8 +365,11 @@ fn a_run_that_called_nothing_still_writes_a_header() {
     // meet a well-formed file saying so rather than an absent one.
     let path = scratch("no_records").join("out.vcf");
     let writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
-    assert_eq!(writer.records_written(), 0);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        0
+    );
 
     let written = fs::read_to_string(&path).expect("the finished file");
     assert!(written.contains("#CHROM\t"));
@@ -361,13 +392,16 @@ fn a_stream_of_records_is_written_in_the_order_it_yields_them() {
 
     let stream = [100u64, 200, 300]
         .into_iter()
-        .map(|position| snp_at(0, position))
+        .map(|position| (snp_at(0, position), RecordFragments::default()))
         // A filter in the middle, as the run will have.
-        .filter(|record| record.region().start != Position(200));
+        .filter(|(record, _)| record.region().start != Position(200));
 
     writer.write_stream(stream).expect("the stream writes");
-    assert_eq!(writer.records_written(), 2);
-    writer.finish().expect("the file finishes");
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file finishes").records_written,
+        2
+    );
 
     let written = fs::read_to_string(&path).expect("the finished file");
     let positions: Vec<&str> = written
@@ -386,7 +420,7 @@ fn a_stream_that_reorders_its_records_is_refused_rather_than_written() {
     let mut writer = VcfWriter::create(&path, metadata(), diploid()).expect("the writer opens");
     let stream = [300u64, 100]
         .into_iter()
-        .map(|position| snp_at(0, position));
+        .map(|position| (snp_at(0, position), RecordFragments::default()));
     assert!(matches!(
         writer.write_stream(stream),
         Err(VcfWriteError::OutOfOrder { .. })
@@ -418,13 +452,16 @@ fn a_line_written_without_its_record_reaches_the_file_exactly() {
     writer
         .write_line(
             place(0, 100, false),
-            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1".to_vec(),
+            RecordFragments::default(),
         )
         .expect("the line");
     writer.finish().expect("the file");
 
     // The whole body, not a suffix: `ends_with` is also satisfied by a writer that emits the
     // line twice, or that puts something extra in front of it.
+    // At ploidy two without refinement the line passes through phase from reads alone, which
+    // appends `PS` to `FORMAT` and `.` to the column it does not phase, and changes nothing else.
     let written = fs::read_to_string(&output).expect("the file");
     let records: Vec<&str> = written
         .lines()
@@ -432,7 +469,7 @@ fn a_line_written_without_its_record_reaches_the_file_exactly() {
         .collect();
     assert_eq!(
         records,
-        vec!["SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1"],
+        vec!["SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT:PS\t0/1:."],
         "the line reached the file changed:\n{written}"
     );
 }
@@ -448,13 +485,19 @@ fn writing_a_record_and_writing_its_line_produce_the_same_bytes() {
     let through_the_record = directory.join("record.vcf");
     let mut writer =
         VcfWriter::create(&through_the_record, metadata(), diploid()).expect("a writer");
-    writer.write_record(&record).expect("the record");
+    writer
+        .write_record(&record, RecordFragments::default())
+        .expect("the record");
     writer.finish().expect("the file");
 
     let through_the_line = directory.join("line.vcf");
     let mut writer = VcfWriter::create(&through_the_line, metadata(), diploid()).expect("a writer");
     writer
-        .write_line(place(0, 100, false), line.as_bytes())
+        .write_line(
+            place(0, 100, false),
+            line.clone().into_bytes(),
+            RecordFragments::default(),
+        )
         .expect("the line");
     writer.finish().expect("the file");
 
@@ -473,9 +516,17 @@ fn a_line_that_runs_backwards_is_refused_as_a_record_would_be() {
     let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
 
     writer
-        .write_line(place(0, 200, false), b"x")
+        .write_line(
+            place(0, 200, false),
+            b"x".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("the first line");
-    let outcome = writer.write_line(place(0, 100, false), b"y");
+    let outcome = writer.write_line(
+        place(0, 100, false),
+        b"y".to_vec(),
+        RecordFragments::default(),
+    );
 
     assert!(matches!(
         outcome,
@@ -494,12 +545,24 @@ fn a_line_may_take_the_one_legal_tie_and_no_other() {
     let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
 
     writer
-        .write_line(place(0, 100, false), b"a generic locus")
+        .write_line(
+            place(0, 100, false),
+            b"a generic locus".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("the first");
     writer
-        .write_line(place(0, 100, true), b"a tract padded onto it")
+        .write_line(
+            place(0, 100, true),
+            b"a tract padded onto it".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("the tract may share the position");
-    let a_third = writer.write_line(place(0, 100, true), b"another tract");
+    let a_third = writer.write_line(
+        place(0, 100, true),
+        b"another tract".to_vec(),
+        RecordFragments::default(),
+    );
 
     assert!(matches!(a_third, Err(VcfWriteError::IllegalTie { .. })));
 }
@@ -510,12 +573,19 @@ fn a_line_counts_towards_the_records_written() {
     let output = directory.join("cohort.vcf");
     let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
 
-    writer.write_record(&snp_at(0, 100)).expect("a record");
     writer
-        .write_line(place(0, 200, false), b"a line")
+        .write_record(&snp_at(0, 100), RecordFragments::default())
+        .expect("a record");
+    writer
+        .write_line(
+            place(0, 200, false),
+            b"a line".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("a line");
 
-    assert_eq!(writer.records_written(), 2);
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(writer.finish().expect("the file").records_written, 2);
 }
 
 #[test]
@@ -528,22 +598,35 @@ fn a_refused_line_leaves_the_writer_where_it_was() {
     let mut writer = VcfWriter::create(&output, metadata(), diploid()).expect("a writer");
 
     writer
-        .write_line(place(0, 200, false), b"the one that got in")
+        .write_line(
+            place(0, 200, false),
+            b"the one that got in".to_vec(),
+            RecordFragments::default(),
+        )
         .expect("the first line");
-    let refused = writer.write_line(place(0, 100, false), b"backwards");
+    let refused = writer.write_line(
+        place(0, 100, false),
+        b"backwards".to_vec(),
+        RecordFragments::default(),
+    );
 
     assert!(matches!(refused, Err(VcfWriteError::OutOfOrder { .. })));
-    assert_eq!(
-        writer.records_written(),
-        1,
-        "a line the writer refused was counted as written"
-    );
     assert!(
         matches!(
-            writer.write_line(place(0, 150, false), b"behind the last written line"),
+            writer.write_line(
+                place(0, 150, false),
+                b"behind the last written line".to_vec(),
+                RecordFragments::default()
+            ),
             Err(VcfWriteError::OutOfOrder { .. })
         ),
         "the refused line became the order the next one is checked against"
+    );
+    // Counted once finished: phase from reads holds lines until the stream is past them.
+    assert_eq!(
+        writer.finish().expect("the file").records_written,
+        1,
+        "a line the writer refused was counted as written"
     );
 }
 
@@ -563,13 +646,15 @@ fn the_order_is_checked_against_the_place_and_not_the_line() {
     writer
         .write_line(
             place(0, 100, false),
-            b"SL4.0ch01\t900\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+            b"SL4.0ch01\t900\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1".to_vec(),
+            RecordFragments::default(),
         )
         .expect("the place ascends, so the writer is content");
     writer
         .write_line(
             place(0, 200, false),
-            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1",
+            b"SL4.0ch01\t100\t.\tA\tG\t9.0\tPASS\t.\tGT\t0/1".to_vec(),
+            RecordFragments::default(),
         )
         .expect("the place ascends, so the writer is content");
     writer.finish().expect("the file");

@@ -38,6 +38,7 @@ use crate::paralog::{
     DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO, EmConfig,
     ParalogLrHistogram, ParalogModelParams,
 };
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::paralog_filter::{
     ParalogScoringContext, SpillEntry, SpillFile, SpillFileError, SpilledSample,
 };
@@ -202,7 +203,9 @@ fn a_spill_holding(test_name: &str, entries: Vec<SpillEntry>) -> SpillFile {
     let _ = fs::remove_file(SpillFile::beside(&output).path());
     let mut spill = SpillFile::beside(&output);
     for entry in &entries {
-        spill.append(entry).expect("the entry is appended");
+        spill
+            .append(entry, &RecordFragments::default())
+            .expect("the entry is appended");
     }
     spill.finish_writing().expect("the spill is flushed");
     spill
@@ -942,7 +945,10 @@ fn a_spill_pass_one_has_not_finished_writing_is_refused() {
     let _ = fs::remove_file(SpillFile::beside(&output).path());
     let mut spill = SpillFile::beside(&output);
     spill
-        .append(&a_record_shaped_like_a_variant(100, 6))
+        .append(
+            &a_record_shaped_like_a_variant(100, 6),
+            &RecordFragments::default(),
+        )
         .expect("the entry is appended");
     // deliberately no `finish_writing`
 
