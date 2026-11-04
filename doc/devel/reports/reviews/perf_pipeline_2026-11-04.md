@@ -193,3 +193,35 @@ None open.
 
 Address each finding by its identifier with one of: `applied in <commit>` / `experiment shows no
 gain — closing` / `disputed because …` / `deferred to <issue>` / `won't fix because …`.
+
+---
+
+## Addendum: a second round on the pass (branch `perf-pass2`, the same day)
+
+A line-level profile of the merged build (`samply` and `atos -i`, `tmp/perf/pass_lines.sh`) put a
+quarter of the pass in the posterior and an eighth in the emission terms, both running inner loops
+over a site's alleles — two at a biallelic site — so every running sum waited on the one before.
+Six commits, each measured alone on `call-from-psps`, 62 tomato samples, **all bit-identical** to
+main:
+
+| commit | change | instructions |
+|---|---|---|
+| `4159786d` | the allele loops over slices, no bounds checks | 8,227 → 7,665 G |
+| `248d27ca` | each normalisation a loop over one slice, not a chained iterator | 7,665 → 7,317 G |
+| `3d08c0b0` | inner loops across the 17 templates, not the alleles: shares laid out allele by allele, pair weights column by column | 7,319 → 6,594 G |
+| `0484c48f` | the posterior's states read in row order (no wall-time change; kept as the clearer form) | 6,592 → 6,494 G |
+| `474bc426` | the draw reads the forward pass's margins and sums running totals only when a path needs them | 6,494 → 6,321 G |
+| `32738444` | the likelihood matrix built once a site, not once a path | 6,323 → 6,198 G |
+
+**Together, alternating with main:** the pass 60 and 58 s against 40 and 39 s; the run 100 and 96 s
+against 81 and 78 s; instructions −25%; peak memory level (654 to 683 MB). Since main before this
+review, the pass has gone from about 90 s to about 40 s on this cohort.
+
+**Rejected:** writing the posterior's division as a select rather than a branch — the instruction
+count did not move, so the compiler already did it.
+
+**What is left** is the arithmetic each step needs: the posterior's division by each state's
+emission (about 14%), the transition (5%), the margins and sums, and each path's haplotypes
+(5%, several allocations a site a path, a change of the output's shape to remove). The larger
+levers are modelling choices — the window margins, which double the work on a whole genome, the
+rounds and the templates — and need accuracy measured before any is moved.

@@ -107,6 +107,9 @@ struct SiteTerms {
     autozygous: Vec<f64>,
     /// The emission of each pair state, `K × K`, row `k₁`.
     pairs: Vec<f64>,
+    /// The sample's likelihood as a symmetric `A × A` matrix, `L(a/b)` at `[a][b]` and `[b][a]`;
+    /// every path's haplotypes read it.
+    by_alleles: Vec<f64>,
 }
 
 fn site_terms(
@@ -144,19 +147,44 @@ fn site_terms(
         by_alleles[second * alleles + first] = likelihood;
     }
     let mut weighted = vec![0.0; templates * alleles];
-    for k in 0..templates {
-        for b in 0..alleles {
-            weighted[k * alleles + b] = (0..alleles)
-                .map(|a| blurred[k * alleles + a] * by_alleles[a * alleles + b])
+    for (out, shares) in weighted
+        .chunks_exact_mut(alleles)
+        .zip(blurred.chunks_exact(alleles))
+    {
+        for (b, value) in out.iter_mut().enumerate() {
+            *value = shares
+                .iter()
+                .zip(by_alleles.iter().skip(b).step_by(alleles))
+                .map(|(share, likelihood)| share * likelihood)
                 .sum();
         }
     }
+    // Each first template's row of emissions is built one allele at a time across every second
+    // template, so the inner loop runs over templates and vectorises; each emission still adds its
+    // alleles' terms in order, so the bits are those of a sum per pair.
+    let mut by_allele = vec![0.0; alleles * templates];
+    for (template, shares) in blurred.chunks_exact(alleles).enumerate() {
+        for (allele, &share) in shares.iter().enumerate() {
+            by_allele[allele * templates + template] = share;
+        }
+    }
     let mut pair_emissions = vec![0.0; templates * templates];
-    for first in 0..templates {
-        for second in 0..templates {
-            pair_emissions[first * templates + second] = (0..alleles)
-                .map(|b| weighted[first * alleles + b] * blurred[second * alleles + b])
-                .sum();
+    for (out, first) in pair_emissions
+        .chunks_exact_mut(templates)
+        .zip(weighted.chunks_exact(alleles))
+    {
+        for (allele, (&weight, second)) in first
+            .iter()
+            .zip(by_allele.chunks_exact(templates))
+            .enumerate()
+        {
+            for (value, &share) in out.iter_mut().zip(second) {
+                if allele == 0 {
+                    *value = weight * share;
+                } else {
+                    *value += weight * share;
+                }
+            }
         }
     }
     let autozygous = (0..templates)
@@ -170,6 +198,7 @@ fn site_terms(
         blurred,
         autozygous,
         pairs: pair_emissions,
+        by_alleles,
     }
 }
 
@@ -342,6 +371,8 @@ fn walk_with_draw(
     // multiply to the window's likelihood.
     let mut forward_autozygous: Vec<Vec<f64>> = Vec::with_capacity(sites.len());
     let mut forward_pairs: Vec<Vec<f64>> = Vec::with_capacity(sites.len());
+    // Each site's pair margins, which the next site's step needs and the draw reads again.
+    let mut forward_margins: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(sites.len());
     let mut log_likelihood = 0.0;
     for (index, site_terms) in terms.iter().enumerate() {
         let (mut autozygous, mut pairs) = if index == 0 {
@@ -371,6 +402,7 @@ fn walk_with_draw(
                 PairTransition::new(keep, mass_pairs, k_f, stay_other),
                 (1.0 - stay_autozygous) * mass_autozygous / (k_f * k_f),
             );
+            forward_margins.push((rows, columns));
             (autozygous, pairs)
         };
         for (value, emission) in autozygous.iter_mut().zip(&site_terms.autozygous) {
@@ -381,12 +413,14 @@ fn walk_with_draw(
         }
         let scale: f64 = autozygous.iter().sum::<f64>() + lane_sum(&pairs);
         let inverse = 1.0 / scale;
-        for value in autozygous.iter_mut().chain(pairs.iter_mut()) {
-            *value *= inverse;
-        }
+        scale_by(&mut autozygous, inverse);
+        scale_by(&mut pairs, inverse);
         log_likelihood += float::ln(scale);
         forward_autozygous.push(autozygous);
         forward_pairs.push(pairs);
+    }
+    if let Some(last) = forward_pairs.last() {
+        forward_margins.push(margins(last, k));
     }
 
     // The round's own path from `uniforms`, then each extra path from `extra_uniforms`, one
@@ -410,20 +444,13 @@ fn walk_with_draw(
         sites,
         &forward_autozygous,
         &forward_pairs,
+        &forward_margins,
         k,
         &parameters,
         &streams,
     )
     .iter()
-    .map(|states| {
-        haplotypes_along(
-            sites,
-            &terms,
-            states,
-            &mut genotype_pairs,
-            reads.as_deref_mut(),
-        )
-    })
+    .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
     .collect();
     let drawn = draws_own.then(|| paths.remove(0));
     let extra_paths = paths;
@@ -470,12 +497,8 @@ fn walk_with_draw(
             );
             let total: f64 = backward_autozygous.iter().sum::<f64>() + lane_sum(&backward_pairs);
             let inverse = 1.0 / total;
-            for value in backward_autozygous
-                .iter_mut()
-                .chain(backward_pairs.iter_mut())
-            {
-                *value *= inverse;
-            }
+            scale_by(&mut backward_autozygous, inverse);
+            scale_by(&mut backward_pairs, inverse);
         }
         let site = &sites[index];
         let site_terms = &terms[index];
@@ -499,14 +522,17 @@ fn walk_with_draw(
                 )
             })
             .collect();
-        let state_pairs: Vec<f64> = (0..k * k)
-            .map(|state| {
-                without_emission(
-                    forward_pairs[index][state] * backward_pairs[state],
-                    site_terms.pairs[state],
-                )
-            })
-            .collect();
+        // Column by column, `[second][first]`, for the spreading over alleles below.
+        // Read row by row, so the three inputs are read in order, and written to their columns.
+        let mut by_second = vec![0.0; k * k];
+        for (state, ((&forward, &backward), &emission)) in forward_pairs[index]
+            .iter()
+            .zip(&backward_pairs)
+            .zip(&site_terms.pairs)
+            .enumerate()
+        {
+            by_second[(state % k) * k + state / k] = without_emission(forward * backward, emission);
+        }
         let both_autozygous: f64 = (0..k)
             .map(|state| forward_autozygous[index][state] * backward_autozygous[state])
             .sum();
@@ -532,28 +558,32 @@ fn walk_with_draw(
         // first-copy template's weight spread over the second copy's alleles (K² · A), then over
         // the first copy's (K · A²) — not K² · A² by summing every state over every pair.
         let blurred = &site_terms.blurred;
-        let mut second_copy = vec![0.0; k * alleles];
-        for first in 0..k {
-            for second in 0..k {
-                let weight = state_pairs[first * k + second];
-                for b in 0..alleles {
-                    second_copy[first * alleles + b] += weight * blurred[second * alleles + b];
+        // `second_copy[b][first]`: the second templates taken in order, each adding its share of
+        // allele `b` to every first template at once — the same terms in the same order as a sum
+        // per first template, but the inner loop runs over templates and vectorises.
+        let mut second_copy = vec![0.0; alleles * k];
+        for (column, shares) in by_second.chunks_exact(k).zip(blurred.chunks_exact(alleles)) {
+            for (out, &share) in second_copy.chunks_exact_mut(k).zip(shares) {
+                for (value, &weight) in out.iter_mut().zip(column) {
+                    *value += weight * share;
                 }
             }
         }
         let mut pair_weight = vec![0.0; alleles * alleles];
-        for first in 0..k {
-            for a in 0..alleles {
-                let first_share = blurred[first * alleles + a];
-                for b in 0..alleles {
-                    pair_weight[a * alleles + b] += first_share * second_copy[first * alleles + b];
+        for (first, first_shares) in blurred.chunks_exact(alleles).enumerate() {
+            for (&first_share, out) in first_shares
+                .iter()
+                .zip(pair_weight.chunks_exact_mut(alleles))
+            {
+                for (value, spread) in out.iter_mut().zip(second_copy.chunks_exact(k)) {
+                    *value += first_share * spread[first];
                 }
             }
         }
         let mut autozygous_weight = vec![0.0; alleles];
-        for state in 0..k {
-            for a in 0..alleles {
-                autozygous_weight[a] += state_autozygous[state] * blurred[state * alleles + a];
+        for (&weight, shares) in state_autozygous.iter().zip(blurred.chunks_exact(alleles)) {
+            for (value, share) in autozygous_weight.iter_mut().zip(shares) {
+                *value += weight * share;
             }
         }
         let mut prediction: Vec<f64> = pairs_of_alleles
@@ -606,13 +636,21 @@ fn draw_state_paths(
     sites: &[WalkSite<'_>],
     forward_autozygous: &[Vec<f64>],
     forward_pairs: &[Vec<f64>],
+    forward_margins: &[(Vec<f64>, Vec<f64>)],
     k: usize,
     parameters: &WalkParameters,
     streams: &[Vec<f64>],
 ) -> Vec<Vec<State>> {
     let mut paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
     for (drawn, index) in (0..sites.len()).rev().enumerate() {
-        let site = SiteDraw::new(&forward_autozygous[index], &forward_pairs[index], k);
+        let (rows, columns) = &forward_margins[index];
+        let site = SiteDraw::new(
+            &forward_autozygous[index],
+            &forward_pairs[index],
+            rows,
+            columns,
+            k,
+        );
         let persistence = (index + 1 < sites.len()).then(|| {
             persistence(
                 (sites[index + 1].position - sites[index].position) as f64,
@@ -638,43 +676,58 @@ fn draw_state_paths(
 /// pair's row and of its column, plus a share of the next state itself (spec §3.5). A uniform
 /// first picks one of those parts by its mass, then a state inside it: by bisection over the
 /// pairs' running totals for a share of every pair, by a scan of `K` for a row, a column or the
-/// autozygous states. That draws from exactly the distribution the full scan does; the running
-/// totals and the margins are summed once a site, for every path drawn through it.
+/// autozygous states. That draws from exactly the distribution the full scan does. The margins
+/// are the forward pass's own; the running totals are summed the first time a path needs them —
+/// rarely, because a jump of both copies at once is the least likely transition — and serve every
+/// path drawn through the site.
 struct SiteDraw<'a> {
     autozygous: &'a [f64],
     pairs: &'a [f64],
     k: usize,
-    /// The pairs' running totals, row by row.
-    running: Vec<f64>,
-    rows: Vec<f64>,
-    columns: Vec<f64>,
+    rows: &'a [f64],
+    columns: &'a [f64],
     autozygous_mass: f64,
+    /// The pairs' total, the sum of the row totals.
+    pair_mass: f64,
+    /// The pairs' running totals, row by row, once a path has needed them.
+    running: std::cell::OnceCell<Vec<f64>>,
 }
 
 impl<'a> SiteDraw<'a> {
-    fn new(autozygous: &'a [f64], pairs: &'a [f64], k: usize) -> Self {
-        let mut total = 0.0;
-        let running = pairs
-            .iter()
-            .map(|value| {
-                total += value;
-                total
-            })
-            .collect();
-        let (rows, columns) = margins(pairs, k);
+    fn new(
+        autozygous: &'a [f64],
+        pairs: &'a [f64],
+        rows: &'a [f64],
+        columns: &'a [f64],
+        k: usize,
+    ) -> Self {
         Self {
             autozygous,
             pairs,
             k,
-            running,
             rows,
             columns,
             autozygous_mass: autozygous.iter().sum(),
+            pair_mass: rows.iter().sum(),
+            running: std::cell::OnceCell::new(),
         }
     }
 
     fn pair_mass(&self) -> f64 {
-        self.running.last().copied().unwrap_or(0.0)
+        self.pair_mass
+    }
+
+    fn running(&self) -> &[f64] {
+        self.running.get_or_init(|| {
+            let mut total = 0.0;
+            self.pairs
+                .iter()
+                .map(|value| {
+                    total += value;
+                    total
+                })
+                .collect()
+        })
     }
 
     /// The state a uniform `u` draws here, given the next site's state and the persistence
@@ -685,7 +738,7 @@ impl<'a> SiteDraw<'a> {
         let any_template =
             |rest: f64| State::Autozygous(pick_at(self.autozygous.iter().copied(), rest));
         let any_pair = |rest: f64| {
-            let position = pick_in_running(&self.running, rest);
+            let position = pick_in_running(self.running(), rest);
             State::Pair(position / k, position % k)
         };
         match next {
@@ -758,7 +811,6 @@ fn haplotypes_along(
     sites: &[WalkSite<'_>],
     terms: &[SiteTerms],
     states: &[State],
-    genotype_pairs: &mut GenotypePairs,
     reads: Option<&mut DrawReads<'_>>,
 ) -> Vec<HaplotypePair> {
     let mut joints: Vec<Option<Vec<f64>>> = sites
@@ -766,15 +818,12 @@ fn haplotypes_along(
         .zip(terms)
         .zip(states)
         .map(|((site, site_terms), &state)| {
-            let alleles = site.allele_count;
-            let mut by_alleles = vec![0.0; alleles * alleles];
-            for (&(first, second), &likelihood) in
-                genotype_pairs.of(alleles).iter().zip(site.likelihoods)
-            {
-                by_alleles[first * alleles + second] = likelihood;
-                by_alleles[second * alleles + first] = likelihood;
-            }
-            joint_along(state, &site_terms.blurred, &by_alleles, alleles)
+            joint_along(
+                state,
+                &site_terms.blurred,
+                &site_terms.by_alleles,
+                site.allele_count,
+            )
         })
         .collect();
     if let Some(reads) = reads {
@@ -1056,6 +1105,14 @@ fn pair_transition(
         }));
     }
     out
+}
+
+/// Every value times `factor`. A loop of its own over one slice, which vectorises where a loop
+/// over two slices chained together does not.
+fn scale_by(values: &mut [f64], factor: f64) {
+    for value in values {
+        *value *= factor;
+    }
 }
 
 /// How many running totals [`lane_sum`] and [`lane_dot`] keep.
