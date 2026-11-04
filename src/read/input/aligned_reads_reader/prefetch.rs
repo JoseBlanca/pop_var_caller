@@ -53,7 +53,7 @@ use noodles_cram as cram;
 use noodles_sam as sam;
 
 use crate::read::input::read_groups::ReadGroupResolution;
-use crate::ref_seq::RawRefSeq;
+use crate::ref_seq::SliceReference;
 
 use super::container::{SharedContainers, container_at};
 
@@ -120,7 +120,7 @@ impl ContainerPrefetcher {
         mut reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
         resolution: ReadGroupResolution,
-        reference: Box<dyn RawRefSeq + Send>,
+        reference: Box<dyn SliceReference + Send>,
     ) -> Self {
         let wanted = Arc::new(Wanted {
             offset: Mutex::new(None),

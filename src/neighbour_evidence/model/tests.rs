@@ -704,3 +704,82 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
         "{first_copy_reference:?}"
     );
 }
+
+/// **A site's draw picks each state as often as its full weight says** (spec §3.5): for every
+/// possible next state, and at the last site, the share of a fine grid of uniforms that lands on
+/// each state equals forward × transition over the whole `K + K²` weights, written out here as
+/// the scan over all of them computed it. Uneven forward probabilities, `K` = 3.
+#[test]
+fn a_sites_draw_follows_forward_times_transition() {
+    let k = 3;
+    let autozygous = [0.02, 0.07, 0.01];
+    let pairs = [0.05, 0.2, 0.0, 0.11, 0.04, 0.09, 0.0, 0.3, 0.11];
+    let (keep, stay_autozygous, stay_other) = (0.7, 0.8, 0.9);
+    let k_f = k as f64;
+    let site = SiteDraw::new(&autozygous, &pairs, k);
+    let index_of = |state: State| match state {
+        State::Autozygous(template) => template,
+        State::Pair(first, second) => k + first * k + second,
+    };
+    let full_weights = |next: Option<State>| -> Vec<f64> {
+        let mut weights: Vec<f64> = autozygous.iter().chain(&pairs).copied().collect();
+        match next {
+            None => {}
+            Some(State::Pair(next_first, next_second)) => {
+                for value in &mut weights[..k] {
+                    *value *= (1.0 - stay_autozygous) / (k_f * k_f);
+                }
+                for first in 0..k {
+                    for second in 0..k {
+                        let mut transition = (1.0 - keep) * (1.0 - keep) / (k_f * k_f);
+                        if first == next_first {
+                            transition += keep * (1.0 - keep) / k_f;
+                        }
+                        if second == next_second {
+                            transition += keep * (1.0 - keep) / k_f;
+                        }
+                        if first == next_first && second == next_second {
+                            transition += keep * keep;
+                        }
+                        weights[k + first * k + second] *= stay_other * transition;
+                    }
+                }
+            }
+            Some(State::Autozygous(next_template)) => {
+                for (template, value) in weights[..k].iter_mut().enumerate() {
+                    let mut transition = (1.0 - keep) / k_f;
+                    if template == next_template {
+                        transition += keep;
+                    }
+                    *value *= stay_autozygous * transition;
+                }
+                for value in &mut weights[k..] {
+                    *value *= (1.0 - stay_other) / k_f;
+                }
+            }
+        }
+        weights
+    };
+    let nexts = std::iter::once(None)
+        .chain((0..k).map(|template| Some(State::Autozygous(template))))
+        .chain((0..k * k).map(|pair| Some(State::Pair(pair / k, pair % k))));
+    let points = 200_000;
+    for next in nexts {
+        let weights = full_weights(next);
+        let total: f64 = weights.iter().sum();
+        let mut counts = vec![0_usize; k + k * k];
+        for point in 0..points {
+            let u = (point as f64 + 0.5) / points as f64;
+            let persistence = (keep, stay_autozygous, stay_other);
+            counts[index_of(site.draw(next.map(|state| (persistence, state)), u))] += 1;
+        }
+        for (state, (&count, &weight)) in counts.iter().zip(&weights).enumerate() {
+            let share = count as f64 / points as f64;
+            assert!(
+                (share - weight / total).abs() < 1e-4,
+                "next {next:?}, state {state}: drawn {share}, weight {}",
+                weight / total
+            );
+        }
+    }
+}

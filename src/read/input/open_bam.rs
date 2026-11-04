@@ -40,7 +40,7 @@ use crate::read::input::aligned_reads_reader::{
 use crate::read::input::cursor::AlignmentCursor;
 use crate::read::input::read_groups::ReadGroupResolution;
 use crate::read::input::reference::{OpenReference, ReferenceBasesError};
-use crate::ref_seq::{ContigTable, RawRefSeq};
+use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq};
 use crate::types::ContigId;
 
 use super::AlignmentFileError;
@@ -437,7 +437,7 @@ impl AlignmentFile {
     /// consumer separately rather than sharing (`run_streaming.md` §9;
     /// `alignment_cursor.md` §10 point 1). `SampleReads`'s cursor holds the factory and cannot
     /// answer that question, so it forwards it here rather than calling it.
-    pub fn cursor<R: RawRefSeq + ContigTable + Send + 'static>(
+    pub fn cursor<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static>(
         self: &Arc<Self>,
         contig: ContigId,
         mut make_reference: impl FnMut() -> R,
@@ -630,7 +630,7 @@ impl AlignmentFile {
     /// rather than swallowed — a reference reader that would not pass the checks is the fault
     /// `cursor` exists to catch, and letting the prefetcher quietly run without one would decode
     /// this file's reads against unchecked bases.
-    fn prefetcher_started_with<R: RawRefSeq + ContigTable + Send + 'static>(
+    fn prefetcher_started_with<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static>(
         &self,
         probe: &mut Vec<u8>,
         mint: &mut impl FnMut(&mut Vec<u8>, &'static str) -> Result<R, AlignmentFileError>,
@@ -1431,6 +1431,68 @@ mod tests {
                  had already served every region before it",
             );
         }
+    }
+
+    /// **No reference reader a CRAM cursor holds grows with the walk**
+    /// (`perf_pipeline_2026-11-04.md`).
+    ///
+    /// The decode copies each slice's reference span out of its reader, and consecutive slices
+    /// of a coordinate-sorted file start close behind each other, so a reader that only fetched
+    /// extended forward slice after slice: on a whole-genome CRAM each open file's decode held its
+    /// contig up to the walk's position. This walks the 400-kb fixture — three containers, each
+    /// about 164 kb of reads — evicting the cursor's own filter reference as the walk does, and
+    /// checks every reference the cursor minted, the decode's and the prefetcher's included, never
+    /// holds half the contig. Without the decode's eviction one held 221,415 of its 400,000 bases.
+    #[test]
+    fn no_reference_a_cram_cursor_holds_grows_with_the_walk() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+        let mut minted: Vec<Arc<crate::ref_seq::WindowedRefSeq>> = Vec::new();
+        let mut cursor = file
+            .cursor(ContigId(0), || {
+                let made = Arc::new(cram_cursor_reference_bases(&fasta));
+                minted.push(Arc::clone(&made));
+                made
+            })
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(CRAM_CURSOR_CONTIG_LENGTH as u64),
+            })
+            .expect("on this chromosome");
+        let mut most_held = 0;
+        let mut reads = 0;
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("the fixture reads decode and filter");
+            cursor.evict_reference_before(read.pos);
+            reads += 1;
+            most_held = minted
+                .iter()
+                .map(|reference| reference.resident_bases())
+                .fold(most_held, usize::max);
+        }
+        assert_eq!(reads, CRAM_CURSOR_READS, "the walk read the whole fixture");
+        assert!(
+            most_held < CRAM_CURSOR_CONTIG_LENGTH / 2,
+            "a reference held {most_held} bases of a {CRAM_CURSOR_CONTIG_LENGTH}-base contig"
+        );
     }
 
     /// **A CRAM file that is opened and closed must leave no prefetch thread behind, and
@@ -2891,6 +2953,11 @@ mod tests {
                 Ok(())
             }
         }
+        impl EvictableRefSeq for OneBaseShort {
+            fn evict_before(&self, pos: u64) {
+                self.0.evict_before(pos);
+            }
+        }
         impl ContigTable for OneBaseShort {
             fn contigs(&self) -> &ContigList {
                 self.0.contigs()
@@ -3002,6 +3069,11 @@ mod tests {
                     dst.pop();
                 }
                 Ok(())
+            }
+        }
+        impl EvictableRefSeq for OneBaseShort {
+            fn evict_before(&self, pos: u64) {
+                self.0.evict_before(pos);
             }
         }
         impl ContigTable for OneBaseShort {

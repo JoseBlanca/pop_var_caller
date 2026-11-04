@@ -16,9 +16,15 @@ use std::process;
 // allocates on the merge thread, because the observations it walks were
 // allocated by the sample sweeps and released as it passes them, and a
 // system allocator takes a lock per cross-thread free.
-#[cfg(feature = "alloc-mimalloc")]
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// A heap profile of a whole run (`--no-default-features --features dhat-heap`): DHAT takes the
+// allocator slot and writes `dhat-heap.json` in the working directory when `main` returns.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use clap::{CommandFactory, FromArgMatches};
 use pop_var_caller::cli::command_line::settings_of;
@@ -31,6 +37,8 @@ use pop_var_caller::cli::{
 use pop_var_caller::error_render::format_error_chain;
 
 fn main() {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     run_output::install(cli.quiet, settings_of(&matches));
