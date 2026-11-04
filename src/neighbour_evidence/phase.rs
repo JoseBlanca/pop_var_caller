@@ -480,7 +480,7 @@ fn link_to_next(
     let by_reads = reads.link(last.site, last.alleles, next.site, next.alleles);
     let confident = reads.is_confident(last.site) && reads.is_confident(next.site);
     if population_linked {
-        if confident && by_reads.relation().is_some() {
+        if confident && by_reads.relation().is_some() && reads.is_checkable(last.site, next.site) {
             counts.population_links_reached += 1;
             counts.population_links_contradicted +=
                 u32::from(by_reads.relation() != Some(consensus));
@@ -540,12 +540,16 @@ impl Member {
 
 /// **A sample's reads at a window's sites** (read phase spec §2.7): at each site its fragments, in
 /// fragment order, and the `GQ` its column is written with where it is a core site the pass
-/// called. Empty — no fragments and no `GQ` anywhere — for a run without reads, which phases as
-/// the population alone does.
+/// called; and at each site whether the haplotype draw went without its reads there. Empty — no
+/// fragments and no `GQ` anywhere — for a run without reads, which phases as the population alone
+/// does.
 #[derive(Default)]
 pub(crate) struct SiteReads<'a> {
     pub(crate) fragments: Vec<&'a [FragmentAllele]>,
     pub(crate) genotype_qualities: Vec<Option<u32>>,
+    /// Per site, whether the draw kept the sample's reads out there (reads-in-draw spec §2.6); empty
+    /// when the draw used no reads anywhere, and then every site counts as kept out.
+    pub(crate) drawn_without_reads: Vec<bool>,
 }
 
 impl SiteReads<'_> {
@@ -581,13 +585,22 @@ impl SiteReads<'_> {
             .flatten()
             .is_some_and(|quality| quality >= u32::from(link::GQ_MIN))
     }
+
+    /// Whether a link between `one` and `other` may enter the read check: the draw went without the
+    /// sample's reads at one of them at least, so the reads that score the link never shaped it
+    /// (reads-in-draw spec §2.6).
+    fn is_checkable(&self, one: usize, other: usize) -> bool {
+        let without = |site: usize| self.drawn_without_reads.get(site).copied().unwrap_or(true);
+        without(one) || without(other)
+    }
 }
 
 /// **What reads did to one sample's phase in one window** (read phase spec §2.7, §2.8).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PassReadCounts {
     /// Population links reads reached at [`LINK_MIN`](crate::read_phase::link::LINK_MIN) or more, with `GQ` at least [`link::GQ_MIN`] at
-    /// both ends: the read check's denominator (§2.8).
+    /// both ends and, where the draw used reads, one end held out of it: the read check's
+    /// denominator (§2.8; reads-in-draw spec §2.6).
     pub population_links_reached: u32,
     /// Of those, the ones the reads' relation contradicted: an estimate of how often population
     /// links are wrong that does not come from the model's draws, for links under a kilobase.

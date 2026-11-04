@@ -21,6 +21,12 @@ pub enum StreamPurpose {
     /// The extra paths a sample draws in a round for the phase's link test
     /// (`neighbour_evidence_phase_output.md` §2.3).
     ExtraPaths,
+    /// The orientations of a sample's read-linked records along a round's paths, the round's own
+    /// path first and then its extra paths (`neighbour_evidence_reads_in_draw.md` §4).
+    Orientation,
+    /// The records of a sample whose reads are held out of the draw for the read check
+    /// (`neighbour_evidence_reads_in_draw.md` §2.6).
+    ReadCheck,
 }
 
 /// **A SplitMix64 stream** of uniforms in `[0, 1)`.
@@ -31,13 +37,15 @@ pub struct Uniforms {
 
 impl Uniforms {
     /// The stream for `purpose`, keyed by `window` (the window's key,
-    /// `refine::window_key`), `sample` and `round` (0 for [`StreamPurpose::HiddenRecords`]).
+    /// `refine::window_key`), `sample` and `round` (0 for [`StreamPurpose::HiddenRecords`] and [`StreamPurpose::ReadCheck`]).
     #[must_use]
     pub fn new(purpose: StreamPurpose, window: u64, sample: usize, round: usize) -> Self {
         let purpose = match purpose {
             StreamPurpose::HiddenRecords => 1,
             StreamPurpose::Path => 2,
             StreamPurpose::ExtraPaths => 3,
+            StreamPurpose::Orientation => 4,
+            StreamPurpose::ReadCheck => 5,
         };
         let mut state = SEED;
         for value in [purpose, window, sample as u64, round as u64] {

@@ -585,6 +585,7 @@ fn site_reads<'a>(
     SiteReads {
         fragments: fragments.iter().map(Vec::as_slice).collect(),
         genotype_qualities: qualities.to_vec(),
+        drawn_without_reads: Vec::new(),
     }
 }
 
@@ -636,6 +637,56 @@ fn reads_break_a_population_link_they_contradict_and_leave_the_rest() {
             records_attached_by_reads: 0,
         }
     );
+}
+
+/// **Where the draw used reads, the read check counts only a link with an end held out of it**
+/// (reads-in-draw spec §2.6). The fixture of the test above, with two fragments per link at every
+/// pair of consecutive sites: cis at 0–1 and 2–3, trans at 1–2. Every site drawn with reads, the
+/// check counts nothing, while the link test still breaks 1–2; site 2 held out, it counts 1–2 and
+/// 2–3; site 0 held out, only 0–1.
+#[test]
+fn the_read_check_counts_only_links_with_an_end_held_out_of_the_draw() {
+    let n = 4;
+    let paths: Vec<Vec<HaplotypePair>> = (0..5).map(|_| path(n, |_| false)).collect();
+    let (pairs, phase) = rounds(n, &paths);
+    let (fragments, qualities) = read_fixture(
+        n,
+        &[
+            (0, &[(1, 0), (2, 1)]),
+            (1, &[(1, 0), (2, 1), (7, 0), (8, 1)]),
+            (2, &[(7, 1), (8, 0), (9, 1), (10, 0)]),
+            (3, &[(9, 1), (10, 0)]),
+        ],
+        |_| Some(40),
+    );
+    let counts_with = |held_out: Option<usize>| {
+        let mut reads = site_reads(&fragments, &qualities);
+        reads.drawn_without_reads = (0..n).map(|site| Some(site) == held_out).collect();
+        phase
+            .phase_heterozygotes(
+                &pairs,
+                &every_site_heterozygous(n),
+                &positions(n),
+                300_000.0,
+                PathAgreement::ALL,
+                &reads,
+            )
+            .1
+    };
+    let reached_and_contradicted = |counts: PassReadCounts| {
+        (
+            counts.population_links_reached,
+            counts.population_links_contradicted,
+        )
+    };
+    let none_held_out = counts_with(None);
+    assert_eq!(reached_and_contradicted(none_held_out), (0, 0));
+    assert_eq!(
+        none_held_out.population_links_broken, 1,
+        "the link test still acts"
+    );
+    assert_eq!(reached_and_contradicted(counts_with(Some(2))), (2, 1));
+    assert_eq!(reached_and_contradicted(counts_with(Some(0))), (1, 0));
 }
 
 /// **Reads link two candidates the population did not, and a link whose relation is the opposite

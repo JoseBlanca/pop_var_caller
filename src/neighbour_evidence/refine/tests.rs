@@ -801,3 +801,102 @@ fn more_rounds_than_the_link_test_holds_are_refused() {
     let _ = Phasing::new(8, 0);
     let _ = Phasing::new(9, 0);
 }
+
+/// **The draw's link is positive where the reads say cis** (reads-in-draw spec §2.2; review M2):
+/// fragments that show the lower allele at both records, or the upper at both, give a positive `L`,
+/// which the chain reads as the same orientation; fragments that pair a lower with an upper give a
+/// negative one. At a `1/2` heterozygote the lower allele is 1, not the reference.
+#[test]
+fn the_draws_link_is_positive_for_cis() {
+    let allele = |fragment: u32, allele: u16| FragmentAllele {
+        sample: 0,
+        fragment,
+        allele,
+        error_phred: 30,
+    };
+    // Two fragments, each the lower allele at both records or the upper at both: cis.
+    let cis_one = [allele(0, 0), allele(1, 1)];
+    let cis_other = [allele(0, 0), allele(1, 1)];
+    let cis = draw_link(&cis_one, (0, 1), &cis_other, (0, 1)).expect("two fragments count");
+    assert!(cis > 0.0, "{cis}");
+    // The same fragments with the second record's alleles swapped: trans, the same size.
+    let trans_other = [allele(0, 1), allele(1, 0)];
+    let trans = draw_link(&cis_one, (0, 1), &trans_other, (0, 1)).expect("two fragments count");
+    assert_eq!(trans, -cis);
+    // A 1/2 heterozygote beside a 0/1: allele 1 there is the lower, so 1 with 0 is cis.
+    let one_two = [allele(0, 1), allele(1, 2)];
+    let zero_one = [allele(0, 0), allele(1, 1)];
+    let multi = draw_link(&one_two, (1, 2), &zero_one, (0, 1)).expect("two fragments count");
+    assert_eq!(multi, cis);
+    // No fragment at both records: no link.
+    assert_eq!(draw_link(&cis_one, (0, 1), &[allele(7, 0)], (0, 1)), None);
+    assert_eq!(draw_link(&[], (0, 1), &cis_other, (0, 1)), None);
+}
+
+/// **About one in twenty of a sample's core records with fragments is held out for the read check,
+/// never a hidden one, and the draw depends on the window and the sample alone** (reads-in-draw
+/// spec §2.6). Sample 0 has a fragment at every record of a 3,000-record window, sample 1 at every
+/// other one; records 0–99 are hidden.
+#[test]
+fn read_check_records_are_one_in_twenty_and_never_hidden() {
+    let records = 3_000;
+    let cohort = test_cohort(CohortShape {
+        records,
+        depth: 30.0,
+        ..SHAPE
+    });
+    let layout = WindowLayout::new(&cohort.records, &(0..records));
+    let fragments: Vec<RecordFragments> = (0..records)
+        .map(|index| {
+            let entry = |sample: u32| FragmentAllele {
+                sample,
+                fragment: index as u32,
+                allele: 0,
+                error_phred: 30,
+            };
+            let mut entries = vec![entry(0)];
+            if index % 2 == 0 {
+                entries.push(entry(1));
+            }
+            RecordFragments::from_entries(entries)
+        })
+        .collect();
+    let hidden: Vec<usize> = (0..100).collect();
+    let with_fragments = |sample: usize| {
+        layout
+            .core_sites
+            .iter()
+            .map(|&site| layout.record_of_site[site])
+            .filter(|&index| sample == 0 || index % 2 == 0)
+            .filter(|index| !hidden.contains(index))
+            .count()
+    };
+    for sample in [0, 1] {
+        let held_out = draw_read_check_records(&fragments, &layout, sample, &hidden, 5);
+        assert!(held_out.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(held_out.iter().all(|index| !hidden.contains(index)));
+        assert!(
+            held_out
+                .iter()
+                .all(|&index| !fragments[index].of_sample(sample as u32).is_empty())
+        );
+        // Binomial(n, 1/20) within five standard deviations.
+        let n = with_fragments(sample) as f64;
+        let expected = n * READ_CHECK_SHARE;
+        let spread = 5.0 * (n * READ_CHECK_SHARE * (1.0 - READ_CHECK_SHARE)).sqrt();
+        assert!(
+            (held_out.len() as f64 - expected).abs() <= spread,
+            "sample {sample}: {} held out of {n}",
+            held_out.len()
+        );
+        assert_eq!(
+            held_out,
+            draw_read_check_records(&fragments, &layout, sample, &hidden, 5)
+        );
+        assert_ne!(
+            held_out,
+            draw_read_check_records(&fragments, &layout, sample, &hidden, 6),
+            "another window draws other records"
+        );
+    }
+}

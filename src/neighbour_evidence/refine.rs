@@ -32,8 +32,8 @@ use rayon::prelude::*;
 
 use super::fit::SampleFit;
 use super::model::{
-    GenotypePairs, HaplotypePair, WalkParameters, WalkResult, WalkSite, walk, walk_and_draw,
-    walk_and_draw_paths,
+    DrawReads, GenotypePairs, HaplotypePair, WalkParameters, WalkResult, WalkSite, walk,
+    walk_and_draw, walk_and_draw_paths,
 };
 use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
@@ -43,7 +43,8 @@ use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
-use crate::read_phase::fragments::RecordFragments;
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
+use crate::read_phase::link::{Heterozygote, score_read_link};
 use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
@@ -72,6 +73,13 @@ pub const SETTLED_POSTERIOR: f64 = 0.999;
 /// keeps 101 of 294 fills with 2 wrong, from 47
 /// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`).
 pub const NO_READ_MAX_BACKGROUND_COPY: f64 = 0.1;
+
+/// **`HET_MASS_MIN`**: the smallest heterozygous mass, given the path, at which a record's
+/// orientation is drawn from the sample's reads (`neighbour_evidence_reads_in_draw.md` §2.2).
+/// Measured against ¼ and ¾ on the dense outbred simulated cohorts, it gave the fewest wrong links
+/// and the most heterozygotes phased at both 16 and 64 founders
+/// (`doc/devel/reports/implementations/reads_in_draw_2026-11-04.md`).
+pub const HET_MASS_MIN: f64 = 0.5;
 
 /// **When a sample without reads at a record is written with a genotype** (§4.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -200,6 +208,7 @@ pub struct Phasing {
     window_key: u64,
     extra_paths: usize,
     path_agreement: PathAgreement,
+    reads_in_draw: bool,
 }
 
 // The default rounds' paths fit the link test's masks.
@@ -214,6 +223,7 @@ impl Phasing {
             window_key: 0,
             extra_paths: 0,
             path_agreement: PathAgreement::ALL,
+            reads_in_draw: true,
         }
     }
 
@@ -245,6 +255,17 @@ impl Phasing {
             window_key,
             extra_paths: EXTRA_PATHS_PER_ROUND,
             path_agreement: PathAgreement::ALL,
+            reads_in_draw: true,
+        }
+    }
+
+    /// The same, each sample's fragments orienting its drawn haplotypes or not
+    /// (`neighbour_evidence_reads_in_draw.md`; on unless a test needs the link test's reads alone).
+    #[must_use]
+    pub(crate) fn with_reads_in_draw(self, reads_in_draw: bool) -> Self {
+        Self {
+            reads_in_draw,
+            ..self
         }
     }
 
@@ -259,6 +280,12 @@ impl Phasing {
 
     fn is_on(self) -> bool {
         self.rounds > 1
+    }
+
+    /// Whether the haplotype draw uses a window's reads: phasing on, the switch on, and the window
+    /// has `fragments`.
+    fn draws_with_reads(self, fragments: &[RecordFragments]) -> bool {
+        self.is_on() && self.reads_in_draw && !fragments.is_empty()
     }
 
     /// Whether `round`'s results enter the written mean: round 1 alone without phasing, rounds 2
@@ -298,6 +325,11 @@ pub const HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW: usize = 50;
 /// lose much of a sample's evidence to the check. Set at the first build with the 50 above; on the
 /// 2-Mb simulated cohorts it moved wrong genotypes within the seed spread (phasing spec §4.1).
 pub const MAX_HIDDEN_SHARE: f64 = 0.05;
+
+/// **The share of a sample's core records with fragments whose reads are held out of the haplotype
+/// draw**, so the read check scores links the draw never shaped with the same reads (reads-in-draw
+/// spec §2.6). Set at 1 in 20 like [`MAX_HIDDEN_SHARE`], before measurement.
+pub const READ_CHECK_SHARE: f64 = 0.05;
 
 /// **Solves one window**: `records` is the whole window, `core` the indices of the records it
 /// writes, `contig_length` the contig's length if the header gives it (for §4.2's rule at the
@@ -496,6 +528,9 @@ struct SampleRounds {
     previous_posteriors: Vec<Vec<f64>>,
     /// Record indices hidden from the rounds for the fill check, ascending; empty without phasing.
     hidden: Vec<usize>,
+    /// Record indices whose reads are held out of the haplotype draw for the read check, ascending;
+    /// empty unless the draw uses reads (reads-in-draw spec §2.6).
+    read_check: Vec<usize>,
     /// Positions of its informative records, for §4.2's evidence-nearby rule.
     informative_positions: Vec<u64>,
     /// The parameters round 1 fitted or read.
@@ -618,6 +653,7 @@ pub fn refine_window_with_reads(
         .map(|&index| records[index].allele_count)
         .collect();
     let pairs = PairLayout::new(allele_counts.iter().copied());
+    let draws_with_reads = phasing.draws_with_reads(fragments);
 
     let mut states: Vec<SampleRounds> = (0..samples)
         .into_par_iter()
@@ -634,10 +670,16 @@ pub fn refine_window_with_reads(
             } else {
                 Vec::new()
             };
+            let read_check = if draws_with_reads && templates.is_some() {
+                draw_read_check_records(fragments, &layout, sample, &hidden, phasing.window_key)
+            } else {
+                Vec::new()
+            };
             SampleRounds {
                 compared: compared_records(records, sample),
                 previous_posteriors: Vec::new(),
                 hidden,
+                read_check,
                 informative_positions,
                 parameters: None,
                 sums: Vec::new(),
@@ -662,6 +704,7 @@ pub fn refine_window_with_reads(
             .for_each(|(sample, ((state, fit), row))| {
                 solve_round(
                     records,
+                    fragments,
                     &layout,
                     &pairs,
                     store_view,
@@ -740,6 +783,32 @@ pub fn refine_window_with_reads(
     }
 }
 
+/// **`L` for the draw's link between two records** (reads-in-draw spec §2.2): a sample's fragments
+/// at each, the heterozygote the chain reads at each, the lower allele first. Positive is *cis*,
+/// which the chain reads as the two records taking the same orientation; `None` where no fragment
+/// counts at both.
+fn draw_link(
+    at_one: &[FragmentAllele],
+    one_pair: (usize, usize),
+    at_other: &[FragmentAllele],
+    other_pair: (usize, usize),
+) -> Option<f64> {
+    if at_one.is_empty() || at_other.is_empty() {
+        return None;
+    }
+    let heterozygote = |(a, b): (usize, usize)| {
+        // PANIC-FREE: a chain's pair has two different alleles, the lower first.
+        Heterozygote::of(a as u16, b as u16).expect("a chain's pair is a heterozygote")
+    };
+    let found = score_read_link(
+        at_one,
+        heterozygote(one_pair),
+        at_other,
+        heterozygote(other_pair),
+    );
+    (found.fragments > 0).then_some(found.log_odds)
+}
+
 fn add_to(sum: &mut [f64], values: &[f64]) {
     for (total, value) in sum.iter_mut().zip(values) {
         *total += value;
@@ -780,6 +849,40 @@ fn draw_hidden_records(
     hidden
 }
 
+/// **Draws the core records of `sample` whose reads are held out of the haplotype draw** for the
+/// read check (reads-in-draw spec §2.6): each core record where the sample has a fragment and that
+/// is not in `hidden` is held out with probability [`READ_CHECK_SHARE`], one uniform a record in
+/// record order from the window's [`StreamPurpose::ReadCheck`] stream. Returned as record indices,
+/// ascending.
+fn draw_read_check_records(
+    fragments: &[RecordFragments],
+    layout: &WindowLayout,
+    sample: usize,
+    hidden: &[usize],
+    window_key: u64,
+) -> Vec<usize> {
+    let mut uniforms = Uniforms::new(StreamPurpose::ReadCheck, window_key, sample, 0);
+    layout
+        .core_sites
+        .iter()
+        .map(|&site| layout.record_of_site[site])
+        .filter(|&index| {
+            fragments
+                .get(index)
+                .is_some_and(|fragments| !fragments.of_sample(sample as u32).is_empty())
+                && hidden.binary_search(&index).is_err()
+        })
+        .filter(|_| uniforms.next_uniform() < READ_CHECK_SHARE)
+        .collect()
+}
+
+/// Whether the draw keeps a sample's reads at record `index` out: one of its `hidden` records, or
+/// of its records held out for the `read_check` (reads-in-draw spec §2.6). Two lists, not
+/// [`SampleRounds`], so the round's solve can hold it while the sample's phase is borrowed mutably.
+fn keeps_reads_out(hidden: &[usize], read_check: &[usize], index: usize) -> bool {
+    hidden.binary_search(&index).is_ok() || read_check.binary_search(&index).is_ok()
+}
+
 /// **One sample's walk in one round**: its posteriors at its compared records and, in averaged
 /// rounds, its core sites' quantities go into `state`; with phasing its drawn haplotypes go into
 /// `row`, its row of the round being written. Nothing happens for a sample not walked in the
@@ -787,6 +890,7 @@ fn draw_hidden_records(
 #[allow(clippy::too_many_arguments)] // the window's data, one sample's state, and the round
 fn solve_round(
     records: &[SiteRecord],
+    fragments: &[RecordFragments],
     layout: &WindowLayout,
     pairs: &PairLayout,
     store: &HaplotypeStore,
@@ -880,6 +984,31 @@ fn solve_round(
     };
     let result = if phasing.is_on() {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, phasing.window_key, sample, round);
+        // The sample's reads in its draw (reads-in-draw spec §2.2): a link between two walk sites
+        // is `L` over its fragments at both, `None` where no fragment counts at both.
+        let fragments_at = |site: usize| {
+            fragments
+                .get(layout.record_of_site[site])
+                .map_or(&[][..], |fragments| fragments.of_sample(sample as u32))
+        };
+        let link =
+            |one: usize, one_pair: (usize, usize), other: usize, other_pair: (usize, usize)| {
+                draw_link(fragments_at(one), one_pair, fragments_at(other), other_pair)
+            };
+        let (hidden, read_check) = (&state.hidden, &state.read_check);
+        let kept_out =
+            |site: usize| keeps_reads_out(hidden, read_check, layout.record_of_site[site]);
+        let mut draw_reads = phasing.draws_with_reads(fragments).then(|| DrawReads {
+            link: &link,
+            kept_out: &kept_out,
+            het_mass_min: HET_MASS_MIN,
+            uniforms: Uniforms::new(
+                StreamPurpose::Orientation,
+                phasing.window_key,
+                sample,
+                round,
+            ),
+        });
         let (result, haplotypes) = match state.phase.as_mut().filter(|_| phasing.averages(round)) {
             // An averaged round also draws the link test's extra paths, from a stream of their own,
             // and adds its own path to the consensus (phase output spec §2.1, §2.3).
@@ -893,6 +1022,7 @@ fn solve_round(
                     &mut uniforms,
                     &mut extra_uniforms,
                     phasing.extra_paths,
+                    draw_reads.as_mut(),
                 );
                 phase.record_path(pairs, &haplotypes);
                 for path in &extra {
@@ -901,7 +1031,13 @@ fn solve_round(
                 phase.add_round(&haplotypes);
                 (result, haplotypes)
             }
-            None => walk_and_draw(&sites, walk_templates, parameters, &mut uniforms),
+            None => walk_and_draw(
+                &sites,
+                walk_templates,
+                parameters,
+                &mut uniforms,
+                draw_reads.as_mut(),
+            ),
         };
         HaplotypeStore::write(&store.offsets, row, &haplotypes, |site| {
             records[layout.record_of_site[site]].row(sample) == SampleRow::Absent
@@ -1088,6 +1224,15 @@ fn final_solution(
                     })
                     .collect(),
                 genotype_qualities,
+                drawn_without_reads: if phasing.draws_with_reads(fragments) {
+                    layout
+                        .record_of_site
+                        .iter()
+                        .map(|&index| keeps_reads_out(&state.hidden, &state.read_check, index))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             };
             let (phased, read_counts) = phase.phase_heterozygotes(
                 pairs_layout,

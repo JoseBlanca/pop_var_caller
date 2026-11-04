@@ -514,7 +514,8 @@ pub fn report_read_phase(finished: &FinishedVcf) {
     }
     tracing::info!(
         "reads in the neighbour-evidence pass: the read check — of the population links reads \
-         reach at odds of {:.0} to 1 with GQ {} or more at both ends, {} of {} contradicted by the \
+         reach at odds of {:.0} to 1 with GQ {} or more at both ends, and with one end among the \
+         records whose reads the haplotype draw held out, {} of {} contradicted by the \
          reads, a check of the population links that does not come from the model, for links \
          under {} bases and not acted on; {} population links broken by reads, {} links made by \
          reads, {} heterozygotes the consensus did not lean on attached by reads",
