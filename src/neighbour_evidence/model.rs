@@ -10,7 +10,7 @@
 //! (`doc/devel/ng/research/neighbour_evidence/hmm.py`, `haplotypes`), checked against it to 1e-9 by
 //! this module's tests.
 
-use super::random::{Uniforms, pick};
+use super::random::{Uniforms, pick, pick_at, pick_in_running};
 use crate::calling::genotype_table::{GenotypeIdx, GenotypeTable};
 use crate::float;
 use crate::types::Ploidy;
@@ -388,37 +388,44 @@ fn walk_with_draw(
         forward_pairs.push(pairs);
     }
 
-    let drawn = uniforms.map(|uniforms| {
-        draw_haplotypes(
+    // The round's own path from `uniforms`, then each extra path from `extra_uniforms`, one
+    // uniform a site from the last site back. All are drawn in one sweep, so each site's totals
+    // are summed once for every path.
+    let mut streams: Vec<Vec<f64>> = Vec::new();
+    let draws_own = uniforms.is_some();
+    if let Some(uniforms) = uniforms {
+        streams.push((0..sites.len()).map(|_| uniforms.next_uniform()).collect());
+    }
+    if let Some((extra_uniforms, count)) = extra {
+        for _ in 0..count {
+            streams.push(
+                (0..sites.len())
+                    .map(|_| extra_uniforms.next_uniform())
+                    .collect(),
+            );
+        }
+    }
+    let mut paths: Vec<Vec<HaplotypePair>> = draw_state_paths(
+        sites,
+        &forward_autozygous,
+        &forward_pairs,
+        k,
+        &parameters,
+        &streams,
+    )
+    .iter()
+    .map(|states| {
+        haplotypes_along(
             sites,
             &terms,
-            &forward_autozygous,
-            &forward_pairs,
-            k,
-            &parameters,
+            states,
             &mut genotype_pairs,
-            uniforms,
             reads.as_deref_mut(),
         )
-    });
-    let extra_paths = match extra {
-        None => Vec::new(),
-        Some((extra_uniforms, count)) => (0..count)
-            .map(|_| {
-                draw_haplotypes(
-                    sites,
-                    &terms,
-                    &forward_autozygous,
-                    &forward_pairs,
-                    k,
-                    &parameters,
-                    &mut genotype_pairs,
-                    extra_uniforms,
-                    reads.as_deref_mut(),
-                )
-            })
-            .collect(),
-    };
+    })
+    .collect();
+    let drawn = draws_own.then(|| paths.remove(0));
+    let extra_paths = paths;
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
     let mut posteriors = vec![Vec::new(); sites.len()];
@@ -593,89 +600,172 @@ fn walk_with_draw(
     )
 }
 
-/// The backward draw and the re-estimation of [`walk_and_draw`].
-#[allow(clippy::too_many_arguments)] // the forward walk's parts the draw reads, and the stream
-fn draw_haplotypes(
+/// **Draws every path's states backwards from the forward probabilities** (phasing spec §2.1),
+/// each state given the one after it. `streams` holds each path's uniforms, one a site from the
+/// last site back. Each site's totals ([`SiteDraw`]) are summed once and serve every path.
+fn draw_state_paths(
     sites: &[WalkSite<'_>],
-    terms: &[SiteTerms],
     forward_autozygous: &[Vec<f64>],
     forward_pairs: &[Vec<f64>],
     k: usize,
     parameters: &WalkParameters,
-    genotype_pairs: &mut GenotypePairs,
-    uniforms: &mut Uniforms,
-    reads: Option<&mut DrawReads<'_>>,
-) -> Vec<HaplotypePair> {
-    let k_f = k as f64;
-    let mut weights = vec![0.0; k + k * k];
-    let mut states = Vec::with_capacity(sites.len());
-    for index in (0..sites.len()).rev() {
-        match states.last() {
-            None => {
-                weights[..k].copy_from_slice(&forward_autozygous[index]);
-                weights[k..].copy_from_slice(&forward_pairs[index]);
+    streams: &[Vec<f64>],
+) -> Vec<Vec<State>> {
+    let mut paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
+    for (drawn, index) in (0..sites.len()).rev().enumerate() {
+        let site = SiteDraw::new(&forward_autozygous[index], &forward_pairs[index], k);
+        let persistence = (index + 1 < sites.len()).then(|| {
+            persistence(
+                (sites[index + 1].position - sites[index].position) as f64,
+                parameters,
+            )
+        });
+        for (path, stream) in paths.iter_mut().zip(streams) {
+            let next = persistence.zip(path.last().copied());
+            path.push(site.draw(next, stream[drawn]));
+        }
+    }
+    for path in &mut paths {
+        path.reverse();
+    }
+    paths
+}
+
+/// **One site's forward probabilities, arranged so a state can be drawn given the next in about
+/// `K` steps** rather than a scan of all `K + K²` weights.
+///
+/// Given the next state, a state's weight is its forward probability times the transition, and
+/// the transition is a share of every state of a kind, plus — towards a pair — a share of the next
+/// pair's row and of its column, plus a share of the next state itself (spec §3.5). A uniform
+/// first picks one of those parts by its mass, then a state inside it: by bisection over the
+/// pairs' running totals for a share of every pair, by a scan of `K` for a row, a column or the
+/// autozygous states. That draws from exactly the distribution the full scan does; the running
+/// totals and the margins are summed once a site, for every path drawn through it.
+struct SiteDraw<'a> {
+    autozygous: &'a [f64],
+    pairs: &'a [f64],
+    k: usize,
+    /// The pairs' running totals, row by row.
+    running: Vec<f64>,
+    rows: Vec<f64>,
+    columns: Vec<f64>,
+    autozygous_mass: f64,
+}
+
+impl<'a> SiteDraw<'a> {
+    fn new(autozygous: &'a [f64], pairs: &'a [f64], k: usize) -> Self {
+        let mut total = 0.0;
+        let running = pairs
+            .iter()
+            .map(|value| {
+                total += value;
+                total
+            })
+            .collect();
+        let (rows, columns) = margins(pairs, k);
+        Self {
+            autozygous,
+            pairs,
+            k,
+            running,
+            rows,
+            columns,
+            autozygous_mass: autozygous.iter().sum(),
+        }
+    }
+
+    fn pair_mass(&self) -> f64 {
+        self.running.last().copied().unwrap_or(0.0)
+    }
+
+    /// The state a uniform `u` draws here, given the next site's state and the persistence
+    /// `(keep, stay autozygous, stay other)` between the two; `None` at the last site.
+    fn draw(&self, next: Option<((f64, f64, f64), State)>, u: f64) -> State {
+        let k = self.k;
+        let k_f = k as f64;
+        let any_template =
+            |rest: f64| State::Autozygous(pick_at(self.autozygous.iter().copied(), rest));
+        let any_pair = |rest: f64| {
+            let position = pick_in_running(&self.running, rest);
+            State::Pair(position / k, position % k)
+        };
+        match next {
+            None => match choose_part(&[self.autozygous_mass, self.pair_mass()], u) {
+                (0, rest) => any_template(rest),
+                (_, rest) => any_pair(rest),
+            },
+            Some(((keep, stay_autozygous, stay_other), State::Pair(first, second))) => {
+                let to_autozygous = (1.0 - stay_autozygous) / (k_f * k_f);
+                let none_kept = stay_other * (1.0 - keep) * (1.0 - keep) / (k_f * k_f);
+                let one_kept = stay_other * keep * (1.0 - keep) / k_f;
+                let both_kept = stay_other * keep * keep;
+                let masses = [
+                    self.autozygous_mass * to_autozygous,
+                    self.pair_mass() * none_kept,
+                    self.rows[first] * one_kept,
+                    self.columns[second] * one_kept,
+                    self.pairs[first * k + second] * both_kept,
+                ];
+                match choose_part(&masses, u) {
+                    (0, rest) => any_template(rest / to_autozygous),
+                    (1, rest) => any_pair(rest / none_kept),
+                    (2, rest) => {
+                        let row = &self.pairs[first * k..][..k];
+                        State::Pair(first, pick_at(row.iter().copied(), rest / one_kept))
+                    }
+                    (3, rest) => {
+                        let column = self.pairs.iter().skip(second).step_by(k).copied();
+                        State::Pair(pick_at(column, rest / one_kept), second)
+                    }
+                    _ => State::Pair(first, second),
+                }
             }
-            Some(&next) => {
-                let gap = (sites[index + 1].position - sites[index].position) as f64;
-                let (keep, stay_autozygous, stay_other) = persistence(gap, parameters);
-                match next {
-                    State::Pair(next_first, next_second) => {
-                        for (weight, value) in
-                            weights[..k].iter_mut().zip(&forward_autozygous[index])
-                        {
-                            *weight = value * (1.0 - stay_autozygous) / (k_f * k_f);
-                        }
-                        for first in 0..k {
-                            for second in 0..k {
-                                let mut transition = (1.0 - keep) * (1.0 - keep) / (k_f * k_f);
-                                if first == next_first {
-                                    transition += keep * (1.0 - keep) / k_f;
-                                }
-                                if second == next_second {
-                                    transition += keep * (1.0 - keep) / k_f;
-                                }
-                                if first == next_first && second == next_second {
-                                    transition += keep * keep;
-                                }
-                                weights[k + first * k + second] = forward_pairs[index]
-                                    [first * k + second]
-                                    * stay_other
-                                    * transition;
-                            }
-                        }
-                    }
-                    State::Autozygous(next_template) => {
-                        for (template, (weight, value)) in weights[..k]
-                            .iter_mut()
-                            .zip(&forward_autozygous[index])
-                            .enumerate()
-                        {
-                            let mut transition = (1.0 - keep) / k_f;
-                            if template == next_template {
-                                transition += keep;
-                            }
-                            *weight = value * stay_autozygous * transition;
-                        }
-                        for (weight, value) in weights[k..].iter_mut().zip(&forward_pairs[index]) {
-                            *weight = value * (1.0 - stay_other) / k_f;
-                        }
-                    }
+            Some(((keep, stay_autozygous, stay_other), State::Autozygous(template))) => {
+                let jumped = stay_autozygous * (1.0 - keep) / k_f;
+                let to_pairs = (1.0 - stay_other) / k_f;
+                let masses = [
+                    self.autozygous_mass * jumped,
+                    self.autozygous[template] * stay_autozygous * keep,
+                    self.pair_mass() * to_pairs,
+                ];
+                match choose_part(&masses, u) {
+                    (0, rest) => any_template(rest / jumped),
+                    (1, _) => State::Autozygous(template),
+                    (_, rest) => any_pair(rest / to_pairs),
                 }
             }
         }
-        let picked = pick(&weights, uniforms.next_uniform());
-        states.push(if picked < k {
-            State::Autozygous(picked)
-        } else {
-            State::Pair((picked - k) / k, (picked - k) % k)
-        });
     }
-    states.reverse();
+}
 
+/// **Which of a site's weight parts a uniform `u` falls in**, by their `masses` in order, and how
+/// far into that part's mass it falls; a part of zero mass is never chosen.
+///
+/// # Panics
+///
+/// If every mass is zero.
+fn choose_part(masses: &[f64], u: f64) -> (usize, f64) {
+    let total: f64 = masses.iter().sum();
+    assert!(total > 0.0, "a draw needs a positive weight");
+    let target = u * total;
+    let part = pick_at(masses.iter().copied(), target);
+    let before: f64 = masses[..part].iter().sum();
+    (part, (target - before).max(0.0))
+}
+
+/// **The two haplotypes along one drawn path** (phasing spec §2.1), each site's joint oriented by
+/// the sample's reads where `reads` links it (reads-in-draw spec §2.2).
+fn haplotypes_along(
+    sites: &[WalkSite<'_>],
+    terms: &[SiteTerms],
+    states: &[State],
+    genotype_pairs: &mut GenotypePairs,
+    reads: Option<&mut DrawReads<'_>>,
+) -> Vec<HaplotypePair> {
     let mut joints: Vec<Option<Vec<f64>>> = sites
         .iter()
         .zip(terms)
-        .zip(&states)
+        .zip(states)
         .map(|((site, site_terms), &state)| {
             let alleles = site.allele_count;
             let mut by_alleles = vec![0.0; alleles * alleles];

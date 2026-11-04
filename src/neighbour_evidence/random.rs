@@ -79,10 +79,15 @@ fn finalise(value: u64) -> u64 {
 pub fn pick(weights: &[f64], u: f64) -> usize {
     let total: f64 = weights.iter().sum();
     assert!(total > 0.0, "a draw needs a positive weight");
-    let target = u * total;
+    pick_at(weights.iter().copied(), u * total)
+}
+
+/// **The index whose cumulative weight first exceeds `target`**, in `weights`' order; the last
+/// positive weight's where rounding leaves `target` at or past the total.
+pub(crate) fn pick_at(weights: impl IntoIterator<Item = f64>, target: f64) -> usize {
     let mut cumulative = 0.0;
     let mut last_positive = 0;
-    for (index, &weight) in weights.iter().enumerate() {
+    for (index, weight) in weights.into_iter().enumerate() {
         if weight > 0.0 {
             last_positive = index;
         }
@@ -92,6 +97,18 @@ pub fn pick(weights: &[f64], u: f64) -> usize {
         }
     }
     last_positive
+}
+
+/// **[`pick_at`] over running totals**: the first index whose running total exceeds `target`,
+/// found by bisection, so a draw from many weights whose totals are shared costs `log n`; the
+/// last index whose weight is positive where `target` is at or past the total.
+pub(crate) fn pick_in_running(running: &[f64], target: f64) -> usize {
+    let index = running.partition_point(|&total| total <= target);
+    if index < running.len() {
+        return index;
+    }
+    let total = running.last().copied().unwrap_or(0.0);
+    running.partition_point(|&before| before < total)
 }
 
 #[cfg(test)]
