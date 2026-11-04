@@ -367,6 +367,8 @@ fn walk_with_draw(
     // multiply to the window's likelihood.
     let mut forward_autozygous: Vec<Vec<f64>> = Vec::with_capacity(sites.len());
     let mut forward_pairs: Vec<Vec<f64>> = Vec::with_capacity(sites.len());
+    // Each site's pair margins, which the next site's step needs and the draw reads again.
+    let mut forward_margins: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(sites.len());
     let mut log_likelihood = 0.0;
     for (index, site_terms) in terms.iter().enumerate() {
         let (mut autozygous, mut pairs) = if index == 0 {
@@ -396,6 +398,7 @@ fn walk_with_draw(
                 PairTransition::new(keep, mass_pairs, k_f, stay_other),
                 (1.0 - stay_autozygous) * mass_autozygous / (k_f * k_f),
             );
+            forward_margins.push((rows, columns));
             (autozygous, pairs)
         };
         for (value, emission) in autozygous.iter_mut().zip(&site_terms.autozygous) {
@@ -411,6 +414,9 @@ fn walk_with_draw(
         log_likelihood += float::ln(scale);
         forward_autozygous.push(autozygous);
         forward_pairs.push(pairs);
+    }
+    if let Some(last) = forward_pairs.last() {
+        forward_margins.push(margins(last, k));
     }
 
     // The round's own path from `uniforms`, then each extra path from `extra_uniforms`, one
@@ -434,6 +440,7 @@ fn walk_with_draw(
         sites,
         &forward_autozygous,
         &forward_pairs,
+        &forward_margins,
         k,
         &parameters,
         &streams,
@@ -633,13 +640,21 @@ fn draw_state_paths(
     sites: &[WalkSite<'_>],
     forward_autozygous: &[Vec<f64>],
     forward_pairs: &[Vec<f64>],
+    forward_margins: &[(Vec<f64>, Vec<f64>)],
     k: usize,
     parameters: &WalkParameters,
     streams: &[Vec<f64>],
 ) -> Vec<Vec<State>> {
     let mut paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
     for (drawn, index) in (0..sites.len()).rev().enumerate() {
-        let site = SiteDraw::new(&forward_autozygous[index], &forward_pairs[index], k);
+        let (rows, columns) = &forward_margins[index];
+        let site = SiteDraw::new(
+            &forward_autozygous[index],
+            &forward_pairs[index],
+            rows,
+            columns,
+            k,
+        );
         let persistence = (index + 1 < sites.len()).then(|| {
             persistence(
                 (sites[index + 1].position - sites[index].position) as f64,
@@ -665,43 +680,58 @@ fn draw_state_paths(
 /// pair's row and of its column, plus a share of the next state itself (spec §3.5). A uniform
 /// first picks one of those parts by its mass, then a state inside it: by bisection over the
 /// pairs' running totals for a share of every pair, by a scan of `K` for a row, a column or the
-/// autozygous states. That draws from exactly the distribution the full scan does; the running
-/// totals and the margins are summed once a site, for every path drawn through it.
+/// autozygous states. That draws from exactly the distribution the full scan does. The margins
+/// are the forward pass's own; the running totals are summed the first time a path needs them —
+/// rarely, because a jump of both copies at once is the least likely transition — and serve every
+/// path drawn through the site.
 struct SiteDraw<'a> {
     autozygous: &'a [f64],
     pairs: &'a [f64],
     k: usize,
-    /// The pairs' running totals, row by row.
-    running: Vec<f64>,
-    rows: Vec<f64>,
-    columns: Vec<f64>,
+    rows: &'a [f64],
+    columns: &'a [f64],
     autozygous_mass: f64,
+    /// The pairs' total, the sum of the row totals.
+    pair_mass: f64,
+    /// The pairs' running totals, row by row, once a path has needed them.
+    running: std::cell::OnceCell<Vec<f64>>,
 }
 
 impl<'a> SiteDraw<'a> {
-    fn new(autozygous: &'a [f64], pairs: &'a [f64], k: usize) -> Self {
-        let mut total = 0.0;
-        let running = pairs
-            .iter()
-            .map(|value| {
-                total += value;
-                total
-            })
-            .collect();
-        let (rows, columns) = margins(pairs, k);
+    fn new(
+        autozygous: &'a [f64],
+        pairs: &'a [f64],
+        rows: &'a [f64],
+        columns: &'a [f64],
+        k: usize,
+    ) -> Self {
         Self {
             autozygous,
             pairs,
             k,
-            running,
             rows,
             columns,
             autozygous_mass: autozygous.iter().sum(),
+            pair_mass: rows.iter().sum(),
+            running: std::cell::OnceCell::new(),
         }
     }
 
     fn pair_mass(&self) -> f64 {
-        self.running.last().copied().unwrap_or(0.0)
+        self.pair_mass
+    }
+
+    fn running(&self) -> &[f64] {
+        self.running.get_or_init(|| {
+            let mut total = 0.0;
+            self.pairs
+                .iter()
+                .map(|value| {
+                    total += value;
+                    total
+                })
+                .collect()
+        })
     }
 
     /// The state a uniform `u` draws here, given the next site's state and the persistence
@@ -712,7 +742,7 @@ impl<'a> SiteDraw<'a> {
         let any_template =
             |rest: f64| State::Autozygous(pick_at(self.autozygous.iter().copied(), rest));
         let any_pair = |rest: f64| {
-            let position = pick_in_running(&self.running, rest);
+            let position = pick_in_running(self.running(), rest);
             State::Pair(position / k, position % k)
         };
         match next {
