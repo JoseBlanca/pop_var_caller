@@ -364,16 +364,13 @@ fn walk_with_draw(
                     stay_autozygous * within + (1.0 - stay_other) * mass_pairs / k_f
                 })
                 .collect();
-            let mut pairs = vec![0.0; k * k];
-            for first in 0..k {
-                for second in 0..k {
-                    let within = keep * keep * previous_pairs[first * k + second]
-                        + keep * (1.0 - keep) * (rows[first] + columns[second]) / k_f
-                        + (1.0 - keep) * (1.0 - keep) * mass_pairs / (k_f * k_f);
-                    pairs[first * k + second] = stay_other * within
-                        + (1.0 - stay_autozygous) * mass_autozygous / (k_f * k_f);
-                }
-            }
+            let pairs = pair_transition(
+                previous_pairs,
+                &rows,
+                &columns,
+                PairTransition::new(keep, mass_pairs, k_f, stay_other),
+                (1.0 - stay_autozygous) * mass_autozygous / (k_f * k_f),
+            );
             (autozygous, pairs)
         };
         for (value, emission) in autozygous.iter_mut().zip(&site_terms.autozygous) {
@@ -456,17 +453,13 @@ fn walk_with_draw(
                     stay_autozygous * within + (1.0 - stay_autozygous) * total_pairs / (k_f * k_f)
                 })
                 .collect();
-            let mut pairs = vec![0.0; k * k];
-            for first in 0..k {
-                for second in 0..k {
-                    let within = keep * keep * weighted_pairs[first * k + second]
-                        + keep * (1.0 - keep) * (rows[first] + columns[second]) / k_f
-                        + (1.0 - keep) * (1.0 - keep) * total_pairs / (k_f * k_f);
-                    pairs[first * k + second] =
-                        stay_other * within + (1.0 - stay_other) * total_autozygous / k_f;
-                }
-            }
-            backward_pairs = pairs;
+            backward_pairs = pair_transition(
+                &weighted_pairs,
+                &rows,
+                &columns,
+                PairTransition::new(keep, total_pairs, k_f, stay_other),
+                (1.0 - stay_other) * total_autozygous / k_f,
+            );
             let total: f64 =
                 backward_autozygous.iter().sum::<f64>() + backward_pairs.iter().sum::<f64>();
             for value in backward_autozygous
@@ -924,6 +917,56 @@ fn joint_along(
         *value /= total;
     }
     Some(joint)
+}
+
+/// **A pair state's transition, split by how many copies keep their template**: both
+/// (`keep²`), one (`keep · (1 − keep)` spread over the `K` templates the other may jump to), or
+/// neither (`(1 − keep)²` spread over all `K²` pairs, times the mass it comes from), all times the
+/// chance of staying out of the autozygous state.
+#[derive(Clone, Copy)]
+struct PairTransition {
+    stay_other: f64,
+    both_kept: f64,
+    one_kept: f64,
+    none_kept: f64,
+}
+
+impl PairTransition {
+    fn new(keep: f64, pair_mass: f64, k_f: f64, stay_other: f64) -> Self {
+        Self {
+            stay_other,
+            both_kept: keep * keep,
+            one_kept: keep * (1.0 - keep) / k_f,
+            none_kept: (1.0 - keep) * (1.0 - keep) * pair_mass / (k_f * k_f),
+        }
+    }
+}
+
+/// **One step of the pair states** (spec §3.5), forward or backward: each pair's mass from
+/// `values` (`k × k`, row by row) with its row and column sums, moved by `transition`, plus
+/// `from_autozygous`, the share arriving at every pair from the autozygous states.
+fn pair_transition(
+    values: &[f64],
+    rows: &[f64],
+    columns: &[f64],
+    transition: PairTransition,
+    from_autozygous: f64,
+) -> Vec<f64> {
+    let PairTransition {
+        stay_other,
+        both_kept,
+        one_kept,
+        none_kept,
+    } = transition;
+    let column_terms: Vec<f64> = columns.iter().map(|column| one_kept * column).collect();
+    let mut out = Vec::with_capacity(values.len());
+    for (row, &row_sum) in values.chunks_exact(columns.len()).zip(rows) {
+        let row_term = one_kept * row_sum + none_kept;
+        out.extend(row.iter().zip(&column_terms).map(|(&value, column_term)| {
+            stay_other * (both_kept * value + row_term + column_term) + from_autozygous
+        }));
+    }
+    out
 }
 
 /// Row and column sums of a `k × k` matrix stored row by row, each summed in index order.
