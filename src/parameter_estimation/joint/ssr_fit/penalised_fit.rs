@@ -29,6 +29,7 @@ use std::time::Instant;
 use super::expected_counts::{
     CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs, ScoredDistinctRows,
     concentration_stopped_inside_its_search, expected_counts_by_distinct_rows,
+    expected_counts_with_model, read_model_of,
 };
 use super::read_group_stutter::{
     ClassEvidence, fit_multipliers_of_a_typical_one, log_multiplier_error,
@@ -125,6 +126,14 @@ pub struct PenalisedFitConfig {
     /// **`None` scores every read group at the class's rate**, as the fit did before 2026-11-02. A
     /// cohort of one read group is always scored so: there is nothing to tell its multiplier from.
     pub read_group_multiplier_pull: Option<f64>,
+    /// **Whether the loop jumps along its own path** ([`Period::squarem_step`], spec §2.8): two
+    /// rounds record the path, every number jumps along it, and the round after keeps the jump
+    /// only if the reads' log-likelihood did not fall.
+    pub extrapolate: bool,
+    /// **Whether a motif length refitted after the stutter-tail rule left tracts out starts from
+    /// the fit before**, rather than from the starting stutter (spec `parameter_prepass_ssr.md`
+    /// §4.6.1).
+    pub refit_from_the_fit_before: bool,
     /// **A class with fewer loci with reads than this takes its stutter from the curves and does
     /// not shape them** (spec §2.11). Production's is [`LOCI_TO_SHAPE_THE_STUTTER_CURVES`]; zero
     /// lets every class shape them, as the fit did before 2026-11-02.
@@ -174,7 +183,7 @@ impl PenalisedFitConfig {
     /// |---|---|
     /// | allele window | ±[`ALLELE_SPAN`], 9 |
     /// | start | [`STARTING_STUTTER`]: slip rate 0.05, shorter share 0.5, fall-off 0.3 |
-    /// | rounds at most / stop when no number moves more than | [`MAX_ROUNDS`] 2,000 / [`TOLERANCE`] 10⁻⁷ |
+    /// | rounds at most / stop when no number moves more than | [`MAX_ROUNDS`] 2,000 / [`TOLERANCE`] 10⁻⁵ |
     /// | floor under the allele lengths | [`ALLELE_PRIOR_LOCI`], one locus's worth, plus [`ALLELE_PSEUDO_DRAWS_A_CLASS`], one draw a class |
     /// | prior under the three stutter curves | [`STUTTER_PRIOR_READS`], one read's worth a class, at [`STUTTER_PRIOR_CENTRE`]: slip rate 0.10, shorter share 0.5, fall-off 0.05 |
     /// | F read off pairs of samples, at most | [`PAIR_ALTERNATIONS`], 10 times |
@@ -205,6 +214,8 @@ impl PenalisedFitConfig {
             read_group_multiplier_pull: Some(
                 super::read_group_stutter::PULL_TOWARD_ONE_SLIPPED_READS,
             ),
+            extrapolate: true,
+            refit_from_the_fit_before: true,
             loci_to_shape_the_stutter_curves: LOCI_TO_SHAPE_THE_STUTTER_CURVES,
             pair_alternations: PAIR_ALTERNATIONS,
             rounds_choosing_strength: 200,
@@ -239,6 +250,8 @@ impl PenalisedFitConfig {
             stutter_prior_reads: 0.0,
             stutter_prior_centre: STUTTER_PRIOR_CENTRE,
             read_group_multiplier_pull: None,
+            extrapolate: false,
+            refit_from_the_fit_before: false,
             loci_to_shape_the_stutter_curves: 0,
             pair_alternations: 0,
             rounds_choosing_strength: 200,
@@ -373,9 +386,13 @@ pub const STARTING_STUTTER: Slippage = Slippage {
 /// **At most this many rounds of the loop**, over every run of penalised counting together
 /// (spec §2.7). The bench's value; soft.
 pub const MAX_ROUNDS: usize = 2000;
-/// **The loop stops once no number moves by more than this in a round** (spec §2.7). The bench's
-/// value; soft.
-pub const TOLERANCE: f64 = 1e-7;
+/// **The loop stops once no number moves by more than this in a round** (spec §2.7). Soft. It was
+/// 10⁻⁷, the bench's value, until 2026-11-04, when 10⁻⁵ was measured on tomato2 to move no
+/// multiplier by more than 0.0004% and no slip rate by more than 0.06%, at half the time.
+pub const TOLERANCE: f64 = 1e-5;
+
+/// The longest jump a squared-extrapolation cycle takes, in multiples of a round's step.
+const SQUAREM_LONGEST_STEP: f64 = 50.0;
 /// **One draw a class, spread evenly over the allele lengths**: the first floor under the allele
 /// draws ([`PenalisedFitConfig::allele_pseudo_draws`] holds it per length). Spec §2.4, measured.
 pub const ALLELE_PSEUDO_DRAWS_A_CLASS: f64 = 1.0;
@@ -767,8 +784,9 @@ fn fit_one_period(
 /// have removed tracts. Standard errors are computed on the last fit only.
 ///
 /// `indices` are the motif length's classes in `strata`. **A tract removed stays out**, which is
-/// what makes the rounds end. Each refit starts afresh, so the answer does not depend on where the
-/// round before stopped.
+/// what makes the rounds end. With [`PenalisedFitConfig::refit_from_the_fit_before`] each refit
+/// starts from the numbers and curves the fit before reached, when it fitted the same classes:
+/// that fit is closer than the starting stutter, and the refit still runs to the tolerance.
 fn fit_one_period_leaving_out_the_stutter_tail(
     strata: &mut [StratumEvidence],
     indices: &[usize],
@@ -782,9 +800,16 @@ fn fit_one_period_leaving_out_the_stutter_tail(
         rounds: 0,
         settled: true,
     };
+    let mut previous: Option<Period> = None;
     loop {
         let classes: Vec<&StratumEvidence> = indices.iter().map(|&index| &strata[index]).collect();
-        let Some(period) = fitted_period(&classes, homozygote_excess, fit, round_ended) else {
+        let Some(period) = fitted_period_from(
+            &classes,
+            homozygote_excess,
+            fit,
+            round_ended,
+            previous.as_ref().filter(|_| fit.refit_from_the_fit_before),
+        ) else {
             return (no_period_fit(&classes), outcome);
         };
         let flagged: Vec<(usize, Vec<usize>)> = classes
@@ -814,6 +839,7 @@ fn fit_one_period_leaving_out_the_stutter_tail(
             );
         }
         drop(classes);
+        previous = Some(period);
         outcome.rounds += 1;
         for (class, tracts) in flagged {
             let evidence = &mut strata[indices[class]];
@@ -881,6 +907,18 @@ fn fitted_period(
     fit: &PenalisedFitConfig,
     round_ended: &dyn Fn(usize, f64),
 ) -> Option<Period> {
+    fitted_period_from(classes, homozygote_excess, fit, round_ended, None)
+}
+
+/// [`fitted_period`], started from `previous`'s numbers and curves where it fitted the same
+/// classes at the same grid points.
+fn fitted_period_from(
+    classes: &[&StratumEvidence],
+    homozygote_excess: &[f64],
+    fit: &PenalisedFitConfig,
+    round_ended: &dyn Fn(usize, f64),
+    previous: Option<&Period>,
+) -> Option<Period> {
     if let Some(problem) = fit.stutter_prior_problem() {
         panic!("{problem}");
     }
@@ -893,12 +931,29 @@ fn fitted_period(
         );
     }
     let mut period = Period::new(classes, fit)?;
+    let mut started_close = false;
+    if let Some(previous) = previous
+        && previous.class_at_point == period.class_at_point
+        && previous.stutter_from_the_curves == period.stutter_from_the_curves
+        && previous.multipliers.as_ref().map(Vec::len) == period.multipliers.as_ref().map(Vec::len)
+    {
+        period.slippage = previous.slippage.clone();
+        period.shares = previous.shares.clone();
+        period.concentration = previous.concentration.clone();
+        period.level_curve = previous.level_curve.clone();
+        period.shorter_curve = previous.shorter_curve.clone();
+        period.fall_off_curve = previous.fall_off_curve.clone();
+        period.between_curve = previous.between_curve.clone();
+        period.shares_curve = previous.shares_curve.clone();
+        period.multipliers = previous.multipliers.clone();
+        started_close = true;
+    }
     // With read groups fitted apart, the loop starts where one stutter for every read group
     // settles: a round at one stutter scores the pooled rows, several times fewer than the keyed
     // ones, so most of the climb is cheap, and the rounds that follow, each read group at its own
     // rate alternating with the class numbers until both settle, are the fit (ruling 1).
     let multipliers = period.multipliers.take();
-    if multipliers.is_some() {
+    if multipliers.is_some() && !started_close {
         period.count(classes, homozygote_excess, fit, false, round_ended);
     }
     period.multipliers = multipliers;
@@ -1482,6 +1537,9 @@ struct Period {
     multipliers: Option<Vec<f64>>,
     /// How far, in natural-log units, the multiplier that moved most moved in the last round.
     multiplier_change: f64,
+    /// The squared-extrapolation cycle in progress ([`Period::squarem_step`]).
+    squarem: SquaremCycle,
+
     /// Each multiplier's standard error on the log scale, once computed.
     multiplier_errors: Vec<Option<f64>>,
     /// Per grid point, whether the class there takes its stutter numbers from the curves without
@@ -1552,6 +1610,7 @@ impl Period {
             multipliers,
             multiplier_change: 0.0,
             multiplier_errors: Vec::new(),
+            squarem: SquaremCycle::Idle,
             stutter_from_the_curves,
             stutter_held_at,
             between_locus_share_measurable: with_reads.iter().any(|&index| {
@@ -1641,6 +1700,118 @@ impl Period {
     /// under the constraint that their geometric mean, each weighted by its reads, is one
     /// ([`fit_multipliers_of_a_typical_one`]). Returns how far, in natural-log units, the
     /// multiplier that moved most moved.
+    /// **Every number a round moves, on the scale the fit draws it on**: per class, its slip rate,
+    /// shorter share and fall-off as logits, its spread and allele-length shares as logarithms; then
+    /// every multiplier as a logarithm.
+    fn state(&self) -> Vec<f64> {
+        let logit = |p: f64| float::ln(p / (1.0 - p));
+        let mut state = Vec::new();
+        for point in 0..self.points() {
+            if self.class_at_point[point].is_none() {
+                continue;
+            }
+            let s = self.slippage[point];
+            state.extend([logit(s.level), logit(s.shorter_share), logit(s.fall_off)]);
+            state.push(float::ln(self.concentration[point]));
+            state.extend(self.shares[point].iter().map(|share| float::ln(*share)));
+        }
+        state.extend(self.multipliers.iter().flatten().map(|m| float::ln(*m)));
+        state
+    }
+
+    /// The inverse of [`state`](Self::state).
+    fn set_state(&mut self, state: &[f64]) {
+        let mut at = state.iter().copied();
+        let mut next = || at.next().expect("a state as long as the fit's");
+        for point in 0..self.points() {
+            if self.class_at_point[point].is_none() {
+                continue;
+            }
+            self.slippage[point] = Slippage {
+                level: logistic(next()).min(0.95),
+                shorter_share: logistic(next()),
+                fall_off: logistic(next()).clamp(0.0, 0.99),
+            };
+            self.concentration[point] =
+                float::exp(next()).clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1);
+            let mut shares: Vec<f64> = (0..self.shares[point].len())
+                .map(|_| float::exp(next()))
+                .collect();
+            let total: f64 = shares.iter().sum();
+            for share in &mut shares {
+                *share /= total;
+            }
+            self.shares[point] = shares;
+        }
+        if let Some(multipliers) = self.multipliers.as_mut() {
+            for multiplier in multipliers {
+                *multiplier = float::exp(next());
+            }
+        }
+    }
+
+    /// **One step of the squared-extrapolation cycle, after an ordinary round** that started from
+    /// `start` at log-likelihood `log_likelihood`. Returns how far the numbers jumped, on their own
+    /// scales, so that a jump is never taken for having settled.
+    fn squarem_step(&mut self, start: Vec<f64>, log_likelihood: f64) -> f64 {
+        let reached = self.state();
+        match std::mem::take(&mut self.squarem) {
+            SquaremCycle::Idle => {
+                self.squarem = SquaremCycle::OneRound {
+                    start,
+                    first: reached,
+                };
+                0.0
+            }
+            SquaremCycle::OneRound {
+                start: origin,
+                first,
+            } => {
+                // This round started from `first`: its log-likelihood is the first round's.
+                let r: Vec<f64> = first.iter().zip(&origin).map(|(a, b)| a - b).collect();
+                let v: Vec<f64> = reached
+                    .iter()
+                    .zip(&first)
+                    .zip(&r)
+                    .map(|((a, b), r)| a - b - r)
+                    .collect();
+                let length = |x: &[f64]| x.iter().map(|y| y * y).sum::<f64>().sqrt();
+                if length(&v) == 0.0 || length(&r) == 0.0 {
+                    return 0.0;
+                }
+                let alpha = (-length(&r) / length(&v)).clamp(-SQUAREM_LONGEST_STEP, -1.0);
+                let jumped: Vec<f64> = origin
+                    .iter()
+                    .zip(&r)
+                    .zip(&v)
+                    .map(|((o, r), v)| o - 2.0 * alpha * r + alpha * alpha * v)
+                    .collect();
+                let jump = jumped
+                    .iter()
+                    .zip(&reached)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f64::max);
+                self.set_state(&jumped);
+                self.squarem = SquaremCycle::Jumped {
+                    fallback: reached,
+                    to_beat: log_likelihood,
+                };
+                jump
+            }
+            SquaremCycle::Jumped { fallback, to_beat } => {
+                // This round started from the jumped numbers.
+                if log_likelihood < to_beat {
+                    self.set_state(&fallback);
+                    self.class_change
+                        .iter_mut()
+                        .for_each(|c| *c = f64::INFINITY);
+                    return f64::INFINITY;
+                }
+                0.0
+            }
+        }
+    }
+
     fn update_multipliers(&mut self, counts: &[Option<ClassCounts>], pull: f64) -> f64 {
         let Some(old) = self.multipliers.clone() else {
             return 0.0;
@@ -1690,19 +1861,26 @@ impl Period {
                 continue;
             };
             let evidence = classes[*index];
+            // One read model for the class serves each of its tracts: it depends on the stutter
+            // and the multipliers alone.
+            let model = read_model_of(
+                evidence,
+                &self.table_of(evidence, homozygote_excess),
+                self.slippage[point],
+                fit.allele_span,
+            );
             let per_tract: Vec<ClassCounts> = evidence
                 .tracts
                 .par_iter()
                 .filter(|tract| !tract.samples.is_empty())
                 .map(|tract| {
                     let one = one_tract_of(evidence, tract);
-                    expected_counts_by_distinct_rows(
+                    expected_counts_with_model(
                         &one,
                         &self.table_of(&one, homozygote_excess),
-                        self.slippage[point],
+                        &model,
                         &self.shares[point],
                         self.concentration[point],
-                        fit.allele_span,
                     )
                 })
                 .collect();
@@ -1757,6 +1935,7 @@ impl Period {
                 } else {
                     StrengthSearch::Held
                 };
+            let state_before = self.state();
             let started = Instant::now();
             // **One class at a time**, the threads working inside it (`expected_counts` spreads the
             // class's distinct rows over the pool). A class's table of distinct rows, with each
@@ -1981,6 +2160,14 @@ impl Period {
                 self.multiplier_change = moved;
                 change = change.max(moved);
             }
+            // Not while the curves' stiffness is first searched for, when a round's step reflects
+            // the search as much as the reads.
+            if fit.extrapolate && search != StrengthSearch::Wide && rounds_here > 5 {
+                let jump = self.squarem_step(state_before, self.composite_log_likelihood);
+                change = change.max(jump);
+            } else {
+                self.squarem = SquaremCycle::Idle;
+            }
             self.last_counts = counts;
             self.last_change = change;
             round_ended(self.rounds, change);
@@ -1989,6 +2176,7 @@ impl Period {
             }
         }
         self.rounds_per_counting.push(rounds_here);
+        self.squarem = SquaremCycle::Idle;
         if spread_held {
             self.spread_from_pairs = true;
         }
@@ -2196,6 +2384,9 @@ impl Period {
                         .map(|theta| class_slope(evidence, &distinct, point, &theta));
                     add_column(column, &above, &below);
                 }
+                // One read model at the central numbers serves every locus's small table.
+                let central_model =
+                    read_model_of(evidence, &distinct, central_stutter, allele_span);
                 // Gone before the loci build their own small tables.
                 drop(distinct);
                 let by_locus: Vec<Vec<f64>> = evidence
@@ -2218,7 +2409,15 @@ impl Period {
                             bases_compared: 0,
                             mismatching_bases: 0,
                         };
-                        class_slope(&one, &self.table_of(&one, homozygote_excess), point, &theta)
+                        let (_, shares, concentration) = numbers_of(point, &theta);
+                        let counts = expected_counts_with_model(
+                            &one,
+                            &self.table_of(&one, homozygote_excess),
+                            &central_model,
+                            &shares,
+                            concentration,
+                        );
+                        self.without_a_thin_class_stutter(point, slope_of(&counts, &theta))
                     })
                     .collect();
                 let mut spread = vec![0.0; width * width];
@@ -2659,6 +2858,20 @@ impl Period {
             }),
         }
     }
+}
+
+/// **Where a squared-extrapolation cycle stands** (Varadhan and Roland 2008): two ordinary rounds
+/// record the path, the numbers jump along it, and the round after the jump keeps it only if the
+/// reads' log-likelihood at the jumped numbers is not below the first round's.
+#[derive(Debug, Clone, Default)]
+enum SquaremCycle {
+    #[default]
+    Idle,
+    /// One ordinary round run: the numbers it started from and those it reached.
+    OneRound { start: Vec<f64>, first: Vec<f64> },
+    /// Jumped: the numbers two ordinary rounds reached, to return to, and the log-likelihood at
+    /// the first round's numbers, to beat.
+    Jumped { fallback: Vec<f64>, to_beat: f64 },
 }
 
 fn logistic(value: f64) -> f64 {
@@ -4012,7 +4225,7 @@ mod tests {
                 fall_off: 0.3,
             },
             max_rounds: 2000,
-            tolerance: 1e-7,
+            tolerance: 1e-5,
             smoothing: Smoothing::MarginalLikelihood,
             kink_knee: 2.5,
             kink_tail: 2.0,
@@ -4025,6 +4238,8 @@ mod tests {
                 fall_off: 0.05,
             },
             read_group_multiplier_pull: Some(20.0),
+            extrapolate: true,
+            refit_from_the_fit_before: true,
             loci_to_shape_the_stutter_curves: 3,
             pair_alternations: 10,
             rounds_choosing_strength: 200,

@@ -474,7 +474,8 @@ struct RowWeights {
 /// **One slip rate for a pooled table, one for each distinct multiplier for a keyed one.** Read
 /// groups at the same multiplier share their rate's distributions, so a keyed table at every
 /// multiplier one builds one, as a pooled table does.
-struct ReadModel {
+#[derive(Clone)]
+pub(super) struct ReadModel {
     classes: usize,
     span: i32,
     read_span: i32,
@@ -491,6 +492,7 @@ struct ReadModel {
 
 /// **The part of a [`ReadModel`] that depends on the slip rate**: each allele's read-length
 /// distribution, its log chances under each genotype, and the chance a read reports its allele.
+#[derive(Clone)]
 struct ReadModelAtRate {
     per_allele: Vec<Vec<f64>>,
     /// [`ln_read_chances`] of `per_allele`: a row per genotype in `genotypes` order.
@@ -818,7 +820,7 @@ impl GenotypePrior {
 /// each step ([`Self::expected_counts`]).
 pub(super) struct ScoredDistinctRows<'a> {
     distinct: &'a DistinctRows,
-    model: ReadModel,
+    model: std::borrow::Cow<'a, ReadModel>,
     scored: Vec<ScoredRow>,
 }
 
@@ -837,6 +839,16 @@ impl<'a> ScoredDistinctRows<'a> {
             distinct.keying,
             distinct.multipliers.as_deref(),
         );
+        Self::with_model(evidence, distinct, std::borrow::Cow::Owned(model))
+    }
+
+    /// Every row of `distinct` scored with `model`, built for `evidence` or for evidence that
+    /// holds it, as a class holds each of its tracts.
+    fn with_model(
+        evidence: &StratumEvidence,
+        distinct: &'a DistinctRows,
+        model: std::borrow::Cow<'a, ReadModel>,
+    ) -> Self {
         // [`ln_reads`] reads a row against its log table bucket by bucket and would drop a bucket
         // the table lacks; every part of a row is built `2 · read_span + 1` buckets long.
         let buckets = (2 * evidence.read_span + 1) as usize;
@@ -1133,6 +1145,38 @@ pub(super) fn expected_counts_by_distinct_rows(
 ) -> Counts {
     ScoredDistinctRows::of(evidence, distinct, slippage, allele_span)
         .expected_counts(shares, concentration)
+}
+
+/// [`expected_counts_by_distinct_rows`] with a read model already built for the class `evidence`
+/// belongs to ([`read_model_of`]): one tract's rows are few, and the model, one log table per
+/// multiplier, can cost more than scoring them.
+pub(super) fn expected_counts_with_model(
+    evidence: &StratumEvidence,
+    distinct: &DistinctRows,
+    model: &ReadModel,
+    shares: &[f64],
+    concentration: f64,
+) -> Counts {
+    ScoredDistinctRows::with_model(evidence, distinct, std::borrow::Cow::Borrowed(model))
+        .expected_counts(shares, concentration)
+}
+
+/// **The read model a class's rows are scored with**, at `slippage` and `distinct`'s keying and
+/// multipliers: built once, it scores the rows of any of the class's tracts
+/// ([`expected_counts_with_model`]).
+pub(super) fn read_model_of(
+    evidence: &StratumEvidence,
+    distinct: &DistinctRows,
+    slippage: Slippage,
+    allele_span: i32,
+) -> ReadModel {
+    ReadModel::of(
+        evidence,
+        slippage,
+        allele_span,
+        distinct.keying,
+        distinct.multipliers.as_deref(),
+    )
 }
 
 /// Every read group of `evidence` scored at the class's one stutter: one slippage group, every

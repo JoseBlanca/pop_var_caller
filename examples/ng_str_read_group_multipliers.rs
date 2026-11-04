@@ -88,12 +88,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sample_of.insert(read_group.get(), row.sample);
         }
     }
+    let started = std::time::Instant::now();
     let fit = fit_repeat_tracts(
         &mut strata,
         &excess,
         &PenalisedFitConfig::production(),
         &TractExclusion::production(),
     );
+    eprintln!("repeat-tract fit: {:.1} s", started.elapsed().as_secs_f64());
 
     let mut out = BufWriter::new(File::create(&cli.args.output)?);
     writeln!(

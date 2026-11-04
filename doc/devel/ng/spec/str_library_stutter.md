@@ -146,7 +146,7 @@ becomes:
 **The loop starts where one stutter for every read group settles** (amended 2026-11-04): the motif
 length is first fitted with every read group at the class's rate, its rows pooled, until no number
 moves; then the multipliers enter, all at one, and the rounds above run from there. **The loop stops
-as today**, when no number moves by more than the tolerance (10⁻⁷) or the rounds run out (2,000),
+as today**, when no number moves by more than the tolerance (10⁻⁵ since 2026-11-04, `str_penalised_fit.md` §2.8) or the rounds run out (2,000),
 and the multipliers count among the numbers that must stop moving. The duplicated-tract rules run as
 today, between fits of the motif length (§5).
 

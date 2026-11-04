@@ -223,6 +223,12 @@ slip rate 0.5% of its value low changes any call is not measured (§5).
 
 ### 2.6 Standard errors
 
+*Cost, 2026-11-04*: each class's read model, which depends on the stutter and the read groups'
+multipliers alone, is built once and serves every tract's small table in the two per-tract passes
+(each tract's contribution to the spread, and each read group's to its multiplier's). Building one
+a tract cost, at 960 read groups and 1,000 tracts a class, 84 s of standard errors against 42 s;
+no number moves.
+
 **Every reported number carries one, computed as `H⁻¹(B + P)H⁻¹`**: H the penalised curvature of the
 objective, B the sum over loci of each locus's score contribution times itself, P the fit's prior —
 the bend penalties, the stutter prior's curvature (§2.10.4) and the allele-length prior's (below).
@@ -311,7 +317,7 @@ these**:
 |---|---|---|
 | allele window | ±9 | `str_allele_window.md` |
 | start | slip rate 0.05, shorter share 0.5, fall-off 0.3 | bench; soft |
-| rounds at most / stop when no number moves more than | 2,000 / 10⁻⁷ | bench; soft |
+| rounds at most / stop when no number moves more than | 2,000 / 10⁻⁵ | §2.8, measured 2026-11-04 (was 10⁻⁷, the bench's); soft |
 | floor | one locus's worth + one draw a class | §2.4, measured |
 | prior under the three stutter curves: weight (`STUTTER_PRIOR_READS`) | one read's worth a class, each curve | §2.10.2; owner 2026-10-15, kept after C8's three-seed sweep of 0, 1 and 5 on held-out loci |
 | prior under the three stutter curves: centre (`STUTTER_PRIOR_CENTRE`) | slip rate 0.10, shorter share 0.5, fall-off 0.05: calling's default stutter | §2.10; owner 2026-10-15; not a measurement |
@@ -333,14 +339,33 @@ Both change no number beyond about 10⁻⁶ (`cost_2026-10-14.md`). **Their gain
 30 reads a row repeats 3.6 times, at 300 reads 1.2 times.
 
 
-*Tried and dropped, 2026-11-04: jumping a steady approach to its end.* Near its answer the loop
-creeps, each round's step about 0.93 times the last; moving every number to where the geometric
-series of steps ends, once three rounds agreed on the direction and the ratio, cut the rounds on
-drawn cohorts (183 → 72) with the same answer to 6 decimals. **On tomato2 it did harm**: the
-tetranucleotide fit never settled in 2,000 rounds (still moving by 2×10⁻⁴), and the homopolymer
-fit took 763 rounds with read groups apart where it takes 199 without. Real classes are thin and
-their curves stiffen and ease as the numbers move, so a jump lands where the next rounds must
-undo it. Not built.
+**Three ways to fewer rounds, owner 2026-11-04.** Near its answer the loop creeps: each round's
+step is about 0.93 times the last, so the last factor of 100 toward the tolerance takes about 60
+rounds, and a start ten times closer saves only about 32.
+
+- **The tolerance is 10⁻⁵** (was 10⁻⁷). On tomato2 it moves no read-group multiplier by more than
+  0.0004% and no slip rate by more than 0.06% (a class of 3 loci), at half the time (80 s → 39 s).
+  The numbers' own errors are 3% and more.
+- **The loop jumps along its own path, guarded** (`PenalisedFitConfig::extrapolate`; squared
+  extrapolation, Varadhan and Roland 2008). Two ordinary rounds record the path, from `θ₀` to `θ₁`
+  to `θ₂`; with `r = θ₁ − θ₀` and `v = θ₂ − θ₁ − r`, every number jumps to
+  `θ₀ − 2αr + α²v`, `α = −‖r‖/‖v‖` held between −50 and −1 (−1 lands on `θ₂`). The round after
+  the jump keeps it only if the reads' log-likelihood at the jumped numbers is not below that at
+  `θ₁`; otherwise the numbers return to `θ₂`. The numbers are those a round moves, on the scales
+  the curves draw them on: per class the slip rate, shorter share and fall-off as logits, the
+  spread and the allele-length shares as logarithms (the shares renormalised), and every
+  read-group multiplier as a logarithm. Not in the first five rounds of a counting run, nor while
+  the curves' stiffness is first searched for. On tomato2, at the tolerance of 10⁻⁵, the fit takes
+  32 s against 39 s; about half the jumps are undone. Dinucleotide multipliers move by up to 0.11%
+  and slip rates by up to 0.25% against the loop without it, the same at 10⁻⁷ and 10⁻⁵: the jumps
+  move the path along which the curves' stiffness is chosen.
+- *Tried and dropped*: the same jump **without the guard** cut the rounds on drawn cohorts but on
+  tomato2 left the tetranucleotide fit unsettled after 2,000 rounds; **recomputing alternate
+  classes** each round, the rest reusing their last counts, needed proportionally more rounds
+  (129, 172 and 204 for every class, halves and thirds).
+
+*Measured on a drawn cohort of 960 read groups, 9 homopolymer classes of 1,000 loci at 3 reads, 6
+threads*: 303 s at the old settings, 87 s with the three above and the shared read model of §2.6.
 
 ### 2.9 What the run logs
 

@@ -1242,7 +1242,7 @@ mod tests {
         assert_eq!(
             round_line(2, 140, 3.14e-5, &a_narrow_production_fit()),
             "motif length 2, round 140 of at most 2000: the largest change in any number was \
-             3.1e-5 (it settles once every change is below 1e-7)"
+             3.1e-5 (it settles once every change is below 1e-5)"
         );
     }
 

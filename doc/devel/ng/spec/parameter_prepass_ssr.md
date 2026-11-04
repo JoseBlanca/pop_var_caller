@@ -1018,6 +1018,14 @@ hard rule because it is simpler, and the price, a few good tracts, is affordable
 A tract left out stays out: a later round never brings it back, which is what guarantees the rounds
 end.
 
+**A refit starts from the fit before** (owner, 2026-11-04; `PenalisedFitConfig::refit_from_the_fit_before`):
+its numbers, curves and read-group multipliers, wherever it fitted the same classes, and it runs to
+the tolerance from there. Any start leans the answer a little toward itself, within the tolerance
+and through the path along which the curves' stiffness is chosen; the fit before, a few tracts
+away, is a closer start than the starting stutter. *Measured on tomato2*: the repeat-tract fit
+takes 19 s against 23 s; a homopolymer multiplier moves by 0.01% and one slip rate by 0.4%, in a
+class of 3 loci.
+
 **Why rounds, and not one test.** A stratum's rate is inflated by its own outliers, so in the first
 round they do not look improbable. In the one-round prototype, hexanucleotides stayed at 4 to 11
 slips in 100 against 0 at confident tracts. Each round tests against a rate with the last round's
