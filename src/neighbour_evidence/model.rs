@@ -355,7 +355,7 @@ fn walk_with_draw(
             let previous_autozygous = &forward_autozygous[index - 1];
             let previous_pairs = &forward_pairs[index - 1];
             let mass_autozygous: f64 = previous_autozygous.iter().sum();
-            let mass_pairs: f64 = previous_pairs.iter().sum();
+            let mass_pairs = lane_sum(previous_pairs);
             let (rows, columns) = margins(previous_pairs, k);
             let autozygous = previous_autozygous
                 .iter()
@@ -379,9 +379,10 @@ fn walk_with_draw(
         for (value, emission) in pairs.iter_mut().zip(&site_terms.pairs) {
             *value *= emission;
         }
-        let scale: f64 = autozygous.iter().sum::<f64>() + pairs.iter().sum::<f64>();
+        let scale: f64 = autozygous.iter().sum::<f64>() + lane_sum(&pairs);
+        let inverse = 1.0 / scale;
         for value in autozygous.iter_mut().chain(pairs.iter_mut()) {
-            *value /= scale;
+            *value *= inverse;
         }
         log_likelihood += float::ln(scale);
         forward_autozygous.push(autozygous);
@@ -451,7 +452,7 @@ fn walk_with_draw(
                 .map(|(value, emission)| value * emission)
                 .collect();
             let total_autozygous: f64 = weighted_autozygous.iter().sum();
-            let total_pairs: f64 = weighted_pairs.iter().sum();
+            let total_pairs = lane_sum(&weighted_pairs);
             let (rows, columns) = margins(&weighted_pairs, k);
             backward_autozygous = weighted_autozygous
                 .iter()
@@ -467,13 +468,13 @@ fn walk_with_draw(
                 PairTransition::new(keep, total_pairs, k_f, stay_other),
                 (1.0 - stay_other) * total_autozygous / k_f,
             );
-            let total: f64 =
-                backward_autozygous.iter().sum::<f64>() + backward_pairs.iter().sum::<f64>();
+            let total: f64 = backward_autozygous.iter().sum::<f64>() + lane_sum(&backward_pairs);
+            let inverse = 1.0 / total;
             for value in backward_autozygous
                 .iter_mut()
                 .chain(backward_pairs.iter_mut())
             {
-                *value /= total;
+                *value *= inverse;
             }
         }
         let site = &sites[index];
@@ -509,9 +510,7 @@ fn walk_with_draw(
         let both_autozygous: f64 = (0..k)
             .map(|state| forward_autozygous[index][state] * backward_autozygous[state])
             .sum();
-        let both_pairs: f64 = (0..k * k)
-            .map(|state| forward_pairs[index][state] * backward_pairs[state])
-            .sum();
+        let both_pairs = lane_dot(&forward_pairs[index], &backward_pairs);
         autozygous_probability[index] = both_autozygous / (both_autozygous + both_pairs);
         let last = k - 1;
         let with_last: f64 = forward_autozygous[index][last] * backward_autozygous[last]
@@ -1057,6 +1056,43 @@ fn pair_transition(
         }));
     }
     out
+}
+
+/// How many running totals [`lane_sum`] and [`lane_dot`] keep.
+const LANES: usize = 8;
+
+/// **A sum in [`LANES`] lanes**: each lane adds every eighth value, then the lanes are added in
+/// order and the values past the last whole eight after them. The order is fixed by the length
+/// alone, so the bits are the same on every machine and pool width, and the lanes vectorise where
+/// one running total — each addition waiting for the one before — cannot (`float_portability.md`).
+fn lane_sum(values: &[f64]) -> f64 {
+    let chunks = values.chunks_exact(LANES);
+    let rest: f64 = chunks.remainder().iter().sum();
+    let mut lanes = [0.0; LANES];
+    for chunk in chunks {
+        for (lane, value) in lanes.iter_mut().zip(chunk) {
+            *lane += value;
+        }
+    }
+    lanes.iter().sum::<f64>() + rest
+}
+
+/// **[`lane_sum`] of the products of `one` and `other`**, pair by pair.
+fn lane_dot(one: &[f64], other: &[f64]) -> f64 {
+    let (one_chunks, other_chunks) = (one.chunks_exact(LANES), other.chunks_exact(LANES));
+    let rest: f64 = one_chunks
+        .remainder()
+        .iter()
+        .zip(other_chunks.remainder())
+        .map(|(a, b)| a * b)
+        .sum();
+    let mut lanes = [0.0; LANES];
+    for (a, b) in one_chunks.zip(other_chunks) {
+        for ((lane, a), b) in lanes.iter_mut().zip(a).zip(b) {
+            *lane += a * b;
+        }
+    }
+    lanes.iter().sum::<f64>() + rest
 }
 
 /// Row and column sums of a `k × k` matrix stored row by row, each summed in index order.

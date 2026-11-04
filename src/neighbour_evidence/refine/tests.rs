@@ -518,7 +518,7 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
 }
 
 /// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
-const RECORDED_POSTERIOR_BITS: u64 = 0x09fb_bb78_aa91_996c;
+const RECORDED_POSTERIOR_BITS: u64 = 0x5a7f_cfa5_860e_1c2f;
 
 /// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
 /// round went unnoticed): two rounds and five leave every sample's fit in the same state, since
