@@ -68,6 +68,10 @@ pub struct NeighbourEvidenceDecision {
     /// The share of drawn paths that must agree at a phase link (`--phase-min-path-agreement`,
     /// phase output spec §9); [`decide`] sets all of them.
     pub path_agreement: PathAgreement,
+    /// Whether each sample's fragments orient its haplotypes in the rounds' draws
+    /// (`neighbour_evidence_reads_in_draw.md`); [`decide`] sets it. Off only where a test needs
+    /// the link test's reads alone.
+    pub reads_in_draw: bool,
 }
 
 impl NeighbourEvidenceDecision {
@@ -157,6 +161,7 @@ pub fn decide(
         inbreeding_by_sample: inbreeding_by_sample.to_vec(),
         sizes: WindowSizes::default(),
         path_agreement: PathAgreement::ALL,
+        reads_in_draw: true,
     }
 }
 
@@ -191,6 +196,7 @@ pub struct NeighbourEvidenceStage {
     contig_lengths: Vec<u64>,
     sizes: WindowSizes,
     path_agreement: PathAgreement,
+    reads_in_draw: bool,
     fits: Vec<SampleFit>,
     contig: Option<ContigId>,
     held: Vec<HeldLine>,
@@ -221,6 +227,7 @@ impl NeighbourEvidenceStage {
             contig_lengths,
             sizes: decision.sizes,
             path_agreement: decision.path_agreement,
+            reads_in_draw: decision.reads_in_draw,
             fits: decision
                 .inbreeding_by_sample
                 .iter()
@@ -358,7 +365,9 @@ impl NeighbourEvidenceStage {
                     &mut self.fits,
                     MAX_TEMPLATES,
                     NoReadRule::default(),
-                    Phasing::rounds_for(key).with_path_agreement(self.path_agreement),
+                    Phasing::rounds_for(key)
+                        .with_path_agreement(self.path_agreement)
+                        .with_reads_in_draw(self.reads_in_draw),
                     &joins,
                 );
                 for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {

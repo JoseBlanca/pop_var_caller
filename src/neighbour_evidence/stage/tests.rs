@@ -434,7 +434,19 @@ fn join_stage_with_reads(
     cohort: &crate::neighbour_evidence::test_cohort::TestCohort,
     fragments: impl Fn(usize) -> RecordFragments,
 ) -> Vec<(RecordPlace, Vec<u8>)> {
-    let decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+    join_stage_drawing(cohort, fragments, true)
+}
+
+/// [`join_stage_with_reads`], the fragments orienting the rounds' draws only if `reads_in_draw`.
+fn join_stage_drawing(
+    cohort: &crate::neighbour_evidence::test_cohort::TestCohort,
+    fragments: impl Fn(usize) -> RecordFragments,
+    reads_in_draw: bool,
+) -> Vec<(RecordPlace, Vec<u8>)> {
+    let decision = NeighbourEvidenceDecision {
+        reads_in_draw,
+        ..decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid())
+    };
     let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
     let mut output = Vec::new();
     for (index, line) in cohort.lines.iter().enumerate() {
@@ -591,8 +603,8 @@ fn mixed_fragments(
 
 /// **With reads, the pass writes the same bytes at any thread count** (review Mi5): every
 /// heterozygous column carries fragments of both signs, the stage runs in pools of one and eight
-/// threads, and the output is identical — and differs from the output without reads, so the read
-/// path is what ran.
+/// threads, and the output is identical — and differs from the output without reads, and from the
+/// output with reads kept out of the rounds' draws, so both read paths are what ran.
 #[test]
 fn the_pass_with_reads_writes_the_same_bytes_at_any_thread_count() {
     let cohort = join_cohort();
@@ -610,6 +622,11 @@ fn the_pass_with_reads_writes_the_same_bytes_at_any_thread_count() {
         join_stage_with_reads(&cohort, |_| RecordFragments::default()),
         "the fragments reach the link test"
     );
+    assert_ne!(
+        one,
+        join_stage_drawing(&cohort, &fragments, false),
+        "the fragments reach the rounds' draws (reads-in-draw spec §6)"
+    );
     assert_eq!(one, at(8));
 }
 
@@ -617,12 +634,14 @@ fn the_pass_with_reads_writes_the_same_bytes_at_any_thread_count() {
 /// test's `GQ` comes from the refined posterior, which the writer's `GQ` can only raise. With
 /// fragments over every heterozygous column, every column written phased with the reads and
 /// unphased without them is at `GQ` 30 or more. The cohort has phased-by-population heterozygotes
-/// below 30 next to ones the reads link, so a link test that ignored `GQ` would phase some.
+/// below 30 next to ones the reads link, so a link test that ignored `GQ` would phase some. The
+/// fragments stay out of the rounds' draws: there they change the population's phase, which may
+/// phase a heterozygote below 30 (reads-in-draw spec §2.1), and this test is of the link test.
 #[test]
 fn a_column_reads_newly_phase_has_gq_30_or_more() {
     let cohort = join_cohort();
     let without = join_stage_with_reads(&cohort, |_| RecordFragments::default());
-    let with = join_stage_with_reads(&cohort, mixed_fragments(&cohort));
+    let with = join_stage_drawing(&cohort, mixed_fragments(&cohort), false);
     // The cohort's lines carry `GP` and no `GQ` key, so the written `GQ` is read from `GP` as the
     // pass computes it. The written `GP` is renormalised, which can only raise it, so this is at
     // least the `GQ` the link test saw.

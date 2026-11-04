@@ -32,8 +32,8 @@ use rayon::prelude::*;
 
 use super::fit::SampleFit;
 use super::model::{
-    GenotypePairs, HaplotypePair, WalkParameters, WalkResult, WalkSite, walk, walk_and_draw,
-    walk_and_draw_paths,
+    DrawReads, GenotypePairs, HaplotypePair, WalkParameters, WalkResult, WalkSite, walk,
+    walk_and_draw, walk_and_draw_paths,
 };
 use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
@@ -44,6 +44,7 @@ use super::records::{SampleRow, SiteRecord};
 use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
 use crate::read_phase::fragments::RecordFragments;
+use crate::read_phase::link::{Heterozygote, score_read_link};
 use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
@@ -72,6 +73,13 @@ pub const SETTLED_POSTERIOR: f64 = 0.999;
 /// keeps 101 of 294 fills with 2 wrong, from 47
 /// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`).
 pub const NO_READ_MAX_BACKGROUND_COPY: f64 = 0.1;
+
+/// **`HET_MASS_MIN`**: the smallest heterozygous mass, given the path, at which a record's
+/// orientation is drawn from the sample's reads (`neighbour_evidence_reads_in_draw.md` §2.2).
+/// Measured against ¼ and ¾ on the dense outbred simulated cohorts, it gave the fewest wrong links
+/// and the most heterozygotes phased at both 16 and 64 founders
+/// (`doc/devel/reports/implementations/reads_in_draw_2026-11-04.md`).
+pub const HET_MASS_MIN: f64 = 0.5;
 
 /// **When a sample without reads at a record is written with a genotype** (§4.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -200,6 +208,7 @@ pub struct Phasing {
     window_key: u64,
     extra_paths: usize,
     path_agreement: PathAgreement,
+    reads_in_draw: bool,
 }
 
 // The default rounds' paths fit the link test's masks.
@@ -214,6 +223,7 @@ impl Phasing {
             window_key: 0,
             extra_paths: 0,
             path_agreement: PathAgreement::ALL,
+            reads_in_draw: true,
         }
     }
 
@@ -245,6 +255,17 @@ impl Phasing {
             window_key,
             extra_paths: EXTRA_PATHS_PER_ROUND,
             path_agreement: PathAgreement::ALL,
+            reads_in_draw: true,
+        }
+    }
+
+    /// The same, each sample's fragments orienting its drawn haplotypes or not
+    /// (`neighbour_evidence_reads_in_draw.md`; on unless a test needs the link test's reads alone).
+    #[must_use]
+    pub fn with_reads_in_draw(self, reads_in_draw: bool) -> Self {
+        Self {
+            reads_in_draw,
+            ..self
         }
     }
 
@@ -662,6 +683,7 @@ pub fn refine_window_with_reads(
             .for_each(|(sample, ((state, fit), row))| {
                 solve_round(
                     records,
+                    fragments,
                     &layout,
                     &pairs,
                     store_view,
@@ -787,6 +809,7 @@ fn draw_hidden_records(
 #[allow(clippy::too_many_arguments)] // the window's data, one sample's state, and the round
 fn solve_round(
     records: &[SiteRecord],
+    fragments: &[RecordFragments],
     layout: &WindowLayout,
     pairs: &PairLayout,
     store: &HaplotypeStore,
@@ -880,6 +903,48 @@ fn solve_round(
     };
     let result = if phasing.is_on() {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, phasing.window_key, sample, round);
+        // The sample's reads in its draw (reads-in-draw spec §2.2): a link between two walk sites
+        // is `L` over its fragments at both, `None` where no fragment counts at both.
+        let fragments_at = |site: usize| {
+            fragments
+                .get(layout.record_of_site[site])
+                .map_or(&[][..], |fragments| fragments.of_sample(sample as u32))
+        };
+        let link =
+            |one: usize, one_pair: (usize, usize), other: usize, other_pair: (usize, usize)| {
+                let heterozygote = |(a, b): (usize, usize)| {
+                    // PANIC-FREE: a chain's pair has two different alleles, the lower first.
+                    Heterozygote::of(a as u16, b as u16).expect("a chain's pair is a heterozygote")
+                };
+                let (at_one, at_other) = (fragments_at(one), fragments_at(other));
+                if at_one.is_empty() || at_other.is_empty() {
+                    return None;
+                }
+                let found = score_read_link(
+                    at_one,
+                    heterozygote(one_pair),
+                    at_other,
+                    heterozygote(other_pair),
+                );
+                (found.fragments > 0).then_some(found.log_odds)
+            };
+        let hidden = |site: usize| {
+            state
+                .hidden
+                .binary_search(&layout.record_of_site[site])
+                .is_ok()
+        };
+        let mut draw_reads = (phasing.reads_in_draw && !fragments.is_empty()).then(|| DrawReads {
+            link: &link,
+            hidden: &hidden,
+            het_mass_min: HET_MASS_MIN,
+            uniforms: Uniforms::new(
+                StreamPurpose::Orientation,
+                phasing.window_key,
+                sample,
+                round,
+            ),
+        });
         let (result, haplotypes) = match state.phase.as_mut().filter(|_| phasing.averages(round)) {
             // An averaged round also draws the link test's extra paths, from a stream of their own,
             // and adds its own path to the consensus (phase output spec §2.1, §2.3).
@@ -893,6 +958,7 @@ fn solve_round(
                     &mut uniforms,
                     &mut extra_uniforms,
                     phasing.extra_paths,
+                    draw_reads.as_mut(),
                 );
                 phase.record_path(pairs, &haplotypes);
                 for path in &extra {
@@ -901,7 +967,13 @@ fn solve_round(
                 phase.add_round(&haplotypes);
                 (result, haplotypes)
             }
-            None => walk_and_draw(&sites, walk_templates, parameters, &mut uniforms),
+            None => walk_and_draw(
+                &sites,
+                walk_templates,
+                parameters,
+                &mut uniforms,
+                draw_reads.as_mut(),
+            ),
         };
         HaplotypeStore::write(&store.offsets, row, &haplotypes, |site| {
             records[layout.record_of_site[site]].row(sample) == SampleRow::Absent

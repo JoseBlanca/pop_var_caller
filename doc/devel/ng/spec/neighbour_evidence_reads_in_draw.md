@@ -1,6 +1,7 @@
 # ng — reads in the pass's haplotype draw
 
-*Spec, 2026-11-04. No code yet. It realises the item deferred in
+*Spec, 2026-11-04. Built on branch `reads-in-draw` the same day; measured in
+`doc/devel/reports/implementations/reads_in_draw_2026-11-04.md`. It realises the item deferred in
 [`neighbour_evidence_read_phase.md`](neighbour_evidence_read_phase.md) §8, "the pass's sampler using
 reads", whose condition is now met: on the outbred simulated cohort, links that rest on the
 population are still wrong 3.6 times in 100 with reads in the link test, against a ceiling of 1 in
@@ -230,7 +231,8 @@ rows; the read check; the phase writer of reads alone, where refinement does not
 | the window's fragments | `refine_window_with_reads` (`src/neighbour_evidence/refine.rs:586`), handed only to `final_solution` | also handed to `solve_round`, one sample's slice a record |
 | the draw | `draw_haplotypes` and `copies_along` (`model.rs:578`, `:677`) | `copies_along` returns the joint; a new step after the per-record joints applies §2.2, then takes the margins |
 | a link's log-odds | `score_read_link` (`src/read_phase/link.rs:192`) | unchanged, called from the new step |
-| the stream | `Uniforms`, `StreamPurpose` (`src/neighbour_evidence/random.rs:16`) | a new purpose, `Orientation`, keyed like `Path` plus the path's number within the round |
+| the stream | `Uniforms`, `StreamPurpose` (`src/neighbour_evidence/random.rs:16`) | a new purpose, `Orientation`, keyed like `Path`: one stream a sample a round, read by the round's own path and then by its extra paths, in that order |
+| the switch | — | `Phasing::with_reads_in_draw` and `NeighbourEvidenceDecision::reads_in_draw`, on wherever the pass runs; off only in the test of the link test's own `GQ` rule. No option sets it |
 
 The draw lives in `model.rs` because the joints do; the walk does not know about reads, so the new
 step takes a closure or a small trait that, given two record indices and their heterozygotes,
@@ -297,7 +299,8 @@ order (read phase spec §2.5). The draw is the same at any thread count, as the 
    - two confident, differing templates at one record (log-odds about 10.6, §2.3) against two
      fragments and then against three: the templates win in the first case and lose in the second,
      with the probabilities the chain gives;
-   - a hidden record is never in a group; a record with `H` just below ½ splits a group;
+   - a hidden record is never in a group; a record with `H` just below ½ stays out of a group, and the orientable records either side are
+     still linked across it;
    - a `1/2` heterozygote at a three-allele record reads alleles 1 and 2;
    - the written joint keeps every homozygous mass and moves the whole heterozygous mass;
    - no fragments: the haplotypes equal today's, bit for bit.
@@ -341,6 +344,9 @@ it. If the dense 64-founder cohort stays above 1 in 100, the next step is the ex
 ---
 
 ## 8. Questions for the owner
+
+**Ruled 2026-11-04: the owner accepted all three recommendations.** The cheap draw is built first,
+as a prototype behind a constant, with `HET_MASS_MIN` at ½ and ¼, ¾ measured.
 
 1. **Build the draw given the path first, and the exact draw only if it falls short?** *Recommended:
    yes.* The cheap draw costs a few percent of a walk; the exact one doubles to quadruples the walk,
