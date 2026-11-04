@@ -144,19 +144,27 @@ fn site_terms(
         by_alleles[second * alleles + first] = likelihood;
     }
     let mut weighted = vec![0.0; templates * alleles];
-    for k in 0..templates {
-        for b in 0..alleles {
-            weighted[k * alleles + b] = (0..alleles)
-                .map(|a| blurred[k * alleles + a] * by_alleles[a * alleles + b])
+    for (out, shares) in weighted
+        .chunks_exact_mut(alleles)
+        .zip(blurred.chunks_exact(alleles))
+    {
+        for (b, value) in out.iter_mut().enumerate() {
+            *value = shares
+                .iter()
+                .zip(by_alleles.iter().skip(b).step_by(alleles))
+                .map(|(share, likelihood)| share * likelihood)
                 .sum();
         }
     }
+    // Rows by slices rather than indices, so the inner products carry no bounds checks; each sum
+    // adds the same terms in the same order.
     let mut pair_emissions = vec![0.0; templates * templates];
-    for first in 0..templates {
-        for second in 0..templates {
-            pair_emissions[first * templates + second] = (0..alleles)
-                .map(|b| weighted[first * alleles + b] * blurred[second * alleles + b])
-                .sum();
+    for (out, first) in pair_emissions
+        .chunks_exact_mut(templates)
+        .zip(weighted.chunks_exact(alleles))
+    {
+        for (value, second) in out.iter_mut().zip(blurred.chunks_exact(alleles)) {
+            *value = first.iter().zip(second).map(|(w, q)| w * q).sum();
         }
     }
     let autozygous = (0..templates)
@@ -533,27 +541,34 @@ fn walk_with_draw(
         // the first copy's (K · A²) — not K² · A² by summing every state over every pair.
         let blurred = &site_terms.blurred;
         let mut second_copy = vec![0.0; k * alleles];
-        for first in 0..k {
-            for second in 0..k {
-                let weight = state_pairs[first * k + second];
-                for b in 0..alleles {
-                    second_copy[first * alleles + b] += weight * blurred[second * alleles + b];
+        for (out, weights) in second_copy
+            .chunks_exact_mut(alleles)
+            .zip(state_pairs.chunks_exact(k))
+        {
+            for (&weight, shares) in weights.iter().zip(blurred.chunks_exact(alleles)) {
+                for (value, share) in out.iter_mut().zip(shares) {
+                    *value += weight * share;
                 }
             }
         }
         let mut pair_weight = vec![0.0; alleles * alleles];
-        for first in 0..k {
-            for a in 0..alleles {
-                let first_share = blurred[first * alleles + a];
-                for b in 0..alleles {
-                    pair_weight[a * alleles + b] += first_share * second_copy[first * alleles + b];
+        for (first_shares, spread) in blurred
+            .chunks_exact(alleles)
+            .zip(second_copy.chunks_exact(alleles))
+        {
+            for (&first_share, out) in first_shares
+                .iter()
+                .zip(pair_weight.chunks_exact_mut(alleles))
+            {
+                for (value, second) in out.iter_mut().zip(spread) {
+                    *value += first_share * second;
                 }
             }
         }
         let mut autozygous_weight = vec![0.0; alleles];
-        for state in 0..k {
-            for a in 0..alleles {
-                autozygous_weight[a] += state_autozygous[state] * blurred[state * alleles + a];
+        for (&weight, shares) in state_autozygous.iter().zip(blurred.chunks_exact(alleles)) {
+            for (value, share) in autozygous_weight.iter_mut().zip(shares) {
+                *value += weight * share;
             }
         }
         let mut prediction: Vec<f64> = pairs_of_alleles
