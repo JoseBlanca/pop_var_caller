@@ -520,15 +520,15 @@ fn walk_with_draw(
             })
             .collect();
         // Column by column, `[second][first]`, for the spreading over alleles below.
+        // Read row by row, so the three inputs are read in order, and written to their columns.
         let mut by_second = vec![0.0; k * k];
-        for (second, column) in by_second.chunks_exact_mut(k).enumerate() {
-            for (first, value) in column.iter_mut().enumerate() {
-                let state = first * k + second;
-                *value = without_emission(
-                    forward_pairs[index][state] * backward_pairs[state],
-                    site_terms.pairs[state],
-                );
-            }
+        for (state, ((&forward, &backward), &emission)) in forward_pairs[index]
+            .iter()
+            .zip(&backward_pairs)
+            .zip(&site_terms.pairs)
+            .enumerate()
+        {
+            by_second[(state % k) * k + state / k] = without_emission(forward * backward, emission);
         }
         let both_autozygous: f64 = (0..k)
             .map(|state| forward_autozygous[index][state] * backward_autozygous[state])
