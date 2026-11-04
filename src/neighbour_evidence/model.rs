@@ -389,9 +389,8 @@ fn walk_with_draw(
         }
         let scale: f64 = autozygous.iter().sum::<f64>() + lane_sum(&pairs);
         let inverse = 1.0 / scale;
-        for value in autozygous.iter_mut().chain(pairs.iter_mut()) {
-            *value *= inverse;
-        }
+        scale_by(&mut autozygous, inverse);
+        scale_by(&mut pairs, inverse);
         log_likelihood += float::ln(scale);
         forward_autozygous.push(autozygous);
         forward_pairs.push(pairs);
@@ -478,12 +477,8 @@ fn walk_with_draw(
             );
             let total: f64 = backward_autozygous.iter().sum::<f64>() + lane_sum(&backward_pairs);
             let inverse = 1.0 / total;
-            for value in backward_autozygous
-                .iter_mut()
-                .chain(backward_pairs.iter_mut())
-            {
-                *value *= inverse;
-            }
+            scale_by(&mut backward_autozygous, inverse);
+            scale_by(&mut backward_pairs, inverse);
         }
         let site = &sites[index];
         let site_terms = &terms[index];
@@ -1071,6 +1066,14 @@ fn pair_transition(
         }));
     }
     out
+}
+
+/// Every value times `factor`. A loop of its own over one slice, which vectorises where a loop
+/// over two slices chained together does not.
+fn scale_by(values: &mut [f64], factor: f64) {
+    for value in values {
+        *value *= factor;
+    }
 }
 
 /// How many running totals [`lane_sum`] and [`lane_dot`] keep.
