@@ -120,6 +120,32 @@ fn a_shallow_relative_is_not_taken_for_a_distant_sample() {
     assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
 }
 
+/// One read of the reference, one of the alternative: shares 0.79 against 0.21.
+const ONE_READ_REFERENCE: ([u32; 3], [f64; 3]) = ([0, 3, 13], [0.62, 0.34, 0.04]);
+const ONE_READ_ALTERNATIVE: ([u32; 3], [f64; 3]) = ([13, 3, 0], [0.04, 0.34, 0.62]);
+/// Reads that leave the genotype at the cohort's frequency, 0.5: shares even.
+const UNSURE: ([u32; 3], [f64; 3]) = ([3, 0, 3], [0.25, 0.5, 0.25]);
+
+/// **An unsure candidate is not taken for a close one** (spec §3.3, 2026-11-05): sample 0 has one
+/// read a record, as a 1× F2 plant; sample 1 is certain and carries sample 0's allele at three
+/// records in four, as a parent does; sample 2's shares sit at the cohort's frequency everywhere,
+/// as a 1× sibling's do where it has no reads. Half the summed share difference ranked sample 2
+/// first (0.29 against 0.36); against what the frequencies predict, sample 2 is no closer than an
+/// unrelated sample and sample 1 is.
+#[test]
+fn an_unsure_candidate_is_not_taken_for_a_close_one() {
+    let records = window_of(3, |sample, record| {
+        let alternative = record % 2 == 0;
+        match sample {
+            0 if alternative => &ONE_READ_ALTERNATIVE,
+            0 => &ONE_READ_REFERENCE,
+            1 => carrier(alternative != (record % 4 == 1)),
+            _ => &UNSURE,
+        }
+    });
+    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+}
+
 /// **Between two that disagree about as little, the one with more data**: sample 1 agrees
 /// everywhere it has reads, one record in four; sample 2 has reads everywhere and disagrees at one
 /// record in a hundred. Sample 3, with reads everywhere and disagreeing at one in ten, is further than

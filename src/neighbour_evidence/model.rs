@@ -16,7 +16,7 @@ use crate::float;
 use crate::types::Ploidy;
 use std::collections::HashMap;
 
-/// **The four numbers a walk runs with** (spec §3.4, §3.5).
+/// **The numbers a walk runs with** (spec §3.4, §3.5).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WalkParameters {
     /// Mean length, in bases, of a stretch one copy copies from one template (`S`).
@@ -27,6 +27,24 @@ pub struct WalkParameters {
     pub autozygous_share: f64,
     /// The chance a template's allele is not the one the copy carries (`ε`).
     pub mismatch: f64,
+    /// **The chance that a copy changing template lands on the last one** — the background, which
+    /// the window solve puts last (spec §3.3, §3.5) — the rest shared alike by the others. `None`:
+    /// every template alike, `1/K`. Ignored when the walk has one template.
+    pub background_landing_share: Option<f64>,
+}
+
+impl WalkParameters {
+    /// **Where a copy that changes template lands**: one weight a template, summing to one.
+    fn landing_weights(&self, templates: usize) -> Vec<f64> {
+        match self.background_landing_share {
+            Some(background) if templates > 1 => {
+                let mut weights = vec![(1.0 - background) / (templates - 1) as f64; templates];
+                weights[templates - 1] = background;
+                weights
+            }
+            _ => vec![1.0 / templates as f64; templates],
+        }
+    }
 }
 
 /// **One record as one sample's walk sees it.**
@@ -40,8 +58,13 @@ pub struct WalkSite<'a> {
     /// scale — read off `PL` (§3.2).
     pub likelihoods: &'a [f64],
     /// Each template's allele shares, template by template: `templates × allele_count` numbers,
-    /// each template's summing to one — read off its `GP` (§3.2).
+    /// each template's summing to one — read off its `GP` (§3.2). The genotype prediction and the
+    /// drawn haplotypes read them.
     pub template_shares: &'a [f64],
+    /// **The shares the states' emissions read, where they differ from `template_shares`** —
+    /// definite alleles drawn from them (phasing spec §2.3), laid out the same way. `None`: the
+    /// emissions read `template_shares`.
+    pub emission_shares: Option<&'a [f64]>,
 }
 
 /// **What a walk gives back**, one entry per site.
@@ -102,7 +125,8 @@ impl GenotypePairs {
 /// **One site's blurred shares and likelihoods**, kept from the forward walk for the backward one
 /// and the draw; its emissions are in the window's [`Emissions`].
 struct SiteTerms {
-    /// `q̃`: `templates × allele_count`, each template's shares blurred by the mismatch rate.
+    /// `q̃`: `templates × allele_count`, each template's shares blurred by the mismatch rate — the
+    /// shares the prediction and the drawn haplotypes read, whatever the emissions read.
     blurred: Vec<f64>,
     /// The sample's likelihood as a symmetric `A × A` matrix, `L(a/b)` at `[a][b]` and `[b][a]`;
     /// every path's haplotypes read it.
@@ -135,11 +159,24 @@ fn site_terms(
         "a site at {} needs {templates} templates × {alleles} allele shares",
         site.position
     );
-    let blurred: Vec<f64> = site
-        .template_shares
-        .iter()
-        .map(|share| (1.0 - mismatch) * share + mismatch / alleles as f64)
-        .collect();
+    let blur = |shares: &[f64]| -> Vec<f64> {
+        shares
+            .iter()
+            .map(|share| (1.0 - mismatch) * share + mismatch / alleles as f64)
+            .collect()
+    };
+    let blurred = blur(site.template_shares);
+    // The emissions read their own shares where the site gives them, `blurred` otherwise.
+    let emitting_own = site.emission_shares.map(|shares| {
+        assert_eq!(
+            shares.len(),
+            site.template_shares.len(),
+            "a site at {} gives emission shares laid out unlike its template shares",
+            site.position
+        );
+        blur(shares)
+    });
+    let emitting = emitting_own.as_deref().unwrap_or(&blurred);
     // The likelihood as a symmetric allele-by-allele matrix, so the pair emission is two matrix
     // products: Σ_a Σ_b q̃_k₁(a) · L(a/b) · q̃_k₂(b).
     let mut by_alleles = vec![0.0; alleles * alleles];
@@ -151,7 +188,7 @@ fn site_terms(
     weighted.resize(templates * alleles, 0.0);
     for (out, shares) in weighted
         .chunks_exact_mut(alleles)
-        .zip(blurred.chunks_exact(alleles))
+        .zip(emitting.chunks_exact(alleles))
     {
         for (b, value) in out.iter_mut().enumerate() {
             *value = shares
@@ -166,7 +203,7 @@ fn site_terms(
     // alleles' terms in order, so the bits are those of a sum per pair.
     by_allele.clear();
     by_allele.resize(alleles * templates, 0.0);
-    for (template, shares) in blurred.chunks_exact(alleles).enumerate() {
+    for (template, shares) in emitting.chunks_exact(alleles).enumerate() {
         for (allele, &share) in shares.iter().enumerate() {
             by_allele[allele * templates + template] = share;
         }
@@ -191,7 +228,7 @@ fn site_terms(
     }
     for (k, emission) in autozygous.iter_mut().enumerate() {
         *emission = (0..alleles)
-            .map(|a| blurred[k * alleles + a] * by_alleles[a * alleles + a])
+            .map(|a| emitting[k * alleles + a] * by_alleles[a * alleles + a])
             .sum();
     }
     SiteTerms {
@@ -446,7 +483,7 @@ fn walk_with_draw(
          got {share} and {templates}"
     );
     let k = templates;
-    let k_f = k as f64;
+    let landing = parameters.landing_weights(k);
     let mut genotype_pairs = GenotypePairs::default();
     let WalkArrays {
         mut emissions,
@@ -479,8 +516,14 @@ fn walk_with_draw(
         let (done_pairs, pairs) = forward.pairs.split_at_mut(index * k * k);
         let pairs = &mut pairs[..k * k];
         if index == 0 {
-            autozygous.fill(share / k_f);
-            pairs.fill((1.0 - share) / (k_f * k_f));
+            for (value, &weight) in autozygous.iter_mut().zip(&landing) {
+                *value = share * weight;
+            }
+            for (row, &first) in pairs.chunks_exact_mut(k).zip(&landing) {
+                for (value, &second) in row.iter_mut().zip(&landing) {
+                    *value = (1.0 - share) * first * second;
+                }
+            }
         } else {
             let gap = (sites[index].position - sites[index - 1].position) as f64;
             let (keep, stay_autozygous, stay_other) = persistence(gap, &parameters);
@@ -492,16 +535,19 @@ fn walk_with_draw(
             let rows = &mut forward.rows[(index - 1) * k..index * k];
             let columns = &mut forward.columns[(index - 1) * k..index * k];
             margins(previous_pairs, k, rows, columns);
-            for (value, &previous) in autozygous.iter_mut().zip(previous_autozygous) {
-                let within = keep * previous + (1.0 - keep) * mass_autozygous / k_f;
-                *value = stay_autozygous * within + (1.0 - stay_other) * mass_pairs / k_f;
+            for ((value, &previous), &weight) in
+                autozygous.iter_mut().zip(previous_autozygous).zip(&landing)
+            {
+                let within = keep * previous + (1.0 - keep) * mass_autozygous * weight;
+                *value = stay_autozygous * within + (1.0 - stay_other) * mass_pairs * weight;
             }
-            pair_transition(
+            forward_pair_step(
                 previous_pairs,
                 rows,
                 columns,
-                PairTransition::new(keep, mass_pairs, k_f, stay_other),
-                (1.0 - stay_autozygous) * mass_autozygous / (k_f * k_f),
+                &landing,
+                PairTransition::new(keep, mass_pairs, stay_other),
+                (1.0 - stay_autozygous) * mass_autozygous,
                 pairs,
             );
         }
@@ -544,7 +590,7 @@ fn walk_with_draw(
         }
     }
     let mut paths: Vec<Vec<HaplotypePair>> =
-        draw_state_paths(sites, &forward, &parameters, &streams)
+        draw_state_paths(sites, &forward, &parameters, &landing, &streams)
             .iter()
             .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
             .collect();
@@ -585,20 +631,29 @@ fn walk_with_draw(
             {
                 *weighted = value * emission;
             }
-            let total_autozygous: f64 = weighted_autozygous.iter().sum();
-            let total_pairs = lane_sum(&weighted_pairs);
-            margins(&weighted_pairs, k, &mut rows, &mut columns);
+            // Read backwards, a jump lands where `landing` says, so what a state can reach is
+            // weighed by it: each row and column summed with the landing weights, and the totals.
+            let total_autozygous: f64 = weighted_autozygous
+                .iter()
+                .zip(&landing)
+                .map(|(value, weight)| value * weight)
+                .sum();
+            landing_margins(&weighted_pairs, &landing, &mut rows, &mut columns);
+            let total_pairs: f64 = rows
+                .iter()
+                .zip(&landing)
+                .map(|(row, weight)| row * weight)
+                .sum();
             for (value, weighted) in backward_autozygous.iter_mut().zip(&weighted_autozygous) {
-                let within = keep * weighted + (1.0 - keep) * total_autozygous / k_f;
-                *value =
-                    stay_autozygous * within + (1.0 - stay_autozygous) * total_pairs / (k_f * k_f);
+                let within = keep * weighted + (1.0 - keep) * total_autozygous;
+                *value = stay_autozygous * within + (1.0 - stay_autozygous) * total_pairs;
             }
-            pair_transition(
+            backward_pair_step(
                 &weighted_pairs,
                 &rows,
                 &columns,
-                PairTransition::new(keep, total_pairs, k_f, stay_other),
-                (1.0 - stay_other) * total_autozygous / k_f,
+                PairTransition::new(keep, total_pairs, stay_other),
+                (1.0 - stay_other) * total_autozygous,
                 &mut backward_pairs,
             );
             let total: f64 = backward_autozygous.iter().sum::<f64>() + lane_sum(&backward_pairs);
@@ -743,6 +798,7 @@ fn draw_state_paths(
     sites: &[WalkSite<'_>],
     forward: &Forward,
     parameters: &WalkParameters,
+    landing: &[f64],
     streams: &[Vec<f64>],
 ) -> Vec<Vec<State>> {
     let mut paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
@@ -762,7 +818,7 @@ fn draw_state_paths(
         });
         for (path, stream) in paths.iter_mut().zip(streams) {
             let next = persistence.zip(path.last().copied());
-            path.push(site.draw(next, stream[drawn]));
+            path.push(site.draw(next, stream[drawn], landing));
         }
     }
     for path in &mut paths {
@@ -834,10 +890,10 @@ impl<'a> SiteDraw<'a> {
     }
 
     /// The state a uniform `u` draws here, given the next site's state and the persistence
-    /// `(keep, stay autozygous, stay other)` between the two; `None` at the last site.
-    fn draw(&self, next: Option<((f64, f64, f64), State)>, u: f64) -> State {
+    /// `(keep, stay autozygous, stay other)` between the two; `None` at the last site. A copy that
+    /// jumped landed on template `j` with `landing[j]`.
+    fn draw(&self, next: Option<((f64, f64, f64), State)>, u: f64, landing: &[f64]) -> State {
         let k = self.k;
-        let k_f = k as f64;
         let any_template =
             |rest: f64| State::Autozygous(pick_at(self.autozygous.iter().copied(), rest));
         let any_pair = |rest: f64| {
@@ -850,15 +906,18 @@ impl<'a> SiteDraw<'a> {
                 (_, rest) => any_pair(rest),
             },
             Some(((keep, stay_autozygous, stay_other), State::Pair(first, second))) => {
-                let to_autozygous = (1.0 - stay_autozygous) / (k_f * k_f);
-                let none_kept = stay_other * (1.0 - keep) * (1.0 - keep) / (k_f * k_f);
-                let one_kept = stay_other * keep * (1.0 - keep) / k_f;
+                let both_landed = landing[first] * landing[second];
+                let to_autozygous = (1.0 - stay_autozygous) * both_landed;
+                let none_kept = stay_other * (1.0 - keep) * (1.0 - keep) * both_landed;
+                // Copy one kept its template and copy two landed on `second`, or the other way.
+                let first_kept = stay_other * keep * (1.0 - keep) * landing[second];
+                let second_kept = stay_other * keep * (1.0 - keep) * landing[first];
                 let both_kept = stay_other * keep * keep;
                 let masses = [
                     self.autozygous_mass * to_autozygous,
                     self.pair_mass() * none_kept,
-                    self.rows[first] * one_kept,
-                    self.columns[second] * one_kept,
+                    self.rows[first] * first_kept,
+                    self.columns[second] * second_kept,
                     self.pairs[first * k + second] * both_kept,
                 ];
                 match choose_part(&masses, u) {
@@ -866,18 +925,18 @@ impl<'a> SiteDraw<'a> {
                     (1, rest) => any_pair(rest / none_kept),
                     (2, rest) => {
                         let row = &self.pairs[first * k..][..k];
-                        State::Pair(first, pick_at(row.iter().copied(), rest / one_kept))
+                        State::Pair(first, pick_at(row.iter().copied(), rest / first_kept))
                     }
                     (3, rest) => {
                         let column = self.pairs.iter().skip(second).step_by(k).copied();
-                        State::Pair(pick_at(column, rest / one_kept), second)
+                        State::Pair(pick_at(column, rest / second_kept), second)
                     }
                     _ => State::Pair(first, second),
                 }
             }
             Some(((keep, stay_autozygous, stay_other), State::Autozygous(template))) => {
-                let jumped = stay_autozygous * (1.0 - keep) / k_f;
-                let to_pairs = (1.0 - stay_other) / k_f;
+                let jumped = stay_autozygous * (1.0 - keep) * landing[template];
+                let to_pairs = (1.0 - stay_other) * landing[template];
                 let masses = [
                     self.autozygous_mass * jumped,
                     self.autozygous[template] * stay_autozygous * keep,
@@ -1161,9 +1220,9 @@ fn joint_along(
 }
 
 /// **A pair state's transition, split by how many copies keep their template**: both
-/// (`keep²`), one (`keep · (1 − keep)` spread over the `K` templates the other may jump to), or
-/// neither (`(1 − keep)²` spread over all `K²` pairs, times the mass it comes from), all times the
-/// chance of staying out of the autozygous state.
+/// (`keep²`), one (`keep · (1 − keep)`, the other jumping), or neither (`(1 − keep)²`, times the
+/// mass it comes from), all times the chance of staying out of the autozygous state. Where a jump
+/// lands is the landing weights' business, applied by the step that reads this.
 #[derive(Clone, Copy)]
 struct PairTransition {
     stay_other: f64,
@@ -1173,21 +1232,60 @@ struct PairTransition {
 }
 
 impl PairTransition {
-    fn new(keep: f64, pair_mass: f64, k_f: f64, stay_other: f64) -> Self {
+    fn new(keep: f64, pair_mass: f64, stay_other: f64) -> Self {
         Self {
             stay_other,
             both_kept: keep * keep,
-            one_kept: keep * (1.0 - keep) / k_f,
-            none_kept: (1.0 - keep) * (1.0 - keep) * pair_mass / (k_f * k_f),
+            one_kept: keep * (1.0 - keep),
+            none_kept: (1.0 - keep) * (1.0 - keep) * pair_mass,
         }
     }
 }
 
-/// **One step of the pair states** (spec §3.5), forward or backward, written over `out`: each
-/// pair's mass from `values` (`k × k`, row by row) with its row and column sums, moved by
-/// `transition`, plus `from_autozygous`, the share arriving at every pair from the autozygous
-/// states.
-fn pair_transition(
+/// **One forward step of the pair states** (spec §3.5), written over `out`: each pair's mass from
+/// `values` (`k × k`, row by row) with its row and column sums, moved by `transition`, a jumping
+/// copy landing on template `j` with `landing[j]`, plus `from_autozygous`, the mass leaving the
+/// autozygous states, which lands on pair `(a, b)` with `landing[a] · landing[b]`.
+fn forward_pair_step(
+    values: &[f64],
+    rows: &[f64],
+    columns: &[f64],
+    landing: &[f64],
+    transition: PairTransition,
+    from_autozygous: f64,
+    out: &mut [f64],
+) {
+    let PairTransition {
+        stay_other,
+        both_kept,
+        one_kept,
+        none_kept,
+    } = transition;
+    let k = columns.len();
+    let fresh = stay_other * none_kept + from_autozygous;
+    for (((row, &row_sum), &first), out_row) in values
+        .chunks_exact(k)
+        .zip(rows)
+        .zip(landing)
+        .zip(out.chunks_exact_mut(k))
+    {
+        // Pair (a, b): its own mass kept, its row's mass with copy two landing on b, its column's
+        // with copy one landing on a, and fresh mass landing on both.
+        let row_term = stay_other * one_kept * row_sum + fresh * first;
+        let column_factor = stay_other * one_kept * first;
+        for (((out, &value), &column), &second) in
+            out_row.iter_mut().zip(row).zip(columns).zip(landing)
+        {
+            *out = stay_other * both_kept * value + row_term * second + column_factor * column;
+        }
+    }
+}
+
+/// **One backward step of the pair states**, written over `out`: `values` the next site's
+/// backward probabilities times its emissions, `rows` and `columns` their sums weighed by the
+/// landing weights ([`landing_margins`]), `transition` built on their landing-weighed total, and
+/// `from_autozygous` what the autozygous states, landing-weighed, add to every pair.
+fn backward_pair_step(
     values: &[f64],
     rows: &[f64],
     columns: &[f64],
@@ -1212,6 +1310,25 @@ fn pair_transition(
             *out =
                 stay_other * (both_kept * value + row_term + one_kept * column) + from_autozygous;
         }
+    }
+}
+
+/// Row and column sums of a `k × k` matrix stored row by row, each entry weighed by the landing
+/// weight of the template it would land on: row `a` sums `m[a][b] · landing[b]`, column `b` sums
+/// `landing[a] · m[a][b]`.
+fn landing_margins(matrix: &[f64], landing: &[f64], rows: &mut [f64], columns: &mut [f64]) {
+    columns.fill(0.0);
+    for ((row, out), &first) in matrix
+        .chunks_exact(landing.len())
+        .zip(rows.iter_mut())
+        .zip(landing)
+    {
+        let mut row_total = 0.0;
+        for ((column, &value), &second) in columns.iter_mut().zip(row).zip(landing) {
+            row_total += value * second;
+            *column += first * value;
+        }
+        *out = row_total;
     }
 }
 

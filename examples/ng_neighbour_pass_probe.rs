@@ -20,7 +20,9 @@ use std::process::ExitCode;
 
 use pop_var_caller::neighbour_evidence::fit::SampleFit;
 use pop_var_caller::neighbour_evidence::records::{SampleColumns, SampleRow, SiteRecord};
-use pop_var_caller::neighbour_evidence::refine::{NoReadRule, Outcome, refine_window};
+use pop_var_caller::neighbour_evidence::refine::{
+    BACKGROUND_LANDING_SHARE, MISMATCH, NoReadRule, Outcome, refine_window,
+};
 use pop_var_caller::neighbour_evidence::templates::MAX_TEMPLATES;
 use pop_var_caller::neighbour_evidence::windows::{WindowSizes, plan_window};
 
@@ -260,7 +262,7 @@ fn main() -> ExitCode {
         contigs.len()
     );
     for (sample, fit) in samples.iter().zip(&fits) {
-        let parameters = fit.parameters(0.01);
+        let parameters = fit.parameters(MISMATCH, Some(BACKGROUND_LANDING_SHARE));
         eprintln!(
             "{sample}\tS={}\tR={}\tF={:.3}",
             parameters.segment_bases, parameters.run_bases, parameters.autozygous_share

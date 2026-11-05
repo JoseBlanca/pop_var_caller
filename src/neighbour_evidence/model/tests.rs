@@ -35,6 +35,7 @@ fn reference_cases() -> Vec<ReferenceCase> {
                     run_bases: fields[4].parse().expect("a run length"),
                     autozygous_share: fields[5].parse().expect("a share"),
                     mismatch: fields[6].parse().expect("a mismatch rate"),
+                    background_landing_share: None,
                 },
                 sites: Vec::new(),
                 log_likelihood: 0.0,
@@ -91,6 +92,7 @@ fn the_walk_reproduces_the_python_prototype() {
                 allele_count: *alleles,
                 likelihoods,
                 template_shares: shares,
+                emission_shares: None,
             })
             .collect();
         let templates = case.templates + usize::from(case.background);
@@ -141,6 +143,7 @@ fn a_site_without_reads_takes_the_templates_allele() {
         allele_count: 2,
         likelihoods: &likelihoods[..],
         template_shares: &alternative_templates,
+        emission_shares: None,
     })
     .collect();
     let parameters = WalkParameters {
@@ -148,6 +151,7 @@ fn a_site_without_reads_takes_the_templates_allele() {
         run_bases: 1_000_000.0,
         autozygous_share: 0.8,
         mismatch: 0.01,
+        background_landing_share: None,
     };
     let result = walk(&sites, 2, parameters);
     let middle = &result.posteriors[1];
@@ -170,12 +174,14 @@ fn a_long_gap_returns_the_autozygous_state_to_its_share() {
             allele_count: 2,
             likelihoods: &homozygous,
             template_shares: &shares,
+            emission_shares: None,
         },
         WalkSite {
             position: 1_000_001_000,
             allele_count: 2,
             likelihoods: &flat,
             template_shares: &shares,
+            emission_shares: None,
         },
     ];
     let parameters = WalkParameters {
@@ -183,6 +189,7 @@ fn a_long_gap_returns_the_autozygous_state_to_its_share() {
         run_bases: 1_000_000.0,
         autozygous_share: 0.8,
         mismatch: 0.01,
+        background_landing_share: None,
     };
     let result = walk(&sites, 2, parameters);
     assert!(
@@ -206,12 +213,14 @@ fn a_zero_emission_state_contributes_nothing() {
             allele_count: 2,
             likelihoods: &heterozygous,
             template_shares: &shares,
+            emission_shares: None,
         },
         WalkSite {
             position: 2_000,
             allele_count: 2,
             likelihoods: &heterozygous,
             template_shares: &shares,
+            emission_shares: None,
         },
     ];
     let parameters = WalkParameters {
@@ -219,6 +228,7 @@ fn a_zero_emission_state_contributes_nothing() {
         run_bases: 1_000_000.0,
         autozygous_share: 0.95,
         mismatch: 0.01,
+        background_landing_share: None,
     };
     let result = walk(&sites, 2, parameters);
     for posterior in &result.posteriors {
@@ -245,6 +255,7 @@ fn a_drawn_path_follows_the_only_template_that_fits() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
+            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -252,6 +263,7 @@ fn a_drawn_path_follows_the_only_template_that_fits() {
         run_bases: 100_000.0,
         autozygous_share: 0.5,
         mismatch: 0.0,
+        background_landing_share: None,
     };
     for seed in 0..20 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
@@ -299,6 +311,7 @@ fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
             allele_count: 3,
             likelihoods: &likelihoods,
             template_shares: &shares,
+            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -306,6 +319,7 @@ fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
         run_bases: 100_000.0,
         autozygous_share: 0.5,
         mismatch: 0.0,
+        background_landing_share: None,
     };
     for seed in 0..10 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
@@ -359,6 +373,7 @@ fn extra_paths_leave_the_round_unchanged() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
+            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -366,6 +381,7 @@ fn extra_paths_leave_the_round_unchanged() {
         run_bases: 100_000.0,
         autozygous_share: 0.3,
         mismatch: 0.01,
+        background_landing_share: None,
     };
     let mut alone = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
     let (walked, own) = walk_and_draw(&sites, 2, parameters, &mut alone, None);
@@ -405,6 +421,7 @@ fn bare_sites(allele_counts: &[usize]) -> Vec<WalkSite<'static>> {
             allele_count,
             likelihoods: &[],
             template_shares: &[],
+            emission_shares: None,
         })
         .collect()
 }
@@ -631,6 +648,7 @@ fn reads_that_link_nothing_change_no_bit() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
+            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -638,6 +656,7 @@ fn reads_that_link_nothing_change_no_bit() {
         run_bases: 100_000.0,
         autozygous_share: 0.3,
         mismatch: 0.01,
+        background_landing_share: None,
     };
     let draw = |reads: Option<&mut DrawReads<'_>>| {
         let mut path = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
@@ -671,6 +690,7 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
+            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -678,6 +698,7 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
         run_bases: 100_000.0,
         autozygous_share: 0.3,
         mismatch: 0.01,
+        background_landing_share: None,
     };
     let link = |_: usize, _: (usize, usize), _: usize, _: (usize, usize)| Some(20.0);
     let is_hidden = |_: usize| false;
@@ -705,83 +726,305 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
     );
 }
 
+/// **A copy changing template lands where the landing weights say**, as one `K + K²` matrix: the
+/// chance of moving from `from` to `to` between two sites, written out state by state (spec §3.5).
+fn full_transition(
+    (keep, stay_autozygous, stay_other): (f64, f64, f64),
+    landing: &[f64],
+    from: State,
+    to: State,
+) -> f64 {
+    match (from, to) {
+        (State::Autozygous(from), State::Autozygous(to)) => {
+            stay_autozygous * (keep * f64::from(u8::from(from == to)) + (1.0 - keep) * landing[to])
+        }
+        (State::Autozygous(_), State::Pair(first, second)) => {
+            (1.0 - stay_autozygous) * landing[first] * landing[second]
+        }
+        (State::Pair(..), State::Autozygous(to)) => (1.0 - stay_other) * landing[to],
+        (State::Pair(from_first, from_second), State::Pair(first, second)) => {
+            let copy = |from: usize, to: usize| {
+                keep * f64::from(u8::from(from == to)) + (1.0 - keep) * landing[to]
+            };
+            stay_other * copy(from_first, first) * copy(from_second, second)
+        }
+    }
+}
+
+fn all_states(k: usize) -> Vec<State> {
+    (0..k)
+        .map(State::Autozygous)
+        .chain((0..k * k).map(|pair| State::Pair(pair / k, pair % k)))
+        .collect()
+}
+
 /// **A site's draw picks each state as often as its full weight says** (spec §3.5): for every
 /// possible next state, and at the last site, the share of a fine grid of uniforms that lands on
-/// each state equals forward × transition over the whole `K + K²` weights, written out here as
-/// the scan over all of them computed it. Uneven forward probabilities, `K` = 3.
+/// each state equals forward × transition over the whole `K + K²` weights, from the full matrix of
+/// [`full_transition`]. Uneven forward probabilities, `K` = 3, every template landed on alike and
+/// the last landed on rarely.
 #[test]
 fn a_sites_draw_follows_forward_times_transition() {
     let k = 3;
     let autozygous = [0.02, 0.07, 0.01];
     let pairs = [0.05, 0.2, 0.0, 0.11, 0.04, 0.09, 0.0, 0.3, 0.11];
-    let (keep, stay_autozygous, stay_other) = (0.7, 0.8, 0.9);
-    let k_f = k as f64;
+    let persistence = (0.7, 0.8, 0.9);
     let (mut rows, mut columns) = ([0.0; 3], [0.0; 3]);
     margins(&pairs, k, &mut rows, &mut columns);
     let site = SiteDraw::new(&autozygous, &pairs, &rows, &columns, k);
-    let index_of = |state: State| match state {
-        State::Autozygous(template) => template,
-        State::Pair(first, second) => k + first * k + second,
-    };
-    let full_weights = |next: Option<State>| -> Vec<f64> {
-        let mut weights: Vec<f64> = autozygous.iter().chain(&pairs).copied().collect();
-        match next {
-            None => {}
-            Some(State::Pair(next_first, next_second)) => {
-                for value in &mut weights[..k] {
-                    *value *= (1.0 - stay_autozygous) / (k_f * k_f);
-                }
-                for first in 0..k {
-                    for second in 0..k {
-                        let mut transition = (1.0 - keep) * (1.0 - keep) / (k_f * k_f);
-                        if first == next_first {
-                            transition += keep * (1.0 - keep) / k_f;
-                        }
-                        if second == next_second {
-                            transition += keep * (1.0 - keep) / k_f;
-                        }
-                        if first == next_first && second == next_second {
-                            transition += keep * keep;
-                        }
-                        weights[k + first * k + second] *= stay_other * transition;
-                    }
-                }
+    let states = all_states(k);
+    let index_of = |state: State| states.iter().position(|&s| s == state).expect("a state");
+    let forward: Vec<f64> = autozygous.iter().chain(&pairs).copied().collect();
+    for landing in [vec![1.0 / 3.0; 3], vec![0.45, 0.45, 0.1]] {
+        let nexts = std::iter::once(None).chain(states.iter().map(|&state| Some(state)));
+        let points = 200_000;
+        for next in nexts {
+            let weights: Vec<f64> = states
+                .iter()
+                .zip(&forward)
+                .map(|(&state, &value)| {
+                    next.map_or(value, |next| {
+                        value * full_transition(persistence, &landing, state, next)
+                    })
+                })
+                .collect();
+            let total: f64 = weights.iter().sum();
+            let mut counts = vec![0_usize; k + k * k];
+            for point in 0..points {
+                let u = (point as f64 + 0.5) / points as f64;
+                counts[index_of(site.draw(next.map(|state| (persistence, state)), u, &landing))] +=
+                    1;
             }
-            Some(State::Autozygous(next_template)) => {
-                for (template, value) in weights[..k].iter_mut().enumerate() {
-                    let mut transition = (1.0 - keep) / k_f;
-                    if template == next_template {
-                        transition += keep;
-                    }
-                    *value *= stay_autozygous * transition;
-                }
-                for value in &mut weights[k..] {
-                    *value *= (1.0 - stay_other) / k_f;
-                }
+            for (state, (&count, &weight)) in counts.iter().zip(&weights).enumerate() {
+                let share = count as f64 / points as f64;
+                assert!(
+                    (share - weight / total).abs() < 1e-4,
+                    "landing {landing:?}, next {next:?}, state {state}: drawn {share}, weight {}",
+                    weight / total
+                );
             }
         }
-        weights
+    }
+}
+
+/// **The walk's posteriors are a plain forward-backward over the full transition matrix**, with the
+/// last template landed on rarely (spec §3.5, §3.6): the same windows computed state by state from
+/// [`full_transition`], the emissions and the posterior written out here, agree to 1e-9. Three
+/// templates, one window with sites close together and far apart, reads and none.
+#[test]
+fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
+    let k = 3;
+    let shares = [0.9, 0.1, 0.2, 0.8, 0.5, 0.5];
+    let reads: [[f64; 3]; 6] = [
+        [1.0, 0.5, 0.01],
+        [1.0, 1.0, 1.0],
+        [0.01, 0.5, 1.0],
+        [0.3, 1.0, 0.3],
+        [1.0, 0.5, 0.01],
+        [0.01, 0.5, 1.0],
+    ];
+    let positions = [1_000_u64, 4_000, 30_000, 31_000, 400_000, 2_000_000];
+    let sites: Vec<WalkSite<'_>> = positions
+        .iter()
+        .zip(&reads)
+        .map(|(&position, likelihoods)| WalkSite {
+            position,
+            allele_count: 2,
+            likelihoods: &likelihoods[..],
+            template_shares: &shares,
+            emission_shares: None,
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 50_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.3,
+        mismatch: 0.01,
+        background_landing_share: Some(0.05),
     };
-    let nexts = std::iter::once(None)
-        .chain((0..k).map(|template| Some(State::Autozygous(template))))
-        .chain((0..k * k).map(|pair| Some(State::Pair(pair / k, pair % k))));
-    let points = 200_000;
-    for next in nexts {
-        let weights = full_weights(next);
-        let total: f64 = weights.iter().sum();
-        let mut counts = vec![0_usize; k + k * k];
-        for point in 0..points {
-            let u = (point as f64 + 0.5) / points as f64;
-            let persistence = (keep, stay_autozygous, stay_other);
-            counts[index_of(site.draw(next.map(|state| (persistence, state)), u))] += 1;
+    let result = walk(&sites, k, parameters);
+
+    let landing = [0.475, 0.475, 0.05];
+    let states = all_states(k);
+    let blurred: Vec<f64> = shares.iter().map(|q| 0.99 * q + 0.005).collect();
+    let q = |template: usize, allele: usize| blurred[template * 2 + allele];
+    // What a state says of the genotype g (0/0, 0/1, 1/1), before the likelihood.
+    let given = |state: State, g: usize| -> f64 {
+        match state {
+            State::Autozygous(t) => match g {
+                0 => q(t, 0),
+                2 => q(t, 1),
+                _ => 0.0,
+            },
+            State::Pair(one, two) => match g {
+                0 => q(one, 0) * q(two, 0),
+                1 => q(one, 0) * q(two, 1) + q(one, 1) * q(two, 0),
+                _ => q(one, 1) * q(two, 1),
+            },
         }
-        for (state, (&count, &weight)) in counts.iter().zip(&weights).enumerate() {
-            let share = count as f64 / points as f64;
+    };
+    let emission = |site: usize, state: State| -> f64 {
+        (0..3).map(|g| given(state, g) * reads[site][g]).sum()
+    };
+    let n = sites.len();
+    let initial: Vec<f64> = states
+        .iter()
+        .map(|&state| match state {
+            State::Autozygous(t) => 0.3 * landing[t],
+            State::Pair(one, two) => 0.7 * landing[one] * landing[two],
+        })
+        .collect();
+    let step = |site: usize| -> (f64, f64, f64) {
+        let gap = (positions[site + 1] - positions[site]) as f64;
+        let (share, run) = (0.3, 100_000.0);
+        let gap_run = run * (1.0 - share) / share;
+        let decay = crate::float::exp(-gap * (1.0 / run + 1.0 / gap_run));
+        (
+            crate::float::exp(-gap / 50_000.0),
+            share + (1.0 - share) * decay,
+            (1.0 - share) + share * decay,
+        )
+    };
+    let mut forward = vec![vec![0.0; states.len()]; n];
+    for (i, state) in states.iter().enumerate() {
+        forward[0][i] = initial[i] * emission(0, *state);
+    }
+    for site in 1..n {
+        let persistence = step(site - 1);
+        for (i, &to) in states.iter().enumerate() {
+            let arriving: f64 = states
+                .iter()
+                .enumerate()
+                .map(|(j, &from)| {
+                    forward[site - 1][j] * full_transition(persistence, &landing, from, to)
+                })
+                .sum();
+            forward[site][i] = arriving * emission(site, to);
+        }
+        let total: f64 = forward[site].iter().sum();
+        forward[site].iter_mut().for_each(|value| *value /= total);
+    }
+    let mut backward = vec![vec![1.0; states.len()]; n];
+    for site in (0..n - 1).rev() {
+        let persistence = step(site);
+        for (i, &from) in states.iter().enumerate() {
+            backward[site][i] = states
+                .iter()
+                .enumerate()
+                .map(|(j, &to)| {
+                    full_transition(persistence, &landing, from, to)
+                        * emission(site + 1, to)
+                        * backward[site + 1][j]
+                })
+                .sum();
+        }
+        let total: f64 = backward[site].iter().sum();
+        backward[site].iter_mut().for_each(|value| *value /= total);
+    }
+    for site in 0..n {
+        let mut posterior: Vec<f64> = (0..3)
+            .map(|g| {
+                reads[site][g]
+                    * states
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &state)| {
+                            forward[site][i] * backward[site][i] / emission(site, state)
+                                * given(state, g)
+                        })
+                        .sum::<f64>()
+            })
+            .collect();
+        let total: f64 = posterior.iter().sum();
+        posterior.iter_mut().for_each(|value| *value /= total);
+        for (walked, expected) in result.posteriors[site].iter().zip(&posterior) {
             assert!(
-                (share - weight / total).abs() < 1e-4,
-                "next {next:?}, state {state}: drawn {share}, weight {}",
-                weight / total
+                (walked - expected).abs() < 1e-9,
+                "site {site}: walked {:?}, expected {posterior:?}",
+                result.posteriors[site]
             );
         }
     }
+}
+
+/// **Landing every template alike is the walk without landing weights**: a background landing
+/// share of `1/K` gives the posteriors and the log-likelihood of `None` to 1e-12.
+#[test]
+fn an_even_landing_share_is_no_landing_share() {
+    let shares = [0.9, 0.1, 0.2, 0.8, 0.5, 0.5];
+    let reads = [[1.0, 0.5, 0.01], [1.0, 1.0, 1.0], [0.01, 0.5, 1.0]];
+    let sites: Vec<WalkSite<'_>> = [1_000_u64, 20_000, 90_000]
+        .iter()
+        .zip(&reads)
+        .map(|(&position, likelihoods)| WalkSite {
+            position,
+            allele_count: 2,
+            likelihoods: &likelihoods[..],
+            template_shares: &shares,
+            emission_shares: None,
+        })
+        .collect();
+    let parameters = |landing| WalkParameters {
+        segment_bases: 50_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.3,
+        mismatch: 0.01,
+        background_landing_share: landing,
+    };
+    let alike = walk(&sites, 3, parameters(None));
+    let even = walk(&sites, 3, parameters(Some(1.0 / 3.0)));
+    assert!((alike.log_likelihood - even.log_likelihood).abs() < 1e-12);
+    for (one, other) in alike.posteriors.iter().zip(&even.posteriors) {
+        for (a, b) in one.iter().zip(other) {
+            assert!((a - b).abs() < 1e-12, "{one:?} against {other:?}");
+        }
+    }
+}
+
+/// **The emissions read the emission shares; the prediction reads the template shares**
+/// (phasing spec §2.3): one template, unsure (50:50) as the prediction sees it and carrying the
+/// alternative as the emissions see it. At a site without reads the prediction is the unsure
+/// template's, even between the two homozygotes, while the window's likelihood, which only
+/// the emissions make, follows the definite allele.
+#[test]
+fn the_emissions_and_the_prediction_read_their_own_shares() {
+    static UNSURE: [f64; 2] = [0.5, 0.5];
+    static DEFINITE: [f64; 2] = [0.0, 1.0];
+    static ALTERNATIVE_READ: [f64; 3] = [0.01, 0.5, 1.0];
+    static FLAT: [f64; 3] = [1.0, 1.0, 1.0];
+    let sites = |emission: Option<&'static [f64]>| -> Vec<WalkSite<'static>> {
+        [(1_000_u64, &ALTERNATIVE_READ), (2_000, &FLAT)]
+            .iter()
+            .map(|&(position, likelihoods)| WalkSite {
+                position,
+                allele_count: 2,
+                likelihoods,
+                template_shares: &UNSURE,
+                emission_shares: emission,
+            })
+            .collect()
+    };
+    let parameters = WalkParameters {
+        segment_bases: 50_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.3,
+        mismatch: 0.01,
+        background_landing_share: None,
+    };
+    let soft = walk(&sites(None), 1, parameters);
+    let split = walk(&sites(Some(&DEFINITE)), 1, parameters);
+    // Read off the definite allele it would be nearly all 1/1; read off the 50:50 shares it is
+    // even between the homozygotes, whatever weight the walk gives the autozygous state.
+    let predicted = &split.neighbour_predictions[1];
+    assert!(
+        (predicted[0] - predicted[2]).abs() < 1e-12,
+        "the prediction without reads reads the template shares: {predicted:?}"
+    );
+    // One read of the alternative: the definite template explains it better than the unsure one.
+    assert!(
+        split.log_likelihood > soft.log_likelihood,
+        "{} against {}",
+        split.log_likelihood,
+        soft.log_likelihood
+    );
 }
