@@ -716,7 +716,8 @@ fn a_sites_draw_follows_forward_times_transition() {
     let pairs = [0.05, 0.2, 0.0, 0.11, 0.04, 0.09, 0.0, 0.3, 0.11];
     let (keep, stay_autozygous, stay_other) = (0.7, 0.8, 0.9);
     let k_f = k as f64;
-    let (rows, columns) = margins(&pairs, k);
+    let (mut rows, mut columns) = ([0.0; 3], [0.0; 3]);
+    margins(&pairs, k, &mut rows, &mut columns);
     let site = SiteDraw::new(&autozygous, &pairs, &rows, &columns, k);
     let index_of = |state: State| match state {
         State::Autozygous(template) => template,
