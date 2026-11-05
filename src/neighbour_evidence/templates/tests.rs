@@ -33,6 +33,16 @@ fn window(patterns: &[Pattern], records: usize) -> Vec<SiteRecord> {
         .collect()
 }
 
+/// [`choose_templates`]' samples, without the stretches each won.
+fn chosen_samples(
+    records: &[SiteRecord],
+    sample: usize,
+    max_templates: usize,
+) -> Option<Vec<usize>> {
+    choose_templates(records, sample, max_templates)
+        .map(|chosen| chosen.into_iter().map(|template| template.source).collect())
+}
+
 fn even(record: usize) -> bool {
     record.is_multiple_of(2)
 }
@@ -49,16 +59,16 @@ fn a_sample_copies_the_samples_that_carry_its_alleles() {
         &[Some(even), Some(even), Some(even), Some(third), Some(third)],
         30,
     );
-    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
-    assert_eq!(choose_templates(&records, 3, 1), Some(vec![4]));
+    assert_eq!(chosen_samples(&records, 0, 2), Some(vec![1, 2]));
+    assert_eq!(chosen_samples(&records, 3, 1), Some(vec![4]));
 }
 
 /// **Ties break by sample order, and a sample is never its own template.**
 #[test]
 fn ties_break_by_sample_order_and_never_choose_the_sample() {
     let records = window(&[Some(even as fn(usize) -> bool) as Pattern; 5], 10);
-    assert_eq!(choose_templates(&records, 2, 3), Some(vec![0, 1, 3]));
-    assert_eq!(choose_templates(&records, 2, 16), Some(vec![0, 1, 3, 4]));
+    assert_eq!(chosen_samples(&records, 2, 3), Some(vec![0, 1, 3]));
+    assert_eq!(chosen_samples(&records, 2, 16), Some(vec![0, 1, 3, 4]));
 }
 
 /// **An absent sample shares no record, so it ranks last**: after one that agrees and even after
@@ -72,7 +82,7 @@ fn an_absent_sample_ranks_last() {
         true
     }
     let records = window(&[Some(never), Some(always), None, Some(never)], 10);
-    assert_eq!(choose_templates(&records, 0, 3), Some(vec![3, 1, 2]));
+    assert_eq!(chosen_samples(&records, 0, 3), Some(vec![3, 1, 2]));
 }
 
 const FLAT: ([u32; 3], [f64; 3]) = ([0, 0, 0], [0.5, 0.0, 0.5]);
@@ -106,18 +116,28 @@ fn carrier(carries: bool) -> &'static ([u32; 3], [f64; 3]) {
     }
 }
 
-/// **A shallow relative is judged where it has reads**: sample 1 agrees with sample 0 wherever it
-/// has reads, which is one record in five; sample 2 has reads everywhere and disagrees at one record
-/// in ten. Counting the records without reads as disagreement would put sample 2 first.
+/// **A shallow relative is judged where it has reads** (spec §3.3): sample 1 agrees with sample 0
+/// wherever it has reads, one record in five; samples 2 and 3 have reads everywhere and each
+/// disagrees at one record in four — sample 2 in the even stretches, sample 3 in the odd ones (a
+/// stretch here is two records). Sample 1 wins every stretch it has a read in, 80 of 200: there it
+/// beats whichever deep sample disagrees, as it could not if its records without reads counted as
+/// disagreement. The deep samples win every stretch sample 1 has no read in — 120 for both — and
+/// one in two of the others, so each ranks above it.
 #[test]
-fn a_shallow_relative_is_not_taken_for_a_distant_sample() {
-    let records = window_of(3, |sample, record| match sample {
+fn a_shallow_relative_wins_the_stretches_it_has_reads_in() {
+    let records = window_of(4, |sample, record| match sample {
         0 => carrier(record % 2 == 0),
         1 if record % 5 == 0 => carrier(record % 2 == 0),
         1 => &FLAT,
-        _ => carrier((record % 2 == 0) != (record % 10 == 1)),
+        2 => carrier((record % 2 == 0) != (record % 4 == 1)),
+        _ => carrier((record % 2 == 0) != (record % 4 == 3)),
     });
-    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+    let won: Vec<(usize, usize)> = choose_templates(&records, 0, 3)
+        .expect("informative records")
+        .into_iter()
+        .map(|template| (template.source, template.stretches_won))
+        .collect();
+    assert_eq!(won, vec![(2, 160), (3, 160), (1, 80)]);
 }
 
 /// One read of the reference, one of the alternative: shares 0.79 against 0.21.
@@ -143,13 +163,15 @@ fn an_unsure_candidate_is_not_taken_for_a_close_one() {
             _ => &UNSURE,
         }
     });
-    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+    assert_eq!(chosen_samples(&records, 0, 2), Some(vec![1, 2]));
 }
 
-/// **Between two that disagree about as little, the one with more data**: sample 1 agrees
-/// everywhere it has reads, one record in four; sample 2 has reads everywhere and disagrees at one
-/// record in a hundred. Sample 3, with reads everywhere and disagreeing at one in ten, is further than
-/// both.
+/// **Between two that agree as well where both are judged, the one with more data** (spec §3.3):
+/// sample 1 agrees everywhere it has reads, one record in four; sample 2 has reads everywhere and
+/// disagrees at one record in a hundred; sample 3 at one in ten. In a stretch where sample 1 has a
+/// read, the deep samples agree there too and their score rests on twice the expected
+/// disagreement, so they win it; sample 1 ranks last, after sample 3, which disagrees more but
+/// carries data at every record the walk can copy.
 #[test]
 fn a_near_tie_goes_to_the_sample_with_more_data() {
     let records = window_of(4, |sample, record| match sample {
@@ -159,7 +181,98 @@ fn a_near_tie_goes_to_the_sample_with_more_data() {
         2 => carrier((record % 2 == 0) != (record % 100 == 1)),
         _ => carrier((record % 2 == 0) != (record % 10 == 1)),
     });
-    assert_eq!(choose_templates(&records, 0, 3), Some(vec![2, 1, 3]));
+    assert_eq!(chosen_samples(&records, 0, 3), Some(vec![2, 3, 1]));
+}
+
+/// **The samples a copy copies win the stretches they match** (spec §3.3, owner 2026-11-05): sample
+/// 0 copies sample 1 over the window's first half and sample 2 over its second, as an F2 plant
+/// copies its parents either side of a crossover; each of those disagrees at every record of its
+/// other half, a rate of ½ over the window. Samples 3–5 each disagree at one record in three
+/// everywhere, a rate of ⅓, so the whole window's score ranks all three above samples 1 and 2. In
+/// each two-record stretch the matching parent and the one of samples 3–5 that agrees there win;
+/// each parent wins its 100 stretches, each of samples 3–5 about 67, and the parents are the two
+/// templates.
+#[test]
+fn the_samples_a_copy_copies_win_the_stretches_they_match() {
+    let records = window_of(6, |sample, record| {
+        let target = record % 2 == 0;
+        match sample {
+            0 => carrier(target),
+            1 => carrier(target != (record >= 200)),
+            2 => carrier(target != (record < 200)),
+            _ => carrier(target != (record % 3 == sample - 3)),
+        }
+    });
+    let chosen = choose_templates(&records, 0, 5).expect("informative records");
+    let won: Vec<(usize, usize)> = chosen
+        .iter()
+        .map(|template| (template.source, template.stretches_won))
+        .collect();
+    assert_eq!(won[..2], [(1, 100), (2, 100)]);
+    for &(sample, stretches) in &won[2..] {
+        assert!(
+            (66..=67).contains(&stretches),
+            "sample {sample} won {stretches}"
+        );
+    }
+}
+
+/// **A stretch ends once it holds [`STRETCH_INFORMATION`]** of expected disagreement, counting
+/// only records some candidate is judged at; what is left after the last joins the one before it,
+/// and a window holding less than one unit is one stretch.
+#[test]
+fn a_stretch_ends_once_it_holds_enough_to_judge_by() {
+    let expected = [0.5, 0.5, 0.3, 0.3, 0.3, 0.2, 0.4, 0.2];
+    let everywhere = [true; 8];
+    assert_eq!(stretches(&expected, &everywhere), vec![0..2, 2..8]);
+    let mut gap = everywhere;
+    gap[1] = false;
+    assert_eq!(stretches(&expected, &gap), vec![0..4, 4..8]);
+    assert_eq!(stretches(&[0.3, 0.3], &[true; 2]), vec![0..2]);
+    assert_eq!(stretches(&[], &[]), Vec::<Range<usize>>::new());
+}
+
+/// Stretch sums over one record expecting 1, `copies` candidates a sample, each candidate's
+/// observed disagreement there given.
+fn one_stretch(copies: usize, observed: &[Option<f64>]) -> Vec<usize> {
+    let mut sums = StretchSums::new(vec![1.0], &[true], copies);
+    for &candidate in observed {
+        sums.add([candidate]);
+    }
+    sums.judged().iter().map(|one| one.stretches_won).collect()
+}
+
+/// **A stretch's winners are the [`STRETCH_WINNERS`] best and any tied with the last of them**; a
+/// candidate not judged there does not win it. Each landing weight is the stretches won plus
+/// [`LANDING_WEIGHT_BASE`].
+#[test]
+fn ties_with_the_last_winner_win_too() {
+    let won = one_stretch(1, &[Some(0.0), Some(0.5), Some(0.5), Some(1.0), None]);
+    assert_eq!(won, vec![1, 1, 1, 0, 0]);
+    let template = ChosenTemplate {
+        source: 0,
+        stretches_won: 3,
+    };
+    assert!((template.landing_weight() - (3.0 + LANDING_WEIGHT_BASE)).abs() < 1e-15);
+}
+
+/// **A sample's two haplotypes take one winner's place between them** (phasing spec §2.3): sample
+/// A is homozygous, its two copies equal and best; sample B's better copy comes next and wins too,
+/// where judging haplotypes alone would have given both places to A. Sample C, behind B, does not.
+#[test]
+fn a_homozygous_sample_does_not_take_both_places() {
+    let won = one_stretch(
+        2,
+        &[
+            Some(0.0),
+            Some(0.0),
+            Some(0.5),
+            Some(1.0),
+            Some(0.8),
+            Some(0.8),
+        ],
+    );
+    assert_eq!(won, vec![1, 1, 1, 0, 0, 0]);
 }
 
 /// **A sample with no informative record in the window has no templates**, so it is not
@@ -183,8 +296,8 @@ fn a_sample_without_informative_records_has_no_templates() {
             SiteRecord::new(1 + record * 100, &[0.5], &columns)
         })
         .collect();
-    assert_eq!(choose_templates(&records, 0, 16), None);
-    assert_eq!(choose_templates(&records, 1, 16), Some(vec![0]));
+    assert_eq!(chosen_samples(&records, 0, 16), None);
+    assert_eq!(chosen_samples(&records, 1, 16), Some(vec![0]));
 }
 
 /// **More than [`AGREEMENT_RECORDS`] informative records are compared on that many, spread over
@@ -202,10 +315,15 @@ fn the_records_compared_are_spread_over_the_window() {
         true
     }
     let records = window(&[Some(always), Some(first_half), Some(second_half)], 2_000);
-    let templates = choose_templates(&records, 0, 2).expect("informative records");
+    let templates = chosen_samples(&records, 0, 2).expect("informative records");
     assert_eq!(templates, vec![1, 2], "a tie, broken by sample order");
     let records = window(&[Some(always), Some(second_half), Some(first_half)], 2_000);
-    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+    assert_eq!(chosen_samples(&records, 0, 2), Some(vec![1, 2]));
+}
+
+/// [`choose_haplotypes`]' haplotypes, without the stretches each won.
+fn haplotype_sources(chosen: &[ChosenTemplate<(usize, usize)>]) -> Vec<(usize, usize)> {
+    chosen.iter().map(|template| template.source).collect()
 }
 
 /// **A phasing round's haplotype choice takes each sample's better copy, one a sample** (phasing
@@ -236,7 +354,7 @@ fn a_round_takes_each_samples_better_haplotype_once() {
         &haplotype,
         3,
     );
-    assert_eq!(chosen, vec![(1, 1), (3, 0), (2, 0)]);
+    assert_eq!(haplotype_sources(&chosen), vec![(1, 1), (3, 0), (2, 0)]);
     let chosen = choose_haplotypes(
         &records,
         0,
@@ -245,7 +363,7 @@ fn a_round_takes_each_samples_better_haplotype_once() {
         &haplotype,
         1,
     );
-    assert_eq!(chosen, vec![(1, 1)]);
+    assert_eq!(haplotype_sources(&chosen), vec![(1, 1)]);
 }
 
 /// **The haplotype choice at three alleles** (code review 2026-11-02): sample 0's previous genotype
@@ -287,5 +405,5 @@ fn the_haplotype_choice_reads_every_allele() {
         });
     };
     let chosen = choose_haplotypes(&records, 0, &compared, &previous, &haplotype, 2);
-    assert_eq!(chosen, vec![(1, 0), (2, 0)]);
+    assert_eq!(haplotype_sources(&chosen), vec![(1, 0), (2, 0)]);
 }

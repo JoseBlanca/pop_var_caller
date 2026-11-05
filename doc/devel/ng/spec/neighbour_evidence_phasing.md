@@ -162,14 +162,23 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 its `GP` allele shares.
 
 **From round 2: 16 haplotypes, re-chosen every round, at most one of each sample — decided, measured
-(§10 Q2).** A haplotype's score against the sample is a disagreement rate: at each record, the
-probability that the haplotype carries an allele the sample's genotype lacks — for a biallelic
-record `x · P(0/0) + (1 − x) · P(1/1)`, `x` the haplotype's alternative probability and the genotype
-the sample's posterior from the previous round; in general `Σ_a h(a) · P(genotype without a)`. It
-is summed over the sample's informative records (at most 500, spread evenly, as now) where the
-haplotype's sample is informative too, and scored pessimistically as the pass scores samples (the
-Beta mean plus two standard deviations). Each candidate sample offers its better-scoring haplotype;
-the 16 best samples' offers are the templates.
+(§10 Q2).** Haplotypes are judged as the pass judges samples in round 1 — stretch by stretch,
+ranked by stretches won (pass §3.3) — with the disagreement read off the sample's genotype from the
+previous round. At each record the **observed** disagreement is the probability that the haplotype
+carries an allele the sample's genotype lacks — for a biallelic record `x · P(0/0) + (1 − x) ·
+P(1/1)`, `x` the haplotype's alternative probability and the genotype the sample's posterior from
+the previous round; in general `Σ_a h(a) · P(genotype without a)`. The **expected** one is the same
+for an allele drawn from the cohort's frequencies, `Σ_a p(a) · P(genotype without a)`. The records
+are the sample's informative records (at most 500, spread evenly, as in round 1), a haplotype judged
+where its sample is informative too, and the stretches are cut by the expected disagreement as in
+pass §3.3. Both haplotypes of every other sample compete in each stretch, the stretch's two winning
+places going to two samples, each scoring by its better copy — so a homozygous sample's two equal
+copies do not take both (code review 2026-11-05). Each sample offers the one
+that won more stretches — on a tie, the better whole-window score, then copy 0 — and the 16 best
+offers, ranked as the pass ranks samples, are the templates; their stretches won set where a copy
+lands (pass §3.5). *Changed 2026-11-05:* before, a haplotype's score was its disagreement rate over
+the whole window, out of the count of shared records rather than out of the expected disagreement
+(`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
 
 **What a round's walk reads of its templates.** The emissions read *definite alleles*: at each site,
 one allele drawn from each template's shares — the 16 haplotypes' and the background's — from the

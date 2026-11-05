@@ -155,10 +155,10 @@ What a record contributes depends on what it carries:
 
 ### 3.3 The templates
 
-For each sample and window, the `K = min(16, N − 1)` other samples that disagree with it least
-**against what the cohort's allele frequencies predict for an unrelated sample, judged only where
-both have reads, with more data preferred between two that disagree about as little** (owner,
-2026-11-02 and 2026-11-05). The records compared are the sample's informative records in the
+For each sample and window, the `K = min(16, N − 1)` other samples that most often disagree with it
+least **over short stretches of the window, against what the cohort's allele frequencies predict for
+an unrelated sample, judged only where both have reads, with more data preferred between two that
+disagree about as little** (owner, 2026-11-02 and 2026-11-05). The records compared are the sample's informative records in the
 window — a fixed sample of at most 500 of them, spread evenly over them by record order (the `i`-th
 of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and weighs the whole
 window, not its left margin. Of those, a candidate is compared where it is informative too. At each
@@ -169,12 +169,68 @@ such record:
 - the **expected** disagreement is the same against the cohort's frequencies,
   `1 − Σ_a q_self(a) · p(a)` — what an unrelated sample would show.
 
-Summed over the shared records they give `d` observed out of `e` expected. The candidate's score is
-the mean of the rate's Beta(`d + 1`, `e − d + 1`) posterior plus two of its standard deviations —
-pessimistic, so a rate measured on little scores worse — with `d` capped at `e`, so a candidate less
-alike than an unrelated sample scores as one. A candidate with `e` = 0 — no shared record, or only
-records where every sample carries the same allele — has nothing to be judged on and ranks after
-every candidate that has. The `K` lowest are the templates; ties break by sample order.
+**Judged stretch by stretch, ranked by stretches won (owner, 2026-11-05).** The compared records
+are cut, in record order, into **stretches** that each hold one unit of expected disagreement: a
+stretch ends at the record where `e`, summed over its records, reaches 1, counting only records at
+which some candidate is informative; what is left after the last such record joins the stretch
+before it, so no stretch is judged on less, and a window holding less than one unit is one
+stretch. One unit is about two SNPs
+at frequency ½ where the sample is certain, or about twenty at 5%. In each stretch every candidate
+gets a score from its own `d` and `e` there:
+
+- the score is the mean of the rate's Beta(`d + 1`, `e − d + 1`) posterior plus two of its standard
+  deviations — pessimistic, so a rate measured on little scores worse — with `d` capped at `e`, so a
+  candidate less alike than an unrelated sample scores as one;
+- a candidate with `e` = 0 there — no shared record, or only records where every sample carries the
+  same allele — has nothing to be judged on and cannot win the stretch;
+- the two lowest scores **win** the stretch, and so does any candidate tied with the second. From
+  phasing round 2, where the candidates are haplotypes, the two places go to two samples, each
+  scoring by its better copy — so a homozygous sample's two equal copies do not take both
+  (phasing spec §2.3).
+
+Candidates rank by stretches won, most first; then by the same score over the whole window's
+compared records; then by sample order. The first `K` are the templates. **A template's stretches
+won also set where a copy that changes template lands** (§3.5): with weight `wins + ½`, so a
+template that won nothing is still reachable, at half the weight of one that won a single stretch.
+
+**Why stretches — changed 2026-11-05.** A sample's two copies change template along the window at
+every crossover in its ancestry. A whole-window score ranks highest whoever is fairly close
+everywhere; the samples a copy actually copies are close over a part each — an F2 plant's parents
+over the stretches either side of a crossover — and only stretches short enough to fall between
+crossovers see that. On the simulated F2 (two inbred parents at 30×, 20 offspring at 1×) the
+whole-window rule often left an offspring's parents out of its templates or buried them among
+siblings; stretch wins raised the heterozygous offspring genotypes called right from 72 and 67 in
+100 to 82 and 81 on two simulations, with the wrong calls among them falling from 6 and 7 in 100 to
+3. In 40-sample natural cohorts at 1×, heterozygotes right rose by about 5 in 100 (outbred) and 4 to
+6 (selfing); samples at 5× gained up to 3 in 100, and samples at 10× and above did not move
+(`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
+
+- *Why one unit and two winners:* tuned on those cohorts. Longer stretches, four winners, and fixed
+  stretches of 50 records all measured worse; so did growing a stretch until its
+  candidates separated. Two winners are one a copy.
+- *Why land by wins:* on the F2, landing every template alike kept 74 heterozygotes in 100 right
+  against 81; in the natural cohorts it made no difference.
+- *Tried and not adopted* (same report): IMPUTE5's choice, the haplotypes sharing the longest exact
+  run of likeliest alleles with the sample, in rounds 2 and later — no better than stretch wins on
+  the natural cohorts, worse for selfing at 1×, and adding nothing measurable on top of them; and
+  Beagle's composite templates, one re-chosen in every stretch — re-chosen from the sample's own
+  reads every few records, they echo those reads back, and the F2 fell to 18 in 100.
+
+**Data wins near ties, and certainty is not penalised.** Within a stretch the pessimistic score
+charges a candidate for how little it is judged on, so a deep sample beats a shallow one that agrees
+as well — and it is the deep sample whose own data fills a site the target has none at. **The cost,
+stated:** a shallow candidate cannot win a stretch it has no reads in, so a shallow close relative
+wins fewer stretches than a deep sample that is only fairly close, and may rank below it. Where that
+loses accuracy — a cohort with shallow close relatives and many deep distant samples — is not
+measured.
+
+**At thousands of samples, chance matches — not measured.** One unit is short: an unrelated sample
+shows no disagreement over it about one time in three (`e^−1`). With a few dozen candidates that
+rarely matters; with thousands, many unrelated samples tie a true relative in every stretch, and a
+relative wins clearly only if it matches over more of the window than chance does — an F2 parent
+matches over about half of it. The stretch's information and its two winners were tuned at 20 and
+40 samples; the refine_sim benchmark measures 400; at several thousand the rule may need longer
+stretches, and that is not measured.
 
 **Why against the frequencies — changed 2026-11-05.** The rule before scored the plain
 disagreement, `½ Σ_a |q_self(a) − q_other(a)|`, over the shared records, and it favoured exactly
@@ -200,7 +256,7 @@ dozen genotypes in any cohort, uniform or mixed in depth (10 samples at 30× amo
 among 15), because a 3× sample has reads at about 95% of records and the earlier rule's charge for
 the rest was small. It is kept as the rule that says what it measures; where it should matter — 1×
 shallow samples among deep ones, cohorts far larger than `K` — is not measured. **The sample itself is never a template.** `K` = 16 was
-what the prototype ran; how accuracy and cost move with `K` is a measurement (§8).
+what the prototype ran; 2, 4 and 8 measured worse on every cohort of the 2026-11-05 report.
 
 **A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
 frequencies — `AF`, the reference taking the rest. A copy that matches none of the sampled
@@ -240,8 +296,8 @@ and nothing else.
 Between records `d` bases apart:
 
 - **A copy keeps its template** with probability `e^(−d/S)`, and otherwise draws one: the
-  background with probability 10⁻⁵, each of the `K` sampled templates with an equal share of the
-  rest (§3.3; before 2026-11-05 every one of the `K + 1` alike). In the non-autozygous state the two
+  background with probability 10⁻⁵, each of the `K` sampled templates a share of the rest in
+  proportion to its stretches won plus ½ (§3.3; before 2026-11-05 every one of the `K + 1` alike). In the non-autozygous state the two
   copies do this independently.
 - **The autozygous state is a two-state Markov chain** with runs of mean `R` and gaps of mean
   `R′ = R · (1 − F) / F`, so a share `F` of the sample is autozygous in the long run:
@@ -255,8 +311,9 @@ Between records `d` bases apart:
   sample 99% autozygous before a centromere came out 1% after it.
 - A change of state draws its templates afresh, with the same landing chances, and the walk's first
   record starts from them too: autozygous on template `k` with `F · w(k)`, the pair `(k₁, k₂)` with
-  `(1 − F) · w(k₁) · w(k₂)`, `w` the landing chance (`WalkParameters::background_landing_share`,
-  `src/neighbour_evidence/model.rs`).
+  `(1 − F) · w(k₁) · w(k₂)`, `w` the landing chance (`WalkParameters::landing_weights`,
+  `src/neighbour_evidence/model.rs`; the weights from `ChosenTemplate::landing_weight`,
+  `templates.rs`).
 
 **The parameters, per sample.** `F` starts at the sample's fitted inbreeding coefficient from the
 parameters file, clamped to [0.01, 0.99], and is re-estimated as the mean autozygous posterior,

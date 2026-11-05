@@ -97,11 +97,12 @@ impl SampleFit {
     /// frozen: the twelve grid walks at the current `F`, their log-likelihoods added to the running
     /// totals, the best total chosen, and `F` re-estimated from that grid point's walk.
     /// `informative_records` is how many of the window's sites are informative records of the
-    /// sample.
+    /// sample. `template_weights` is the walk's, as [`walk`] takes it.
     pub fn fit_window(
         &mut self,
         sites: &[WalkSite<'_>],
         templates: usize,
+        template_weights: Option<&[f64]>,
         informative_records: usize,
         mismatch: f64,
         background_landing_share: Option<f64>,
@@ -119,6 +120,7 @@ impl SampleFit {
             let result = walk(
                 sites,
                 templates,
+                template_weights,
                 WalkParameters {
                     segment_bases: SEGMENT_GRID[point / RUN_GRID.len()],
                     run_bases: RUN_GRID[point % RUN_GRID.len()],
