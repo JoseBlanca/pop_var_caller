@@ -932,6 +932,7 @@ fn fitted_period_from(
     }
     let mut period = Period::new(classes, fit)?;
     let mut started_close = false;
+    let mut share_from_pairs = false;
     if let Some(previous) = previous
         && previous.class_at_point == period.class_at_point
         && previous.stutter_from_the_curves == period.stutter_from_the_curves
@@ -947,6 +948,7 @@ fn fitted_period_from(
         period.shares_curve = previous.shares_curve.clone();
         period.multipliers = previous.multipliers.clone();
         started_close = true;
+        share_from_pairs = previous.spread_from_pairs;
     }
     // With read groups fitted apart, the loop starts where one stutter for every read group
     // settles: a round at one stutter scores the pooled rows, several times fewer than the keyed
@@ -957,7 +959,19 @@ fn fitted_period_from(
         period.count(classes, homozygote_excess, fit, false, round_ended);
     }
     period.multipliers = multipliers;
-    period.count(classes, homozygote_excess, fit, false, round_ended);
+    // **A refit keeps the between-locus share it started from** when that share was read off
+    // pairs (spec §2.2): counting with it free moved it back to where counting alone puts it, and
+    // the readings off pairs then redid the first fit's, the same rounds each time (on tomato2's
+    // homopolymers 30, 6 and 2 of the refit's 80). Held, it is read off pairs again at the
+    // stiffness already chosen, until a reading moves it by less than the alternations' own
+    // stopping step.
+    period.count(
+        classes,
+        homozygote_excess,
+        fit,
+        share_from_pairs,
+        round_ended,
+    );
     for alternation in 0..fit.pair_alternations {
         let started = Instant::now();
         let Some(tables) = period.pair_tables(classes, homozygote_excess, fit.allele_span) else {
@@ -966,7 +980,7 @@ fn fitted_period_from(
         let spreads = period.between_curve.refit(
             &tables,
             fit,
-            if alternation == 0 {
+            if alternation == 0 && !share_from_pairs {
                 StrengthSearch::Wide
             } else {
                 StrengthSearch::Near
@@ -1922,6 +1936,25 @@ impl Period {
         let points = self.points();
         let alleles = self.alleles;
         let mut rounds_here = 0;
+        // **A keyed class's table, built once for the run of rounds.** Which distinct rows a class
+        // holds depends on its reads and the homozygote excesses, not on the multipliers, so each
+        // round gives the table its multipliers rather than building it again. Building it was the
+        // round's largest part on one thread at 960 read groups on 32 threads (7 of 41 seconds).
+        // Every class's table is alive for the run, where a pooled table is dropped before the next
+        // class builds its own.
+        let mut keyed_tables: Vec<Option<DistinctRows>> = (0..points).map(|_| None).collect();
+        // **The jumps stop once they stop helping** (spec §2.8). The guard compares the reads'
+        // log-likelihood, but a round climbs the penalised objective, which adds the curves' bend
+        // penalties, the priors and the multipliers' pull; a round can lower the first while it
+        // raises the second, and a jump back then passes the guard. On kimura's cohort of 2,655
+        // read groups the homopolymer fit went round one cycle of three rounds from round 226 to
+        // round 310, its largest change 6.6e-4, 3.1e-4, 2.3e-4 each time. So the run keeps the
+        // lowest change of any round, and once 30 rounds have passed without a new lowest, lower
+        // by 1 in 100, the rest of the run takes ordinary rounds, which climb the objective every
+        // time. A run that is settling keeps setting new lows, a jump turned back now and then
+        // included (on tomato2 about half are).
+        let mut jumping = fit.extrapolate;
+        let (mut lowest, mut since_lowest) = (f64::INFINITY, 0);
         while self.rounds < fit.max_rounds {
             self.rounds += 1;
             rounds_here += 1;
@@ -1963,18 +1996,36 @@ impl Period {
             let gathered: Vec<(Option<ClassCounts>, Option<usize>)> = self
                 .class_at_point
                 .iter()
+                .zip(keyed_tables.iter_mut())
                 .enumerate()
-                .map(|(point, class)| {
+                .map(|(point, (class, keyed_table))| {
                     if reuse(point) {
                         return (self.last_counts[point].clone(), None);
                     }
                     let Some(index) = *class else {
                         return (None, None);
                     };
-                    let distinct = self.table_of(classes[index], homozygote_excess);
+                    let pooled_table;
+                    let distinct: &DistinctRows = match &self.multipliers {
+                        None => {
+                            pooled_table = DistinctRows::of(classes[index], homozygote_excess);
+                            &pooled_table
+                        }
+                        Some(multipliers) => {
+                            let table = keyed_table.get_or_insert_with(|| {
+                                DistinctRows::keyed_at(
+                                    classes[index],
+                                    homozygote_excess,
+                                    multipliers,
+                                )
+                            });
+                            table.score_at(multipliers);
+                            table
+                        }
+                    };
                     let counts = expected_counts_by_distinct_rows(
                         classes[index],
-                        &distinct,
+                        distinct,
                         self.slippage[point],
                         &self.shares[point],
                         self.concentration[point],
@@ -2162,9 +2213,18 @@ impl Period {
             }
             // Not while the curves' stiffness is first searched for, when a round's step reflects
             // the search as much as the reads.
-            if fit.extrapolate && search != StrengthSearch::Wide && rounds_here > 5 {
+            if jumping && search != StrengthSearch::Wide && rounds_here > 5 {
+                if change < 0.99 * lowest {
+                    lowest = change;
+                    since_lowest = 0;
+                } else {
+                    since_lowest += 1;
+                }
                 let jump = self.squarem_step(state_before, self.composite_log_likelihood);
                 change = change.max(jump);
+                if since_lowest >= 30 && matches!(self.squarem, SquaremCycle::Idle) {
+                    jumping = false;
+                }
             } else {
                 self.squarem = SquaremCycle::Idle;
             }

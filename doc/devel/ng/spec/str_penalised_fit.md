@@ -152,6 +152,22 @@ one class's table of distinct rows is alive at once, whatever the thread count (
 §3). The cost: a class small enough to leave the machine idle is fitted on few threads, which at one
 sample costs seconds. Steps 2–3 are cheap (1–9% of the time on the bench).
 
+*One exception, 2026-11-05: a table keyed by read group* (`str_library_stutter.md` §3.2) *is built
+once for a run of rounds and kept*, each round giving it the round's multipliers: which distinct rows
+a class holds does not depend on them. What is alive at once is then every class's table of rows,
+not the rows' scores, which are still built and dropped a class at a time. Building the table every
+round had been the largest part of a round left on one thread: at 960 read groups and 200 loci a
+class on 32 threads of kimura the fit took 57.8 s with it and 37.1 s without, at a peak of 1.14 GB
+and 1.26 GB.
+
+*The scores, the read models and the counts are held in a few large arrays, not one small vector a
+row or a genotype* (2026-11-05). On Linux, vectors made on the pool's threads and freed on the
+calling one were freed slowly and one at a time: the read models' alone, about 200,000 vectors a
+class and round at 960 read groups, took 21 of the fit's 78 seconds on 32 threads, longer at 32
+threads than at one. Each round's counts are summed in fixed chunks of rows side by side, then the
+chunks in order, so the answer does not depend on the thread count; this sums in another order than
+row by row, and no number on tomato2 moved by more than 10⁻⁸ of itself.
+
 **Every class with reads at even one locus is fitted.** There is no refusal floor: a thin class's
 numbers come mostly from the curve, which is the point. *Main's floor of 8 loci
 (`DEFAULT_REFUSAL_FLOOR`, `ssr_fit.rs:1201`) existed to stop a per-class climb on too little; it has
@@ -359,6 +375,24 @@ rounds, and a start ten times closer saves only about 32.
   32 s against 39 s; about half the jumps are undone. Dinucleotide multipliers move by up to 0.11%
   and slip rates by up to 0.25% against the loop without it, the same at 10⁻⁷ and 10⁻⁵: the jumps
   move the path along which the curves' stiffness is chosen.
+
+  **The jumps stop once they stop helping** (2026-11-05). The guard compares the reads'
+  log-likelihood, but an ordinary round climbs the penalised objective, which adds the curves' bend
+  penalties, the priors and the multipliers' pull to it. A round can lower the reads'
+  log-likelihood while it raises the objective, and a jump back toward where the cycle began then
+  passes the guard. On kimura's cohort of 2,655 read groups the homopolymer fit went round one cycle
+  of three rounds from round 226 to round 331, when it was stopped: its largest change was 6.6·10⁻⁴,
+  3.1·10⁻⁴ and 2.3·10⁻⁴ in every cycle. So a counting run keeps the lowest change of any round,
+  and once 30 rounds pass without a new lowest, lower by 1 in 100, it takes ordinary rounds to the
+  end; those climb the objective every time. A run that is settling keeps setting new lows, though
+  on tomato2 about half its jumps are turned back. *Measured on tomato2*: 16.0 s against 14.7 s with
+  the jumps never stopped; homopolymers to tetranucleotides take the same rounds (18, 168, 99, 58),
+  pentanucleotides 413 against 408 and hexanucleotides 412 against 193, whose rounds are cheap.
+  *Tried and dropped*: stopping after two cycles in a row whose largest change did not fall (the
+  kimura dinucleotide fit, set back by a turned-back jump every 33 rounds, never tripped it), and
+  after three cycles without a new lowest with a turned-back jump counted as none (22.6 s on
+  tomato2, trinucleotides 233 rounds against 99). *Not built*: guarding on the penalised objective itself, which is the exact
+  fix and needs every penalty and prior term summed in one place.
 - *Tried and dropped*: the same jump **without the guard** cut the rounds on drawn cohorts but on
   tomato2 left the tetranucleotide fit unsettled after 2,000 rounds; **recomputing alternate
   classes** each round, the rest reusing their last counts, needed proportionally more rounds

@@ -56,6 +56,13 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    // The fit's progress and its per-motif-length lines, as `estimate-parameters` logs them,
+    // into `<out>.log`.
+    pop_var_caller::cli::run_output::install(false, Vec::new());
+    let _log = pop_var_caller::cli::run_output::open_log(
+        &PathBuf::from(format!("{}.log", cli.args.output.display())),
+        true,
+    )?;
     let fitted = ParametersFile::from_toml(&std::fs::read_to_string(&cli.fitted_parameters)?)?;
     let coefficient: BTreeMap<&str, f64> = fitted
         .inbreeding

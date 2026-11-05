@@ -170,9 +170,11 @@ pub fn fit_multipliers_of_a_typical_one(
     // Weights of mean one, so that `λ` is on the scale of one read group's slope.
     let read_groups = weights.iter().filter(|weight| **weight > 0.0).count() as f64;
     let scaled: Vec<f64> = weights.iter().map(|w| w * read_groups / total).collect();
+    // Each read group's solve stands alone, so they run side by side: at 2,655 read groups the
+    // solves one after another held one thread for most of the fit while the rest waited.
     let solve = |lambda: f64| -> Vec<f64> {
         classes_by_read_group
-            .iter()
+            .par_iter()
             .zip(&scaled)
             .zip(starts)
             .map(|((classes, weight), start)| {

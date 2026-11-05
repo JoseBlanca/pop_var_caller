@@ -299,7 +299,11 @@ mod tests {
     /// and its loop began jumping along its own path (`str_penalised_fit.md` §2.7, §2.8): the fit
     /// stops sooner, and a between-locus share moves from 0.25414573 to 0.25414718 and a slip rate in its 8th digit. It was `07dd485da3fd17b375fe6be3985ae8a4`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const FITTED_PARAMETERS_MD5: &str = "89d6f0d3b9ef190363b1dd6e1f233ae3";
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `89d6f0d3b9ef190363b1dd6e1f233ae3`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    const FITTED_PARAMETERS_MD5: &str = "74942ccad3ca54fa0959b382db29b57d";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -482,7 +486,11 @@ mod tests {
     /// **Re-recorded 2026-11-04, a second time**, with the tolerance of 10⁻⁵: only the
     /// `##pvcParameters` line moves. It was `a0a300f1492b6a90dac4cac8f2d4f2c7`. Recorded on the macOS host (arm64) and in
     /// the Linux container (arm64), which agree.
-    const CALLS_MD5: &str = "a17052e1575c8800c810cc67f7c9d913";
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `a17052e1575c8800c810cc67f7c9d913`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    const CALLS_MD5: &str = "019c3de63c364651173693f426e3c899";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -624,7 +632,11 @@ mod tests {
     /// and its loop began jumping along its own path (`str_penalised_fit.md` §2.7, §2.8): the fit
     /// stops sooner, and a between-locus share moves from 0.25414573 to 0.25414718 and a slip rate in its 8th digit. It was `5fe3d062a2de1be73e770e11269042fe`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "c01e4746bb2c4e30141a49ffe232df7f";
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `c01e4746bb2c4e30141a49ffe232df7f`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "a6f0ab45333b6d2248310eeb06abc7fe";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -785,7 +797,11 @@ mod tests {
     /// **Re-recorded 2026-11-04, a second time**, with the tolerance of 10⁻⁵: only the
     /// `##pvcParameters` line moves. It was `d86ea0d4c06d0056e4df8098f5af19bb`. Recorded on the macOS host (arm64) and in
     /// the Linux container (arm64), which agree.
-    const WITH_ERRORS_CALLS_MD5: &str = "0d56b0fa0b87fdd90a238d9586288b22";
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `0d56b0fa0b87fdd90a238d9586288b22`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    const WITH_ERRORS_CALLS_MD5: &str = "2b9c26ea96b6b3170229d6b193d1a580";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -940,7 +956,11 @@ mod tests {
     /// and its loop began jumping along its own path (`str_penalised_fit.md` §2.7, §2.8): the fit
     /// stops sooner, and a between-locus share moves in its 10th digit and a slip rate in its 13th. It was `1965e6321bb9a454dad2d8268609ea42`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "11a412be1885f1107948ac12283f4c4e";
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `11a412be1885f1107948ac12283f4c4e`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "b25ac05704bc2abd1a3a55d2d8935495";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1117,7 +1137,11 @@ mod tests {
     /// **Re-recorded 2026-11-04, a second time**, with the tolerance of 10⁻⁵: only the
     /// `##pvcParameters` line moves. It was `b1ee069b58448fe0320d1637696e76ae`. Recorded on the macOS host (arm64) and in
     /// the Linux container (arm64), which agree.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "90a30ab4bfb80c549a0b5e297543404a";
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `90a30ab4bfb80c549a0b5e297543404a`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "7adde21dfbc0fa181a0e6bf7f7d7a93b";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

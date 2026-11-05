@@ -282,6 +282,17 @@ impl DistinctRows {
         table
     }
 
+    /// **Scores a keyed table's rows at `multipliers` from now on**, one a read group of the
+    /// evidence the table was built from.
+    pub(super) fn score_at(&mut self, multipliers: &[f64]) {
+        let held = self
+            .multipliers
+            .as_mut()
+            .expect("a keyed table built at multipliers");
+        assert_eq!(held.len(), multipliers.len(), "one multiplier a read group");
+        held.copy_from_slice(multipliers);
+    }
+
     /// **The parts of a distinct row**: each with the read group it came through, `None` for a
     /// pooled row, and its count in each bucket.
     fn parts<'r>(
@@ -404,17 +415,52 @@ impl DistinctRows {
 /// the bucket alone, yet scoring every distinct row took it afresh, and `ln` was a quarter of the
 /// research bench's CPU samples at 2,000 samples of 30 reads. [`ln_reads`] reads the table and adds
 /// the same terms in the same order, so a row's log-likelihood is the same to the bit.
-fn ln_read_chances(per_allele: &[Vec<f64>], genotypes: &[(usize, usize)]) -> Vec<Vec<f64>> {
-    genotypes
-        .iter()
-        .map(|(a, b)| {
+fn ln_read_chances(per_allele: &FlatRows, genotypes: &[(usize, usize)]) -> FlatRows {
+    let mut values = Vec::with_capacity(genotypes.len() * per_allele.width);
+    for (a, b) in genotypes {
+        values.extend(
             per_allele[*a]
                 .iter()
                 .zip(&per_allele[*b])
-                .map(|(from_a, from_b)| float::ln((0.5 * (from_a + from_b)).max(1e-300)))
-                .collect()
-        })
-        .collect()
+                .map(|(from_a, from_b)| float::ln((0.5 * (from_a + from_b)).max(1e-300))),
+        );
+    }
+    FlatRows {
+        width: per_allele.width,
+        values,
+    }
+}
+
+/// **Rows of one length in one array**, row `i` read as `rows[i]`.
+///
+/// A read model holds one row an allele and one a genotype for each distinct multiplier: at 960
+/// read groups, about 200,000 vectors a class and round as vectors of their own, made on the pool's
+/// threads and freed on the calling one, which took 20 of the fit's 78 seconds on 32 threads.
+#[derive(Clone)]
+struct FlatRows {
+    width: usize,
+    values: Vec<f64>,
+}
+
+impl FlatRows {
+    fn of(rows: &[Vec<f64>]) -> Self {
+        let width = rows.first().map_or(0, Vec::len);
+        debug_assert!(
+            rows.iter().all(|row| row.len() == width),
+            "rows of one length"
+        );
+        Self {
+            width,
+            values: rows.concat(),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for FlatRows {
+    type Output = [f64];
+    fn index(&self, row: usize) -> &[f64] {
+        &self.values[row * self.width..(row + 1) * self.width]
+    }
 }
 
 /// **The log-likelihood of a row of reads under one genotype**, from that genotype's row of
@@ -433,15 +479,18 @@ fn ln_reads(ln_chances: &[f64], reads: &[u32]) -> f64 {
     total
 }
 
-/// **One distinct row of reads scored at one stutter**: the largest genotype log-likelihood, and
-/// each genotype's likelihood divided by the largest, in `genotypes` order.
+/// **One distinct row of reads scored at one stutter**: each genotype's likelihood divided by the
+/// largest, in `genotypes` order; the largest log-likelihood is kept beside it
+/// ([`ScoredDistinctRows`]).
 ///
 /// It holds no prior. A genotype's weight in a round is this likelihood times the genotype's prior
 /// ([`GenotypePrior`]), multiplied where it is read, so a step that moves only the shares or the
 /// spread reuses the row as it is.
-struct ScoredRow {
-    largest: f64,
-    scaled: Vec<f64>,
+///
+/// A view into [`ScoredDistinctRows`], which holds every row's likelihoods in one array.
+#[derive(Clone, Copy)]
+struct ScoredRow<'s> {
+    scaled: &'s [f64],
 }
 
 /// **A scored row's likelihoods summed under the prior**: over the genotypes, each scaled
@@ -494,14 +543,16 @@ pub(super) struct ReadModel {
 /// distribution, its log chances under each genotype, and the chance a read reports its allele.
 #[derive(Clone)]
 struct ReadModelAtRate {
-    per_allele: Vec<Vec<f64>>,
+    /// A row an allele.
+    per_allele: FlatRows,
     /// [`ln_read_chances`] of `per_allele`: a row per genotype in `genotypes` order.
-    ln_read_chances: Vec<Vec<f64>>,
+    ln_read_chances: FlatRows,
     stay: f64,
 }
 
 impl ReadModelAtRate {
     fn of(slippage: Slippage, per_allele: Vec<Vec<f64>>, genotypes: &[(usize, usize)]) -> Self {
+        let per_allele = FlatRows::of(&per_allele);
         let ln_read_chances = ln_read_chances(&per_allele, genotypes);
         Self {
             per_allele,
@@ -564,8 +615,9 @@ impl ReadModel {
                 multipliers
                     .sort_unstable_by(|a, b| f64::from_bits(*a).total_cmp(&f64::from_bits(*b)));
                 multipliers.dedup();
+                // One model a distinct multiplier, built side by side: each stands alone.
                 let rates = multipliers
-                    .iter()
+                    .par_iter()
                     .map(|multiplier| {
                         let scored = Slippage {
                             level: read_group_level(slippage.level, f64::from_bits(*multiplier)),
@@ -631,29 +683,29 @@ impl ReadModel {
     /// row's parts of that part's reads read off its own rate's [`ReadModelAtRate::ln_read_chances`].
     /// A row of one part, every row of a pooled table, takes that part's sum as it is, so a pooled
     /// row scores to the bit as before read groups were told apart.
-    fn score(&self, parts: &PartsAtRates<'_, '_>) -> ScoredRow {
+    ///
+    /// Written into `scaled`, one entry a genotype; returns the largest log-likelihood.
+    fn score(&self, parts: &PartsAtRates<'_, '_>, scaled: &mut [f64]) -> f64 {
         // Each genotype's log-likelihood, then its likelihood scaled by the largest, in place.
-        let mut scaled = self.log_likelihoods(parts);
+        self.log_likelihoods(parts, scaled);
         let largest = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        for value in &mut scaled {
+        for value in scaled.iter_mut() {
             *value = float::exp(*value - largest);
         }
-        ScoredRow { largest, scaled }
+        largest
     }
 
     /// **Each genotype's log-likelihood of a row**, in `genotypes` order: the sum over the row's
     /// parts of the part's reads read off its own rate's log chances, a row of one part taking that
     /// part's sum as it is.
-    fn log_likelihoods(&self, parts: &PartsAtRates<'_, '_>) -> Vec<f64> {
-        (0..self.genotypes.len())
-            .map(|genotype| {
-                let mut each = parts
-                    .iter()
-                    .map(|(rate, _, counts)| ln_reads(&rate.ln_read_chances[genotype], counts));
-                let first = each.next().unwrap_or(0.0);
-                each.fold(first, |total, part| total + part)
-            })
-            .collect()
+    fn log_likelihoods(&self, parts: &PartsAtRates<'_, '_>, into: &mut [f64]) {
+        for (genotype, value) in into.iter_mut().enumerate() {
+            let mut each = parts
+                .iter()
+                .map(|(rate, _, counts)| ln_reads(&rate.ln_read_chances[genotype], counts));
+            let first = each.next().unwrap_or(0.0);
+            *value = each.fold(first, |total, part| total + part);
+        }
     }
 
     /// **The counts of every sample that holds a row**, from the row's `parts`, its scaled
@@ -667,7 +719,7 @@ impl ReadModel {
         &self,
         prior: &GenotypePrior,
         parts: &PartsAtRates<'_, '_>,
-        row: &ScoredRow,
+        row: ScoredRow<'_>,
         weights: RowWeights,
         into: &mut Counts,
         by_part: &mut [ReadGroupSlips],
@@ -767,7 +819,7 @@ impl GenotypePrior {
     }
 
     /// `row`'s scaled likelihoods summed under this prior, genotype by genotype in order.
-    fn totals(&self, row: &ScoredRow) -> PriorWeightedTotals {
+    fn totals(&self, row: ScoredRow<'_>) -> PriorWeightedTotals {
         PriorWeightedTotals {
             one_draw: row
                 .scaled
@@ -814,6 +866,11 @@ impl GenotypePrior {
 /// **A class's distinct rows of reads, each scored at one stutter**: the [`ReadModel`] and a
 /// [`ScoredRow`] for every row of `distinct`, in its order.
 ///
+/// **Every row's likelihoods in one array**, a row of one entry a genotype after another. One
+/// vector a row was one heap block a distinct row, made on the pool's threads and freed on the
+/// calling one: at 960 read groups on 32 threads, freeing them took 21 of the fit's 78 seconds,
+/// more than at one thread (8 seconds), and longer than scoring the rows.
+///
 /// **Why it is kept apart from the shares and the spread.** Scoring the rows is the costly part of
 /// a round and depends on the stutter alone. The standard errors take steps in the shares and in F
 /// at fixed stutter, and these all read one scoring of the class instead of scoring it again for
@@ -821,7 +878,10 @@ impl GenotypePrior {
 pub(super) struct ScoredDistinctRows<'a> {
     distinct: &'a DistinctRows,
     model: std::borrow::Cow<'a, ReadModel>,
-    scored: Vec<ScoredRow>,
+    /// Each row's largest genotype log-likelihood.
+    largest: Vec<f64>,
+    /// Each row's scaled likelihoods, `genotypes` entries a row.
+    scaled: Vec<f64>,
 }
 
 impl<'a> ScoredDistinctRows<'a> {
@@ -864,16 +924,34 @@ impl<'a> ScoredDistinctRows<'a> {
                     .all(|reads| !reads.is_empty() && reads.len() % stride == 0),
             "every part of a distinct row holds one count a bucket"
         );
-        let scored = distinct
-            .reads
-            .par_iter()
-            .map(|reads| model.score(&model.parts_at_rates(distinct, reads)))
+        let genotypes = model.genotypes.len();
+        let mut scaled = vec![0.0; distinct.reads.len() * genotypes];
+        let largest = scaled
+            .par_chunks_mut(genotypes)
+            .zip(&distinct.reads)
+            .map(|(scaled, reads)| model.score(&model.parts_at_rates(distinct, reads), scaled))
             .collect();
         Self {
             distinct,
             model,
-            scored,
+            largest,
+            scaled,
         }
+    }
+
+    /// The `index`th distinct row as scored.
+    fn row(&self, index: usize) -> ScoredRow<'_> {
+        let genotypes = self.model.genotypes.len();
+        ScoredRow {
+            scaled: &self.scaled[index * genotypes..(index + 1) * genotypes],
+        }
+    }
+
+    /// Every distinct row as scored, in order.
+    fn rows(&self) -> impl IndexedParallelIterator<Item = ScoredRow<'_>> {
+        self.scaled
+            .par_chunks(self.model.genotypes.len())
+            .map(|scaled| ScoredRow { scaled })
     }
 
     /// **One round's expected counts over the whole class** at the scored stutter, the
@@ -882,11 +960,7 @@ impl<'a> ScoredDistinctRows<'a> {
     pub(super) fn expected_counts(&self, shares: &[f64], concentration: f64) -> Counts {
         let (distinct, model) = (self.distinct, &self.model);
         let prior = GenotypePrior::of(&model.genotypes, shares, concentration);
-        let totals: Vec<PriorWeightedTotals> = self
-            .scored
-            .par_iter()
-            .map(|row| prior.totals(row))
-            .collect();
+        let totals: Vec<PriorWeightedTotals> = self.rows().map(|row| prior.totals(row)).collect();
         // In fixed chunks summed in order, so that the answer does not depend on the thread pool.
         //
         // A chunk keeps only the distinct rows its samples hold, not one entry for every distinct
@@ -912,7 +986,7 @@ impl<'a> ScoredDistinctRows<'a> {
                         held.len() - 1
                     });
                     let index = *index as usize;
-                    let largest = self.scored[index].largest;
+                    let largest = self.largest[index];
                     if let Some(ll) =
                         prior.add_sample(largest, totals[index], *excess, &mut held[at].1)
                     {
@@ -935,39 +1009,50 @@ impl<'a> ScoredDistinctRows<'a> {
         }
         // Freed before the rows' counts are built.
         drop(partials);
-        // Each row's counts, and each of its parts' exactly-read and slipped reads with the read
-        // group it came through; a pooled row's part names none.
-        type PartSlips = SmallVec<[(Option<ReadGroupIndex>, ReadGroupSlips); 2]>;
-        let per_row: Vec<(Counts, PartSlips)> = distinct
+        // **Summed in fixed chunks of rows, side by side, then the chunks in order**: each chunk
+        // adds its rows' counts into one total and each part's reads into its read group's, and the
+        // answer does not depend on the thread pool. One `Counts` a row, summed on the calling
+        // thread and freed there, was the round's largest part left on one thread at 960 read
+        // groups on 32 threads (6 of 37 seconds). The sums are in another order than row by row,
+        // so the last bits differ from that.
+        // About 1,024 chunks a class, so that every thread has rows to count, and each chunk's
+        // total per read group is small beside the rows: at 2.69 million rows and 2,655 read groups,
+        // the largest class of a 2,176-sample cohort, about 43 MB.
+        let read_groups = model.read_groups();
+        let chunk = (distinct.reads.len() / 1024).max(64);
+        let genotypes = model.genotypes.len();
+        let partials: Vec<Counts> = distinct
             .reads
-            .par_iter()
-            .zip(&self.scored)
-            .zip(&weights)
-            .map(|((reads, row), weights)| {
-                let parts = model.parts_at_rates(distinct, reads);
-                let mut by_part: SmallVec<[ReadGroupSlips; 2]> =
-                    smallvec::smallvec![ReadGroupSlips::default(); parts.len()];
+            .par_chunks(chunk)
+            .zip(self.scaled.par_chunks(chunk * genotypes))
+            .zip(weights.par_chunks(chunk))
+            .map(|((reads, scaled), weights)| {
                 let mut counts = Counts::new(model.classes);
-                model.counts_of(&prior, &parts, row, *weights, &mut counts, &mut by_part);
-                let slips = parts
-                    .iter()
-                    .zip(by_part)
-                    .map(|((_, read_group, _), slips)| (*read_group, slips))
-                    .collect();
-                (counts, slips)
+                counts.read_groups = vec![ReadGroupSlips::default(); read_groups];
+                let mut by_part: SmallVec<[ReadGroupSlips; 2]> = SmallVec::new();
+                let rows = scaled
+                    .chunks_exact(genotypes)
+                    .map(|scaled| ScoredRow { scaled });
+                for ((reads, row), weights) in reads.iter().zip(rows).zip(weights) {
+                    let parts = model.parts_at_rates(distinct, reads);
+                    by_part.clear();
+                    by_part.resize(parts.len(), ReadGroupSlips::default());
+                    model.counts_of(&prior, &parts, row, *weights, &mut counts, &mut by_part);
+                    for ((_, read_group, _), slips) in parts.iter().zip(&by_part) {
+                        if let Some(read_group) = read_group {
+                            let into = &mut counts.read_groups[read_group.get()];
+                            into.exact += slips.exact;
+                            into.slipped += slips.slipped;
+                        }
+                    }
+                }
+                counts
             })
             .collect();
         let mut counts = Counts::new(model.classes);
-        counts.read_groups = vec![ReadGroupSlips::default(); model.read_groups()];
-        for (row, parts) in &per_row {
-            counts.add(row);
-            for (read_group, slips) in parts {
-                if let Some(read_group) = read_group {
-                    let into = &mut counts.read_groups[read_group.get()];
-                    into.exact += slips.exact;
-                    into.slipped += slips.slipped;
-                }
-            }
+        counts.read_groups = vec![ReadGroupSlips::default(); read_groups];
+        for partial in &partials {
+            counts.add(partial);
         }
         counts.log_likelihood = log_likelihood;
         counts
@@ -997,9 +1082,10 @@ impl ScoredDistinctRows<'_> {
             .rows
             .par_iter()
             .map(|(index, excess)| {
-                let row = &self.scored[*index as usize];
+                let row = self.row(*index as usize);
                 let mut weights = RowWeights::default();
-                prior.add_sample(row.largest, prior.totals(row), *excess, &mut weights)?;
+                let largest = self.largest[*index as usize];
+                prior.add_sample(largest, prior.totals(row), *excess, &mut weights)?;
                 let mut highest: Option<(usize, f64)> = None;
                 for (genotype, scaled) in row.scaled.iter().enumerate() {
                     let weight = scaled
@@ -1031,7 +1117,7 @@ impl ScoredDistinctRows<'_> {
             .rows
             .par_iter()
             .map(|(index, _)| {
-                let row = &self.scored[*index as usize];
+                let row = self.row(*index as usize);
                 let mut highest: Option<(usize, f64)> = None;
                 for (genotype, scaled) in row.scaled.iter().enumerate() {
                     if *scaled > 0.0 && highest.is_none_or(|(_, top)| *scaled > top) {
@@ -1429,7 +1515,11 @@ pub(super) fn pair_cubics_by_tract(
         .reads
         .par_iter()
         .map(|reads| {
-            let log_likelihoods = model.log_likelihoods(&model.parts_at_rates(&distinct, reads));
+            let mut log_likelihoods = vec![0.0; genotypes.len()];
+            model.log_likelihoods(
+                &model.parts_at_rates(&distinct, reads),
+                &mut log_likelihoods,
+            );
             ordered_row(&log_likelihoods, genotypes, classes)
         })
         .collect();
