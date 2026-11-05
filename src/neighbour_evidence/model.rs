@@ -35,15 +35,46 @@ pub struct WalkParameters {
 
 impl WalkParameters {
     /// **Where a copy that changes template lands**: one weight a template, summing to one.
-    fn landing_weights(&self, templates: usize) -> Vec<f64> {
-        match self.background_landing_share {
-            Some(background) if templates > 1 => {
-                let mut weights = vec![(1.0 - background) / (templates - 1) as f64; templates];
-                weights[templates - 1] = background;
-                weights
-            }
-            _ => vec![1.0 / templates as f64; templates],
+    /// `template_weights`, when given, are the relative weights of the first `templates − 1` — the
+    /// sample templates (spec §3.3) — on any positive scale; without them those weigh alike. The
+    /// last template, the background, takes `background_landing_share`, or without one the mean
+    /// of the others' relative weights.
+    ///
+    /// # Panics
+    ///
+    /// If `template_weights` is not one weight for each template but the last.
+    fn landing_weights(&self, templates: usize, template_weights: Option<&[f64]>) -> Vec<f64> {
+        if templates == 1 {
+            return vec![1.0];
         }
+        let mut weights: Vec<f64> = match template_weights {
+            Some(given) => {
+                assert_eq!(
+                    given.len(),
+                    templates - 1,
+                    "one landing weight for each template but the background"
+                );
+                given.to_vec()
+            }
+            None => vec![1.0; templates - 1],
+        };
+        let others: f64 = weights.iter().sum();
+        match self.background_landing_share {
+            Some(background) => {
+                for weight in &mut weights {
+                    *weight *= (1.0 - background) / others;
+                }
+                weights.push(background);
+            }
+            None => {
+                weights.push(others / (templates - 1) as f64);
+                let total: f64 = weights.iter().sum();
+                for weight in &mut weights {
+                    *weight /= total;
+                }
+            }
+        }
+        weights
     }
 }
 
@@ -257,15 +288,31 @@ fn persistence(gap: f64, parameters: &WalkParameters) -> (f64, f64, f64) {
 }
 
 /// **One sample's walk over a window's sites** (spec §3). `templates` is `K`; every site carries
-/// that many templates' shares. Returns each site's genotype posterior and autozygous probability.
+/// that many templates' shares. `template_weights` weighs where a copy that changes template lands,
+/// one relative weight for each template but the background (`WalkParameters::landing_weights`);
+/// `None` weighs them alike. Returns each site's genotype posterior and autozygous probability.
 ///
 /// # Panics
 ///
-/// If a site's likelihoods or shares do not match its allele count, or the autozygous share is
-/// not strictly between 0 and 1.
+/// If a site's likelihoods or shares do not match its allele count, the autozygous share is not
+/// strictly between 0 and 1, or `template_weights` is not `templates − 1` long.
 #[must_use]
-pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters) -> WalkResult {
-    walk_with_draw(sites, templates, parameters, None, None, None).0
+pub fn walk(
+    sites: &[WalkSite<'_>],
+    templates: usize,
+    template_weights: Option<&[f64]>,
+    parameters: WalkParameters,
+) -> WalkResult {
+    walk_with_draw(
+        sites,
+        templates,
+        template_weights,
+        parameters,
+        None,
+        None,
+        None,
+    )
+    .0
 }
 
 /// **A sample's read link between two walk sites**: `L` between `one` and `other`, each with its
@@ -308,12 +355,20 @@ pub(crate) type HaplotypePair = [Vec<f64>; 2];
 pub(crate) fn walk_and_draw(
     sites: &[WalkSite<'_>],
     templates: usize,
+    template_weights: Option<&[f64]>,
     parameters: WalkParameters,
     uniforms: &mut Uniforms,
     reads: Option<&mut DrawReads<'_>>,
 ) -> (WalkResult, Vec<HaplotypePair>) {
-    let (result, drawn, _) =
-        walk_with_draw(sites, templates, parameters, Some(uniforms), None, reads);
+    let (result, drawn, _) = walk_with_draw(
+        sites,
+        templates,
+        template_weights,
+        parameters,
+        Some(uniforms),
+        None,
+        reads,
+    );
     (
         result,
         // PANIC-FREE: `walk_with_draw` draws whenever it is given a stream, as it is here.
@@ -331,9 +386,11 @@ pub(crate) fn walk_and_draw(
 ///
 /// As [`walk_and_draw`].
 #[must_use]
+#[allow(clippy::too_many_arguments)] // the walk's own inputs and the two draws' streams
 pub(crate) fn walk_and_draw_paths(
     sites: &[WalkSite<'_>],
     templates: usize,
+    template_weights: Option<&[f64]>,
     parameters: WalkParameters,
     uniforms: &mut Uniforms,
     extra_uniforms: &mut Uniforms,
@@ -343,6 +400,7 @@ pub(crate) fn walk_and_draw_paths(
     let (result, drawn, extra_paths) = walk_with_draw(
         sites,
         templates,
+        template_weights,
         parameters,
         Some(uniforms),
         Some((extra_uniforms, extra)),
@@ -461,6 +519,7 @@ enum State {
 fn walk_with_draw(
     sites: &[WalkSite<'_>],
     templates: usize,
+    template_weights: Option<&[f64]>,
     parameters: WalkParameters,
     uniforms: Option<&mut Uniforms>,
     extra: Option<(&mut Uniforms, usize)>,
@@ -483,7 +542,7 @@ fn walk_with_draw(
          got {share} and {templates}"
     );
     let k = templates;
-    let landing = parameters.landing_weights(k);
+    let landing = parameters.landing_weights(k, template_weights);
     let mut genotype_pairs = GenotypePairs::default();
     let WalkArrays {
         mut emissions,

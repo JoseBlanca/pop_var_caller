@@ -96,7 +96,7 @@ fn the_walk_reproduces_the_python_prototype() {
             })
             .collect();
         let templates = case.templates + usize::from(case.background);
-        let result = walk(&sites, templates, case.parameters);
+        let result = walk(&sites, templates, None, case.parameters);
         assert!(
             (result.log_likelihood - case.log_likelihood).abs() < 1e-9,
             "case {number}: log-likelihood {} against {}",
@@ -153,7 +153,7 @@ fn a_site_without_reads_takes_the_templates_allele() {
         mismatch: 0.01,
         background_landing_share: None,
     };
-    let result = walk(&sites, 2, parameters);
+    let result = walk(&sites, 2, None, parameters);
     let middle = &result.posteriors[1];
     assert!(middle[2] > 0.95, "the site without reads: {middle:?}");
 }
@@ -191,7 +191,7 @@ fn a_long_gap_returns_the_autozygous_state_to_its_share() {
         mismatch: 0.01,
         background_landing_share: None,
     };
-    let result = walk(&sites, 2, parameters);
+    let result = walk(&sites, 2, None, parameters);
     assert!(
         (result.autozygous[1] - 0.8).abs() < 1e-6,
         "after a gigabase: {}",
@@ -230,7 +230,7 @@ fn a_zero_emission_state_contributes_nothing() {
         mismatch: 0.01,
         background_landing_share: None,
     };
-    let result = walk(&sites, 2, parameters);
+    let result = walk(&sites, 2, None, parameters);
     for posterior in &result.posteriors {
         assert!(
             posterior.iter().all(|value| value.is_finite()),
@@ -267,7 +267,7 @@ fn a_drawn_path_follows_the_only_template_that_fits() {
     };
     for seed in 0..20 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
-        let (_, haplotypes) = walk_and_draw(&sites, 2, parameters, &mut uniforms, None);
+        let (_, haplotypes) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
         for pair in &haplotypes {
             for copy in pair {
                 assert!((copy[1] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
@@ -323,7 +323,7 @@ fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
     };
     for seed in 0..10 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
-        let (_, haplotypes) = walk_and_draw(&sites, 2, parameters, &mut uniforms, None);
+        let (_, haplotypes) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
         for pair in &haplotypes {
             for copy in pair {
                 assert_eq!(copy.len(), 3);
@@ -384,11 +384,11 @@ fn extra_paths_leave_the_round_unchanged() {
         background_landing_share: None,
     };
     let mut alone = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
-    let (walked, own) = walk_and_draw(&sites, 2, parameters, &mut alone, None);
+    let (walked, own) = walk_and_draw(&sites, 2, None, parameters, &mut alone, None);
     let mut with = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
     let mut extra = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
     let (walked_again, own_again, paths) =
-        walk_and_draw_paths(&sites, 2, parameters, &mut with, &mut extra, 4, None);
+        walk_and_draw_paths(&sites, 2, None, parameters, &mut with, &mut extra, 4, None);
     assert_eq!(walked, walked_again);
     assert_eq!(own, own_again);
     assert_eq!(paths.len(), 4);
@@ -397,6 +397,7 @@ fn extra_paths_leave_the_round_unchanged() {
     let (_, _, paths_again) = walk_and_draw_paths(
         &sites,
         2,
+        None,
         parameters,
         &mut with_again,
         &mut extra_again,
@@ -661,7 +662,7 @@ fn reads_that_link_nothing_change_no_bit() {
     let draw = |reads: Option<&mut DrawReads<'_>>| {
         let mut path = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
         let mut extra = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
-        walk_and_draw_paths(&sites, 3, parameters, &mut path, &mut extra, 4, reads)
+        walk_and_draw_paths(&sites, 3, None, parameters, &mut path, &mut extra, 4, reads)
     };
     let link = |_: usize, _: (usize, usize), _: usize, _: (usize, usize)| None;
     let is_hidden = |_: usize| false;
@@ -709,9 +710,10 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
         uniforms: Uniforms::new(StreamPurpose::Orientation, 9, 0, 2),
     };
     let mut path = Uniforms::new(StreamPurpose::Path, 9, 0, 2);
-    let (walked, without) = walk_and_draw(&sites, 3, parameters, &mut path, None);
+    let (walked, without) = walk_and_draw(&sites, 3, None, parameters, &mut path, None);
     let mut path = Uniforms::new(StreamPurpose::Path, 9, 0, 2);
-    let (walked_again, with) = walk_and_draw(&sites, 3, parameters, &mut path, Some(&mut reads));
+    let (walked_again, with) =
+        walk_and_draw(&sites, 3, None, parameters, &mut path, Some(&mut reads));
     assert_eq!(walked, walked_again);
     // Templates even between the alleles: without reads both copies are the same margin.
     assert!(without.iter().all(|[one, two]| one == two));
@@ -810,7 +812,8 @@ fn a_sites_draw_follows_forward_times_transition() {
 /// **The walk's posteriors are a plain forward-backward over the full transition matrix**, with the
 /// last template landed on rarely (spec §3.5, §3.6): the same windows computed state by state from
 /// [`full_transition`], the emissions and the posterior written out here, agree to 1e-9. Three
-/// templates, one window with sites close together and far apart, reads and none.
+/// templates, one window with sites close together and far apart, reads and none; the two sample
+/// templates landed on alike, and three times as often on the first as on the second (§3.3).
 #[test]
 fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
     let k = 3;
@@ -842,9 +845,25 @@ fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
         mismatch: 0.01,
         background_landing_share: Some(0.05),
     };
-    let result = walk(&sites, k, parameters);
+    for (template_weights, landing) in [
+        (None, [0.475, 0.475, 0.05]),
+        (Some(&[3.0, 1.0][..]), [0.7125, 0.2375, 0.05]),
+    ] {
+        let result = walk(&sites, k, template_weights, parameters);
+        same_as_full_forward_backward(&result, &shares, &reads, &positions, &landing);
+    }
+}
 
-    let landing = [0.475, 0.475, 0.05];
+/// [`the_walk_with_rare_background_landings_is_a_plain_forward_backward`]'s check of one walk: its
+/// posteriors against the full forward-backward with `landing`, the window's own landing weights.
+fn same_as_full_forward_backward(
+    result: &WalkResult,
+    shares: &[f64],
+    reads: &[[f64; 3]],
+    positions: &[u64],
+    landing: &[f64],
+) {
+    let k = landing.len();
     let states = all_states(k);
     let blurred: Vec<f64> = shares.iter().map(|q| 0.99 * q + 0.005).collect();
     let q = |template: usize, allele: usize| blurred[template * 2 + allele];
@@ -866,7 +885,7 @@ fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
     let emission = |site: usize, state: State| -> f64 {
         (0..3).map(|g| given(state, g) * reads[site][g]).sum()
     };
-    let n = sites.len();
+    let n = positions.len();
     let initial: Vec<f64> = states
         .iter()
         .map(|&state| match state {
@@ -896,7 +915,7 @@ fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
                 .iter()
                 .enumerate()
                 .map(|(j, &from)| {
-                    forward[site - 1][j] * full_transition(persistence, &landing, from, to)
+                    forward[site - 1][j] * full_transition(persistence, landing, from, to)
                 })
                 .sum();
             forward[site][i] = arriving * emission(site, to);
@@ -912,7 +931,7 @@ fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
                 .iter()
                 .enumerate()
                 .map(|(j, &to)| {
-                    full_transition(persistence, &landing, from, to)
+                    full_transition(persistence, landing, from, to)
                         * emission(site + 1, to)
                         * backward[site + 1][j]
                 })
@@ -971,8 +990,8 @@ fn an_even_landing_share_is_no_landing_share() {
         mismatch: 0.01,
         background_landing_share: landing,
     };
-    let alike = walk(&sites, 3, parameters(None));
-    let even = walk(&sites, 3, parameters(Some(1.0 / 3.0)));
+    let alike = walk(&sites, 3, None, parameters(None));
+    let even = walk(&sites, 3, None, parameters(Some(1.0 / 3.0)));
     assert!((alike.log_likelihood - even.log_likelihood).abs() < 1e-12);
     for (one, other) in alike.posteriors.iter().zip(&even.posteriors) {
         for (a, b) in one.iter().zip(other) {
@@ -1011,8 +1030,8 @@ fn the_emissions_and_the_prediction_read_their_own_shares() {
         mismatch: 0.01,
         background_landing_share: None,
     };
-    let soft = walk(&sites(None), 1, parameters);
-    let split = walk(&sites(Some(&DEFINITE)), 1, parameters);
+    let soft = walk(&sites(None), 1, None, parameters);
+    let split = walk(&sites(Some(&DEFINITE)), 1, None, parameters);
     // Read off the definite allele it would be nearly all 1/1; read off the 50:50 shares it is
     // even between the homozygotes, whatever weight the walk gives the autozygous state.
     let predicted = &split.neighbour_predictions[1];
