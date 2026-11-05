@@ -62,13 +62,14 @@ def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log):
             f"--log {q(log)} --force")
 
 
-def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None):
+def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None, extra=""):
+    """`extra`: further options, as text (e.g. `--refine-genotypes on`)."""
     psp_args = " ".join(f"--psp {q(p)}" for p in psps)
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     return ("call_from_psps",
             f"{q(ctx.pvc_bin)} call-from-psps --reference {q(reference)} --catalog {q(catalog)} "
-            f"{psp_args} {source} --threads {ctx.threads} --output {q(out)} --log {q(log)} "
-            f"--force")
+            f"{psp_args} {source} {extra} --threads {ctx.threads} --output {q(out)} "
+            f"--log {q(log)} --force")
 
 
 # ---- GATK -------------------------------------------------------------------------------------
