@@ -217,30 +217,29 @@ fn the_samples_a_copy_copies_win_the_stretches_they_match() {
     }
 }
 
-/// A [`Disagreements`] over `expected`, each candidate's observed disagreements one a record.
-fn disagreements(expected: &[f64], candidates: &[&[Option<f64>]]) -> Disagreements {
-    Disagreements {
-        expected: expected.to_vec(),
-        observed: candidates.iter().flat_map(|c| c.iter().copied()).collect(),
-    }
-}
-
 /// **A stretch ends once it holds [`STRETCH_INFORMATION`]** of expected disagreement, counting
-/// only records some candidate is informative at; the last holds what is left.
+/// only records some candidate is judged at; what is left after the last joins the one before it,
+/// and a window holding less than one unit is one stretch.
 #[test]
 fn a_stretch_ends_once_it_holds_enough_to_judge_by() {
-    let expected = [0.5, 0.5, 0.3, 0.3, 0.3, 0.2, 0.4];
-    let everywhere = [Some(0.0); 7];
-    assert_eq!(
-        disagreements(&expected, &[&everywhere]).stretches(),
-        vec![0..2, 2..6, 6..7]
-    );
+    let expected = [0.5, 0.5, 0.3, 0.3, 0.3, 0.2, 0.4, 0.2];
+    let everywhere = [true; 8];
+    assert_eq!(stretches(&expected, &everywhere), vec![0..2, 2..8]);
     let mut gap = everywhere;
-    gap[1] = None;
-    assert_eq!(
-        disagreements(&expected, &[&gap]).stretches(),
-        vec![0..4, 4..7]
-    );
+    gap[1] = false;
+    assert_eq!(stretches(&expected, &gap), vec![0..4, 4..8]);
+    assert_eq!(stretches(&[0.3, 0.3], &[true; 2]), vec![0..2]);
+    assert_eq!(stretches(&[], &[]), Vec::<Range<usize>>::new());
+}
+
+/// Stretch sums over one record expecting 1, `copies` candidates a sample, each candidate's
+/// observed disagreement there given.
+fn one_stretch(copies: usize, observed: &[Option<f64>]) -> Vec<usize> {
+    let mut sums = StretchSums::new(vec![1.0], &[true], copies);
+    for &candidate in observed {
+        sums.add([candidate]);
+    }
+    sums.judged().iter().map(|one| one.stretches_won).collect()
 }
 
 /// **A stretch's winners are the [`STRETCH_WINNERS`] best and any tied with the last of them**; a
@@ -248,24 +247,32 @@ fn a_stretch_ends_once_it_holds_enough_to_judge_by() {
 /// [`LANDING_WEIGHT_BASE`].
 #[test]
 fn ties_with_the_last_winner_win_too() {
-    let judged = disagreements(
-        &[1.0],
-        &[
-            &[Some(0.0)],
-            &[Some(0.5)],
-            &[Some(0.5)],
-            &[Some(1.0)],
-            &[None],
-        ],
-    )
-    .judged();
-    let won: Vec<usize> = judged.iter().map(|one| one.stretches_won).collect();
+    let won = one_stretch(1, &[Some(0.0), Some(0.5), Some(0.5), Some(1.0), None]);
     assert_eq!(won, vec![1, 1, 1, 0, 0]);
     let template = ChosenTemplate {
         source: 0,
         stretches_won: 3,
     };
     assert!((template.landing_weight() - (3.0 + LANDING_WEIGHT_BASE)).abs() < 1e-15);
+}
+
+/// **A sample's two haplotypes take one winner's place between them** (phasing spec §2.3): sample
+/// A is homozygous, its two copies equal and best; sample B's better copy comes next and wins too,
+/// where judging haplotypes alone would have given both places to A. Sample C, behind B, does not.
+#[test]
+fn a_homozygous_sample_does_not_take_both_places() {
+    let won = one_stretch(
+        2,
+        &[
+            Some(0.0),
+            Some(0.0),
+            Some(0.5),
+            Some(1.0),
+            Some(0.8),
+            Some(0.8),
+        ],
+    );
+    assert_eq!(won, vec![1, 1, 1, 0, 0, 0]);
 }
 
 /// **A sample with no informative record in the window has no templates**, so it is not

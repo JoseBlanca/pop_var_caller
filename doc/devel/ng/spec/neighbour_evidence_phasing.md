@@ -171,7 +171,9 @@ the previous round; in general `Σ_a h(a) · P(genotype without a)`. The **expec
 for an allele drawn from the cohort's frequencies, `Σ_a p(a) · P(genotype without a)`. The records
 are the sample's informative records (at most 500, spread evenly, as in round 1), a haplotype judged
 where its sample is informative too, and the stretches are cut by the expected disagreement as in
-pass §3.3. Both haplotypes of every other sample compete in each stretch. Each sample offers the one
+pass §3.3. Both haplotypes of every other sample compete in each stretch, the stretch's two winning
+places going to two samples, each scoring by its better copy — so a homozygous sample's two equal
+copies do not take both (code review 2026-11-05). Each sample offers the one
 that won more stretches — on a tie, the better whole-window score, then copy 0 — and the 16 best
 offers, ranked as the pass ranks samples, are the templates; their stretches won set where a copy
 lands (pass §3.5). *Changed 2026-11-05:* before, a haplotype's score was its disagreement rate over

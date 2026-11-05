@@ -74,27 +74,34 @@ change; copy 1 / copy 2:
 
 | cohort, depth, true genotype | genotypes (copy 1 / 2) | main | branch |
 |---|---|---|---|
-| F2 offspring 1×, heterozygous | 6,416 / 7,458 | 71.6 (6.2) / 67.4 (7.3) | **82.3 (2.6) / 80.6 (2.9)** |
-| F2 offspring 1×, homozygous | 7,364 / 7,082 | 94.4 (0.2) / 93.8 (0.1) | 94.2 (0.2) / 93.7 (0.2) |
-| outbred 1×, heterozygous | 5,552 / 5,333 | 53.3 (13.6) / 53.4 (14.9) | **58.1 (11.5) / 58.2 (12.0)** |
-| outbred 1×, homozygous alternative | 2,363 / 2,558 | 81.6 (1.5) / 82.1 (1.9) | 84.3 (2.0) / 83.9 (2.2) |
-| outbred 1×, homozygous reference | 18,995 / 19,209 | 75.4 (0.4) / 73.4 (0.6) | 75.8 (0.5) / 73.6 (0.6) |
-| outbred 2×, heterozygous | 5,282 / 5,547 | 75.4 (11.1) / 75.2 (11.1) | **79.1 (8.2) / 79.5 (8.2)** |
-| outbred 5×, heterozygous | 5,447 / 5,678 | 93.0 (5.0) / 93.6 (4.3) | 94.4 (3.7) / 94.6 (3.4) |
-| selfing 1×, heterozygous | 335 / 495 | 83.0 (5.4) / 85.1 (6.9) | **87.2 (1.8) / 91.5 (1.6)** |
-| selfing 2×, heterozygous | 523 / 795 | 93.3 (3.1) / 87.4 (3.5) | 93.3 (2.7) / 90.2 (2.3) |
-| selfing 5×, heterozygous | 557 / 579 | 93.0 (3.4) / 95.2 (2.6) | 95.7 (0.7) / 97.6 (0.5) |
-| any cohort, 30×, any genotype | | | moves by at most 0.1 in 100 |
+| F2 offspring 1×, heterozygous | 6,416 / 7,458 | 71.6 (6.2) / 67.4 (7.3) | **82.1 (3.1) / 80.1 (3.4)** |
+| F2 offspring 1×, homozygous | 7,364 / 7,082 | 94.4 (0.2) / 93.8 (0.1) | 94.5 (0.2) / 93.9 (0.1) |
+| outbred 1×, heterozygous | 5,552 / 5,333 | 53.3 (13.6) / 53.4 (14.9) | **58.0 (11.3) / 58.1 (12.0)** |
+| outbred 1×, homozygous alternative | 2,363 / 2,558 | 81.6 (1.5) / 82.1 (1.9) | 83.3 (1.9) / 83.5 (2.2) |
+| outbred 1×, homozygous reference | 18,995 / 19,209 | 75.4 (0.4) / 73.4 (0.6) | 75.8 (0.5) / 73.8 (0.6) |
+| outbred 2×, heterozygous | 5,282 / 5,547 | 75.4 (11.1) / 75.2 (11.1) | **78.8 (8.8) / 79.4 (8.4)** |
+| outbred 5×, heterozygous | 5,447 / 5,678 | 93.0 (5.0) / 93.6 (4.3) | 94.6 (3.5) / 94.8 (3.2) |
+| selfing 1×, heterozygous | 335 / 495 | 83.0 (5.4) / 85.1 (6.9) | **86.6 (1.8) / 90.7 (2.2)** |
+| selfing 2×, heterozygous | 523 / 795 | 93.3 (3.1) / 87.4 (3.5) | 93.3 (2.7) / 90.1 (2.1) |
+| selfing 5×, heterozygous | 557 / 579 | 93.0 (3.4) / 95.2 (2.6) | 95.5 (1.1) / 97.8 (0.3) |
+| any cohort, 30×, any genotype | | | the same to 0.1 in 100 |
 
 - **The gains are in heterozygotes and in fewer wrong calls.** F2 heterozygotes called wrong fall
-  from about 7 in 100 to under 3; selfing 1× heterozygotes called wrong from about 6 in 100 to under
+  from about 7 in 100 to about 3; selfing 1× heterozygotes called wrong from about 6 in 100 to about
   2.
-- **The cost**: homozygous alternatives at 1× in the outbred cohort are called wrong slightly more
-  often (1.5 → 2.0 and 1.9 → 2.2 in 100) while more of them are called right; F2 homozygous offspring
-  lose 0.1 to 0.2 points. Neither is larger than the difference between the two copies.
+- **No genotype class loses** beyond the difference between the two copies: outbred 1× homozygous
+  alternatives called wrong move 1.5 → 1.9 and 1.9 → 2.2 in 100 while more of them are called
+  right.
 - **Selfing heterozygotes are few** — 335 to 795 a group — so their figures move by a point for every
   3 to 8 genotypes.
-- The clean build was checked against the diagnostic switch it replaces on three of these cohorts:
+- **The branch column is the build after the code review** (§6), which changed two rules: from
+  round 2 a stretch's two winning places go to two samples, so a homozygous sample's equal copies
+  do not take both, and what is left after a window's last full stretch joins that stretch rather
+  than being judged on its own. Against the build before them (approach A of §3) every figure
+  above moves by under 1 in 100 — the largest, selfing 1× heterozygotes, by 0.6 and 0.8, 2 to 4
+  genotypes.
+- Before the review, the clean build was checked against the diagnostic switch it replaces on three
+  of these cohorts:
   the F2 call set is identical; the outbred one differs at 7 of 40 samples on the first contig only,
   where the per-sample walk parameters are still being fitted and the landing weights' rounding,
   computed in a different order, tips some near-tied fits. Its scores agree to 0.1 in 100.
@@ -117,7 +124,36 @@ samples.
 - With the parents as the only sources, the F2's heterozygotes reach 90 in 100; the branch reaches 81.
   The remaining gap is not traced.
 
-## 6. Tests
+## 6. Code review
+
+A review of the branch (2026-11-05, ten findings). Fixed:
+
+- **A homozygous sample took both winning places** in rounds 2 and later, where candidates are
+  haplotypes and its two copies score alike — the rule of two winners, one a copy, became one sample
+  a stretch in an inbred cohort. The places now go to two samples.
+- **The window's leftover stretch** won like a full one however little it held; it now joins the
+  stretch before it.
+- **Memory**: every candidate's disagreement at every compared record was kept (`2·N·500` numbers a
+  sample in a phasing round, about 80 MB at 5,000 samples); now only the sums a stretch are, a pair
+  a candidate a stretch (`StretchSums`).
+- Docs: the module doc's F2 figures disagreed with the spec's; the constants now say which cohorts
+  their tuning was measured on; `BACKGROUND_LANDING_SHARE` says its figures predate landing by wins.
+
+Measured, no change needed:
+
+- **The fill check and the hidden records.** The fill check (pass §4.3) hides records from the
+  sample's own reads after its templates were chosen from them; with stretches of about two SNPs a
+  hidden record weighs more in the choice than in a 500-record score, which could make the check
+  report fewer wrong fills than no-read calls really have. Against the truth it does not: where the
+  check has enough genotypes (30× and 5×) its error rate is at or above the true error of the no-read
+  calls, before and after the change (outbred copy 1, 5×: check 6.7 → 5.2 in 100, true 1.7 → 0.8;
+  selfing copy 2, 5×: check 1.0 → 0.7, true 0 both).
+
+Stated, not fixed: at thousands of samples chance matches over a one-unit stretch may swamp a true
+relative's lead (spec §3.3, not measured); a shallow close relative ranks below deep samples that
+win the stretches it has no reads in (spec §3.3, §5 here).
+
+## 7. Tests
 
 - `templates::tests::the_samples_a_copy_copies_win_the_stretches_they_match` — a sample copying one
   candidate over each half of the window, against three candidates fairly close everywhere: the two
@@ -127,16 +163,16 @@ samples.
   their order: a shallow relative wins every stretch it has a read in, and ranks below deep samples
   that win the rest.
 - `templates::tests::a_stretch_ends_once_it_holds_enough_to_judge_by`,
-  `ties_with_the_last_winner_win_too`.
+  `ties_with_the_last_winner_win_too`, `a_homozygous_sample_does_not_take_both_places`.
 - `model::tests::the_walk_with_rare_background_landings_is_a_plain_forward_backward` — now also with
   uneven landing weights on the sample templates, against the full forward-backward: agree to 1e-9.
 - The two bit-fingerprint tests of a phased window (`refine::tests`) re-recorded: the change is to
-  the pass's arithmetic on purpose. The phased columns of the test window rise from 2,648 to 2,872.
+  the pass's arithmetic on purpose. The phased columns of the test window rise from 2,648 to 2,840.
 - The whole crate's tests pass in release, except the two `should_panic` tests outside the pass
   (`alignment::left_align_structured`, `genetics::lgamma`) that panic only through debug
   assertions, which a release build leaves out.
 
-## 7. Reproducing
+## 8. Reproducing
 
 The cohorts are built with `doc/devel/ng/research/neighbour_evidence/refine_sources/natural_cohort.sh`
 and scored with `score_natural.py` and `score_f2.py` beside it, as for the change before.

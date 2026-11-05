@@ -172,7 +172,9 @@ such record:
 **Judged stretch by stretch, ranked by stretches won (owner, 2026-11-05).** The compared records
 are cut, in record order, into **stretches** that each hold one unit of expected disagreement: a
 stretch ends at the record where `e`, summed over its records, reaches 1, counting only records at
-which some candidate is informative; the last stretch holds what is left. One unit is about two SNPs
+which some candidate is informative; what is left after the last such record joins the stretch
+before it, so no stretch is judged on less, and a window holding less than one unit is one
+stretch. One unit is about two SNPs
 at frequency ½ where the sample is certain, or about twenty at 5%. In each stretch every candidate
 gets a score from its own `d` and `e` there:
 
@@ -181,7 +183,10 @@ gets a score from its own `d` and `e` there:
   candidate less alike than an unrelated sample scores as one;
 - a candidate with `e` = 0 there — no shared record, or only records where every sample carries the
   same allele — has nothing to be judged on and cannot win the stretch;
-- the two lowest scores **win** the stretch, and so does any candidate tied with the second.
+- the two lowest scores **win** the stretch, and so does any candidate tied with the second. From
+  phasing round 2, where the candidates are haplotypes, the two places go to two samples, each
+  scoring by its better copy — so a homozygous sample's two equal copies do not take both
+  (phasing spec §2.3).
 
 Candidates rank by stretches won, most first; then by the same score over the whole window's
 compared records; then by sample order. The first `K` are the templates. **A template's stretches
@@ -218,6 +223,14 @@ stated:** a shallow candidate cannot win a stretch it has no reads in, so a shal
 wins fewer stretches than a deep sample that is only fairly close, and may rank below it. Where that
 loses accuracy — a cohort with shallow close relatives and many deep distant samples — is not
 measured.
+
+**At thousands of samples, chance matches — not measured.** One unit is short: an unrelated sample
+shows no disagreement over it about one time in three (`e^−1`). With a few dozen candidates that
+rarely matters; with thousands, many unrelated samples tie a true relative in every stretch, and a
+relative wins clearly only if it matches over more of the window than chance does — an F2 parent
+matches over about half of it. The stretch's information and its two winners were tuned at 20 and
+40 samples; the refine_sim benchmark measures 400; at several thousand the rule may need longer
+stretches, and that is not measured.
 
 **Why against the frequencies — changed 2026-11-05.** The rule before scored the plain
 disagreement, `½ Σ_a |q_self(a) − q_other(a)|`, over the shared records, and it favoured exactly

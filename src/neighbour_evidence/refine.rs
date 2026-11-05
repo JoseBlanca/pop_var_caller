@@ -51,11 +51,14 @@ use crate::vcf::encode::written_genotype_quality;
 pub const MISMATCH: f64 = 0.01;
 
 /// **The chance that a copy changing template lands on the background** (§3.3, §3.5): a last
-/// resort, the other templates sharing the rest by the stretches each won (`ChosenTemplate::landing_weight`). With the background one template among 17
-/// alike, an F2 at 1× copied it in place of its parents wherever an allele stood near 50% — at one
-/// read a site it explains a heterozygote as well as the two parents do — and 30 of 100 of the
-/// heterozygous offspring were called right; at this share, 51 of 100, with 1× natural cohorts
-/// gaining too (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
+/// resort, the other templates sharing the rest by the stretches each won
+/// (`ChosenTemplate::landing_weight`). With the background one template among 17 alike, an F2 at
+/// 1× copied it in place of its parents wherever an allele stood near 50% — at one read a site it
+/// explains a heterozygote as well as the two parents do — and 30 of 100 of the heterozygous
+/// offspring were called right; at this share, 51 of 100, with 1× natural cohorts gaining too
+/// (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`). Those figures were measured
+/// with the other templates landed on alike, before landing followed stretches won; the share was
+/// not re-tuned after (`local_sources_2026-11-05.md`).
 pub const BACKGROUND_LANDING_SHARE: f64 = 1e-5;
 
 /// **The least `GQ` a sample whose reads said nothing is written with a genotype at** (§4.2, owner

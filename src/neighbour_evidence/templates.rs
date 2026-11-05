@@ -23,8 +23,9 @@
 //! ancestry. A whole-window score ranks highest whoever is fairly close everywhere; the samples a
 //! copy actually copies are exactly close over a part each, and only stretches short enough to fall
 //! between crossovers see that. On a simulated F2 at 1× the whole-window rule left an offspring's
-//! parents out of its 16 templates or among siblings that blurred them; stretch wins raised the
-//! heterozygous offspring genotypes called right from 70 to 81 in 100
+//! parents out of its 16 templates or among siblings that blurred them. On two simulated F2s (two
+//! inbred parents at 30×, 20 offspring at 1×), stretch wins raised the heterozygous offspring
+//! genotypes called right from 72 and 67 in 100 to 82 and 81
 //! (`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
 //!
 //! **Data wins near ties, and is never penalised for being certain.** Within a stretch the
@@ -45,7 +46,8 @@ use super::records::{SampleRow, SiteRecord};
 use std::ops::Range;
 
 /// The most templates a walk copies from, the background aside (`K`, §3.3) — what the prototype
-/// ran; fewer measured worse on every cohort tried (2, 4 and 8, 2026-11-05).
+/// ran; 2, 4 and 8 measured worse on every cohort of the 2026-11-05 report (40 samples at 1× to 30×,
+/// and an F2 of 20 offspring at 1×).
 pub const MAX_TEMPLATES: usize = 16;
 
 /// The most of a sample's informative records its templates are chosen over (§3.3).
@@ -54,11 +56,12 @@ pub const AGREEMENT_RECORDS: usize = 500;
 /// **How much a stretch must hold before its candidates are judged in it** (§3.3): a stretch of
 /// compared records ends once the disagreement an unrelated sample would show the sample over it,
 /// `Σ 1 − Σ_a q_self(a) · p(a)`, reaches this. One is about two SNPs at frequency ½ where the sample
-/// is certain, or twenty at 5%. Larger stretches measured worse (2026-11-05).
+/// is certain, or twenty at 5%. Tuned on the cohorts of the 2026-11-05 report (40 samples at 1× to
+/// 30×, and an F2 of 20 offspring at 1×): longer stretches measured worse there.
 pub const STRETCH_INFORMATION: f64 = 1.0;
 
-/// **How many candidates win each stretch**, besides any tied with the last of them (§3.3): one a
-/// copy. Four measured worse than two (2026-11-05).
+/// **How many samples win each stretch**, besides any tied with the last of them (§3.3): one a copy.
+/// Four measured worse than two on the cohorts of the 2026-11-05 report.
 pub const STRETCH_WINNERS: usize = 2;
 
 /// **A template's landing weight before the stretches it won** (§3.3, §3.5): its weight is
@@ -106,21 +109,19 @@ pub fn choose_templates(
             allele_mismatch(record.template_shares(sample), record.background_shares())
         })
         .collect();
-    let observed = others
-        .iter()
-        .flat_map(|&other| {
-            compared.iter().map(move |&index| {
-                let record = &records[index];
-                (record.row(other) == SampleRow::Informative).then(|| {
-                    allele_mismatch(
-                        record.template_shares(sample),
-                        record.template_shares(other),
-                    )
-                })
+    let mut sums = StretchSums::new(expected, &judged_records(records, sample, &compared), 1);
+    for &other in &others {
+        sums.add(compared.iter().map(|&index| {
+            let record = &records[index];
+            (record.row(other) == SampleRow::Informative).then(|| {
+                allele_mismatch(
+                    record.template_shares(sample),
+                    record.template_shares(other),
+                )
             })
-        })
-        .collect();
-    let ranked = Disagreements { expected, observed }.ranked();
+        }));
+    }
+    let ranked = sums.ranked();
     Some(
         ranked
             .into_iter()
@@ -166,7 +167,9 @@ pub(crate) type HaplotypeReader<'a> = dyn Fn(usize, usize, usize, &mut Vec<f64>)
 /// `Σ_a h(a) · P(genotype without a)`, and the expected one the same for an allele drawn from the
 /// cohort's frequencies, `Σ_a p(a) · P(genotype without a)` — `h` the haplotype, the genotype
 /// probabilities `previous_posteriors`, one per `compared` record in its order. Both haplotypes of
-/// every other sample compete in each stretch; each sample offers the one that won more stretches
+/// every other sample compete in each stretch, a sample taking at most one of its two winners'
+/// places (so a homozygous sample's two equal copies do not take both); each sample offers the one
+/// that won more stretches
 /// (on a tie, the better whole-window score; then copy 0), and the offers rank as samples do in
 /// [`choose_templates`], then by copy. `haplotype(other, copy, record, out)` writes the previous
 /// round's haplotype into `out`, which it clears first.
@@ -228,25 +231,23 @@ pub(crate) fn choose_haplotypes(
         .collect();
     // Candidate `2·j + copy` is copy `copy` of the `j`-th other sample.
     let others: Vec<usize> = (0..samples).filter(|&other| other != sample).collect();
-    let mut observed = Vec::with_capacity(2 * others.len() * compared.len());
+    let mut sums = StretchSums::new(expected, &judged_records(records, sample, compared), 2);
     let mut carried = Vec::new();
     for &other in &others {
         for copy in 0..2 {
-            for (&index, lacked) in compared.iter().zip(&lacking) {
-                observed.push(
-                    (records[index].row(other) == SampleRow::Informative).then(|| {
-                        haplotype(other, copy, index, &mut carried);
-                        carried
-                            .iter()
-                            .zip(lacked)
-                            .map(|(carried, lacked)| carried * lacked)
-                            .sum()
-                    }),
-                );
-            }
+            sums.add(compared.iter().zip(&lacking).map(|(&index, lacked)| {
+                (records[index].row(other) == SampleRow::Informative).then(|| {
+                    haplotype(other, copy, index, &mut carried);
+                    carried
+                        .iter()
+                        .zip(lacked)
+                        .map(|(carried, lacked)| carried * lacked)
+                        .sum()
+                })
+            }));
         }
     }
-    let judged = Disagreements { expected, observed }.judged();
+    let judged = sums.judged();
     let mut offers: Vec<Judged> = judged
         .as_chunks::<2>()
         .0
@@ -270,14 +271,58 @@ pub(crate) fn choose_haplotypes(
         .collect()
 }
 
-/// **Every candidate's disagreement with the sample at each compared record**, observed against
-/// expected (§3.3).
-struct Disagreements {
+/// **Whether some candidate is judged at each compared record**: whether any sample but `sample`
+/// is informative there — what a stretch's information counts (§3.3).
+fn judged_records(records: &[SiteRecord], sample: usize, compared: &[usize]) -> Vec<bool> {
+    compared
+        .iter()
+        .map(|&index| {
+            let record = &records[index];
+            (0..record.sample_count())
+                .any(|other| other != sample && record.row(other) == SampleRow::Informative)
+        })
+        .collect()
+}
+
+/// **The stretches the compared records are cut into**, in order (§3.3): each ends at the record
+/// where the expected disagreement summed over it reaches [`STRETCH_INFORMATION`], counting only
+/// records where `judged[record]`. What is left after the last such record joins the stretch before
+/// it, so no stretch is judged on less; a window holding less than one unit is one stretch.
+fn stretches(expected: &[f64], judged: &[bool]) -> Vec<Range<usize>> {
+    let mut stretches: Vec<Range<usize>> = Vec::new();
+    let (mut start, mut held) = (0, 0.0);
+    for (record, (&expected, &judged)) in expected.iter().zip(judged).enumerate() {
+        if judged {
+            held += expected;
+        }
+        if held >= STRETCH_INFORMATION {
+            stretches.push(start..record + 1);
+            (start, held) = (record + 1, 0.0);
+        }
+    }
+    match stretches.last_mut() {
+        Some(last) => last.end = expected.len(),
+        None if !expected.is_empty() => stretches.push(0..expected.len()),
+        None => {}
+    }
+    stretches
+}
+
+/// **Every candidate's disagreement with the sample, summed stretch by stretch** (§3.3): observed
+/// against expected, summed over the records of each stretch where the candidate is informative.
+/// Only the sums are kept — a pair a candidate a stretch, not a number a candidate a record.
+struct StretchSums {
+    /// Each compared record's stretch.
+    stretch_of: Vec<usize>,
+    /// How many stretches there are.
+    stretches: usize,
     /// What an unrelated sample would show at each compared record — the same for every candidate.
     expected: Vec<f64>,
-    /// What each candidate shows, candidate by candidate, one entry a compared record; `None` where
-    /// the candidate is not informative.
-    observed: Vec<Option<f64>>,
+    /// How many candidates are one sample's: 1 when candidates are samples, 2 when they are a
+    /// sample's two haplotypes, which are consecutive.
+    copies: usize,
+    /// Each candidate's `(observed, expected)` in each stretch, candidate by candidate.
+    sums: Vec<(f64, f64)>,
 }
 
 /// **One candidate as the stretches judged it**: its index among the candidates, the stretches it
@@ -304,92 +349,93 @@ impl Judged {
     }
 }
 
-impl Disagreements {
-    fn records(&self) -> usize {
-        self.expected.len()
-    }
-
-    /// Candidate `candidate`'s observed disagreement at each record.
-    fn of(&self, candidate: usize) -> &[Option<f64>] {
-        let records = self.records();
-        &self.observed[candidate * records..(candidate + 1) * records]
-    }
-
-    /// **A candidate's pessimistic score over `stretch`**: [`disagreement_bound`] of its observed
-    /// over its expected disagreement, summed where it is informative, the observed capped at the
-    /// expected — a candidate less alike than an unrelated sample scores as one. Infinite when
-    /// nothing was expected there: no shared record, or only records every sample agrees at.
-    fn score(&self, candidate: usize, stretch: Range<usize>) -> f64 {
-        let (observed, expected) = self.of(candidate)[stretch.clone()]
-            .iter()
-            .zip(&self.expected[stretch])
-            .filter_map(|(observed, &expected)| observed.map(|observed| (observed, expected)))
-            .fold((0.0, 0.0), |(o, e), (observed, expected)| {
-                (o + observed, e + expected)
-            });
-        if expected > 0.0 {
-            disagreement_bound(f64::min(observed, expected), expected)
-        } else {
-            f64::INFINITY
+impl StretchSums {
+    /// Stretches cut over `expected` where `judged`, no candidate added yet; `copies` candidates to
+    /// a sample.
+    fn new(expected: Vec<f64>, judged: &[bool], copies: usize) -> Self {
+        let cut = stretches(&expected, judged);
+        let mut stretch_of = vec![0; expected.len()];
+        for (stretch, range) in cut.iter().enumerate() {
+            stretch_of[range.clone()].fill(stretch);
+        }
+        Self {
+            stretch_of,
+            stretches: cut.len(),
+            expected,
+            copies,
+            sums: Vec::new(),
         }
     }
 
-    /// **The stretches the compared records are cut into**, in order: each ends once the expected
-    /// disagreement over it reaches [`STRETCH_INFORMATION`], counting only records where some
-    /// candidate is informative; the last holds what is left.
-    fn stretches(&self) -> Vec<Range<usize>> {
-        let candidates = self.observed.len() / self.records().max(1);
-        let mut stretches = Vec::new();
-        let (mut start, mut held) = (0, 0.0);
-        for record in 0..self.records() {
-            if (0..candidates).any(|candidate| self.of(candidate)[record].is_some()) {
-                held += self.expected[record];
-            }
-            if held >= STRETCH_INFORMATION {
-                stretches.push(start..record + 1);
-                (start, held) = (record + 1, 0.0);
+    /// Adds the next candidate: its observed disagreement at each compared record, `None` where it
+    /// is not informative.
+    fn add(&mut self, observed: impl IntoIterator<Item = Option<f64>>) {
+        let start = self.sums.len();
+        self.sums.resize(start + self.stretches, (0.0, 0.0));
+        let sums = &mut self.sums[start..];
+        for ((observed, &stretch), &expected) in observed
+            .into_iter()
+            .zip(&self.stretch_of)
+            .zip(&self.expected)
+        {
+            if let Some(observed) = observed {
+                sums[stretch].0 += observed;
+                sums[stretch].1 += expected;
             }
         }
-        if start < self.records() {
-            stretches.push(start..self.records());
-        }
-        stretches
+    }
+
+    fn candidates(&self) -> usize {
+        self.sums.len() / self.stretches.max(1)
     }
 
     /// **Every candidate, with the stretches it won and its whole-window score**, in candidate
-    /// order. A stretch's winners are the [`STRETCH_WINNERS`] lowest scores there and any tied with
-    /// the last of them, among the candidates with a finite score.
+    /// order. A stretch's winners are the candidates of the [`STRETCH_WINNERS`] samples with the
+    /// lowest scores there — a sample scoring by its better copy — and any tied with the last of
+    /// them, among the candidates with a finite score: so a sample whose two haplotypes are the
+    /// same cannot take both places.
     fn judged(&self) -> Vec<Judged> {
-        let candidates = self.observed.len() / self.records().max(1);
+        let candidates = self.candidates();
+        let samples = candidates / self.copies;
         let mut stretches_won = vec![0_usize; candidates];
-        let mut scores = Vec::with_capacity(candidates);
-        for stretch in self.stretches() {
-            scores.clear();
-            scores.extend(
-                (0..candidates)
-                    .map(|candidate| self.score(candidate, stretch.clone()))
-                    .enumerate()
-                    .filter(|(_, score)| score.is_finite()),
+        let mut scores = vec![f64::INFINITY; candidates];
+        let mut best = Vec::with_capacity(samples);
+        for stretch in 0..self.stretches {
+            for (candidate, score) in scores.iter_mut().enumerate() {
+                *score = pessimistic_score(self.sums[candidate * self.stretches + stretch]);
+            }
+            best.clear();
+            best.extend(
+                scores
+                    .chunks_exact(self.copies)
+                    .map(|copies| copies.iter().copied().fold(f64::INFINITY, f64::min))
+                    .filter(|score| score.is_finite()),
             );
-            if scores.is_empty() {
+            if best.is_empty() {
                 continue;
             }
-            let last = STRETCH_WINNERS.min(scores.len()) - 1;
-            let (_, &mut (_, threshold), _) =
-                scores.select_nth_unstable_by(last, |one, other| one.1.total_cmp(&other.1));
-            for &(candidate, score) in &scores {
+            let last = STRETCH_WINNERS.min(best.len()) - 1;
+            let (_, &mut threshold, _) = best.select_nth_unstable_by(last, f64::total_cmp);
+            for (won, &score) in stretches_won.iter_mut().zip(&scores) {
                 if score <= threshold {
-                    stretches_won[candidate] += 1;
+                    *won += 1;
                 }
             }
         }
         stretches_won
             .into_iter()
             .enumerate()
-            .map(|(index, stretches_won)| Judged {
-                index,
-                stretches_won,
-                score: self.score(index, 0..self.records()),
+            .map(|(index, stretches_won)| {
+                let whole = self.sums[index * self.stretches..(index + 1) * self.stretches]
+                    .iter()
+                    .fold((0.0, 0.0), |(o, e), &(observed, expected)| {
+                        (o + observed, e + expected)
+                    });
+                Judged {
+                    index,
+                    stretches_won,
+                    score: pessimistic_score(whole),
+                }
             })
             .collect()
     }
@@ -399,6 +445,18 @@ impl Disagreements {
         let mut judged = self.judged();
         judged.sort_by(Judged::order);
         judged
+    }
+}
+
+/// **A candidate's pessimistic score from its summed `(observed, expected)`**:
+/// [`disagreement_bound`], the observed capped at the expected — a candidate less alike than an
+/// unrelated sample scores as one. Infinite when nothing was expected: no shared record, or only
+/// records every sample agrees at.
+fn pessimistic_score((observed, expected): (f64, f64)) -> f64 {
+    if expected > 0.0 {
+        disagreement_bound(f64::min(observed, expected), expected)
+    } else {
+        f64::INFINITY
     }
 }
 
