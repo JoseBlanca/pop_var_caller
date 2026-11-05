@@ -224,14 +224,48 @@ It used all 10 of its rounds and left out 925 tracts, 261 of the 624 at 19 repea
 539 at 20; on tomato2 it left out 3. A tract read by 2,176 samples carries enough reads for the
 rule's test to flag far smaller departures than at 59. Whether that is right is not measured here.
 
-*Kimura's time for the whole fit*: pending (the run started 15:40, with the machine at a load of 75
-to 85 on 48 cores, about 54 of them this run's).
+**Kimura's fit, whole.** The repeat-tract fit took 17,644 s (4 h 54 min), the run 4 h 57 min at a
+peak of 43.2 GB, on 55 cores on average, with the machine at a load of 40 to 85 on 48 cores from
+other users' work. Fitted with one stutter for every read group the same fit took 1 h 05 min there
+(2026-10-29). Homopolymers took 2 h 29 min, 10 fits under the stutter-tail rule; dinucleotides
+2 h 11 min, about 740 rounds for the first fit; the other four motif lengths 14 minutes together.
+Every motif length settled.
+
+### 5.2 Kimura's multipliers: 2,176 accessions, 2,655 read groups
+
+**The read groups stutter very differently**, unlike tomato2's:
+
+| motif length | read groups with an error | 10th to 90th read group | extremes | median error, log scale | median slipped reads |
+|---|---|---|---|---|---|
+| 1 | 2,508 | 0.47 to 2.04 | 0.07 to 4.51 | 0.010 | 8,702 |
+| 2 | 2,474 | 0.43 to 2.19 | 0.09 to 3.23 | 0.013 | 4,264 |
+| 3 | 2,214 | 0.49 to 2.66 | 0.16 to 11.5 | 0.048 | 307 |
+| 4 | 930 | 0.82 to 2.10 | 0.42 to 4.50 | 0.125 | 11 |
+| 5 | 283 | 1.02 to 2.00 | 0.68 to 3.21 | 0.157 | 3 |
+| 6 | 1,288 | 0.71 to 1.86 | 0.53 to 3.91 | 0.135 | 20 |
+
+A read group at the 90th percentile slips four to five times as often as one at the 10th, the
+spread that motivated the work (spec §1.1). A read group without an error rests on the pull toward
+one; at four and five bases most do.
+
+**Homopolymer and dinucleotide multipliers go together but not exactly.** On the log scale they
+correlate at r = 0.91 over the 2,474 read groups with both errors, yet 2,206 of them differ by more
+than two combined errors, where about 114 would by chance: the errors are about 1%, so even small
+differences between motif lengths are measured. This supports one multiplier per motif length
+(owner, 2026-11-02).
+
+**A sample's read groups agree.** The variance of a multiplier's logarithm is 0.40 over all read
+groups and 0.003 among the read groups of one sample, which mostly share a library.
+
+**Read groups are still not why tracts vary more than a binomial allows.** Few tracts qualify, as
+2,176 samples rarely all favour one length: at 37 homopolymer tracts off-length reads vary 15.1
+times what a binomial at the class's rate predicts, and 14.8 with each read group's own rate; at 33
+dinucleotide tracts 5.4 and 5.3. As on tomato2 (§3), the excess is between tracts.
 
 ## 6. Not measured here
 
-- **Kimura's cohort** (2,176 accessions from many projects): the first run stopped after 23 hours
-  (§5); the run with §5.1's changes had settled homopolymers and was fitting dinucleotides when this
-  was written. Its multipliers are the measurement the owner's extrapolation idea needs (spec §12).
+- **Calls on kimura's cohort with the multipliers**: §5.2 measures the multipliers, not what they
+  change in the calls; they are the measurement the owner's extrapolation idea needs (spec §12).
 - **The PCR-free arm of the simulation**, which the spec lists: not rerun.
 - **The call-time cost of the multipliers**: calling looks a read group's rate up as before, with one
   more map lookup; not timed.
