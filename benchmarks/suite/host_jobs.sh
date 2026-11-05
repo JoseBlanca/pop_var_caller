@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# The host job runner: runs DeepVariant and GLnexus in their own official images for the suite.
+# The host job runner: runs DeepVariant and GLnexus in their own official images, and STITCH in its
+# Bioconda container, for the suite.
 #
 #   benchmarks/suite/host_jobs.sh <results-dir> <project-dir> <data-root> <genomes-dir> [<extra-dir>]
 #
 # run_suite.sh starts it in the background and stops it on exit. The suite itself runs inside the
-# dev container, which cannot start other containers; for a DeepVariant or GLnexus step it writes a
+# dev container, which cannot start other containers; for a step in one of those images it writes a
 # request into <results-dir>/host_jobs/ and waits, and this runner executes it on the host with the
 # host's own podman or Docker, then writes the result beside the request.
 #
-# It runs only the two images below, only with the project, the data root and the genomes directory
+# It runs only the three images below, only with the project, the data root and the genomes directory
 # mounted (the data and genomes read-only), and only with a working directory inside the project.
 # Inside the image the command runs under the suite's own measuring (lib/measure_cli.py), so its
 # time and memory are measured as every other caller's are.
@@ -31,6 +32,7 @@ image_of() {  # the only images this runner will run (bash 3.2 has no associativ
     case "$1" in
         deepvariant) echo "docker.io/google/deepvariant:1.10.0" ;;
         glnexus) echo "ghcr.io/dnanexus-rnd/glnexus:v1.4.1" ;;
+        stitch) echo "quay.io/biocontainers/r-stitch:1.8.5--r44h64f727c_0" ;;
         *) echo "" ;;
     esac
 }
@@ -52,8 +54,9 @@ else
     available=false
     reason="no podman or Docker on this x86-64 machine"
 fi
-printf '{"available": %s, "reason": "%s", "arch": "%s", "runtime": "%s", "images": {"deepvariant": "%s", "glnexus": "%s"}}\n' \
+printf '{"available": %s, "reason": "%s", "arch": "%s", "runtime": "%s", "images": {"deepvariant": "%s", "glnexus": "%s", "stitch": "%s"}}\n' \
     "$available" "$reason" "$arch" "$runtime" "$(image_of deepvariant)" "$(image_of glnexus)" \
+    "$(image_of stitch)" \
     > "$jobs/capabilities.json"
 
 running=""
@@ -102,7 +105,7 @@ while true; do
         done
         running="pvcsuite-$id"
         # Measured by the suite's own code where the image has Python; otherwise run as it is, and
-        # the step records no measurement (GLnexus's image may lack Python).
+        # the step records no measurement (GLnexus's image may lack Python; STITCH's does).
         mkdir -p "$workdir/logs"
         # No cap on processes and threads: rootless podman's default of 2,048 per container stops
         # DeepVariant's make_examples at 30 shards ("can't start new thread").

@@ -1,4 +1,5 @@
-"""Steps that run in another tool's official image, through the host job runner (host_jobs.sh).
+"""Steps that run in another tool's own image, through the host job runner (host_jobs.sh):
+DeepVariant and GLnexus in their official images, STITCH in its Bioconda container.
 
 A step writes a request into `<results>/host_jobs/` and waits for the runner's answer. Where the
 runner cannot run the image (this Mac; any machine that is not x86-64 with podman or Docker), the
@@ -15,6 +16,7 @@ from .steps import SkipStep
 
 DEEPVARIANT_VERSION = "1.10.0"
 GLNEXUS_VERSION = "1.4.1"
+STITCH_VERSION = "1.8.5"
 
 
 def _dir(ctx):
@@ -34,7 +36,7 @@ def capabilities(ctx):
 def require(ctx):
     available, reason = capabilities(ctx)
     if not available:
-        raise SkipStep(f"DeepVariant and GLnexus cannot run here: {reason}")
+        raise SkipStep(f"DeepVariant, GLnexus and STITCH cannot run here: {reason}")
 
 
 def skip_with(ctx, callset):
@@ -44,7 +46,7 @@ def skip_with(ctx, callset):
 
 
 def run(ctx, image, command, workdir, label, threads=None):
-    """Run `command` in `image` ("deepvariant" or "glnexus") with `workdir` as its working
+    """Run `command` in `image` ("deepvariant", "glnexus" or "stitch") with `workdir` as its working
     directory; return the suite's measurement of it, or None when the image could not measure it."""
     require(ctx)
     jobs = _dir(ctx)

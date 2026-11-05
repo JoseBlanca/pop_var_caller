@@ -41,6 +41,7 @@ class Context:
         self.pvc_bin = os.path.join(PROJECT_DIR, "target-container", "release", "pvc")
         self.gatk = os.environ.get("GATK_BIN", "/opt/gatk/gatk")
         self.rtg_jar = os.path.join(PROJECT_DIR, "tmp", "tools", "rtg-tools-3.13", "RTG.jar")
+        self.beagle_jar = os.path.join(PROJECT_DIR, "tmp", "tools", "beagle", "beagle.27Jan18.7e1.jar")
         # pvc_eval: its checkout and commit (None when run_suite.sh found none), and the image's
         # free-threaded Python that runs it (Containerfile).
         self.pvc_eval_dir = getattr(args, "pvc_eval", None)
@@ -149,6 +150,11 @@ def _read_version(ctx, tool):
     if tool == "deepvariant":
         from .hostjobs import DEEPVARIANT_VERSION
         return f"DeepVariant {DEEPVARIANT_VERSION}"
+    if tool == "beagle":
+        return "Beagle 4.1 (" + os.path.basename(ctx.beagle_jar)[len("beagle."):-len(".jar")] + ")"
+    if tool == "stitch":
+        from .hostjobs import STITCH_VERSION
+        return f"STITCH {STITCH_VERSION}"
     if tool == "pvc_eval":
         return f"pvc_eval {ctx.pvc_eval_commit}" if ctx.pvc_eval_commit else "pvc_eval none"
     if tool == "vcfeval":
