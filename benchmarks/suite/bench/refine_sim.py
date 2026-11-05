@@ -6,7 +6,7 @@ Three cohorts, drawn by `ng_str_stutter_benchmark` over the same 4 Mb genome as 
 | cohort         | how it is drawn                                                     | samples, depth |
 |----------------|---------------------------------------------------------------------|----------------|
 | `f2`           | two inbred parents and their F2, one crossover a contig a meiosis   | parents at 30×, 20 F2 at 1× |
-| `natural_F0`   | msprime coalescent, outbred (`scripts/msprime_haplotypes.py`)      | 400: 100 each at 30×, 20×, 10×, 5× |
+| `natural_F0`   | msprime coalescent, outbred (`scripts/msprime_haplotypes.py`)      | 400: 100 each at 30×, 10×, 5×, 2× |
 | `natural_F0.9` | the same, selfing to F = 0.9, with autozygous runs                  | the same |
 
 One contig plays a whole chromosome in the F2, so its crossovers are about 80 times closer together
@@ -38,7 +38,7 @@ DESCRIPTION = """
 Simulated. Three cohorts over one drawn 4 Mb genome (STR segments and bundles, SNPs, indels), reads
 mapped with minimap2: an F2 (two inbred parents at 30×, 20 F2 at 1×, one crossover per contig per
 meiosis, so recombination far denser than in a real chromosome), and two natural populations from a
-coalescent simulation (msprime), 400 samples each, 100 at each of 30×, 20×, 10× and 5×, one outbred
+coalescent simulation (msprime), 400 samples each, 100 at each of 30×, 10×, 5× and 2×, one outbred
 and one selfing to F = 0.9. pvc fits its parameters, then calls with refinement off and on. The
 `depth` column is the group of samples. Genotypes are scored by pvc_eval, one unit a sample at a
 locus, split by kind and by whether the sample had reads there; phase over SNPs only, a wrong link
@@ -63,10 +63,12 @@ def configurations(ctx):
         return [
             ("f2", "cross=f2 samples=6 deep_samples=2 deep_depth=30 depth=1", None,
              [("parents 30x", 2), ("F2 1x", 4)]),
-            ("natural_F0", "samples=8 depths=30:2,20:2,10:2,5:2", 0.0,
-             [("30x", 2), ("20x", 2), ("10x", 2), ("5x", 2)]),
+            ("natural_F0", "samples=8 depths=30:2,10:2,5:2,2:2", 0.0,
+             [("30x", 2), ("10x", 2), ("5x", 2), ("2x", 2)]),
         ]
-    tiers = [("30x", 100), ("20x", 100), ("10x", 100), ("5x", 100)]
+    # 30× checks that refinement does no harm to well-covered samples; 2× is where it has the most
+    # to do (owner, 2026-11-05: 2× replaced 20×, which added least).
+    tiers = [("30x", 100), ("10x", 100), ("5x", 100), ("2x", 100)]
     depths = "depths=" + ",".join(f"{g[:-1]}:{n}" for g, n in tiers)
     return [
         ("f2", "cross=f2 samples=22 deep_samples=2 deep_depth=30 depth=1", None,
@@ -150,9 +152,12 @@ def _configuration(ctx, cfg, settings, inbreeding, groups):
                          f"&& samtools index {q(bams[s])} && rm -f {q(r1)} {q(r2)}"))
         return {"measurement": run_commands(cmds, os.path.join(d, "logs"))}
 
+    # The settings too: reads drawn again over the same reference must be mapped again.
     steps.append(Step(f"{name}/map", "input", map_reads,
                       lambda: {"reference": file_identity(reference + ".fai"),
-                               "minimap2": ctx.version("minimap2")}))
+                               "minimap2": ctx.version("minimap2"),
+                               "settings": sim_settings.replace(f"threads={ctx.threads}", ""),
+                               "simulation": SIMULATION_VERSION}))
 
     region_bp = 300000 if ctx.slice else genome_bp
     dataset = {"f2": "simulated F2", "natural_F0": "simulated natural population, outbred",
