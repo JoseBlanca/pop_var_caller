@@ -125,7 +125,23 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 - **Soft haplotypes along the path, not hard alleles — decided.** A copy that stays uncertain where
   neither its template nor the reads settle it does not pass a guess on as a certainty. Consistent
   with Beagle's hard haplotypes filling at 1.9% wrong against the prototype's 0.8% in the same
-  cohort, but Beagle differs in more than hardness; soft against hard in this phaser is unmeasured.
+  cohort, but Beagle differs in more than hardness. *Measured 2026-11-05:* reading hard alleles
+  everywhere from round 2 cost the outbred 1× samples of a 40-sample cohort 12 homozygous-reference
+  genotypes in 100 (72 → 60 right); the stored haplotypes stay soft.
+- **From round 2 the states are weighed by definite alleles — decided 2026-11-05, measured.** A
+  template's shares do two jobs in a walk: in the emissions they decide *whom the sample is
+  copying*, and in the prediction and the drawn haplotypes they say *what it then carries*. Soft
+  shares are right for the second and wrong for the first: an unsure template — a 1× sample at 50:50
+  where it has no read — is never plainly wrong, so it explains the sample's reads as well as a
+  template that truly carries them, and the walk spreads its weight onto it. So from round 2 each
+  emission reads one allele drawn from each template's shares, the background's included, while the
+  prediction and the drawn haplotypes read the shares themselves (§2.3). On the simulated F2 (two
+  30× parents, 20 offspring at 1×) heterozygous offspring genotypes right went from 51 to 70 in 100;
+  in two 40-sample natural cohorts with samples down to 1×, the 1× samples gained 2 to 4 genotypes
+  in 100 more and the samples at 5× and above moved by at most 1 in 100. Drawing the background's
+  allele too matters: left soft, it was the one template never plainly wrong, the walk copied it
+  more, and the no-read calls it withholds (pass §4.2) rose from 8 to 21 in 100 of the outbred 1×
+  homozygous-reference genotypes (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
 - **Average the posterior over rounds 2 to `R`, not take the last — decided, measured.** Samples
   phase each other, so an error can reinforce itself round to round: on the first cohort the last
   round's fills drifted from 1.4% wrong (round 3) to 2.8% (round 8), while the average stayed at
@@ -146,14 +162,30 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
 its `GP` allele shares.
 
 **From round 2: 16 haplotypes, re-chosen every round, at most one of each sample — decided, measured
-(§10 Q2).** A haplotype's score against the sample is a disagreement rate: at each record, the
-probability that the haplotype carries an allele the sample's genotype lacks — for a biallelic
-record `x · P(0/0) + (1 − x) · P(1/1)`, `x` the haplotype's alternative probability and the genotype
-the sample's posterior from the previous round; in general `Σ_a h(a) · P(genotype without a)`. It
-is summed over the sample's informative records (at most 500, spread evenly, as now) where the
-haplotype's sample is informative too, and scored pessimistically as the pass scores samples (the
-Beta mean plus two standard deviations). Each candidate sample offers its better-scoring haplotype;
-the 16 best samples' offers are the templates.
+(§10 Q2).** Haplotypes are judged as the pass judges samples in round 1 — stretch by stretch,
+ranked by stretches won (pass §3.3) — with the disagreement read off the sample's genotype from the
+previous round. At each record the **observed** disagreement is the probability that the haplotype
+carries an allele the sample's genotype lacks — for a biallelic record `x · P(0/0) + (1 − x) ·
+P(1/1)`, `x` the haplotype's alternative probability and the genotype the sample's posterior from
+the previous round; in general `Σ_a h(a) · P(genotype without a)`. The **expected** one is the same
+for an allele drawn from the cohort's frequencies, `Σ_a p(a) · P(genotype without a)`. The records
+are the sample's informative records (at most 500, spread evenly, as in round 1), a haplotype judged
+where its sample is informative too, and the stretches are cut by the expected disagreement as in
+pass §3.3. Both haplotypes of every other sample compete in each stretch, the stretch's two winning
+places going to two samples, each scoring by its better copy — so a homozygous sample's two equal
+copies do not take both (code review 2026-11-05). Each sample offers the one
+that won more stretches — on a tie, the better whole-window score, then copy 0 — and the 16 best
+offers, ranked as the pass ranks samples, are the templates; their stretches won set where a copy
+lands (pass §3.5). *Changed 2026-11-05:* before, a haplotype's score was its disagreement rate over
+the whole window, out of the count of shared records rather than out of the expected disagreement
+(`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
+
+**What a round's walk reads of its templates.** The emissions read *definite alleles*: at each site,
+one allele drawn from each template's shares — the 16 haplotypes' and the background's — from the
+stream `StreamPurpose::DefiniteAlleles`, keyed by the window, the sample and the round (§5), one
+uniform a template a site in template order. The genotype prediction and the re-estimation of the
+sample's own haplotypes read the shares (§2.2). Round 1 reads the shares for both: its templates are
+genotypes, not haplotypes, and it is the pass without phasing.
 
 **A sample not walked in the window** — no informative record there, so no templates and no path
 (`templates.rs:46`, `refine.rs:243`) — **carries its `GP` allele shares as both haplotypes in every
@@ -349,6 +381,8 @@ windows and then frozen (pass §3.5), so calling a contig alone or after others 
 different windows. That predates phasing.
 Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
 fixed order — autozygous states first, then pair states row by row — as `phaser.py` orders them.
+The definite alleles a round's emissions read (§2.3) come from a stream of their own, keyed the same
+way with its own purpose number, so drawing them changes no path.
 Nothing depends on threads or on solving order, and rounds are synchronous (§2.1 step 3), so the
 result is the same at 1 and 30 threads. **The seed is a constant in the code, not an option.**
 

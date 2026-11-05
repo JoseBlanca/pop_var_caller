@@ -8,21 +8,27 @@ use crate::neighbour_evidence::test_cohort::{CohortShape, TestCohort, test_cohor
 #[test]
 fn the_starting_share_is_clamped() {
     assert_eq!(
-        SampleFit::new(1.0).parameters(MISMATCH).autozygous_share,
+        SampleFit::new(1.0)
+            .parameters(MISMATCH, None)
+            .autozygous_share,
         0.99
     );
     assert_eq!(
-        SampleFit::new(0.0).parameters(MISMATCH).autozygous_share,
-        0.01
-    );
-    assert_eq!(
-        SampleFit::new(f64::NAN)
-            .parameters(MISMATCH)
+        SampleFit::new(0.0)
+            .parameters(MISMATCH, None)
             .autozygous_share,
         0.01
     );
     assert_eq!(
-        SampleFit::new(0.7).parameters(MISMATCH).autozygous_share,
+        SampleFit::new(f64::NAN)
+            .parameters(MISMATCH, None)
+            .autozygous_share,
+        0.01
+    );
+    assert_eq!(
+        SampleFit::new(0.7)
+            .parameters(MISMATCH, None)
+            .autozygous_share,
         0.7
     );
 }
@@ -41,7 +47,7 @@ fn sample_sites(cohort: &TestCohort, sample: usize) -> (Vec<OwnedSite>, usize) {
         .map(|record| {
             let mut shares: Vec<f64> = Vec::new();
             for &template in &templates {
-                shares.extend(record.template_shares(template));
+                shares.extend(record.template_shares(template.source));
             }
             shares.extend(record.background_shares());
             (
@@ -62,6 +68,7 @@ fn walk_sites(owned: &[OwnedSite]) -> Vec<WalkSite<'_>> {
             allele_count: 2,
             likelihoods,
             template_shares: shares,
+            emission_shares: None,
         })
         .collect()
 }
@@ -85,11 +92,11 @@ fn the_fit_freezes_after_enough_informative_records() {
     let (owned, templates) = sample_sites(&cohort, 0);
     let sites = walk_sites(&owned);
     let mut fit = SampleFit::new(0.9);
-    fit.fit_window(&sites, templates, FIT_RECORDS / 2, MISMATCH);
+    fit.fit_window(&sites, templates, None, FIT_RECORDS / 2, MISMATCH, None);
     assert!(!fit.is_frozen());
-    let frozen = fit.fit_window(&sites, templates, FIT_RECORDS / 2, MISMATCH);
+    let frozen = fit.fit_window(&sites, templates, None, FIT_RECORDS / 2, MISMATCH, None);
     assert!(fit.is_frozen());
-    let after = fit.fit_window(&sites[..50], templates, 50, MISMATCH);
+    let after = fit.fit_window(&sites[..50], templates, None, 50, MISMATCH, None);
     assert_eq!(frozen, after);
 }
 
@@ -114,8 +121,15 @@ fn the_autozygous_share_follows_the_sample() {
         let cohort = test_cohort(CohortShape { inbred, ..shape });
         let (owned, templates) = sample_sites(&cohort, 0);
         let mut fit = SampleFit::new(0.5);
-        fit.fit_window(&walk_sites(&owned), templates, owned.len(), MISMATCH)
-            .autozygous_share
+        fit.fit_window(
+            &walk_sites(&owned),
+            templates,
+            None,
+            owned.len(),
+            MISMATCH,
+            None,
+        )
+        .autozygous_share
     };
     let inbred = share(true);
     let outbred = share(false);

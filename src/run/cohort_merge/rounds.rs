@@ -105,10 +105,44 @@ where
 {
     refuse_malformed_analysed_regions(analysed);
 
+    let beside_the_builders = rayon::current_num_threads() > 1;
     let mut regions_in_round: Vec<GenomeRegion> = Vec::new();
     let mut graveyard: Vec<SampleLocusObservations> = Vec::new();
     let mut owned_through: Option<GenomePosition> = None;
     let mut displaced: u64 = 0;
+    // **The frontier rule, on the calling thread, in region order** — spec §6.1's, the
+    // organiser's `resolve_and_release` with the failed spans and the calls interleaved by first
+    // base. Nothing a healthy run produces reaches the drop.
+    let mut hand_over = |outcomes: Vec<CalledRegion<T>>| {
+        for CalledRegion { calls, failed } in outcomes {
+            let mut calls = calls.into_iter().peekable();
+            for span in failed {
+                let span_first = first_base_of(span);
+                while let Some((locus, made)) =
+                    calls.next_if(|(locus, _)| first_base_of(*locus) <= span_first)
+                {
+                    if claim(&mut owned_through, &mut displaced, locus) {
+                        take(made);
+                    }
+                }
+                if claim(&mut owned_through, &mut displaced, span) {
+                    refused.push(span);
+                }
+            }
+            for (locus, made) in calls {
+                if claim(&mut owned_through, &mut displaced, locus) {
+                    take(made);
+                }
+            }
+        }
+    };
+    // **The last round's calls, handed over while the pool works the next round.** The hand-over
+    // is the calling thread's alone — the sink writes, in genome order — and with a round of
+    // about 15 ms it was a sixth of the calling pass with the pool idle (59 tomato samples, 6
+    // threads). Rounds are still handed over one after another and each in region order, so the
+    // calls reach `take` in genome order as before; a round that fails is reported after the one
+    // before it was handed over, as before.
+    let mut handed_next: Vec<CalledRegion<T>> = Vec::new();
 
     for analysed_region in analysed {
         let mut building_regions =
@@ -116,111 +150,132 @@ where
         loop {
             regions_in_round.clear();
             regions_in_round.extend(building_regions.by_ref().take(regions_in_flight.get()));
-            let Some(first) = regions_in_round.first().copied() else {
+            if regions_in_round.is_empty() {
                 break;
-            };
-            let last = regions_in_round
-                .last()
-                .copied()
-                .expect("the round is not empty");
-
-            let beside_the_builders = rayon::current_num_threads() > 1;
-            let evicted_base = GenomePosition {
-                contig: first.contig,
-                position: first.start,
-            };
-            if beside_the_builders {
-                cache.evict_before_in_parallel(evicted_base, &mut graveyard);
-            } else {
-                cache.evict_before(evicted_base);
             }
-            cache.cover_in_parallel(GenomeRegion {
-                contig: first.contig,
-                start: first.start,
-                end: last.end,
-            })?;
-
-            let cache = &*cache;
-            let make_scratch = &make_scratch;
-            let call_locus = &call_locus;
-            let regions = &regions_in_round;
-            let build_the_round = || -> Result<Vec<CalledRegion<T>>, E> {
-                regions
-                    .par_iter()
-                    .map_init(
-                        make_scratch,
-                        |scratch, building_region| -> Result<CalledRegion<T>, E> {
-                            let mut calls: Vec<(GenomeRegion, T)> = Vec::new();
-                            let mut failed: Vec<GenomeRegion> = Vec::new();
-                            // **The window's own prefix, added back to every member index.**
-                            // The closer numbers members inside the window; `build_at` indexes
-                            // the whole held list. A round evicts once, at its first region's
-                            // first base, so every later region in the round has a prefix and
-                            // the two numberings differ by it.
-                            let mut starts: Vec<usize> = Vec::new();
-                            cache.window_starts_into(*building_region, &mut starts);
-                            let starts = &starts;
-                            cache.with_observations(*building_region, |window| {
-                                build_region_handing_over_windowed(
-                                    *building_region,
-                                    window,
-                                    max_cohort_locus_span,
-                                    min_alt_reads,
-                                    &mut |built: CohortObservation, reads: &LocusReads<'_, '_>| {
-                                        let span = built.region;
-                                        calls.push((span, call_locus(scratch, built, reads)));
-                                    },
-                                    &mut failed,
-                                    &|sample, index| cache.build_at(sample, starts[sample] + index),
-                                    cache.dropped_loci(),
-                                )
-                            })?;
-                            Ok(CalledRegion { calls, failed })
-                        },
-                    )
-                    .collect()
+            let round = Round {
+                regions: &regions_in_round,
+                max_cohort_locus_span,
+                min_alt_reads,
+                make_scratch: &make_scratch,
+                call_locus: &call_locus,
             };
-            let outcomes: Result<Vec<CalledRegion<T>>, E> = if beside_the_builders {
-                let mut dead = std::mem::take(&mut graveyard);
-                let (outcomes, emptied) = rayon::join(build_the_round, move || {
-                    dead.clear();
-                    dead
+            let previous = std::mem::take(&mut handed_next);
+            let worked = if beside_the_builders {
+                let mut worked = None;
+                rayon::in_place_scope(|scope| {
+                    scope.spawn(|_| worked = Some(round.work(cache, &mut graveyard)));
+                    hand_over(previous);
                 });
-                graveyard = emptied;
-                outcomes
+                worked.expect("the scope returns once its spawned round has run")
             } else {
-                build_the_round()
+                hand_over(previous);
+                round.work(cache, &mut graveyard)
             };
-
-            // **The frontier rule, on the calling thread, in region order** — spec §6.1's, the
-            // organiser's `resolve_and_release` with the failed spans and the calls interleaved
-            // by first base. Nothing a healthy run produces reaches the drop.
-            for outcome in outcomes? {
-                let CalledRegion { calls, failed } = outcome;
-                let mut calls = calls.into_iter().peekable();
-                for span in failed {
-                    let span_first = first_base_of(span);
-                    while let Some((locus, made)) =
-                        calls.next_if(|(locus, _)| first_base_of(*locus) <= span_first)
-                    {
-                        if claim(&mut owned_through, &mut displaced, locus) {
-                            take(made);
-                        }
-                    }
-                    if claim(&mut owned_through, &mut displaced, span) {
-                        refused.push(span);
-                    }
-                }
-                for (locus, made) in calls {
-                    if claim(&mut owned_through, &mut displaced, locus) {
-                        take(made);
-                    }
-                }
-            }
+            handed_next = worked?;
         }
     }
+    hand_over(handed_next);
 
     Ok(displaced)
+}
+
+/// **One round's regions and what a worker does with each locus**, everything a round needs
+/// besides the cache.
+struct Round<'r, MK, CL> {
+    regions: &'r [GenomeRegion],
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_reads: MinAltReads,
+    make_scratch: &'r MK,
+    call_locus: &'r CL,
+}
+
+impl<MK, CL> Round<'_, MK, CL> {
+    /// Evict behind the round, cover its ground, and build and call its regions on the pool,
+    /// each region's calls in genome order and the regions in order.
+    fn work<S, E, Sc, T>(
+        &self,
+        cache: &mut ObservationCache<S>,
+        graveyard: &mut Vec<SampleLocusObservations>,
+    ) -> Result<Vec<CalledRegion<T>>, E>
+    where
+        S: ObservationSource<Error = E> + Sync + Send,
+        E: Send + From<ReferenceUnreadable>,
+        T: Send,
+        Sc: Send,
+        MK: Fn() -> Sc + Sync + Send,
+        CL: Fn(&mut Sc, CohortObservation, &LocusReads<'_, '_>) -> T + Sync + Send,
+    {
+        let (first, last) = match self.regions {
+            [first, .., last] => (*first, *last),
+            [only] => (*only, *only),
+            [] => return Ok(Vec::new()),
+        };
+        let beside_the_builders = rayon::current_num_threads() > 1;
+        let evicted_base = GenomePosition {
+            contig: first.contig,
+            position: first.start,
+        };
+        if beside_the_builders {
+            cache.evict_before_in_parallel(evicted_base, graveyard);
+        } else {
+            cache.evict_before(evicted_base);
+        }
+        cache.cover_in_parallel(GenomeRegion {
+            contig: first.contig,
+            start: first.start,
+            end: last.end,
+        })?;
+
+        let cache = &*cache;
+        let build_the_round = || -> Result<Vec<CalledRegion<T>>, E> {
+            self.regions
+                .par_iter()
+                .map_init(
+                    self.make_scratch,
+                    |scratch, building_region| -> Result<CalledRegion<T>, E> {
+                        let mut calls: Vec<(GenomeRegion, T)> = Vec::new();
+                        let mut failed: Vec<GenomeRegion> = Vec::new();
+                        // **The window's own prefix, added back to every member index.** The
+                        // closer numbers members inside the window; `build_at` indexes the whole
+                        // held list. A round evicts once, at its first region's first base, so
+                        // every later region in the round has a prefix and the two numberings
+                        // differ by it.
+                        let mut starts: Vec<usize> = Vec::new();
+                        cache.window_starts_into(*building_region, &mut starts);
+                        let starts = &starts;
+                        cache.with_observations(*building_region, |window| {
+                            build_region_handing_over_windowed(
+                                *building_region,
+                                window,
+                                self.max_cohort_locus_span,
+                                self.min_alt_reads,
+                                &mut |built: CohortObservation, reads: &LocusReads<'_, '_>| {
+                                    let span = built.region;
+                                    calls.push((span, (self.call_locus)(scratch, built, reads)));
+                                },
+                                &mut failed,
+                                &|sample, index| cache.build_at(sample, starts[sample] + index),
+                                cache.dropped_loci(),
+                            )
+                        })?;
+                        Ok(CalledRegion { calls, failed })
+                    },
+                )
+                .collect()
+        };
+        if beside_the_builders {
+            let mut dead = std::mem::take(graveyard);
+            let (outcomes, emptied) = rayon::join(build_the_round, move || {
+                dead.clear();
+                dead
+            });
+            *graveyard = emptied;
+            outcomes
+        } else {
+            build_the_round()
+        }
+    }
 }
 
 /// Claim `span`'s ground, or refuse it to whatever got there first.

@@ -39,9 +39,9 @@ use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
     SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks,
 };
-use super::random::{StreamPurpose, Uniforms};
+use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
-use super::templates::{choose_haplotypes, choose_templates, compared_records};
+use super::templates::{ChosenTemplate, choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
 use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 use crate::read_phase::link::{Heterozygote, score_read_link};
@@ -49,6 +49,17 @@ use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
 pub const MISMATCH: f64 = 0.01;
+
+/// **The chance that a copy changing template lands on the background** (§3.3, §3.5): a last
+/// resort, the other templates sharing the rest by the stretches each won
+/// (`ChosenTemplate::landing_weight`). With the background one template among 17 alike, an F2 at
+/// 1× copied it in place of its parents wherever an allele stood near 50% — at one read a site it
+/// explains a heterozygote as well as the two parents do — and 30 of 100 of the heterozygous
+/// offspring were called right; at this share, 51 of 100, with 1× natural cohorts gaining too
+/// (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`). Those figures were measured
+/// with the other templates landed on alike, before landing followed stretches won; the share was
+/// not re-tuned after (`local_sources_2026-11-05.md`).
+pub const BACKGROUND_LANDING_SHARE: f64 = 1e-5;
 
 /// **The least `GQ` a sample whose reads said nothing is written with a genotype at** (§4.2, owner
 /// 2026-11-02): below it, a one-in-ten chance of being wrong, the sample stays `./.` with the pass's
@@ -521,7 +532,7 @@ impl CoreSite {
 struct SampleRounds {
     /// Round 1's template samples; `None` when the sample has no informative record in the window,
     /// so it is not walked and carries its `GP` shares as both haplotypes (phasing spec §2.3).
-    templates: Option<Vec<usize>>,
+    templates: Option<Vec<ChosenTemplate<usize>>>,
     /// The record indices its templates are chosen over.
     compared: Vec<usize>,
     /// Its previous round's posterior at each compared record, in `compared`'s order.
@@ -906,7 +917,7 @@ fn solve_round(
         return;
     };
     // Round 1: template samples' GP shares; later rounds: other samples' haplotypes.
-    let haplotype_templates: Vec<(usize, usize)> = if round == 1 {
+    let haplotype_templates: Vec<ChosenTemplate<(usize, usize)>> = if round == 1 {
         Vec::new()
     } else {
         let haplotype = |other: usize, copy: usize, record: usize, out: &mut Vec<f64>| {
@@ -922,14 +933,37 @@ fn solve_round(
             max_templates,
         )
     };
-    let template_count = if round == 1 {
-        round_one.len()
+    // Where a copy that changes template lands: by the stretches each template won (§3.3).
+    let template_weights: Vec<f64> = if round == 1 {
+        round_one
+            .iter()
+            .map(ChosenTemplate::landing_weight)
+            .collect()
     } else {
-        haplotype_templates.len()
+        haplotype_templates
+            .iter()
+            .map(ChosenTemplate::landing_weight)
+            .collect()
     };
+    let template_count = template_weights.len();
 
     let mut likelihoods: Vec<f64> = Vec::new();
     let mut shares: Vec<f64> = Vec::new();
+    // From round 2 the states are weighed by definite alleles, one drawn from each template's
+    // shares at each site, the background's included (phasing spec §2.3): a template that is
+    // unsure is then sometimes plainly wrong, as a soft share never is. The shares themselves stay
+    // what the prediction and the drawn haplotypes read.
+    let mut definite = (round > 1).then(|| {
+        (
+            Vec::<f64>::new(),
+            Uniforms::new(
+                StreamPurpose::DefiniteAlleles,
+                phasing.window_key,
+                sample,
+                round,
+            ),
+        )
+    });
     let mut spans = Vec::with_capacity(layout.sites());
     for (site, &index) in layout.record_of_site.iter().enumerate() {
         let record = &records[index];
@@ -941,20 +975,31 @@ fn solve_round(
         }
         let share_start = shares.len();
         if round == 1 {
-            for &template in round_one {
-                shares.extend(record.template_shares(template));
+            for template in round_one {
+                shares.extend(record.template_shares(template.source));
             }
         } else {
-            for &(other, copy) in &haplotype_templates {
+            for &ChosenTemplate {
+                source: (other, copy),
+                ..
+            } in &haplotype_templates
+            {
                 store.haplotype_into(other, copy, site, &mut shares);
             }
         }
         shares.extend(record.background_shares());
+        if let Some((drawn, uniforms)) = definite.as_mut() {
+            for template_shares in shares[share_start..].chunks_exact(record.allele_count) {
+                let allele = pick(template_shares, uniforms.next_uniform());
+                drawn.extend((0..record.allele_count).map(|a| f64::from(u8::from(a == allele))));
+            }
+        }
         spans.push((
             likelihood_start..likelihoods.len(),
             share_start..shares.len(),
         ));
     }
+    let drawn = definite.map(|(drawn, _)| drawn);
     let sites: Vec<WalkSite<'_>> = layout
         .record_of_site
         .iter()
@@ -964,6 +1009,7 @@ fn solve_round(
             allele_count: records[index].allele_count,
             likelihoods: &likelihoods[likelihood_span.clone()],
             template_shares: &shares[share_span.clone()],
+            emission_shares: drawn.as_ref().map(|drawn| &drawn[share_span.clone()]),
         })
         .collect();
     let walk_templates = template_count + 1;
@@ -975,8 +1021,10 @@ fn solve_round(
             let parameters = fit.fit_window(
                 &sites,
                 walk_templates,
+                Some(&template_weights),
                 state.informative_positions.len() - state.hidden.len(),
                 MISMATCH,
+                Some(BACKGROUND_LANDING_SHARE),
             );
             state.parameters = Some(parameters);
             parameters
@@ -1018,6 +1066,7 @@ fn solve_round(
                 let (result, haplotypes, extra) = walk_and_draw_paths(
                     &sites,
                     walk_templates,
+                    Some(&template_weights),
                     parameters,
                     &mut uniforms,
                     &mut extra_uniforms,
@@ -1034,6 +1083,7 @@ fn solve_round(
             None => walk_and_draw(
                 &sites,
                 walk_templates,
+                Some(&template_weights),
                 parameters,
                 &mut uniforms,
                 draw_reads.as_mut(),
@@ -1044,7 +1094,7 @@ fn solve_round(
         });
         result
     } else {
-        walk(&sites, walk_templates, parameters)
+        walk(&sites, walk_templates, Some(&template_weights), parameters)
     };
     let WalkResult {
         mut posteriors,

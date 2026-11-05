@@ -63,6 +63,18 @@
 //! dispersion the factor is production's binomial from production's own logarithms, and the
 //! differential below runs there.
 //!
+//! **The fourth departure (2026-11-05): both hypotheses multiply a group of samples' terms as
+//! probabilities and take one logarithm a group**, where production took an `exp` and a `log1p`
+//! a sample — see [`h1_log_likelihood`] and [`SAMPLES_A_PRODUCT`]. The reason is a measurement:
+//! the scoring pass was 13.7 s of a 108 s `call-from-psps` run on 59 tomato2 samples, almost all
+//! of it those calls, and is 3.0 s after it. The bound is the arithmetic's: a group's product of
+//! sixteen terms, each between its floor and three, carries about sixteen roundings where the
+//! sums carried two a sample, a few times 1e-16 of a log-likelihood of hundreds; and a group
+//! whose product is not a normal number is summed a sample at a time as before.
+//! `the_products_over_groups_give_the_log_space_sums` holds both to the old sums within 1e-9
+//! nats on loci built to reach that fallback, and the differential's widest gap went from
+//! 3.6e-12 to 7.3e-12 nats. The VCF of that run is unchanged.
+//!
 //! **What proves the copy computes what it was copied from is not this file's tests.**
 //! They are production's, transcribed, so they pass on both trees whatever either does.
 //! `production_parity.rs` feeds ng's copy the randomised inputs production was run on, and
@@ -71,7 +83,7 @@
 //! among them — and asserts the two counts equal exactly and the likelihood ratio and both
 //! log-likelihoods **within 1e-9 nats**, a wall derived from the series' truncation term.
 //! **The gap it measures was exactly zero** until the maths moved to libm on 2026-09-14, and is
-//! now 3.6e-12 nats. **One sample is in that set deliberately** (spec §4): the
+//! now 7.3e-12 nats. **One sample is in that set deliberately** (spec §4): the
 //! folded site-frequency-spectrum grid degenerates to a single point at `N = 1`, and
 //! nothing had exercised the copied precompute there.
 
@@ -264,6 +276,9 @@ pub struct ParalogScorePrecompute {
     /// Wright genotype log-priors `(hom-ref, het, hom-alt)`, row-major
     /// `[sfs_point * cohort_size + cohort_sample]`.
     wright: Vec<[f64; 3]>,
+    /// The same priors as probabilities, `exp` of [`wright`](Self::wright), for the products
+    /// [`h1_log_likelihood`] takes over a group of samples.
+    wright_probabilities: Vec<[f64; 3]>,
     /// H1 genotype allele factors `[hom-ref ε, het ½, hom-alt 1−ε]` — depend only on `ε` and
     /// the dispersion.
     allele_h1: [AlleleFactor; 3],
@@ -276,6 +291,9 @@ pub struct ParalogScorePrecompute {
     /// P(carrier))`, row-major `[carrier_freq_point * cohort_size +
     /// cohort_sample]`.
     carrier_probs: Vec<(f64, f64)>,
+    /// The same as probabilities, `exp` of [`carrier_probs`](Self::carrier_probs), for the
+    /// products [`h2_log_likelihood`] takes over a group of samples.
+    carrier_probabilities: Vec<(f64, f64)>,
     /// H2 non-carrier allele factor (VAF `ε`).
     allele_noncarrier: AlleleFactor,
 }
@@ -342,6 +360,7 @@ impl ParalogScorePrecompute {
             homalt_min_depth: params.homalt_min_depth,
             sfs_points,
             sfs_log_weight,
+            wright_probabilities: wright.iter().map(|priors| priors.map(float::exp)).collect(),
             wright,
             allele_h1: [
                 AlleleFactor::new(eps, ln_eps, ln_1m_eps, dispersion),
@@ -350,6 +369,10 @@ impl ParalogScorePrecompute {
             ],
             configs,
             carrier_freq_points,
+            carrier_probabilities: carrier_probs
+                .iter()
+                .map(|&(noncarrier, carrier)| (float::exp(noncarrier), float::exp(carrier)))
+                .collect(),
             carrier_probs,
             allele_noncarrier: AlleleFactor::new(eps, ln_eps, ln_1m_eps, dispersion),
         }
@@ -443,20 +466,25 @@ fn h1_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
     let allele_h1 = &precompute.allele_h1;
 
     // Per-sample allele factor per genotype, and the genotype-independent
-    // coverage term summed once.
+    // coverage term summed once. Each sample's factors are also kept as
+    // probabilities scaled so the largest is one, its logarithm `top` set aside.
     let mut coverage_term = 0.0;
-    let allele_by_genotype: Vec<[f64; 3]> = usable
+    let mut tops = 0.0;
+    let allele_by_genotype: Vec<([f64; 3], [f64; 3], f64)> = usable
         .iter()
         .map(|sample| {
             let obs = &sample.observation;
             coverage_term += ln_normal(obs.relative_copy_number, 1.0, sample.single_copy_depth_sd);
             let k = f64::from(obs.alt_reads);
             let nk = f64::from(obs.total_reads - obs.alt_reads);
-            [
+            let logs = [
                 allele_h1[0].log_likelihood(k, nk),
                 allele_h1[1].log_likelihood(k, nk),
                 allele_h1[2].log_likelihood(k, nk),
-            ]
+            ];
+            let top = logs[0].max(logs[1]).max(logs[2]);
+            tops += top;
+            (logs, logs.map(|log| float::exp(log - top)), top)
         })
         .collect();
 
@@ -465,16 +493,37 @@ fn h1_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
     // with `logw_p` the normalised prior. We accumulate the numerator LSE
     // (`summed1[p] + raw_logw_p`) and the normaliser LSE (`raw_logw_p`)
     // online, so `LSE_num − LSE_norm` is the p-marginal without a p vector.
+    //
+    // **A sample's term is the logarithm of a sum of three products**, and it is
+    // taken once a group of samples rather than once a sample: the group's
+    // terms multiplied as probabilities, then one logarithm. A group whose
+    // product is not a normal number — a prior floored to 1e-300, or a factor
+    // underflowing at hundreds of reads — is summed a sample at a time in
+    // log space instead, as every group was before.
     let cohort_size = precompute.cohort_size;
     let mut lse_num = LogSumExp::new();
     let mut lse_norm = LogSumExp::new();
     for i in 0..precompute.sfs_points {
         let raw_logw = precompute.sfs_log_weight[i];
         let base = i * cohort_size;
-        let mut summed = 0.0;
-        for (sample, allele) in usable.iter().zip(allele_by_genotype.iter()) {
-            let w = precompute.wright[base + sample.cohort_index];
-            summed += log_sum_exp3(w[0] + allele[0], w[1] + allele[1], w[2] + allele[2]);
+        let mut summed = tops;
+        for (samples, alleles) in usable
+            .chunks(SAMPLES_A_PRODUCT)
+            .zip(allele_by_genotype.chunks(SAMPLES_A_PRODUCT))
+        {
+            let mut product = 1.0;
+            for (sample, (_, scaled, _)) in samples.iter().zip(alleles) {
+                let w = precompute.wright_probabilities[base + sample.cohort_index];
+                product *= w[0] * scaled[0] + w[1] * scaled[1] + w[2] * scaled[2];
+            }
+            if product.is_normal() {
+                summed += float::ln(product);
+            } else {
+                for (sample, (logs, _, top)) in samples.iter().zip(alleles) {
+                    let w = precompute.wright[base + sample.cohort_index];
+                    summed += log_sum_exp3(w[0] + logs[0], w[1] + logs[1], w[2] + logs[2]) - top;
+                }
+            }
         }
         lse_num.push(summed + raw_logw);
         lse_norm.push(raw_logw);
@@ -482,6 +531,13 @@ fn h1_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
 
     lse_num.value() - lse_norm.value() + coverage_term
 }
+
+/// **How many samples' terms [`h1_log_likelihood`] and [`h2_log_likelihood`] multiply before
+/// taking one logarithm.** An `h1` term is at most 3 and at least the prior of the genotype the
+/// reads favour; an `h2` term at most one and at least the smaller of a carrier frequency's two
+/// probabilities. Sixteen of them stay a normal number unless one of those is below about 1e-19 —
+/// far below any but a floored one, which is what the fallback is for.
+const SAMPLES_A_PRODUCT: usize = 16;
 
 /// H2 — hidden paralog. Per `(configuration, q)`, each sample is a mixture of
 /// non-carrier (single-copy REF) and carrier `(T, m)`; marginalised flat over
@@ -519,19 +575,51 @@ fn h2_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
     // g[config,q] = Σ_s logaddexp(P(noncarrier|q)+base, P(carrier|q)+carrier).
     // The (q, sample) carrier / non-carrier log-probabilities are precomputed
     // (Wright dosage HWE, floored) and read from `precompute.carrier_probs`.
+    //
+    // **As in [`h1_log_likelihood`], a group of samples' terms is multiplied as
+    // probabilities and one logarithm taken.** Each sample's two branches are
+    // scaled by the larger, `top`, so the carrier and non-carrier factors are at
+    // most one and one of them is exactly one: a term then lies between the
+    // smaller of the two frequency probabilities and one, whatever the depth. A
+    // group whose product is not a normal number is summed in log space.
+    let mut tops = vec![0.0; n_configs];
+    let mut scaled = vec![(0.0, 0.0); usable.len() * n_configs];
+    for (s, base) in noncarrier_base.iter().enumerate() {
+        for (j, top_sum) in tops.iter_mut().enumerate() {
+            let carrier = carrier_branch[s * n_configs + j];
+            let top = base.max(carrier);
+            *top_sum += top;
+            scaled[s * n_configs + j] = (float::exp(base - top), float::exp(carrier - top));
+        }
+    }
     let cohort_size = precompute.cohort_size;
     let mut lse = LogSumExp::new();
     let mut cells = 0usize;
     for iq in 0..precompute.carrier_freq_points {
         let qbase = iq * cohort_size;
-        for j in 0..n_configs {
-            let mut acc = 0.0;
-            for (s, sample) in usable.iter().enumerate() {
-                let (log_noncarrier, log_carrier) =
-                    precompute.carrier_probs[qbase + sample.cohort_index];
-                let a = log_noncarrier + noncarrier_base[s];
-                let b = log_carrier + carrier_branch[s * n_configs + j];
-                acc += log_add_exp(a, b);
+        for (j, &top_sum) in tops.iter().enumerate() {
+            let mut acc = top_sum;
+            for (group, samples) in usable.chunks(SAMPLES_A_PRODUCT).enumerate() {
+                let first = group * SAMPLES_A_PRODUCT;
+                let mut product = 1.0;
+                for (s, sample) in (first..).zip(samples) {
+                    let (noncarrier, carrier) =
+                        precompute.carrier_probabilities[qbase + sample.cohort_index];
+                    let (scaled_noncarrier, scaled_carrier) = scaled[s * n_configs + j];
+                    product *= noncarrier * scaled_noncarrier + carrier * scaled_carrier;
+                }
+                if product.is_normal() {
+                    acc += float::ln(product);
+                } else {
+                    for (s, sample) in (first..).zip(samples) {
+                        let (log_noncarrier, log_carrier) =
+                            precompute.carrier_probs[qbase + sample.cohort_index];
+                        let a = log_noncarrier + noncarrier_base[s];
+                        let b = log_carrier + carrier_branch[s * n_configs + j];
+                        acc += log_add_exp(a, b)
+                            - noncarrier_base[s].max(carrier_branch[s * n_configs + j]);
+                    }
+                }
             }
             lse.push(acc);
             cells += 1;
@@ -600,7 +688,7 @@ fn ln_normal(x: f64, mu: f64, sigma: f64) -> f64 {
 /// matters and is measured next door: `production_parity`'s differential scores 800 randomised loci
 /// at cohort sizes 1, 2, 10 and 63 through this tree, against production's frozen answers, and the
 /// widest gap on any field was **exactly zero** before the maths moved to libm (3.6e-12 nats
-/// since 2026-09-14). On the 63-accession tomato cohort the VCF, the
+/// from 2026-09-14, 7.3e-12 since 2026-11-05). On the 63-accession tomato cohort the VCF, the
 /// 29,212 records dropped, the fitted duplication rate and the cut are all unchanged.
 ///
 /// **Why it is worth a departure**: `log1p` was **52.6% of the hidden-duplication filter's
@@ -713,6 +801,126 @@ mod tests {
             &sds,
             &precompute_from(samples),
         )
+    }
+
+    /// **Both hypotheses' sums a sample at a time in log space** — what
+    /// [`h1_log_likelihood`] and [`h2_log_likelihood`] computed before they multiplied
+    /// groups of samples as probabilities — for the test below.
+    fn log_space_sums(usable: &[UsableSample], precompute: &ParalogScorePrecompute) -> (f64, f64) {
+        let (mut lse_num, mut lse_norm) = (LogSumExp::new(), LogSumExp::new());
+        for i in 0..precompute.sfs_points {
+            let mut summed = 0.0;
+            for sample in usable {
+                let (k, nk) = reads_of(sample);
+                let w = precompute.wright[i * precompute.cohort_size + sample.cohort_index];
+                let a = precompute
+                    .allele_h1
+                    .map(|factor| factor.log_likelihood(k, nk));
+                summed += log_sum_exp3(w[0] + a[0], w[1] + a[1], w[2] + a[2]);
+            }
+            let raw_logw = precompute.sfs_log_weight[i];
+            lse_num.push(summed + raw_logw);
+            lse_norm.push(raw_logw);
+        }
+        let h1 = lse_num.value() - lse_norm.value();
+        let mut lse = LogSumExp::new();
+        let mut cells = 0;
+        for iq in 0..precompute.carrier_freq_points {
+            for config in &precompute.configs {
+                let mut acc = 0.0;
+                for sample in usable {
+                    let (k, nk) = reads_of(sample);
+                    let (c, sigma0) = (
+                        sample.observation.relative_copy_number,
+                        sample.single_copy_depth_sd,
+                    );
+                    let (log_noncarrier, log_carrier) =
+                        precompute.carrier_probs[iq * precompute.cohort_size + sample.cohort_index];
+                    let noncarrier = ln_normal(c, 1.0, sigma0)
+                        + precompute.allele_noncarrier.log_likelihood(k, nk);
+                    let carrier = ln_normal(
+                        c,
+                        config.coverage_mean,
+                        sigma0 * config.coverage_sigma_factor,
+                    ) + config.allele.log_likelihood(k, nk);
+                    acc += log_add_exp(log_noncarrier + noncarrier, log_carrier + carrier);
+                }
+                lse.push(acc);
+                cells += 1;
+            }
+        }
+        (h1, lse.value() - float::ln(f64::from(cells)))
+    }
+
+    fn reads_of(sample: &UsableSample) -> (f64, f64) {
+        let obs = &sample.observation;
+        (
+            f64::from(obs.alt_reads),
+            f64::from(obs.total_reads - obs.alt_reads),
+        )
+    }
+
+    fn ln_normal_terms(usable: &[UsableSample]) -> f64 {
+        usable
+            .iter()
+            .map(|sample| {
+                ln_normal(
+                    sample.observation.relative_copy_number,
+                    1.0,
+                    sample.single_copy_depth_sd,
+                )
+            })
+            .sum()
+    }
+
+    /// **The products over groups of samples give the log-space sums**, to the
+    /// 1e-9 nats production parity allows — on an ordinary locus, where every
+    /// group's product is a normal number, and on the two kinds that underflow
+    /// and are summed in log space instead: every sample fully inbred with deep
+    /// heterozygous reads, so the reads favour the genotype whose prior is
+    /// floored to 1e-300 (`h1`); and a carrier-frequency grid starting at zero,
+    /// so the carriers' probability there is floored (`h2`).
+    #[test]
+    fn the_products_over_groups_give_the_log_space_sums() {
+        let ordinary: Vec<_> = (0..40)
+            .map(|i| obs(1.0 + 0.02 * f64::from(i % 5), i % 7, 20, 0.9))
+            .collect();
+        let inbred_hets: Vec<_> = (0..40).map(|_| obs(1.0, 150, 300, 1.0)).collect();
+        let mut carriers: Vec<_> = (0..20).map(|_| obs(2.0, 100, 200, 0.0)).collect();
+        carriers.extend((0..20).map(|_| obs(1.0, 0, 100, 0.0)));
+        let from_zero = ParalogModelParams {
+            carrier_freq_grid: crate::paralog::GridSpec::new(0.0, 0.5, 5)
+                .expect("a well-formed grid"),
+            ..ParalogModelParams::default()
+        };
+        for (case, samples, params) in [
+            ("ordinary", &ordinary, ParalogModelParams::default()),
+            ("inbred hets", &inbred_hets, ParalogModelParams::default()),
+            ("carriers, grid from zero", &carriers, from_zero),
+        ] {
+            let inbreeding: Vec<f64> = samples
+                .iter()
+                .map(|o| o.map_or(0.0, |s| s.inbreeding_coefficient))
+                .collect();
+            let precompute = ParalogScorePrecompute::new(&params, &inbreeding, inbreeding.len());
+            let usable: Vec<UsableSample> = samples
+                .iter()
+                .enumerate()
+                .map(|(cohort_index, o)| UsableSample {
+                    observation: o.expect("every sample observed"),
+                    single_copy_depth_sd: SIGMA0,
+                    cohort_index,
+                })
+                .collect();
+            let (h1, h2) = log_space_sums(&usable, &precompute);
+            let h1_gap =
+                (h1_log_likelihood(&usable, &precompute) - h1 - ln_normal_terms(&usable)).abs();
+            let h2_gap = (h2_log_likelihood(&usable, &precompute) - h2).abs();
+            assert!(
+                h1_gap < 1e-9 && h2_gap < 1e-9,
+                "{case}: h1 off by {h1_gap}, h2 by {h2_gap}"
+            );
+        }
     }
 
     /// A cohort of confident hom-alt samples at normal coverage: H2 can never
