@@ -15,6 +15,8 @@ Besides the usual lines, the header records how the file was made:
 | `##pvcLog=` | the name of the run's log file, which holds every warning and the parameter values used |
 | `##pvcParameters=` | `defaults`, or the parameters file's name and MD5 checksum |
 | `##paralogFilter=` | the hidden-duplication filter's settings and results, when it ran (the default) |
+| `##neighbourEvidence=` | whether the neighbour-evidence pass ran and why, and its settings when it did ([Genotypes from neighbouring sites](neighbour_evidence.md)) |
+| `##readBackedPhase=` | at ploidy two where the neighbour-evidence pass did not run: the settings the phase from reads was written with ([Phase from reads](#phase-from-reads)) |
 
 ## QUAL and GQ
 
@@ -49,18 +51,54 @@ quality before penalties.
 
 | Field | Meaning |
 |---|---|
-| `GT` | genotype, unphased |
+| `GT` | genotype; written with `\|` where it is phased, which `PS` says, and with `/` elsewhere |
 | `GQ` | genotype quality (above) |
 | `DP` | every read of this sample at the locus. `DP` minus the sum of `AD` is the reads that match no written allele: stutter, noise, alleles left out |
 | `AD` | reads that match each allele exactly, reference first |
 | `REPCN` | STR records: each called allele's length in repeat units, in `GT` order |
 | `REPCNB` | STR-bundle records: each called allele's copies in every repeat of the bundle, joined by `_`, for example `20_8_8,21_8_8` |
+| `PS` | phase set, at ploidy two: the position of the first record of the block a phased genotype belongs to, `.` where the genotype is not phased |
 
 **A sample whose reads cannot tell the genotypes apart is not called** (`./.`, with `GQ` as `.`),
 and this includes samples with no reads. Its `DP` and `AD` are still written if it had reads. A
 sample is never called homozygous reference just because it has no evidence. A sample is also
 not called when an allele its own reads supported was among those left out at a site with too
 many alleles (`--max-generic-alleles`).
+
+## Phase from reads
+
+At ploidy two, pvc writes the phase the reads show. A read pair comes from one molecule, so where it
+covers two heterozygous sites of a sample, the alleles it shows there lie on one chromosome copy.
+Two heterozygous genotypes are written phased together, `0|1` or `1|0` with one `PS`, when at least
+two read pairs that cover both agree on how, at odds of 199 to 1 or more. The odds allow for each
+base's quality and for a further 1 error in 100 that no quality shows. Only `PASS` genotypes with
+`GQ` 30 or more are phased this way, because a genotype that is wrongly heterozygous gives a
+confident link in a random direction. **Genotypes of one sample with the same `PS` are phased
+together**; nothing is said about two different `PS` values. A genotype linked to nothing is left
+unphased.
+
+Where the [neighbour-evidence pass](neighbour_evidence.md) runs, the reads are combined with the
+phase it estimates from the cohort, and its page says how. Elsewhere — one sample, a cohort the
+pass does not run on, or `--refine-genotypes off` — the phase comes from the reads alone. Read
+pairs reach about a kilobase, so the phase sets are short: they join neighbouring heterozygotes,
+not whole genes. STR records are never phased from reads.
+
+How much is phased depends on depth and on how close the heterozygotes are. Measured on GIAB's
+HG002 in 100 random regions (452 kb), the phase scored against the one its parents' genotypes
+give:
+
+| depth | heterozygous SNPs phased | links scored | of them wrong |
+|---|---|---|---|
+| 30× | 197 of 289 (68%) | 106 | 0 |
+| 10× | 106 of 289 (37%) | 52 | 0 |
+| 3× | 20 of 289 (7%) | 10 | 0 |
+
+Above 30× little more is phased: each sample keeps 32 reads at a site for this. These counts are
+too small to show an error rate; on simulated single samples, which have no mapping errors, none of
+1,893 links at 10× and 30× was wrong. **Reads from a hidden duplication all err the same way**,
+which neither measurement tests: the hidden-duplication filter is what keeps such sites out of
+`PASS`, and with it off (`--hidden-dup-fdr 0`) the log warns that the phase can then be confidently
+wrong.
 
 ## STR records
 

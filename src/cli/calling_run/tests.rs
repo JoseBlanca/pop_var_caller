@@ -236,3 +236,18 @@ fn standard_output_is_named_as_such() {
     assert_eq!(where_the_calls_went(Path::new("-")), "standard output");
     assert_eq!(where_the_calls_went(Path::new("calls.vcf")), "calls.vcf");
 }
+
+/// **`--phase-min-path-agreement` takes a share in `(0, 1]` and nothing else** (code review
+/// 2026-11-02): a value it lets through would reach the pass as a share it cannot mean.
+#[test]
+fn the_path_agreement_option_takes_a_share() {
+    for text in ["0", "-0.1", "1.0000001", "NaN", "inf", "abc", ""] {
+        assert!(parse_path_agreement(text).is_err(), "`{text}` accepted");
+    }
+    for (text, share) in [("1", 1.0), ("0.5", 0.5), ("1e-3", 1e-3)] {
+        assert_eq!(
+            parse_path_agreement(text).map(|agreement| agreement.get()),
+            Ok(share)
+        );
+    }
+}

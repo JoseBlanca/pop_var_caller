@@ -21,10 +21,18 @@ use rayon::prelude::*;
 use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
+use super::phase::{
+    DISAGREEMENT_COST, EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, PassReadCounts,
+    PathAgreement, SHARED_RECORDS_TO_JOIN, SWITCH_COST, WrittenPhase,
+};
 use super::records::SiteRecord;
-use super::refine::{MISMATCH, refine_window};
+use super::refine::{
+    FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
+    PHASING_ROUNDS, Phasing, RefinedRecord, refine_window_with_reads, window_key,
+};
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
+use crate::read_phase::fragments::RecordFragments;
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
 
@@ -34,7 +42,7 @@ pub const MIN_SAMPLES: usize = 10;
 /// The lowest median inbreeding the pass runs on by default (`F_min`, §5) — a starting value.
 pub const MIN_MEDIAN_INBREEDING: f64 = 0.5;
 
-/// **`--neighbour-evidence`**: whether the run decides, or the operator did (§5, ruled §9 Q3).
+/// **`--refine-genotypes`**: whether the run decides, or the operator did (§5, ruled §9 Q3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeighbourEvidenceSwitch {
     /// Run where the cohort is large and inbred enough.
@@ -57,17 +65,48 @@ pub struct NeighbourEvidenceDecision {
     pub inbreeding_by_sample: Vec<f64>,
     /// The window sizes the run plans with.
     pub sizes: WindowSizes,
+    /// The share of drawn paths that must agree at a phase link (`--phase-min-path-agreement`,
+    /// phase output spec §9); [`decide`] sets all of them.
+    pub path_agreement: PathAgreement,
+    /// Whether each sample's fragments orient its haplotypes in the rounds' draws
+    /// (`neighbour_evidence_reads_in_draw.md`); [`decide`] sets it. Off only where a test needs
+    /// the link test's reads alone.
+    pub(crate) reads_in_draw: bool,
 }
 
 impl NeighbourEvidenceDecision {
+    /// The same decision, a phase link kept where `agreement` of the drawn paths agree.
+    #[must_use]
+    pub fn with_path_agreement(self, agreement: PathAgreement) -> Self {
+        Self {
+            path_agreement: agreement,
+            ..self
+        }
+    }
+
     /// The value of the `##neighbourEvidence=` header line.
     #[must_use]
     pub fn as_header_value(&self) -> String {
         let why = self.why.replace('"', "'");
         if self.ran {
             format!(
-                "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={}>",
-                self.sizes.core_bases, self.sizes.margin_bases
+                "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},\
+                 rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES},\
+                 hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
+                 hidden_share={MAX_HIDDEN_SHARE},extra_paths={EXTRA_PATHS_PER_ROUND},\
+                 lean_min={LEAN_MIN},path_agreement={},join_records={SHARED_RECORDS_TO_JOIN},\
+                 alignment_costs={DISAGREEMENT_COST}/{SWITCH_COST},\
+                 read_link_min={:.2},read_break_min={:.2},read_error_floor={},read_gq_min={},\
+                 read_reach={},read_cap={}>",
+                self.sizes.core_bases,
+                self.sizes.margin_bases,
+                self.path_agreement.get(),
+                crate::read_phase::link::LINK_MIN,
+                crate::read_phase::link::BREAK_MIN,
+                crate::read_phase::link::ERROR_FLOOR,
+                crate::read_phase::link::GQ_MIN,
+                crate::read_phase::fragments::READ_REACH,
+                crate::read_phase::capture::READ_ALLELES_KEPT,
             )
         } else {
             format!("<ran=no,why=\"{why}\">")
@@ -121,6 +160,8 @@ pub fn decide(
         why,
         inbreeding_by_sample: inbreeding_by_sample.to_vec(),
         sizes: WindowSizes::default(),
+        path_agreement: PathAgreement::ALL,
+        reads_in_draw: true,
     }
 }
 
@@ -132,24 +173,49 @@ struct HeldLine {
     site: Option<usize>,
 }
 
+/// **A sample's last written block** (phase output spec §2.4): its phase set, and its records
+/// written within a margin of its last one, ascending.
+#[derive(Clone, Debug)]
+struct WrittenBlock {
+    phase_set: u64,
+    records: Vec<WrittenRecord>,
+}
+
+/// One record of a [`WrittenBlock`]: its run-wide site number, its position, and its phase.
+#[derive(Clone, Copy, Debug)]
+struct WrittenRecord {
+    site: usize,
+    position: u64,
+    phase: WrittenPhase,
+}
+
 /// **The pass, fed one line at a time.**
 pub struct NeighbourEvidenceStage {
     samples: usize,
     /// Each contig's length, by contig id, for §4.2's rule at a contig's end.
     contig_lengths: Vec<u64>,
     sizes: WindowSizes,
+    path_agreement: PathAgreement,
+    reads_in_draw: bool,
     fits: Vec<SampleFit>,
     contig: Option<ContigId>,
     held: Vec<HeldLine>,
     /// The held lines' positions, kept beside them for the window planner.
     positions: Vec<u64>,
-    /// The held sites' walk records; `sites[0]` is site number `first_site`.
-    sites: Vec<SiteRecord>,
+    /// The held sites, each with its fragments; the first is site number `first_site`.
+    sites: HeldSites,
     first_site: usize,
     next_site: usize,
     /// The first held line not yet written.
     core_start: usize,
     tally: RewriteTally,
+    /// Each sample's fill check, summed over the cores solved so far.
+    fill_checks: Vec<FillCheck>,
+    /// What reads did to each sample's phase, summed over the cores solved so far.
+    read_counts: Vec<PassReadCounts>,
+    /// Each sample's last written block on the current contig, kept across windows that write no
+    /// phase for it (phase output spec §2.4).
+    last_blocks: Vec<Option<WrittenBlock>>,
 }
 
 impl NeighbourEvidenceStage {
@@ -160,6 +226,8 @@ impl NeighbourEvidenceStage {
             samples: decision.inbreeding_by_sample.len(),
             contig_lengths,
             sizes: decision.sizes,
+            path_agreement: decision.path_agreement,
+            reads_in_draw: decision.reads_in_draw,
             fits: decision
                 .inbreeding_by_sample
                 .iter()
@@ -168,11 +236,14 @@ impl NeighbourEvidenceStage {
             contig: None,
             held: Vec::new(),
             positions: Vec::new(),
-            sites: Vec::new(),
+            sites: HeldSites::default(),
             first_site: 0,
             next_site: 0,
             core_start: 0,
             tally: RewriteTally::default(),
+            fill_checks: vec![FillCheck::default(); decision.inbreeding_by_sample.len()],
+            read_counts: vec![PassReadCounts::default(); decision.inbreeding_by_sample.len()],
+            last_blocks: vec![None; decision.inbreeding_by_sample.len()],
         }
     }
 
@@ -182,12 +253,27 @@ impl NeighbourEvidenceStage {
         self.tally
     }
 
+    /// Each sample's fill check so far, in the VCF's sample order.
+    #[must_use]
+    pub fn fill_checks(&self) -> &[FillCheck] {
+        &self.fill_checks
+    }
+
+    /// What reads did to each sample's phase so far, in the VCF's sample order (read phase spec
+    /// §2.7, §2.8).
+    #[must_use]
+    pub fn read_counts(&self) -> &[PassReadCounts] {
+        &self.read_counts
+    }
+
     /// **Takes one line**, its place already checked against the line before it by the writer,
-    /// and appends to `ready` every line whose window this one completed.
+    /// and appends to `ready` every line whose window this one completed. `fragments` are the
+    /// line's reads that reach another record (read phase spec §2.4).
     pub fn push(
         &mut self,
         place: RecordPlace,
         line: Vec<u8>,
+        fragments: RecordFragments,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) {
         if self.contig.is_some_and(|contig| contig != place.at.contig) {
@@ -195,7 +281,7 @@ impl NeighbourEvidenceStage {
         }
         self.contig = Some(place.at.contig);
         let site = site_of(&line, self.samples).map(|record| {
-            self.sites.push(record);
+            self.sites.push(record, fragments);
             self.next_site += 1;
             self.next_site - 1
         });
@@ -214,6 +300,8 @@ impl NeighbourEvidenceStage {
         self.first_site = self.next_site;
         self.core_start = 0;
         self.contig = None;
+        // A block never crosses a contig.
+        self.last_blocks.fill(None);
     }
 
     /// Solves every window whose lines have all arrived (or all of them, when the contig is
@@ -237,14 +325,59 @@ impl NeighbourEvidenceStage {
                 let contig_length = self
                     .contig
                     .and_then(|contig| self.contig_lengths.get(contig.0 as usize).copied());
-                refine_window(
-                    &self.sites
-                        [window_sites.start - self.first_site..window_sites.end - self.first_site],
+                // The window's contig and its first core site's position key its draws: they depend
+                // on the window alone, not on what else the run called.
+                let first_core = &self.sites.records[core_sites.start - self.first_site];
+                let key = window_key(
+                    self.contig.map_or(0, |contig| contig.0),
+                    first_core.position,
+                );
+                // Each sample's last written block, at its records in this window's left margin.
+                let joins: Vec<Option<LastBlock>> = self
+                    .last_blocks
+                    .iter()
+                    .map(|last| {
+                        last.as_ref().map(|last| LastBlock {
+                            phase_set: last.phase_set,
+                            records: last
+                                .records
+                                .iter()
+                                .filter(|record| {
+                                    (window_sites.start..core_sites.start).contains(&record.site)
+                                })
+                                .map(|record| JoinRecord {
+                                    record: record.site - window_sites.start,
+                                    copy_0_allele: record.phase.copy_0_allele,
+                                    copy_1_allele: record.phase.copy_1_allele,
+                                })
+                                .collect(),
+                        })
+                    })
+                    .collect();
+                let in_window =
+                    window_sites.start - self.first_site..window_sites.end - self.first_site;
+                let (records, fragments) = self.sites.window(in_window);
+                let solved = refine_window_with_reads(
+                    records,
+                    Some(fragments),
                     core_sites.start - window_sites.start..core_sites.end - window_sites.start,
                     contig_length,
                     &mut self.fits,
                     MAX_TEMPLATES,
-                )
+                    NoReadRule::default(),
+                    Phasing::rounds_for(key)
+                        .with_path_agreement(self.path_agreement)
+                        .with_reads_in_draw(self.reads_in_draw),
+                    &joins,
+                );
+                for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
+                    *sum += check;
+                }
+                for (sum, counts) in self.read_counts.iter_mut().zip(solved.read_counts) {
+                    *sum += counts;
+                }
+                self.remember_last_blocks(core_sites.start, &solved.records);
+                solved.records
             };
             // **The core's lines are rewritten on the pool and handed back in their own order.**
             // Each rewrite reads only its line and its refined record, so the lines are
@@ -280,6 +413,47 @@ impl NeighbourEvidenceStage {
         }
     }
 
+    /// **Updates each sample's last written block** from a core's records, the first being site
+    /// number `first_site`: the block of its last phased record, extended where it continues the
+    /// one before, and cut to the records within a margin of that record — further back, no later
+    /// window's margin reaches.
+    fn remember_last_blocks(&mut self, first_site: usize, core: &[RefinedRecord]) {
+        for (sample, last) in self.last_blocks.iter_mut().enumerate() {
+            let phased: Vec<WrittenRecord> = core
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, record)| {
+                    record.phases[sample].map(|phase| {
+                        let site = first_site + offset;
+                        WrittenRecord {
+                            site,
+                            position: self.sites.records[site - self.first_site].position,
+                            phase,
+                        }
+                    })
+                })
+                .collect();
+            let Some(&final_record) = phased.last() else {
+                continue;
+            };
+            let phase_set = final_record.phase.phase_set;
+            let mut records = match last.take() {
+                Some(previous) if previous.phase_set == phase_set => previous.records,
+                _ => Vec::new(),
+            };
+            records.extend(
+                phased
+                    .iter()
+                    .filter(|record| record.phase.phase_set == phase_set),
+            );
+            let reach = final_record
+                .position
+                .saturating_sub(self.sizes.margin_bases);
+            records.retain(|record| record.position >= reach);
+            *last = Some(WrittenBlock { phase_set, records });
+        }
+    }
+
     /// The sites among held lines `lines`, as a range of site numbers.
     fn site_span(&self, lines: std::ops::Range<usize>) -> std::ops::Range<usize> {
         let first = self.held[lines.clone()].iter().find_map(|held| held.site);
@@ -309,9 +483,42 @@ impl NeighbourEvidenceStage {
             .count();
         self.held.drain(..keep_from);
         self.positions.drain(..keep_from);
-        self.sites.drain(..sites_dropped);
+        self.sites.drop_first(sites_dropped);
         self.first_site += sites_dropped;
         self.core_start -= keep_from;
+    }
+}
+
+/// **The held sites' walk records and, beside each, its fragments** (read phase spec §2.7): the
+/// reads the link test reads. Two vectors, so a window hands the solve two slices without a copy,
+/// but changed only together, here, so one cannot drift a site from the other. A line that is no
+/// site keeps none, since the pass phases only sites.
+#[derive(Debug, Default)]
+struct HeldSites {
+    records: Vec<SiteRecord>,
+    fragments: Vec<RecordFragments>,
+}
+
+impl HeldSites {
+    fn push(&mut self, record: SiteRecord, fragments: RecordFragments) {
+        self.records.push(record);
+        self.fragments.push(fragments);
+    }
+
+    fn clear(&mut self) {
+        self.records.clear();
+        self.fragments.clear();
+    }
+
+    /// Forget the first `count` sites.
+    fn drop_first(&mut self, count: usize) {
+        self.records.drain(..count);
+        self.fragments.drain(..count);
+    }
+
+    /// The sites in `range`, as the window solve takes them.
+    fn window(&self, range: std::ops::Range<usize>) -> (&[SiteRecord], &[RecordFragments]) {
+        (&self.records[range.clone()], &self.fragments[range])
     }
 }
 

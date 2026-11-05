@@ -262,14 +262,27 @@ pub struct CallFromAlignmentsArgs {
     /// Whether to re-call each sample's genotypes with the evidence of the samples it shares
     /// stretches of chromosome with, and of its own neighbouring sites. `auto` runs it on a
     /// diploid cohort of at least 10 samples whose median inbreeding is at least 0.5; the VCF
-    /// header says whether it ran and why.
+    /// header says whether it ran and why. Where it does not run, on a diploid cohort, phase is
+    /// written from reads alone (`GT` `a|b` with a `PS`); the header's `##readBackedPhase=` line
+    /// states its thresholds.
     #[arg(
         long,
         value_enum,
-        default_value_t = calling_run::NeighbourEvidenceArg::Auto,
+        default_value_t = calling_run::RefineGenotypesArg::Auto,
         help_heading = "Advanced"
     )]
-    pub neighbour_evidence: calling_run::NeighbourEvidenceArg,
+    pub refine_genotypes: calling_run::RefineGenotypesArg,
+
+    /// The share of the neighbour-evidence pass's drawn paths that must agree on how two
+    /// neighbouring heterozygous sites are phased for the VCF to phase them together. 1, all of
+    /// them, is the strictest; lower values give longer phase blocks with more wrong links.
+    #[arg(
+        long,
+        default_value = "1",
+        value_parser = calling_run::parse_path_agreement,
+        help_heading = "Advanced"
+    )]
+    pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
 
     /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
@@ -765,9 +778,10 @@ pub fn run_call_from_alignments(
     };
     let metadata =
         metadata.the_neighbour_evidence_decision(calling_run::neighbour_evidence_decision(
-            args.neighbour_evidence,
+            args.refine_genotypes,
             &inbreeding_by_sample,
             ploidy,
+            args.phase_min_path_agreement,
         ));
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what
@@ -778,6 +792,7 @@ pub fn run_call_from_alignments(
     // **The run's own scratch directory, made only where something will be parked in it**, and
     // removed when `scratch` is dropped — at the end of this function, on its success or on any
     // error that returns through it.
+    calling_run::warn_of_read_phase_without_the_duplication_filter(asked_for.is_some(), ploidy);
     let scratch = match asked_for {
         Some(_) => Some(calling_run::scratch_directory_for(
             &args.output,
@@ -807,7 +822,9 @@ pub fn run_call_from_alignments(
     let mut written = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record, window_coverage| sink.accept(record, window_coverage),
+            &mut |record, window_coverage, fragments| {
+                sink.accept(record, window_coverage, fragments)
+            },
         )
         .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
 
@@ -905,9 +922,10 @@ pub fn run_call_from_alignments(
     // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives
     // it left uncalled, so neither calling's count nor the filter's is the file's.
     let finished = finished_straight
-        .or_else(|| filtered.as_ref().map(|run| run.finished))
+        .or_else(|| filtered.as_ref().map(|run| run.finished.clone()))
         .expect("the calls were written by one of the two paths");
-    calling_run::log_neighbour_evidence(&finished);
+    calling_run::report_neighbour_evidence(&finished, &args.output);
+    calling_run::report_read_phase(&finished);
     let records = finished.records_written;
     tracing::info!(
         "done: {} records written to {} in {}",

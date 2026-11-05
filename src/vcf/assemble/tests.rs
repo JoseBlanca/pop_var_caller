@@ -142,6 +142,7 @@ fn a_sample_whose_reads_said_nothing_is_written_as_a_no_call() {
             vec![sample(vec![10, 9], 0), sample(vec![0, 0], 0)],
             FilterVerdict::Pass,
         ),
+        RecordReadAlleles::default(),
     );
 
     let columns = sample_columns(&record, diploid());
@@ -171,6 +172,7 @@ fn a_sample_the_caller_declined_to_call_is_written_as_a_no_call_too() {
             vec![sample(vec![10, 9], 0), sample(vec![2, 2], 5)],
             FilterVerdict::Pass,
         ),
+        RecordReadAlleles::default(),
     );
 
     // Its evidence is still written beside the missing call.
@@ -186,6 +188,7 @@ fn a_sample_with_reads_that_spoke_keeps_the_genotype_the_loop_gave_it() {
     let record = assemble_record(
         &locus,
         evidence(vec![sample(vec![1, 14], 2)], FilterVerdict::Pass),
+        RecordReadAlleles::default(),
     );
     assert_eq!(
         sample_columns(&record, diploid()),
@@ -209,6 +212,7 @@ fn a_sample_written_as_a_no_call_leaves_an_and_ac_alone() {
             vec![sample(vec![6, 6], 0), sample(vec![0, 0], 0)],
             FilterVerdict::Pass,
         ),
+        RecordReadAlleles::default(),
     );
 
     let info = info_column(&record);
@@ -229,6 +233,7 @@ fn the_alleles_and_the_fitted_copies_come_from_the_locus_itself() {
     let record = assemble_record(
         &locus,
         evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass),
+        RecordReadAlleles::default(),
     );
 
     assert_eq!(record.reference(), b"A");
@@ -243,6 +248,7 @@ fn an_unconverged_locus_reaches_the_file_on_its_filter() {
     let record = assemble_record(
         &locus,
         evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::EmDidNotConverge),
+        RecordReadAlleles::default(),
     );
     assert_eq!(record.filter(), FilterVerdict::EmDidNotConverge);
 }
@@ -254,7 +260,7 @@ fn a_tract_annotation_makes_it_a_tract_record() {
     inputs.repeat_tract = Some(TractAnnotation::new(
         Motif::new(b"AT").expect("a two-base motif"),
     ));
-    let record = assemble_record(&locus, inputs);
+    let record = assemble_record(&locus, inputs, RecordReadAlleles::default());
 
     assert!(record.is_repeat_tract());
     assert_eq!(format_keys(&record), "GT:GQ:DP:AD:PL:GP:REPCN");
@@ -275,6 +281,7 @@ fn evidence_for_a_different_number_of_samples_is_refused() {
     let _ = assemble_record(
         &locus,
         evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass),
+        RecordReadAlleles::default(),
     );
 }
 
@@ -287,6 +294,7 @@ fn a_filter_that_disagrees_with_the_loop_about_convergence_is_refused() {
     let _ = assemble_record(
         &locus,
         evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass),
+        RecordReadAlleles::default(),
     );
 }
 
@@ -296,7 +304,7 @@ fn per_sample_counts_of_the_wrong_width_are_refused() {
     let locus = locus(vec![called(&[0, 1], 40.0)], vec![1.0, 1.0], true);
     let mut inputs = evidence(vec![sample(vec![5, 5], 0)], FilterVerdict::Pass);
     inputs.samples[0].allele_reads = vec![5, 5, 5];
-    let _ = assemble_record(&locus, inputs);
+    let _ = assemble_record(&locus, inputs, RecordReadAlleles::default());
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +373,11 @@ fn evidence_over_three(samples: Vec<SampleEvidenceForOutput>) -> LocusEvidenceFo
 #[test]
 fn an_alternative_no_sample_calls_is_dropped_and_its_reads_become_unexplained() {
     let locus = locus_over_three(vec![called(&[0, 2], 40.0)], vec![1.0, 0.0, 1.0]);
-    let record = assemble_record(&locus, evidence_over_three(vec![sample(vec![9, 3, 8], 0)]));
+    let record = assemble_record(
+        &locus,
+        evidence_over_three(vec![sample(vec![9, 3, 8], 0)]),
+        RecordReadAlleles::default(),
+    );
 
     assert_eq!(
         record
@@ -384,6 +396,41 @@ fn an_alternative_no_sample_calls_is_dropped_and_its_reads_become_unexplained() 
     );
 }
 
+/// **A read allele on the dropped alternative goes with it, and one on a renumbered allele follows
+/// it** (read phase spec §2.3, step 2): `T` (2 reads) is dropped and `G` moves from 2 to 1.
+#[test]
+fn the_read_alleles_are_renumbered_with_the_alternatives_the_record_keeps() {
+    use crate::read_phase::capture::ReadAllele;
+    use crate::read_phase::record_reads::SampleReadAllele;
+    let locus = locus_over_three(vec![called(&[0, 2], 40.0)], vec![1.0, 0.0, 1.0]);
+    let evidence = evidence_over_three(vec![sample(vec![9, 3, 8], 0)]);
+    let read_allele = |read, allele| SampleReadAllele {
+        sample: 0,
+        read_allele: ReadAllele {
+            read,
+            allele,
+            error_phred: 30,
+        },
+    };
+    let read_alleles = RecordReadAlleles::from_merge(
+        vec![
+            read_allele(1, 0),
+            read_allele(2, 1),
+            read_allele(3, 2),
+            read_allele(4, 1),
+        ],
+        Some,
+    );
+    let record = assemble_record(&locus, evidence, read_alleles);
+    let kept: Vec<(u64, u32)> = record
+        .read_alleles()
+        .entries()
+        .iter()
+        .map(|entry| (entry.read_allele.read, entry.read_allele.allele))
+        .collect();
+    assert_eq!(kept, vec![(1, 0), (3, 1)]);
+}
+
 /// **An alternative some sample does call stays, whatever the others say.**
 ///
 /// Two samples, one calling `T` and the other `G`: both alternatives are named somewhere, so
@@ -398,6 +445,7 @@ fn an_alternative_one_sample_calls_survives_for_the_whole_cohort() {
     let record = assemble_record(
         &locus,
         evidence_over_three(vec![sample(vec![9, 8, 0], 0), sample(vec![7, 0, 6], 0)]),
+        RecordReadAlleles::default(),
     );
 
     assert_eq!(
@@ -420,7 +468,11 @@ fn an_alternative_one_sample_calls_survives_for_the_whole_cohort() {
 #[test]
 fn a_record_every_sample_no_calls_keeps_its_alternatives() {
     let locus = locus_over_three(vec![called_saying(&[0, 0], 3.0, true)], vec![2.0, 0.0, 0.0]);
-    let record = assemble_record(&locus, evidence_over_three(vec![sample(vec![0, 0, 0], 4)]));
+    let record = assemble_record(
+        &locus,
+        evidence_over_three(vec![sample(vec![0, 0, 0], 4)]),
+        RecordReadAlleles::default(),
+    );
 
     assert_eq!(
         record.alleles().len(),
@@ -464,7 +516,7 @@ fn padded_record(calls: Vec<SampleGenotypeCall>, reads: Vec<u32>) -> VcfRecord {
         padding_base: Some(PaddingBase::Left(b'C')),
         ..evidence_over_three(vec![sample(reads, 0)])
     };
-    assemble_record(&locus, evidence)
+    assemble_record(&locus, evidence, RecordReadAlleles::default())
 }
 
 /// **A deletion no sample calls takes its padding base with it.**

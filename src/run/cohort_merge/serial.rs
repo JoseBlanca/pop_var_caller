@@ -19,7 +19,7 @@
 //! over this same cache; the loci that differ once builders see different windows are what the
 //! organiser's overlap resolution settles (spec §6.1).
 
-use super::build::{CohortObservation, build_region_handing_over_windowed};
+use super::build::{CohortObservation, LocusReads, build_region_handing_over_windowed};
 #[cfg(test)]
 use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{
@@ -173,7 +173,7 @@ where
         cohort_locus_builder_regions_len,
         max_cohort_locus_span,
         min_alt_reads,
-        &mut |built| cohort_observations.push(built),
+        &mut |built, _| cohort_observations.push(built),
         failed_locus_spans,
     )?;
     Ok(merged)
@@ -203,7 +203,7 @@ pub fn merge_cohort_handing_each_locus_over<S, E>(
     cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
-    keep: &mut impl FnMut(CohortObservation),
+    keep: &mut impl FnMut(CohortObservation, &LocusReads<'_, '_>),
     refused: &mut Vec<GenomeRegion>,
 ) -> Result<(), E>
 where
@@ -258,7 +258,7 @@ pub fn merge_cohort_handing_each_locus_over_covering_samples_in_parallel<S, E>(
     cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
-    keep: &mut impl FnMut(CohortObservation),
+    keep: &mut impl FnMut(CohortObservation, &LocusReads<'_, '_>),
     refused: &mut Vec<GenomeRegion>,
 ) -> Result<(), E>
 where
@@ -306,7 +306,7 @@ fn merge_handing_each_locus_over_with<S, E>(
     cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
-    keep: &mut impl FnMut(CohortObservation),
+    keep: &mut impl FnMut(CohortObservation, &LocusReads<'_, '_>),
     refused: &mut Vec<GenomeRegion>,
     cover: &mut impl FnMut(&mut ObservationCache<S>, GenomeRegion) -> Result<(), E>,
 ) -> Result<(), E>
@@ -1922,7 +1922,7 @@ mod tests {
                 building_region_width,
                 FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
-                &mut |built| cohort_observations.push(built),
+                &mut |built, _| cohort_observations.push(built),
                 failed_locus_spans,
             )
             .expect("the fixture sources hold");
@@ -1997,7 +1997,7 @@ mod tests {
                 width(20),
                 FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
-                &mut |_built| {},
+                &mut |_built, _| {},
                 &mut refused,
             )
         });

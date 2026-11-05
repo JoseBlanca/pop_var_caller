@@ -39,7 +39,7 @@ use noodles_sam::alignment::record::{Flags, MappingQuality};
 
 use crate::read::aligned_read::NoodlesRawAlignedRead;
 use crate::read::input::read_groups::{ReadGroupResolution, RecordOwner};
-use crate::ref_seq::RawRefSeq;
+use crate::ref_seq::SliceReference;
 use crate::types::{ContigId, ReadGroupId};
 
 /// One CRAM container, decoded and held in two flat buffers.
@@ -507,7 +507,7 @@ pub(crate) fn container_at(
     header: &sam::Header,
     resolution: &ReadGroupResolution,
     offset: u64,
-    reference: &dyn RawRefSeq,
+    reference: &dyn SliceReference,
 ) -> io::Result<Option<Arc<DecodedContainer>>> {
     let mut cache = shared.lock();
     let claim = loop {
@@ -556,7 +556,7 @@ fn decode_container_at(
     resolution: &ReadGroupResolution,
     offset: u64,
     // The reference bases each slice is decoded against, one span at a time.
-    reference: &dyn RawRefSeq,
+    reference: &dyn SliceReference,
 ) -> io::Result<Option<DecodedContainer>> {
     reader.seek(SeekFrom::Start(offset))?;
 
@@ -676,6 +676,9 @@ fn decode_container_at(
                 ))
             })?);
             let length = (usize::from(want.end) - usize::from(want.start) + 1) as u64;
+            // The span is copied out below, so what lies behind it is not wanted again; without
+            // this the reader extends forward slice after slice and holds the contig.
+            reference.evict_before(usize::from(want.start) as u64);
             reference
                 .fetch_raw_into(contig, usize::from(want.start) as u64, length, buffer)
                 .map_err(|source| {

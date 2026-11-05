@@ -179,10 +179,11 @@ RUN npm install -g @anthropic-ai/claude-code
 # **A path dependency's source has to be copied, for the same reason** (found 2026-10-09):
 # `vendor/noodles-cram` (aa598441, 2026-09-08) is a `[patch]` path the manifest names, and
 # `cargo fetch` refuses without it ("failed to load source for dependency `noodles-cram`").
-# The cached layer hid it for a month, until a `Cargo.toml` edit invalidated it.
+# The cached layer hid it for a month, until a `Cargo.toml` edit invalidated it. The whole of
+# `vendor/` is copied since `vendor/noodles-bam` (fedb2290) broke it the same way a second time.
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY vendor/noodles-cram ./vendor/noodles-cram
+COPY vendor ./vendor
 RUN mkdir -p src \
     && echo 'fn main() {}' > src/main.rs \
     && awk 'BEGIN{skip=0} /^\[\[(bench|example)\]\]/{skip=1; next} /^\[/{skip=0} !skip' Cargo.toml > Cargo.toml.fetch \
@@ -241,6 +242,13 @@ RUN arch="$(uname -m)" \
          /opt/pvc-eval-env \
     && uv pip install --python /opt/pvc-eval-env/bin/python "numpy==${PVC_EVAL_NUMPY}" \
     && /opt/pvc-eval-env/bin/python -c "import sys, numpy; assert not sys._is_gil_enabled(); print(sys.version, numpy.__version__)"
+
+# GSL, for msprime: the refinement benchmark (benchmarks/suite/bench/refine_sim.py) draws its
+# natural populations with msprime through uv, and msprime ships no wheel for Linux on arm64, so
+# there uv compiles it, against GSL. Its own layer, after pvc_eval's, so adding it rebuilt nothing
+# before it.
+RUN apt-get update && apt-get install -y --no-install-recommends libgsl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
 COPY scripts/container-entrypoint.sh /usr/local/bin/container-entrypoint.sh

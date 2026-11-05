@@ -66,6 +66,10 @@ pub struct EdgeDeletionGatheringCounts {
     /// not be built: an allele came out empty with no padding base kept for it, or a haplotype
     /// could not be spelled. Expected to stay zero.
     pub generic_records_left_unmerged: u64,
+    /// Read alleles the merged generic records carried, lost with them: the merged record's
+    /// alleles are haplotypes over a wider span, and an STR record names no reads (read phase spec
+    /// §2.3, step 3).
+    pub read_alleles_lost_to_a_merge: u64,
 }
 
 /// One widened STR record, waiting for the generic records it overlaps.
@@ -424,6 +428,10 @@ fn merge(
     counts.samples_paired_from_the_cohort += tallies.samples_paired_from_the_cohort;
     counts.generic_calls_lost_to_an_str_no_call += tallies.generic_calls_lost_to_an_str_no_call;
     counts.generic_records_merged += generic.len() as u64;
+    counts.read_alleles_lost_to_a_merge += generic
+        .iter()
+        .map(|record| record.read_alleles().len() as u64)
+        .sum::<u64>();
     vec![(merged, tract.windows)]
 }
 

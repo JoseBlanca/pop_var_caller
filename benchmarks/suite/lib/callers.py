@@ -24,10 +24,15 @@ q = shlex.quote
 
 # ---- pvc --------------------------------------------------------------------------------------
 
-# The neighbour-evidence pass (pvc's default, `auto`, runs it on 10 or more mostly inbred diploid
-# samples) is not ready to be benchmarked, so every calling run turns it off. Benchmarks for it come
-# when it is.
-NEIGHBOUR_EVIDENCE = "--neighbour-evidence off "
+# Genotype refinement (pvc's default, `auto`, runs it on 10 or more mostly inbred diploid samples) is
+# measured by refine_sim alone, which sets it itself; every other calling run turns it off.
+REFINE_OFF = "--refine-genotypes off "
+
+
+def _refine(extra):
+    """`extra` with refinement off added, unless `extra` sets it."""
+    extra = f"{extra} " if extra else ""
+    return extra if "--refine-genotypes" in extra else REFINE_OFF + extra
 
 
 def pvc_catalog(ctx, reference, out, log):
@@ -46,7 +51,7 @@ def pvc_call_from_alignments(ctx, reference, catalog, alignments, regions, out, 
     return (label,
             f"{q(ctx.pvc_bin)} call-from-alignments --reference {q(reference)} "
             f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} {satellites}"
-            f"{NEIGHBOUR_EVIDENCE}--threads {threads or ctx.threads} --output {q(out)} "
+            f"{REFINE_OFF}--threads {threads or ctx.threads} --output {q(out)} "
             f"--log {q(log)} --force")
 
 
@@ -87,12 +92,13 @@ def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log, inbreeding=
             f"--log {q(log)} --force")
 
 
-def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None):
+def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None, extra=""):
+    """`extra`: further options, as text (e.g. `--refine-genotypes on`)."""
     psp_args = " ".join(f"--psp {q(p)}" for p in psps)
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     return ("call_from_psps",
             f"{q(ctx.pvc_bin)} call-from-psps --reference {q(reference)} --catalog {q(catalog)} "
-            f"{psp_args} {source} {NEIGHBOUR_EVIDENCE}--threads {ctx.threads} --output {q(out)} "
+            f"{psp_args} {source} {_refine(extra)}--threads {ctx.threads} --output {q(out)} "
             f"--log {q(log)} --force")
 
 

@@ -8,6 +8,7 @@
 
 use super::{CalledRecordSink, entry_for};
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
+use crate::read_phase::fragments::RecordFragments;
 use crate::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position};
 use crate::vcf::encode::record_line;
 use crate::vcf::{
@@ -337,7 +338,8 @@ fn a_sink_that_parks_records_does_not_create_the_vcf() {
         None,
     );
 
-    sink.accept(&snp, &[a_window(5.0)]).expect("the record");
+    sink.accept(&snp, &[a_window(5.0)], RecordFragments::default())
+        .expect("the record");
 
     assert!(
         !output.exists(),
@@ -482,8 +484,10 @@ fn parked_records_are_readable_once_the_sink_is_finished() {
         Some(TractAnnotation::new(Motif::new(b"AT").expect("a motif"))),
     );
 
-    sink.accept(&snp, &[a_window(5.0)]).expect("the SNP");
-    sink.accept(&tract, &[a_window(6.0)]).expect("the tract");
+    sink.accept(&snp, &[a_window(5.0)], RecordFragments::default())
+        .expect("the SNP");
+    sink.accept(&tract, &[a_window(6.0)], RecordFragments::default())
+        .expect("the tract");
 
     let CalledRecordSink::ParkedOnTheSpill(mut parked) = sink else {
         panic!("the sink changed variant")
@@ -529,7 +533,7 @@ fn a_sink_that_cannot_write_says_which_half_of_pass_one_failed() {
     );
 
     let refused = sink
-        .accept(&snp, &[a_window(5.0)])
+        .accept(&snp, &[a_window(5.0)], RecordFragments::default())
         .expect_err("there is no directory to park in");
 
     assert!(

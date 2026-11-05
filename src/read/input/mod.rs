@@ -57,7 +57,7 @@ use crate::read::input::reference::OpenReference;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::types::{ContigId, GenomeRegion, ReadGroupId};
 
-use crate::ref_seq::{ContigTable, RawRefSeq};
+use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq};
 
 use open_bam::AlignmentFile;
 
@@ -653,7 +653,7 @@ impl SampleReads {
         mut make_reference: F,
     ) -> Result<SampleCursor<R>, IngestError>
     where
-        R: RawRefSeq + ContigTable + Send + 'static,
+        R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static,
         F: FnMut() -> R,
     {
         let mut cursors = Vec::with_capacity(self.files.len());

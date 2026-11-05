@@ -13,7 +13,7 @@ use crate::read::aligned_read::NoodlesRawAlignedRead;
 use crate::read::input::aligned_reads_reader::container::{DecodedContainer, container_at};
 use crate::read::input::aligned_reads_reader::prefetch::SharedDecode;
 use crate::read::input::read_groups::ReadGroupResolution;
-use crate::ref_seq::RawRefSeq;
+use crate::ref_seq::SliceReference;
 use crate::types::GenomeRegion;
 
 /// A CRAM reader that stays where it is between regions.
@@ -87,7 +87,7 @@ pub(crate) struct CramAlignedReadsReader {
     /// such calls. Making it generic instead would put a type parameter through
     /// `AlignedReadsReader` and all 72 sites that name it, for a field only this arm has.
     /// `+ Send` keeps the cursor `Send` (`a_sample_cursor_is_send_in_both_arms`).
-    reference_reader: Box<dyn RawRefSeq + Send>,
+    reference_reader: Box<dyn SliceReference + Send>,
     /// **This contig's** `.crai` entries, in file order, grouped once at open.
     entries: Arc<[cram::crai::Record]>,
     /// A copy of the file's, settled at open. Owned, so this reader carries no lifetime.
@@ -140,7 +140,7 @@ impl CramAlignedReadsReader {
     pub(crate) fn new(
         reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
-        reference_reader: Box<dyn RawRefSeq + Send>,
+        reference_reader: Box<dyn SliceReference + Send>,
         entries: Arc<[cram::crai::Record]>,
         resolution: ReadGroupResolution,
         path: Arc<Path>,

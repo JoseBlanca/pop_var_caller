@@ -41,6 +41,7 @@ use crate::calling::genotype_table::{GenotypeIdx, GenotypeTable};
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::calling::{LocusInference, SampleGenotypeCall};
 use crate::locus_generation::{FlankDeletion, LocusKind};
+use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::region_typing::run_parse::parse_into_runs;
 use crate::types::{AlleleId, Genotype, GenotypeRows, Phred};
 use crate::types::{GenomeRegion, Position};
@@ -127,6 +128,11 @@ pub struct LocusEvidenceForOutput {
 /// The mapper of the output stream. Every rule it applies is settled design; only the shape of
 /// what it is handed is provisional (see the module note).
 ///
+/// `read_alleles` is **which allele each of every sample's reads showed**, in the candidate
+/// table's numbering (read phase spec §2.3, step 1). It is an argument, not a field of the
+/// evidence, so a driver that builds a record must say what reads it carries: it is renumbered
+/// with the alternatives this drops and put on the record.
+///
 /// # Panics
 ///
 /// When the evidence does not describe this locus: a sample list of a different length than the
@@ -134,7 +140,11 @@ pub struct LocusEvidenceForOutput {
 /// converged when it did not. All three are wiring defects between two things the same worker
 /// built, which is [`VcfRecord::new`]'s reasoning and the same choice.
 #[must_use]
-pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput) -> VcfRecord {
+pub fn assemble_record(
+    locus: &LocusInference,
+    evidence: LocusEvidenceForOutput,
+    read_alleles: RecordReadAlleles,
+) -> VcfRecord {
     assert_eq!(
         evidence.samples.len(),
         locus.per_sample.len(),
@@ -178,6 +188,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         .collect();
 
     let mut expected_copies = locus.cohort_expected_copies().copies().to_vec();
+    let mut read_alleles = read_alleles;
     let mut allele_mapq = evidence.allele_mapq;
     let mut alleles = alleles;
     let mut sample_columns = sample_columns;
@@ -190,6 +201,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         &mut allele_mapq,
         &mut sample_columns,
         &mut flank_deletions,
+        &mut read_alleles,
     );
     let mut region = locus.region;
     let mut repeat_tract = evidence.repeat_tract;
@@ -245,7 +257,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
     // shortens one, so it cannot make a padding base necessary where there was none.
     let padding_base = padding_base.filter(|_| alleles.iter().any(|allele| allele.is_empty()));
 
-    VcfRecord::new(
+    let mut record = VcfRecord::new(
         region,
         alleles,
         expected_copies,
@@ -256,7 +268,9 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         evidence.artifact_penalties,
         evidence.filter,
         repeat_tract,
-    )
+    );
+    record.replace_read_alleles(read_alleles);
+    record
 }
 
 /// **An STR record's alleles respelled over a reference widened into its flanks**
@@ -469,6 +483,7 @@ fn drop_alternatives_no_sample_calls(
     allele_mapq: &mut Vec<MapqPool>,
     sample_columns: &mut [SampleColumn],
     flank_deletions: &mut Vec<FlankDeletion>,
+    read_alleles: &mut RecordReadAlleles,
 ) {
     // The reference allele is never dropped: it is the bases the record's span spells, and
     // `VcfRecord::new` refuses a record without one.
@@ -558,6 +573,8 @@ fn drop_alternatives_no_sample_calls(
         old += 1;
         keep
     });
+    // A read allele on a dropped alternative goes with it (read phase spec §2.3, step 2).
+    read_alleles.renumber(&renumbered);
 }
 
 /// **A sample's rows over the alleles the record keeps**: only the genotypes whose alleles are all

@@ -51,8 +51,11 @@ use crate::calling::likelihood::generic::{
 use crate::calling::quality::artifact_correction::correct_site_quality;
 use crate::calling::{CandidateAlleles, LocusInference, ReferenceBesideLocus, SampleGenotypeCall};
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
+use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
-use crate::run::cohort_merge::build::{CohortObservation, LocusBorder, PartialObservation};
+use crate::run::cohort_merge::build::{
+    CohortObservation, LocusBorder, LocusReads, PartialObservation,
+};
 use crate::types::{GenomeRegion, Position};
 use crate::vcf::assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput};
 use crate::vcf::{FilterVerdict, MapqPool, PaddingBase, TractAnnotation};
@@ -582,6 +585,25 @@ where
     }
     reference.fetch_into(region.contig, flank_start - 1, 1, scratch)?;
     Ok(Some(scratch[0]))
+}
+
+/// **Which allele each of every sample's reads showed, in the candidate table's numbering** (read
+/// phase spec §2.3, step 1) — asked of the merge only here, for a locus calling is about to write,
+/// because asking derives the locus's alleles a second time ([`LocusReads`]). A read allele on an
+/// allele candidate selection dropped is dropped with it, as its reads leave `AD` for the leftover.
+/// The capture names each read allele's sample itself, so nothing here pairs lists with samples.
+#[must_use]
+pub fn read_alleles_for_record(
+    remap: &AlleleRemap,
+    reads: &LocusReads<'_, '_>,
+) -> RecordReadAlleles {
+    let captured = reads.read_alleles();
+    RecordReadAlleles::from_merge(captured.entries, |merge_allele| {
+        remap
+            .candidate_for(merge_allele as usize)
+            .map(|written| u32::from(written.get()))
+    })
+    .with_dropped_by_the_cap(captured.dropped_by_the_cap)
 }
 
 /// **Everything a record needs that the called locus does not already carry**, gathered while

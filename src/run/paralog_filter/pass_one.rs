@@ -19,6 +19,7 @@
 //!
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md` §3.4, §3.6.
 
+use crate::read_phase::fragments::RecordFragments;
 use crate::types::Ploidy;
 use crate::vcf::encode::{record_line, written_position};
 use crate::vcf::{HeaderContig, VcfRecord, VcfWriteError, VcfWriter};
@@ -181,15 +182,17 @@ impl CalledRecordSink {
     /// one another once, when the run starts, so a mismatch is a wiring error.
     pub fn accept_prepared(&mut self, prepared: PreparedRecord) -> Result<(), PassOneError> {
         match (self, prepared) {
-            (Self::StraightToTheVcf(writer), PreparedRecord::ForTheVcf(record)) => {
-                writer.write_record(&record).map_err(PassOneError::Vcf)
+            (Self::StraightToTheVcf(writer), PreparedRecord::ForTheVcf(record, fragments)) => {
+                writer
+                    .write_record(&record, fragments)
+                    .map_err(PassOneError::Vcf)
             }
             (Self::ParkedOnTheSpill(sink), PreparedRecord::ForTheSpill(entry)) => sink
                 .spill
                 .append_encoded(&entry)
                 .map_err(PassOneError::Spill),
             (Self::StraightToTheVcf(_), PreparedRecord::ForTheSpill(_))
-            | (Self::ParkedOnTheSpill(_), PreparedRecord::ForTheVcf(_)) => panic!(
+            | (Self::ParkedOnTheSpill(_), PreparedRecord::ForTheVcf(..)) => panic!(
                 "a record prepared for one sink reached the other; the preparer is taken from the \
                  sink when the run starts, so this is a defect in ng"
             ),
@@ -206,16 +209,19 @@ impl CalledRecordSink {
         &mut self,
         record: &VcfRecord,
         windows: &[WindowCoverage],
+        fragments: RecordFragments,
     ) -> Result<(), PassOneError> {
         match self {
             // **Nothing between the record and the writer.** Not a helper, not a re-encode —
             // this is the line the run ran before the filter existed.
-            Self::StraightToTheVcf(writer) => {
-                writer.write_record(record).map_err(PassOneError::Vcf)
-            }
+            Self::StraightToTheVcf(writer) => writer
+                .write_record(record, fragments)
+                .map_err(PassOneError::Vcf),
             Self::ParkedOnTheSpill(sink) => {
                 let entry = entry_for(record, windows, &sink.contigs, sink.ploidy);
-                sink.spill.append(&entry).map_err(PassOneError::Spill)
+                sink.spill
+                    .append(&entry, &fragments)
+                    .map_err(PassOneError::Spill)
             }
         }
     }
@@ -244,8 +250,8 @@ pub enum RecordPreparer {
 /// A record got ready by [`RecordPreparer::prepare`], for [`CalledRecordSink::accept_prepared`].
 #[derive(Debug)]
 pub enum PreparedRecord {
-    /// The record itself, for the VCF writer.
-    ForTheVcf(Box<VcfRecord>),
+    /// The record itself, for the VCF writer, with its fragments beside it.
+    ForTheVcf(Box<VcfRecord>, RecordFragments),
     /// Its spill entry, encoded.
     ForTheSpill(EncodedSpillEntry),
 }
@@ -260,11 +266,12 @@ impl RecordPreparer {
         &self,
         record: VcfRecord,
         windows: &[WindowCoverage],
+        fragments: RecordFragments,
     ) -> Result<PreparedRecord, PassOneError> {
         match self {
-            Self::ForTheVcf => Ok(PreparedRecord::ForTheVcf(Box::new(record))),
+            Self::ForTheVcf => Ok(PreparedRecord::ForTheVcf(Box::new(record), fragments)),
             Self::ForTheSpill { contigs, ploidy } => {
-                EncodedSpillEntry::of(&entry_for(&record, windows, contigs, *ploidy))
+                EncodedSpillEntry::of(&entry_for(&record, windows, contigs, *ploidy), &fragments)
                     .map(PreparedRecord::ForTheSpill)
                     .map_err(PassOneError::SpillEntry)
             }

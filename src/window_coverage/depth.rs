@@ -265,6 +265,7 @@ mod tests {
         observed: Vec<SequenceObservation>,
     ) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: Box::from(&b""[..]),
             observations: observed,

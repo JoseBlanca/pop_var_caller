@@ -490,7 +490,11 @@ pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES
 /// they wrote is refused — 2.x by its major, and 1.x, whose number this one reuses, by the
 /// missing `repeat-ground` key ([`REPEAT_GROUND_KEY`]), checked straight after the version so
 /// none of such a file's older layout is ever read.
-pub const FORMAT_VERSION: (u16, u16) = (1, 0);
+///
+/// **1.1 since 2026-11-03**, when each record's head gained the change in its walked region's
+/// first chain id (read phase spec §2.4). **A 1.0 psp is refused** (owner, 2026-11-03: no
+/// backward compatibility), with the message to write it again.
+pub const FORMAT_VERSION: (u16, u16) = (1, 1);
 
 /// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
 ///
@@ -708,6 +712,16 @@ impl Header {
             return Err(written_by_another_pvc(format!(
                 "this pvc reads format {}.x",
                 FORMAT_VERSION.0
+            )));
+        }
+        // **No backward compatibility for minors either** (owner, 2026-11-03): a psp from before
+        // 1.1 has no walked region's first chain id in its heads, and read-backed phase keys its
+        // read cap on it (read phase spec §2.4).
+        if format_version.1 < FORMAT_VERSION.1 {
+            return Err(written_by_another_pvc(format!(
+                "this pvc reads format {}.{} or a later {}.x; earlier psps lack the chain-id base \
+                 read-backed phase needs",
+                FORMAT_VERSION.0, FORMAT_VERSION.1, FORMAT_VERSION.0
             )));
         }
         // **Before the body is deserialised**, because a 1.x psp from before 2026-10-11 shares
@@ -2045,7 +2059,7 @@ mod tests {
         assert_eq!(&bytes[..4], b"NGP\n");
         let body = body_of(&bytes);
         for expected in [
-            "format-version = \"1.0\"",
+            "format-version = \"1.1\"",
             "sample = \"SRR7279481\"",
             "genomic-block-size-bp = 100000",
             "look-back-window-log = 15",
@@ -2209,7 +2223,7 @@ mod tests {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
-            .replace("format-version = \"1.0\"", "format-version = \"1.4\"")
+            .replace("format-version = \"1.1\"", "format-version = \"1.4\"")
             .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
         written.format_version = (1, 4);
@@ -2227,9 +2241,9 @@ mod tests {
     fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
         let mut header = a_written_header();
         header.format_version = (2, 1);
-        let refused = header.encode().expect_err("this writer produces 1.0");
+        let refused = header.encode().expect_err("this writer produces 1.1");
         assert!(
-            refused.to_string().contains("produces 1.0"),
+            refused.to_string().contains("produces 1.1"),
             "got {refused}"
         );
     }
@@ -3042,13 +3056,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the thirty-three are lists.** A count and
+    /// **The record's own fields, and which two of the thirty-four are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::psp::record::record_fields();
-        assert_eq!(fields.len(), 33);
+        assert_eq!(fields.len(), 34);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)

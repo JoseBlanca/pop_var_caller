@@ -32,6 +32,8 @@ pub(crate) struct CohortShape {
 pub(crate) struct TestCohort {
     pub records: Vec<SiteRecord>,
     pub truth: Vec<Vec<usize>>,
+    /// The allele each copy carries, every sample at every record: the true phase.
+    pub truth_copies: Vec<Vec<[usize; 2]>>,
     pub called: Vec<Vec<usize>>,
     /// The records as calling would write them, on contig `chr1`: `GT` (`./.` without reads),
     /// `PL`, `GP` and `AF`.
@@ -91,12 +93,14 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
         .collect();
     let mut records = Vec::with_capacity(shape.records);
     let mut truth = Vec::with_capacity(shape.records);
+    let mut truth_copies = Vec::with_capacity(shape.records);
     let mut called = Vec::with_capacity(shape.records);
     let mut lines = Vec::with_capacity(shape.records);
     for record in 0..shape.records {
         let mut phred = Vec::with_capacity(shape.samples);
         let mut posteriors = Vec::with_capacity(shape.samples);
         let mut true_genotypes = Vec::with_capacity(shape.samples);
+        let mut true_copies = Vec::with_capacity(shape.samples);
         let mut called_genotypes = Vec::with_capacity(shape.samples);
         let mut written = Vec::with_capacity(shape.samples);
         for (sample, founders) in copies.iter_mut().enumerate() {
@@ -113,6 +117,7 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
                 founder_alleles[founders[1]][record],
             ];
             true_genotypes.push(alleles[0] + alleles[1]);
+            true_copies.push(alleles);
             let mut reads = draw.poisson(shape.depth);
             if shape
                 .silent_from
@@ -205,11 +210,13 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
             written.join("\t")
         ));
         truth.push(true_genotypes);
+        truth_copies.push(true_copies);
         called.push(called_genotypes);
     }
     TestCohort {
         records,
         truth,
+        truth_copies,
         called,
         lines,
     }

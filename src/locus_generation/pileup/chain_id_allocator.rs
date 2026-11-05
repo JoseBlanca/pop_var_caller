@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use ahash::AHashMap;
 
-use crate::types::ChainId;
+use crate::types::{ChainId, ReadGroupId};
 
 use super::PreparedRead;
 use super::errors::WalkerError;
@@ -95,6 +95,13 @@ fn high_water_warn_threshold(cap: u32) -> u32 {
 /// `read_id` so the active-set admission code can link
 /// `mate_read_id`, and where the first mate was seen so we can
 /// evict stale entries past the lookup window.
+/// **What pairs two mates: their read group and their name** (read phase spec §2.1). A name alone
+/// is unique only within one library: a sample whose psp holds two libraries that reuse a read name
+/// inside the mate window would otherwise give two molecules one chain id, which read-backed phase
+/// would take for one fragment. The cost is that a pair whose two mates carry different `RG` tags,
+/// legal input, is no longer paired: two reads, a loss of evidence rather than a false link.
+type MateKey = (ReadGroupId, Arc<str>);
+
 #[derive(Debug, Clone, Copy)]
 pub struct PendingMate {
     pub chain_id: ChainId,
@@ -118,7 +125,7 @@ struct PendingOrder {
     /// Which registration this is, so a slot left behind by a second mate, or by an earlier
     /// registration of the same qname, is recognised and skipped. See [`PendingMate::serial`].
     serial: u64,
-    qname: Arc<str>,
+    key: MateKey,
 }
 
 #[derive(Debug)]
@@ -137,7 +144,7 @@ pub struct ChainIdAllocator {
     /// First mates whose partner has not yet arrived. Sized for
     /// genuinely-pending pairs only — solo reads
     /// (`MateRole::Solo`) never enter this map.
-    pending_mates: AHashMap<Arc<str>, PendingMate>,
+    pending_mates: AHashMap<MateKey, PendingMate>,
     /// **The order [`pending_mates`](Self::pending_mates) was registered in, so that dropping
     /// the stale ones pops rather than scans.**
     ///
@@ -245,6 +252,12 @@ impl ChainIdAllocator {
         }
     }
 
+    /// **The id the next fresh read will get** — at a walked region's opening, that region's first
+    /// id, which a minted record carries as `chain_id_base` (read phase spec §2.4).
+    pub fn next_chain_id(&self) -> u64 {
+        self.next_id
+    }
+
     /// Reset to the initial state. Called at chromosome boundaries
     /// (chains do not span chromosomes per
     /// `ia/specs/calling_pipeline_architecture.md` §"Phase chain
@@ -288,7 +301,9 @@ impl ChainIdAllocator {
         self.evict_stale_pending(read.alignment_start);
 
         if read.mate_role.is_paired()
-            && let Some(pending) = self.pending_mates.remove(&read.qname)
+            && let Some(pending) = self
+                .pending_mates
+                .remove(&(read.read_group, read.qname.clone()))
         {
             // Second mate of a known pair — reuse the id. We do
             // bump `active_count` here because both mates now sit
@@ -341,7 +356,7 @@ impl ChainIdAllocator {
             let serial = self.next_pending_serial;
             self.next_pending_serial += 1;
             self.pending_mates.insert(
-                read.qname.clone(),
+                (read.read_group, read.qname.clone()),
                 PendingMate {
                     chain_id,
                     first_mate_read_id: 0, // caller fills via `register_first_mate_read_id`
@@ -353,7 +368,7 @@ impl ChainIdAllocator {
             self.pending_order.push_back(PendingOrder {
                 seen_at: read.alignment_start,
                 serial,
-                qname: read.qname.clone(),
+                key: (read.read_group, read.qname.clone()),
             });
             // **ng's.** Read after the insert, so the number reported is a size the map
             // actually reached rather than the size it was about to reach.
@@ -370,8 +385,13 @@ impl ChainIdAllocator {
     /// with its assigned `read_id`. Called by the active-set
     /// admission code right after it has decided the new read's
     /// `read_id`.
-    pub fn register_first_mate_read_id(&mut self, qname: &Arc<str>, first_mate_read_id: u32) {
-        if let Some(entry) = self.pending_mates.get_mut(qname) {
+    pub fn register_first_mate_read_id(
+        &mut self,
+        read_group: ReadGroupId,
+        qname: &Arc<str>,
+        first_mate_read_id: u32,
+    ) {
+        if let Some(entry) = self.pending_mates.get_mut(&(read_group, qname.clone())) {
             entry.first_mate_read_id = first_mate_read_id;
         }
     }
@@ -481,10 +501,10 @@ impl ChainIdAllocator {
             // a scan would not have dropped it either.
             let still_ours = self
                 .pending_mates
-                .get(&oldest.qname)
+                .get(&oldest.key)
                 .is_some_and(|entry| entry.serial == oldest.serial);
             if still_ours {
-                self.pending_mates.remove(&oldest.qname);
+                self.pending_mates.remove(&oldest.key);
                 self.counters.mate_lookup_evictions += 1;
             }
         }
@@ -546,7 +566,7 @@ mod tests {
         let mut a = ChainIdAllocator::new();
         let m1 = make_read("pair1", MateRole::FirstOfPair, 100);
         let (chain_id1, mate_id1) = a.allocate_for_read(&m1).expect("first mate");
-        a.register_first_mate_read_id(&m1.qname, 42);
+        a.register_first_mate_read_id(m1.read_group, &m1.qname, 42);
 
         let m2 = make_read("pair1", MateRole::FirstOfPair, 200);
         let (chain_id2, mate_id2) = a.allocate_for_read(&m2).expect("second mate");
@@ -556,6 +576,28 @@ mod tests {
         assert!(
             a.pending_mates.is_empty(),
             "pending entry consumed when second mate arrives"
+        );
+    }
+
+    /// **Two libraries that reuse a read name give two molecules two ids** (read phase spec §2.1):
+    /// mates pair by read group and name, so a name met again in another read group is a new read.
+    #[test]
+    fn a_read_name_reused_by_another_read_group_gets_its_own_id() {
+        let mut a = ChainIdAllocator::new();
+        let first = make_read("pair1", MateRole::FirstOfPair, 100);
+        let (first_id, _) = a.allocate_for_read(&first).expect("first library's mate");
+        let mut other = make_read("pair1", MateRole::FirstOfPair, 150);
+        other.read_group = ReadGroupId(1);
+        let (other_id, partner) = a.allocate_for_read(&other).expect("second library's read");
+        assert_ne!(first_id, other_id);
+        assert_eq!(partner, None);
+        let mate = make_read("pair1", MateRole::FirstOfPair, 200);
+        let (mate_id, _) = a
+            .allocate_for_read(&mate)
+            .expect("first library's second mate");
+        assert_eq!(
+            mate_id, first_id,
+            "the mate of the same read group still pairs"
         );
     }
 

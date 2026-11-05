@@ -53,6 +53,7 @@ use crate::read::input::SampleReads;
 use crate::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::read::input::reference::OpenReference;
 use crate::read::input::{AssemblyMismatch, check_assembly};
+use crate::read_phase::fragments::RecordFragments;
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::run::cohort_merge::build::CohortObservation;
@@ -84,8 +85,8 @@ use super::explain::{
 };
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
-    base_before_left_flank, evidence_for_output, padding_base_beside, reference_beside_locus,
-    reread_spellings_cut_short,
+    base_before_left_flank, evidence_for_output, padding_base_beside, read_alleles_for_record,
+    reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -673,7 +674,7 @@ impl AlignedFilesVariantCaller {
             merge_parameters.cohort_locus_builder_regions_len,
             merge_parameters.max_cohort_locus_span,
             merge_parameters.min_alt_reads,
-            &mut |observation| {
+            &mut |observation, _reads| {
                 if stopped.is_some() {
                     return;
                 }
@@ -782,7 +783,7 @@ impl AlignedFilesVariantCaller {
     pub fn call_cohort_handing_each_record_over<S, G, E>(
         self,
         genotyper: &G,
-        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+        hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage], RecordFragments) -> Result<(), E>,
     ) -> Result<WrittenCohort, RunError>
     where
         G: LocusGenotyper<S>,
@@ -835,6 +836,9 @@ impl AlignedFilesVariantCaller {
             // (`str_edge_deletion_alleles.md` §6), as in psp mode.
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
+            // Then the fragment keeper (read phase spec §2.4), as in psp mode.
+            let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
+            let mut kept = Vec::new();
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
@@ -842,15 +846,26 @@ impl AlignedFilesVariantCaller {
                 &|record, _| Ok::<_, E>(record),
                 &mut |record: VcfRecord, windows| {
                     for (record, windows) in gathering.accept(record, windows.to_vec()) {
-                        hand_over(&record, &windows)?;
+                        keeper.accept(record, windows, &mut kept);
+                        for (record, windows, fragments) in kept.drain(..) {
+                            hand_over(&record, &windows, fragments)?;
+                        }
                     }
                     Ok(())
                 },
             )?;
+            let mut released = Vec::new();
             for (record, windows) in gathering.finish() {
-                hand_over(&record, &windows).map_err(|source| RunError::RecordNotWritten {
-                    locus: record.region(),
-                    source: Box::new(source),
+                keeper.accept(record, windows, &mut released);
+            }
+            keeper.finish(&mut released);
+            crate::run::fragment_keeper::log_counts(keeper.counts());
+            for (record, windows, fragments) in released {
+                hand_over(&record, &windows, fragments).map_err(|source| {
+                    RunError::RecordNotWritten {
+                        locus: record.region(),
+                        source: Box::new(source),
+                    }
                 })?;
             }
             let mut outcome = outcome;
@@ -1059,7 +1074,7 @@ where
         merge_parameters.cohort_locus_builder_regions_len,
         merge_parameters.max_cohort_locus_span,
         merge_parameters.min_alt_reads,
-        &mut |observation| {
+        &mut |observation, reads| {
             if stopped.is_some() {
                 return;
             }
@@ -1150,6 +1165,8 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
+                    // Asked only now, for a locus that is written (read phase spec §2.2).
+                    let read_alleles = read_alleles_for_record(remap, reads);
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -1158,7 +1175,11 @@ where
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(
+                        &inference,
+                        evidence,
+                        read_alleles,
+                    )))
                 },
             );
             if let Some(mut rows) = explanation {
@@ -1417,6 +1438,11 @@ where
 
 /// **What became of a called locus at the record-building stage** — the drivers' answer for each
 /// locus that reached a call.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "built and moved once per called locus; boxing the record would add an allocation \
+              per written record to save copying 216 bytes"
+)]
 pub(crate) enum CalledLocus {
     /// A record, for the file.
     Written(VcfRecord),
@@ -6106,7 +6132,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let written = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record, _window_coverage| {
+                &mut |record, _window_coverage, _fragments| {
                     records.push(record.clone());
                     Ok::<(), std::io::Error>(())
                 },
@@ -6283,7 +6309,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let stopped = open_over(std::slice::from_ref(&zeta), &reference)
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |_record, _window_coverage| {
+                &mut |_record, _window_coverage, _fragments| {
                     taken += 1;
                     Err(std::io::Error::other("the disk is full"))
                 },
@@ -6453,7 +6479,7 @@ mod records_handed_over_as_the_run_finishes_them {
         let written = caller
             .call_cohort_handing_each_record_over(
                 &the_shipped_genotyper(),
-                &mut |record, _window_coverage| writer.write_record(record),
+                &mut |record, _window_coverage, fragments| writer.write_record(record, fragments),
             )
             .expect("calls");
         writer.finish().expect("the file is renamed into place");
@@ -6484,7 +6510,12 @@ mod records_handed_over_as_the_run_finishes_them {
                 11,
                 "nine fixed columns and two samples: {line}"
             );
-            assert_eq!(columns[8], "GT:GQ:DP:AD:PL:GP", "the generic FORMAT string");
+            // `PS` last: diploid without refinement, phase is written from reads (read phase
+            // spec §3), on every line whether or not it phases anything.
+            assert_eq!(
+                columns[8], "GT:GQ:DP:AD:PL:GP:PS",
+                "the generic FORMAT string"
+            );
         }
     }
 
@@ -6688,7 +6719,9 @@ mod records_handed_over_as_the_run_finishes_them {
             let written = caller
                 .call_cohort_handing_each_record_over(
                     &the_shipped_genotyper(),
-                    &mut |record, _window_coverage| writer.write_record(record),
+                    &mut |record, _window_coverage, fragments| {
+                        writer.write_record(record, fragments)
+                    },
                 )
                 .expect("the mixed cohort calls");
             writer.finish().expect("the file is renamed into place");
@@ -7089,7 +7122,7 @@ mod records_handed_over_as_the_run_finishes_them {
             open_over_the_tract_ground_with(&paths, &reference, MergeParameters::DEFAULT)
                 .call_cohort_handing_each_record_over(
                     &the_shipped_genotyper(),
-                    &mut |record, _window_coverage| {
+                    &mut |record, _window_coverage, _fragments| {
                         records.push(record.clone());
                         Ok::<(), std::io::Error>(())
                     },
@@ -7413,7 +7446,9 @@ where
             tracts: TractOutcomes::default(),
             totals: tract_totals_ref,
         },
-        |worker: &mut RoundCallScratch<'_, S>, observation: CohortObservation| {
+        |worker: &mut RoundCallScratch<'_, S>,
+         observation: CohortObservation,
+         reads: &crate::run::cohort_merge::build::LocusReads<'_, '_>| {
             let region = observation.region;
             let RoundCallScratch {
                 shaping,
@@ -7512,10 +7547,16 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
+                    // Asked only now, for a locus that is written (read phase spec §2.2).
+                    let read_alleles = read_alleles_for_record(remap, reads);
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(
+                        &inference,
+                        evidence,
+                        read_alleles,
+                    )))
                 },
             );
             // **Finished on this worker, where the record still exists**, and folded on the
