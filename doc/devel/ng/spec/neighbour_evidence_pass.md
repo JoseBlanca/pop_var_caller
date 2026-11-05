@@ -155,16 +155,43 @@ What a record contributes depends on what it carries:
 
 ### 3.3 The templates
 
-For each sample and window, the `K = min(16, N − 1)` other samples that disagree with it least,
-**judged only where both have reads, with more data preferred between two that disagree about as
-little** (owner, 2026-11-02). The records compared are the sample's informative records in the
+For each sample and window, the `K = min(16, N − 1)` other samples that disagree with it least
+**against what the cohort's allele frequencies predict for an unrelated sample, judged only where
+both have reads, with more data preferred between two that disagree about as little** (owner,
+2026-11-02 and 2026-11-05). The records compared are the sample's informative records in the
 window — a fixed sample of at most 500 of them, spread evenly over them by record order (the `i`-th
 of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and weighs the whole
-window, not its left margin. Of those, a candidate is compared at the `n` where it is informative
-too; at each, the two disagree by `½ Σ_a |q_self(a) − q_other(a)|`, from 0 to 1, summing to `d`. The
-candidate's score is the mean of the disagreement rate's Beta(`d + 1`, `n − d + 1`) posterior plus
-two of its standard deviations — pessimistic, so a rate measured on few records scores worse — and
-the `K` lowest are the templates. Ties break by sample order.
+window, not its left margin. Of those, a candidate is compared where it is informative too. At each
+such record:
+
+- the **observed** disagreement is the chance that one allele drawn from each sample differs,
+  `1 − Σ_a q_self(a) · q_other(a)`;
+- the **expected** disagreement is the same against the cohort's frequencies,
+  `1 − Σ_a q_self(a) · p(a)` — what an unrelated sample would show.
+
+Summed over the shared records they give `d` observed out of `e` expected. The candidate's score is
+the mean of the rate's Beta(`d + 1`, `e − d + 1`) posterior plus two of its standard deviations —
+pessimistic, so a rate measured on little scores worse — with `d` capped at `e`, so a candidate less
+alike than an unrelated sample scores as one. A candidate with `e` = 0 — no shared record, or only
+records where every sample carries the same allele — has nothing to be judged on and ranks after
+every candidate that has. The `K` lowest are the templates; ties break by sample order.
+
+**Why against the frequencies — changed 2026-11-05.** The rule before scored the plain
+disagreement, `½ Σ_a |q_self(a) − q_other(a)|`, over the shared records, and it favoured exactly
+the samples that carry least information:
+
+- a sample whose genotype is uncertain has shares near the frequencies, and two uncertain samples
+  differ little from each other — so a 1× sibling looked closer to a 1× F2 plant than its 30×
+  parents, whose shares are 0 or 1;
+- a record where the whole cohort carries one allele is agreement everyone shares, and counted as
+  much as one that separates relatives. A 1× sample's confident records are mostly of that kind.
+
+On the simulated F2 (two inbred parents at 30×, 20 offspring at 1×), most offspring copied neither
+parent, and 30 of 100 heterozygous offspring genotypes came out right; with this rule and the
+background as a last resort (below), 51 of 100. In two 40-sample natural cohorts with samples at 1×
+and 2×, both changes together gained 3 to 7 genotypes in 100 at 1× and did not move the samples
+at 5× and above by more than 1 in 100
+(`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
 
 Why only where both have reads: a sample without reads carries the cohort's frequency, and counting
 that as disagreement would rank a shallow close relative below a deep distant one. On the founder
@@ -178,9 +205,16 @@ what the prototype ran; how accuracy and cost move with `K` is a measurement (§
 **A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
 frequencies — `AF`, the reference taking the rest. A copy that matches none of the sampled
 haplotypes — an introgression, a private lineage — copies the background, and its genotype falls back
-to what the cohort's frequencies say rather than to the nearest template's allele. It is one template
-among `K + 1` in every respect: pair states with it, an autozygous state copying it, the same mismatch
-blur.
+to what the cohort's frequencies say rather than to the nearest template's allele. It takes part as
+a template does — pair states with it, an autozygous state copying it, the same mismatch blur — but
+**it is a last resort: a copy that changes template lands on it with probability 10⁻⁵** (§3.5;
+owner, 2026-11-05). As one template among 17 alike it was copied in place of real ones wherever an
+allele stood near 50%: at one read a site, a source that predicts each allele with even odds explains
+a heterozygote as well as the two haplotypes that make it, and in an F2 every allele stands at 50%.
+At 10⁻⁵ it is copied only where no sampled template explains the reads; across the cohorts measured,
+any share at or below 10⁻⁴ gave the same results as leaving it out, so the share's exact value does
+not matter there. The stretches it exists for — a haplotype no other sample carries — are absent
+from those cohorts, so how well it still serves them is not measured.
 
 A sample with no
 informative record in the window has no basis for choosing templates and is not re-called in it.
@@ -205,8 +239,10 @@ and nothing else.
 
 Between records `d` bases apart:
 
-- **A copy keeps its template** with probability `e^(−d/S)`, and otherwise draws one uniformly; in
-  the non-autozygous state the two copies do this independently.
+- **A copy keeps its template** with probability `e^(−d/S)`, and otherwise draws one: the
+  background with probability 10⁻⁵, each of the `K` sampled templates with an equal share of the
+  rest (§3.3; before 2026-11-05 every one of the `K + 1` alike). In the non-autozygous state the two
+  copies do this independently.
 - **The autozygous state is a two-state Markov chain** with runs of mean `R` and gaps of mean
   `R′ = R · (1 − F) / F`, so a share `F` of the sample is autozygous in the long run:
 
@@ -217,7 +253,10 @@ Between records `d` bases apart:
   returns to `F`. *Corrected 2026-11-01:* the first version, and the prototype the report measured,
   used `e^(−d/R)` and `e^(−d/R′)` as the two stays, which across a long gap swaps the states: a
   sample 99% autozygous before a centromere came out 1% after it.
-- A change of state draws its templates afresh.
+- A change of state draws its templates afresh, with the same landing chances, and the walk's first
+  record starts from them too: autozygous on template `k` with `F · w(k)`, the pair `(k₁, k₂)` with
+  `(1 − F) · w(k₁) · w(k₂)`, `w` the landing chance (`WalkParameters::background_landing_share`,
+  `src/neighbour_evidence/model.rs`).
 
 **The parameters, per sample.** `F` starts at the sample's fitted inbreeding coefficient from the
 parameters file, clamped to [0.01, 0.99], and is re-estimated as the mean autozygous posterior,

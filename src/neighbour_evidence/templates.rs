@@ -1,19 +1,28 @@
 //! **Which other samples a sample copies from in a window** (`doc/devel/ng/spec/neighbour_evidence_pass.md`
 //! §3.3).
 //!
-//! A sample's templates are the others that disagree with it least, judged only where both have
-//! reads, with more data preferred between two that disagree about as little (owner, 2026-11-02;
-//! spec §3.3). At each record where both are informative the two samples' disagreement is half
-//! their summed allele-share difference, `½ Σ_a |q_self(a) − q_other(a)|`, from 0 to 1. Over the
-//! `n` shared records the summed disagreement `d` gives a rate, and the rate is scored
-//! pessimistically: the mean of its Beta(`d + 1`, `n − d + 1`) posterior plus two of its standard
-//! deviations, [`disagreement_bound`]. The `K` with the lowest scores are the templates.
+//! A sample's templates are the others that disagree with it least **against what the cohort's
+//! allele frequencies predict**, judged only where both have reads, with more data preferred between
+//! two that disagree about as little (owner, 2026-11-02 and 2026-11-05; spec §3.3). At each record
+//! where both are informative the observed disagreement is the chance that one allele drawn from
+//! each differs, `1 − Σ_a q_self(a) · q_other(a)`; the expected one is the same against the cohort's
+//! frequencies, `1 − Σ_a q_self(a) · p(a)` — what an unrelated sample would show. Summed over the
+//! shared records, observed `d` out of expected `e` is a rate, scored pessimistically: the mean of
+//! its Beta(`d + 1`, `e − d + 1`) posterior plus two of its standard deviations,
+//! [`disagreement_bound`]. The `K` with the lowest scores are the templates.
+//!
+//! Why against the frequencies: a record where the whole cohort carries one allele says nothing of
+//! who is related, and counts nothing here (its expected disagreement is 0); and a sample whose
+//! shares are uncertain — near the frequencies — scores as an unrelated one, not as a close one.
+//! The rule this replaced, `½ Σ_a |q_self(a) − q_other(a)|` over records, ranked the 1× siblings of
+//! a simulated F2 above its 30× parents on both counts, and the pass then rarely copied the parents
+//! (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
 //!
 //! Why only where both have reads: a sample without reads at a record carries the cohort's
 //! frequency as its genotype, and counting that as a disagreement would rank a shallow close
 //! relative below a deep distant one. Why the pessimistic score: a low-coverage relative's rate rests
-//! on fewer records and the score charges for that, so a deep sample wins a near tie — and it is
-//! the deep sample whose own data fills a site the target has none at.
+//! on less expected disagreement and the score charges for that, so a deep sample wins a near tie —
+//! and it is the deep sample whose own data fills a site the target has none at.
 //!
 //! The comparison runs over at most [`AGREEMENT_RECORDS`] of the sample's informative records,
 //! spread evenly by record order, so the choice costs the same in a dense window as in a sparse one
@@ -51,20 +60,27 @@ pub fn choose_templates(
     let mut differences: Vec<(f64, usize)> = (0..samples)
         .filter(|&other| other != sample)
         .map(|other| {
-            let (mut shared, mut disagreement) = (0_usize, 0.0);
+            let (mut expected, mut observed) = (0.0, 0.0);
             for record in compared
                 .iter()
                 .filter(|record| record.row(other) == SampleRow::Informative)
             {
-                shared += 1;
-                disagreement += 0.5
-                    * record
-                        .template_shares(sample)
-                        .zip(record.template_shares(other))
-                        .map(|(own, theirs)| (own - theirs).abs())
-                        .sum::<f64>();
+                observed += allele_mismatch(
+                    record.template_shares(sample),
+                    record.template_shares(other),
+                );
+                expected +=
+                    allele_mismatch(record.template_shares(sample), record.background_shares());
             }
-            (disagreement_bound(disagreement, shared), other)
+            // A candidate less alike than an unrelated sample scores as an unrelated one; one with
+            // nothing to be judged on — no shared record, or only records every sample agrees at —
+            // ranks after every candidate that was.
+            let score = if expected > 0.0 {
+                disagreement_bound(observed.min(expected), expected)
+            } else {
+                f64::INFINITY
+            };
+            (score, other)
         })
         .collect();
     differences.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
@@ -172,7 +188,7 @@ pub(crate) fn choose_haplotypes(
                         .sum::<f64>();
                 }
             }
-            let scores = disagreement.map(|total| disagreement_bound(total, shared));
+            let scores = disagreement.map(|total| disagreement_bound(total, shared as f64));
             if scores[1] < scores[0] {
                 (scores[1], other, 1)
             } else {
@@ -193,15 +209,21 @@ pub(crate) fn choose_haplotypes(
         .collect()
 }
 
-/// **A pessimistic disagreement rate** from `disagreement` summed over `shared` records: the mean
-/// of the rate's Beta(`disagreement + 1`, `shared − disagreement + 1`) posterior, from a flat prior,
-/// plus two of its standard deviations. With no shared record it is ½ + 2·√(1/12), above any rate
-/// measured on records.
+/// **A pessimistic disagreement rate** from `disagreement` out of `shared`, a count of records or,
+/// for [`choose_templates`], the disagreement an unrelated sample would have shown: the mean of the
+/// rate's Beta(`disagreement + 1`, `shared − disagreement + 1`) posterior, from a flat prior, plus
+/// two of its standard deviations. With nothing shared it is ½ + 2·√(1/12), above any rate measured.
 #[must_use]
-pub fn disagreement_bound(disagreement: f64, shared: usize) -> f64 {
-    let shared = shared as f64;
+pub fn disagreement_bound(disagreement: f64, shared: f64) -> f64 {
     let mean = (disagreement + 1.0) / (shared + 2.0);
     mean + 2.0 * (mean * (1.0 - mean) / (shared + 3.0)).sqrt()
+}
+
+/// **The chance that one allele drawn from each of two allele-share vectors differs**:
+/// `1 − Σ_a p(a) · q(a)`. Two certain and equal samples give 0; a sample whose shares are the
+/// cohort's frequencies gives, against any other, what an unrelated sample would.
+fn allele_mismatch(one: impl Iterator<Item = f64>, other: impl Iterator<Item = f64>) -> f64 {
+    1.0 - one.zip(other).map(|(p, q)| p * q).sum::<f64>()
 }
 
 #[cfg(test)]

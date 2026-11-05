@@ -39,7 +39,7 @@ use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
     SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks,
 };
-use super::random::{StreamPurpose, Uniforms};
+use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
@@ -49,6 +49,14 @@ use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
 pub const MISMATCH: f64 = 0.01;
+
+/// **The chance that a copy changing template lands on the background** (§3.3, §3.5): a last
+/// resort, the other templates sharing the rest alike. With the background one template among 17
+/// alike, an F2 at 1× copied it in place of its parents wherever an allele stood near 50% — at one
+/// read a site it explains a heterozygote as well as the two parents do — and 30 of 100 of the
+/// heterozygous offspring were called right; at this share, 51 of 100, with 1× natural cohorts
+/// gaining too (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
+pub const BACKGROUND_LANDING_SHARE: f64 = 1e-5;
 
 /// **The least `GQ` a sample whose reads said nothing is written with a genotype at** (§4.2, owner
 /// 2026-11-02): below it, a one-in-ten chance of being wrong, the sample stays `./.` with the pass's
@@ -930,6 +938,21 @@ fn solve_round(
 
     let mut likelihoods: Vec<f64> = Vec::new();
     let mut shares: Vec<f64> = Vec::new();
+    // From round 2 the states are weighed by definite alleles, one drawn from each template's
+    // shares at each site, the background's included (phasing spec §2.3): a template that is
+    // unsure is then sometimes plainly wrong, as a soft share never is. The shares themselves stay
+    // what the prediction and the drawn haplotypes read.
+    let mut definite = (round > 1).then(|| {
+        (
+            Vec::<f64>::new(),
+            Uniforms::new(
+                StreamPurpose::DefiniteAlleles,
+                phasing.window_key,
+                sample,
+                round,
+            ),
+        )
+    });
     let mut spans = Vec::with_capacity(layout.sites());
     for (site, &index) in layout.record_of_site.iter().enumerate() {
         let record = &records[index];
@@ -950,11 +973,18 @@ fn solve_round(
             }
         }
         shares.extend(record.background_shares());
+        if let Some((drawn, uniforms)) = definite.as_mut() {
+            for template_shares in shares[share_start..].chunks_exact(record.allele_count) {
+                let allele = pick(template_shares, uniforms.next_uniform());
+                drawn.extend((0..record.allele_count).map(|a| f64::from(u8::from(a == allele))));
+            }
+        }
         spans.push((
             likelihood_start..likelihoods.len(),
             share_start..shares.len(),
         ));
     }
+    let drawn = definite.map(|(drawn, _)| drawn);
     let sites: Vec<WalkSite<'_>> = layout
         .record_of_site
         .iter()
@@ -964,6 +994,7 @@ fn solve_round(
             allele_count: records[index].allele_count,
             likelihoods: &likelihoods[likelihood_span.clone()],
             template_shares: &shares[share_span.clone()],
+            emission_shares: drawn.as_ref().map(|drawn| &drawn[share_span.clone()]),
         })
         .collect();
     let walk_templates = template_count + 1;
@@ -977,6 +1008,7 @@ fn solve_round(
                 walk_templates,
                 state.informative_positions.len() - state.hidden.len(),
                 MISMATCH,
+                Some(BACKGROUND_LANDING_SHARE),
             );
             state.parameters = Some(parameters);
             parameters
