@@ -116,6 +116,7 @@
 //! | `depth` | 30 | reads a position, both mates counted, averaged over the genome |
 //! | `deep_samples` | 0 | how many samples, the first by name, are sequenced at `deep_depth` instead of `depth` |
 //! | `deep_depth` | 30 | the reads a position of the `deep_samples` |
+//! | `depths` | — | groups of samples at one depth each, `depth:samples,...` in sample order (`30:100,5:100`); replaces `depth` and the deep samples, and must hold every sample |
 //! | `segments_per_period` | 500 | STR segments of each motif length |
 //! | `bundles` | 500 | STR bundles, all motif lengths together; `0` lays none and leaves every other output as it was without them |
 //! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle separated, as before hard shapes existed |
@@ -124,12 +125,19 @@
 //! | `inbreeding` | 0 | without founders, the chance a sample's two copies at a site are one draw; with them, the share of each sample's genome in autozygous runs |
 //! | `founders` | 0 | how many founder haplotypes the cohort descends from (spec §12); `0` draws every site's genotype on its own, byte for byte as before |
 //! | `segment_kb` | 300 | with founders: the mean stretch one copy copies from one founder |
-//! | `run_kb` | 2000 | with founders: the mean autozygous run |
+//! | `run_kb` | 2000 | with founders or haplotypes: the mean autozygous run |
+//! | `cross` | `none` | `f2`: `sim000` and `sim001` are inbred parents, founder 0 and founder 1 on both copies, and every other sample is their F2 |
+//! | `crossovers` | 1 | with `cross=f2`: crossovers on one contig in one meiosis, on average (Poisson, no interference) — one contig plays a whole chromosome |
+//! | `haplotypes` | — | a file from `scripts/msprime_haplotypes.py`: each sample's copies are two of its coalescent haplotypes (autozygous runs still laid by `inbreeding`), and each event's alleles follow their genealogy at the nearest unused sites at or after it; the events' drawn frequencies are then not used |
 //! | `snp_rate` | 0.001 | SNPs away from the segments, per base; a dense setting such as 0.01 gives tomato-like short gaps between heterozygotes, for read-backed phase (read phase spec §7.3) |
 //! | `threads` | all | how many samples are sequenced at once |
 //! | `seed` | 20261009 | the draw's seed; the whole output is a function of it and the rest |
 //!
 //! `one_outlier` makes sample `sim000` heavy PCR and every other library PCR-free.
+//!
+//! `founders`, `cross` and `haplotypes` are the three ways to draw a cohort with linkage; at most
+//! one is given. With any of them the simulator also writes `ancestry.tsv`: where each sample's
+//! copies came from — founder indices, or with `haplotypes` the haplotype file's column indices.
 //!
 //! The draw and the flank-laying functions are copied from `ng_tract_simulator.rs`, so that the
 //! two fixtures can change separately.
@@ -582,8 +590,27 @@ impl Design {
     }
 }
 
+/// A cohort bred from a cross instead of drawn from a population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cross {
+    None,
+    /// Two inbred parents, `sim000` and `sim001`, each one founder carried on both copies, and
+    /// their F2: every other sample's two copies are two meioses of the F1 (spec §12).
+    F2,
+}
+
+impl Cross {
+    fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "none" => Ok(Self::None),
+            "f2" => Ok(Self::F2),
+            other => Err(format!("unknown cross `{other}`: expected none or f2")),
+        }
+    }
+}
+
 /// Everything the output is a function of — see the module docstring's table.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Settings {
     design: Design,
     samples: usize,
@@ -591,6 +618,9 @@ struct Settings {
     /// How many samples, the first by name, are sequenced at `deep_depth` instead of `depth`.
     deep_samples: usize,
     deep_depth: f64,
+    /// Groups of samples sequenced at one depth each, `(depth, samples)`, the first group from
+    /// `sim000`; empty unless `depths` is given, and then it replaces `depth` and the deep samples.
+    depth_groups: Vec<(f64, usize)>,
     segments_per_period: usize,
     bundles: usize,
     /// The share of bundles laid in a hard shape ([`draw_hard_bundle_shape`]); the rest are laid
@@ -607,6 +637,12 @@ struct Settings {
     segment_kb: f64,
     /// The mean length of an autozygous run, in kilobases.
     run_kb: f64,
+    cross: Cross,
+    /// With `cross=f2`: the mean number of crossovers on one contig in one meiosis.
+    crossovers: f64,
+    /// A haplotype file from `scripts/msprime_haplotypes.py`: every sample's two copies are two of
+    /// its haplotypes, and every event's alleles follow the haplotypes' genealogy there.
+    haplotypes: Option<PathBuf>,
     threads: usize,
     seed: u64,
     /// SNPs away from the segments, per base.
@@ -621,6 +657,7 @@ impl Default for Settings {
             depth: 30.0,
             deep_samples: 0,
             deep_depth: 30.0,
+            depth_groups: Vec::new(),
             segments_per_period: 500,
             bundles: DEFAULT_BUNDLES,
             hard_bundle_share: DEFAULT_HARD_BUNDLE_SHARE,
@@ -630,6 +667,9 @@ impl Default for Settings {
             founders: 0,
             segment_kb: 300.0,
             run_kb: 2_000.0,
+            cross: Cross::None,
+            crossovers: 1.0,
+            haplotypes: None,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             seed: 20_261_009,
             snp_rate: SNP_RATE,
@@ -657,6 +697,7 @@ impl Settings {
                 "depth" => settings.depth = number()?,
                 "deep_samples" => settings.deep_samples = number()? as usize,
                 "deep_depth" => settings.deep_depth = number()?,
+                "depths" => settings.depth_groups = parse_depth_groups(value)?,
                 "segments_per_period" => settings.segments_per_period = number()? as usize,
                 "bundles" => settings.bundles = number()? as usize,
                 "hard_bundle_share" => settings.hard_bundle_share = number()?,
@@ -666,6 +707,9 @@ impl Settings {
                 "founders" => settings.founders = number()? as usize,
                 "segment_kb" => settings.segment_kb = number()?,
                 "run_kb" => settings.run_kb = number()?,
+                "cross" => settings.cross = Cross::parse(value)?,
+                "crossovers" => settings.crossovers = number()?,
+                "haplotypes" => settings.haplotypes = Some(PathBuf::from(value)),
                 "threads" => settings.threads = number()? as usize,
                 "seed" => settings.seed = number()? as u64,
                 "snp_rate" => settings.snp_rate = number()?,
@@ -711,6 +755,39 @@ impl Settings {
                 settings.inbreeding
             ));
         }
+        let populations = usize::from(settings.founders > 0)
+            + usize::from(settings.cross != Cross::None)
+            + usize::from(settings.haplotypes.is_some());
+        if populations > 1 {
+            return Err(
+                "founders, cross and haplotypes are three ways to draw the cohort: \
+                        give one at most"
+                    .to_string(),
+            );
+        }
+        if settings.cross == Cross::F2 {
+            if settings.samples < 3 {
+                return Err("cross=f2 needs two parents and at least one F2 sample".to_string());
+            }
+            if settings.crossovers.is_nan() || settings.crossovers <= 0.0 {
+                return Err(format!(
+                    "crossovers must be above zero, got {}",
+                    settings.crossovers
+                ));
+            }
+        }
+        if settings.haplotypes.is_some() && (settings.run_kb.is_nan() || settings.run_kb <= 0.0) {
+            return Err("run_kb must be positive".to_string());
+        }
+        if !settings.depth_groups.is_empty() {
+            let grouped: usize = settings.depth_groups.iter().map(|(_, count)| count).sum();
+            if grouped != settings.samples {
+                return Err(format!(
+                    "depths puts {grouped} samples in groups but samples={}",
+                    settings.samples
+                ));
+            }
+        }
         if settings.design == Design::OneOutlier && settings.samples < 2 {
             return Err(
                 "one_outlier needs at least two samples: one outlier, the rest clean of it"
@@ -719,6 +796,42 @@ impl Settings {
         }
         Ok(settings)
     }
+
+    /// The reads a position sample `sample` is sequenced at.
+    fn depth_of(&self, sample: usize) -> f64 {
+        if self.depth_groups.is_empty() {
+            return if sample < self.deep_samples {
+                self.deep_depth
+            } else {
+                self.depth
+            };
+        }
+        let mut first = 0;
+        for &(depth, count) in &self.depth_groups {
+            if sample < first + count {
+                return depth;
+            }
+            first += count;
+        }
+        unreachable!("parse checked the groups hold every sample")
+    }
+}
+
+/// `depths=30:100,20:100`: a depth and a number of samples a group, groups in sample order.
+fn parse_depth_groups(value: &str) -> Result<Vec<(f64, usize)>, String> {
+    value
+        .split(',')
+        .map(|group| {
+            let wrong = || format!("depths takes depth:samples groups, got `{group}`");
+            let (depth, count) = group.split_once(':').ok_or_else(wrong)?;
+            let depth: f64 = depth.parse().map_err(|_| wrong())?;
+            let count: usize = count.parse().map_err(|_| wrong())?;
+            if depth.is_nan() || depth <= 0.0 || count == 0 {
+                return Err(wrong());
+            }
+            Ok((depth, count))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2715,6 +2828,17 @@ fn ancestry_of(length: usize, settings: &Settings, draw: &mut Draw) -> Vec<Ances
     let first = founder_track(length, segment_bp, settings.founders, draw);
     let second = founder_track(length, segment_bp, settings.founders, draw);
     let runs = autozygous_track(length, settings.run_kb * 1_000.0, settings.inbreeding, draw);
+    merge_tracks(length, &first, &second, &runs)
+}
+
+/// The two copies' founder tracks and the autozygous track merged at every breakpoint of any of
+/// the three; where autozygous, the second copy is the first.
+fn merge_tracks(
+    length: usize,
+    first: &[(usize, usize)],
+    second: &[(usize, usize)],
+    runs: &[(usize, bool)],
+) -> Vec<AncestryPiece> {
     let mut breaks: Vec<usize> = first
         .iter()
         .map(|(start, _)| *start)
@@ -2728,8 +2852,8 @@ fn ancestry_of(length: usize, settings: &Settings, draw: &mut Draw) -> Vec<Ances
         .enumerate()
         .map(|(index, &start)| {
             let end = breaks.get(index + 1).copied().unwrap_or(length);
-            let autozygous = track_at(&runs, start);
-            let founder = track_at(&first, start);
+            let autozygous = track_at(runs, start);
+            let founder = track_at(first, start);
             AncestryPiece {
                 start,
                 end,
@@ -2737,12 +2861,65 @@ fn ancestry_of(length: usize, settings: &Settings, draw: &mut Draw) -> Vec<Ances
                 second: if autozygous {
                     founder
                 } else {
-                    track_at(&second, start)
+                    track_at(second, start)
                 },
                 autozygous,
             }
         })
         .collect()
+}
+
+/// One gamete of the F1 of founders 0 and 1 along a contig of `length` bases: it starts in either
+/// founder and switches at crossovers falling as a Poisson process, `crossovers` on the contig on
+/// average (no interference).
+fn meiosis_track(length: usize, crossovers: f64, draw: &mut Draw) -> Vec<(usize, usize)> {
+    let mean_bp = length as f64 / crossovers;
+    let mut founder = draw.below(2) as usize;
+    let mut track = Vec::new();
+    let mut start = 0_usize;
+    while start < length {
+        track.push((start, founder));
+        start = start.saturating_add((mean_bp * draw.exponential()).ceil().max(1.0) as usize);
+        founder ^= 1;
+    }
+    track
+}
+
+/// **One F2 sample's ancestry along one contig**: the parents `sim000` and `sim001` carry founder
+/// 0 and founder 1 on both copies; every other sample two independent gametes of their F1.
+/// Only the parents are marked autozygous, since only there is the second copy the first by
+/// construction.
+fn f2_ancestry_of(
+    sample: usize,
+    length: usize,
+    crossovers: f64,
+    draw: &mut Draw,
+) -> Vec<AncestryPiece> {
+    if sample < 2 {
+        return vec![AncestryPiece {
+            start: 0,
+            end: length,
+            first: sample,
+            second: sample,
+            autozygous: true,
+        }];
+    }
+    let first = meiosis_track(length, crossovers, draw);
+    let second = meiosis_track(length, crossovers, draw);
+    merge_tracks(length, &first, &second, &[(0, false)])
+}
+
+/// **One sample's ancestry along one contig when the cohort is read from a haplotype file**: its
+/// copies are haplotypes `2·sample` and `2·sample + 1`, except in autozygous runs (as with
+/// founders), where the second copy is the first.
+fn haplotype_ancestry_of(
+    sample: usize,
+    length: usize,
+    settings: &Settings,
+    draw: &mut Draw,
+) -> Vec<AncestryPiece> {
+    let runs = autozygous_track(length, settings.run_kb * 1_000.0, settings.inbreeding, draw);
+    merge_tracks(length, &[(0, 2 * sample)], &[(0, 2 * sample + 1)], &runs)
 }
 
 /// The piece of an ancestry that covers `position`.
@@ -2765,11 +2942,123 @@ fn founder_genotypes(
     let alleles: Vec<u8> = (0..founders)
         .map(|_| draw.categorical(frequencies) as u8)
         .collect();
+    copy_genotypes(&alleles, contig, position, ancestries)
+}
+
+/// Each sample's two copies at an event, given the allele every founder (or haplotype) carries
+/// there.
+fn copy_genotypes(
+    alleles: &[u8],
+    contig: usize,
+    position: usize,
+    ancestries: &[Vec<Vec<AncestryPiece>>],
+) -> Vec<[u8; 2]> {
     ancestries
         .iter()
         .map(|by_contig| {
             let piece = piece_at(&by_contig[contig], position);
             [alleles[piece.first], alleles[piece.second]]
+        })
+        .collect()
+}
+
+/// **The sites of a coalescent simulation** (`scripts/msprime_haplotypes.py`), whose genealogy the
+/// cohort's events borrow: an event takes the next unused sites at or after its position, and a
+/// haplotype carries allele `j + 1` there if site `j` is the first of them it carries the derived
+/// allele at, the reference otherwise. Nearby events take nearby sites, so they inherit the
+/// simulation's linkage; the events' drawn frequencies are not used.
+struct HaplotypeSites {
+    haplotypes: usize,
+    /// Per contig, every site along it: its position and, per haplotype, whether it carries the
+    /// derived allele.
+    by_contig: Vec<Vec<(usize, Vec<bool>)>>,
+}
+
+/// Read a haplotype file: a header `#contig_bp=<bases>\thaplotypes=<count>`, then one line a site,
+/// `contig\tposition\t<one 0 or 1 a haplotype>`, contigs numbered from 0, sites in order.
+fn read_haplotypes(path: &Path, contigs: &[Contig]) -> Result<HaplotypeSites, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut lines = text.lines();
+    let header = lines.next().unwrap_or("");
+    let field = |key: &str| -> Result<usize, String> {
+        header
+            .trim_start_matches('#')
+            .split('\t')
+            .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| format!("{}: header lacks {key}=", path.display()))
+    };
+    let contig_bp = field("contig_bp")?;
+    let haplotypes = field("haplotypes")?;
+    if let Some(long) = contigs.iter().find(|one| one.bases.len() > contig_bp) {
+        return Err(format!(
+            "{}: simulated contigs are {contig_bp} bases but {} has {}; simulate longer ones",
+            path.display(),
+            long.name,
+            long.bases.len()
+        ));
+    }
+    let mut by_contig = vec![Vec::new(); contigs.len()];
+    for line in lines {
+        let mut fields = line.split('\t');
+        let (Some(contig), Some(position), Some(carriers)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(format!("{}: short line `{line}`", path.display()));
+        };
+        let wrong = || format!("{}: bad line `{line}`", path.display());
+        let contig: usize = contig.parse().map_err(|_| wrong())?;
+        let position: usize = position.parse().map_err(|_| wrong())?;
+        if carriers.len() != haplotypes {
+            return Err(wrong());
+        }
+        if let Some(sites) = by_contig.get_mut(contig) {
+            sites.push((position, carriers.bytes().map(|one| one == b'1').collect()));
+        }
+    }
+    Ok(HaplotypeSites {
+        haplotypes,
+        by_contig,
+    })
+}
+
+/// Which sites each event takes: `events` as `(contig, position, sites needed)`, answered in the
+/// same order with indices into the contig's sites. Events are served along each contig in
+/// position order, each from the first unused site at or after it.
+fn assign_sites(
+    sites: &HaplotypeSites,
+    events: &[(usize, usize, usize)],
+) -> Result<Vec<Vec<usize>>, String> {
+    let mut order: Vec<usize> = (0..events.len()).collect();
+    order.sort_by_key(|&index| (events[index].0, events[index].1));
+    let mut next = vec![0_usize; sites.by_contig.len()];
+    let mut taken = vec![Vec::new(); events.len()];
+    for index in order {
+        let (contig, position, needed) = events[index];
+        let on_contig = &sites.by_contig[contig];
+        let first = on_contig[next[contig]..].partition_point(|(at, _)| *at < position);
+        let start = next[contig] + first;
+        if start + needed > on_contig.len() {
+            return Err(format!(
+                "the haplotype file runs out of sites on contig {contig} at {position}; \
+                 simulate a higher mutation rate"
+            ));
+        }
+        taken[index] = (start..start + needed).collect();
+        next[contig] = start + needed;
+    }
+    Ok(taken)
+}
+
+/// The allele every haplotype carries at an event that took `taken` on `contig`.
+fn haplotype_alleles(sites: &HaplotypeSites, contig: usize, taken: &[usize]) -> Vec<u8> {
+    (0..sites.haplotypes)
+        .map(|haplotype| {
+            taken
+                .iter()
+                .position(|&site| sites.by_contig[contig][site].1[haplotype])
+                .map_or(0, |first| first as u8 + 1)
         })
         .collect()
 }
@@ -2850,7 +3139,63 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
         })
         .collect();
     let ancestries: Vec<Vec<Vec<AncestryPiece>>>;
-    let (segment_genotypes, generic_genotypes, bundle_genotypes) = if settings.founders == 0 {
+    let (segment_genotypes, generic_genotypes, bundle_genotypes) = if let Some(path) =
+        &settings.haplotypes
+    {
+        let sites = read_haplotypes(path, &contigs)?;
+        if sites.haplotypes < 2 * settings.samples {
+            return Err(format!(
+                "{} holds {} haplotypes, too few for {} samples",
+                path.display(),
+                sites.haplotypes,
+                settings.samples
+            ));
+        }
+        let mut founder_draw = Draw::new(settings.seed ^ FOUNDER_SEED_SALT);
+        ancestries = (0..settings.samples)
+            .map(|sample| {
+                contigs
+                    .iter()
+                    .map(|contig| {
+                        haplotype_ancestry_of(
+                            sample,
+                            contig.bases.len(),
+                            settings,
+                            &mut founder_draw,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut wanted: Vec<(usize, usize, usize)> = Vec::new();
+        wanted.extend(
+            segments
+                .iter()
+                .map(|one| (one.contig, one.window_start(), one.alleles.len() - 1)),
+        );
+        wanted.extend(generic.iter().map(|one| (one.contig, one.position, 1)));
+        wanted.extend(
+            bundles
+                .iter()
+                .map(|one| (one.contig, one.window_start(), one.alleles.len() - 1)),
+        );
+        let taken = assign_sites(&sites, &wanted)?;
+        let mut genotypes = wanted
+            .iter()
+            .zip(&taken)
+            .map(|(&(contig, position, _), taken)| {
+                copy_genotypes(
+                    &haplotype_alleles(&sites, contig, taken),
+                    contig,
+                    position,
+                    &ancestries,
+                )
+            });
+        let segment_genotypes = genotypes.by_ref().take(segments.len()).collect();
+        let generic_genotypes = genotypes.by_ref().take(generic.len()).collect();
+        let bundle_genotypes = genotypes.collect();
+        (segment_genotypes, generic_genotypes, bundle_genotypes)
+    } else if settings.founders == 0 && settings.cross == Cross::None {
         ancestries = Vec::new();
         let segment_genotypes = segments
             .iter()
@@ -2885,14 +3230,25 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
     } else {
         let mut founder_draw = Draw::new(settings.seed ^ FOUNDER_SEED_SALT);
         ancestries = (0..settings.samples)
-            .map(|_| {
+            .map(|sample| {
                 contigs
                     .iter()
-                    .map(|contig| ancestry_of(contig.bases.len(), settings, &mut founder_draw))
+                    .map(|contig| match settings.cross {
+                        Cross::None => ancestry_of(contig.bases.len(), settings, &mut founder_draw),
+                        Cross::F2 => f2_ancestry_of(
+                            sample,
+                            contig.bases.len(),
+                            settings.crossovers,
+                            &mut founder_draw,
+                        ),
+                    })
                     .collect()
             })
             .collect();
-        let founders = settings.founders;
+        let founders = match settings.cross {
+            Cross::None => settings.founders,
+            Cross::F2 => 2,
+        };
         let segment_genotypes = segments
             .iter()
             .map(|segment| {
@@ -3778,11 +4134,7 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
                             return Ok(done);
                         }
                         let seed = sample_seed(settings.seed, sample);
-                        let depth = if sample < settings.deep_samples {
-                            settings.deep_depth
-                        } else {
-                            settings.depth
-                        };
+                        let depth = settings.depth_of(sample);
                         let one =
                             sequence_sample(&cohort, sample, fragments_at(depth), seed, out_dir)?;
                         done.push((sample, one));
@@ -3864,13 +4216,17 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
         cohort.generic.len(),
         cohort.generic.iter().filter(|one| one.is_snp()).count()
     );
-    println!(
-        "fragments a sample  : {} ({} reads); the {} deep samples {}",
-        fragments_at(settings.depth),
-        2 * fragments_at(settings.depth),
-        settings.deep_samples,
-        fragments_at(settings.deep_depth)
-    );
+    let mut depths: Vec<f64> = (0..settings.samples)
+        .map(|sample| settings.depth_of(sample))
+        .collect();
+    depths.dedup();
+    for depth in depths {
+        println!(
+            "fragments a sample  : {} ({} reads) at {depth}x",
+            fragments_at(depth),
+            2 * fragments_at(depth)
+        );
+    }
     println!("stutter events      : {stutter_events} over all samples");
     println!("settings            : {settings:?}");
     Ok(())
@@ -5009,5 +5365,63 @@ mod tests {
         );
         assert_eq!(TYPING_PURITY_FLOOR, DEFAULT_MIN_PURITY);
         assert_eq!(LONGEST_BUNDLE_GAP as u64, DEFAULT_BUNDLE_THRESHOLD - 1);
+    }
+
+    #[test]
+    fn f2_parents_are_inbred_and_their_offspring_copy_only_them() {
+        let length = 1_000_000;
+        let mut draw = Draw::new(7);
+        for parent in 0..2 {
+            let pieces = f2_ancestry_of(parent, length, 1.0, &mut draw);
+            assert_eq!(pieces.len(), 1);
+            assert_eq!((pieces[0].first, pieces[0].second), (parent, parent));
+        }
+        let mut crossovers = 0;
+        let meioses = 2_000;
+        for _ in 0..meioses / 2 {
+            let pieces = f2_ancestry_of(2, length, 1.0, &mut draw);
+            assert!(pieces.iter().all(|one| one.first < 2 && one.second < 2));
+            assert_eq!(pieces.last().map(|one| one.end), Some(length));
+            crossovers += pieces
+                .windows(2)
+                .map(|pair| {
+                    usize::from(pair[0].first != pair[1].first)
+                        + usize::from(pair[0].second != pair[1].second)
+                })
+                .sum::<usize>();
+        }
+        // One crossover a meiosis on average.
+        let mean = crossovers as f64 / meioses as f64;
+        assert!((mean - 1.0).abs() < 0.1, "{mean}");
+    }
+
+    #[test]
+    fn an_event_takes_the_next_unused_sites_and_its_first_derived_one_names_the_allele() {
+        let carriers = |text: &str| text.bytes().map(|one| one == b'1').collect::<Vec<_>>();
+        let sites = HaplotypeSites {
+            haplotypes: 4,
+            by_contig: vec![vec![
+                (10, carriers("1000")),
+                (20, carriers("0100")),
+                (30, carriers("1110")),
+                (40, carriers("0001")),
+            ]],
+        };
+        // Asked out of order: the one at 15 is served first along the contig.
+        let taken = assign_sites(&sites, &[(0, 25, 1), (0, 15, 2)]).unwrap();
+        assert_eq!(taken, vec![vec![3], vec![1, 2]]);
+        assert_eq!(haplotype_alleles(&sites, 0, &taken[1]), vec![2, 1, 2, 0]);
+        assert!(assign_sites(&sites, &[(0, 35, 2)]).is_err());
+    }
+
+    #[test]
+    fn depth_groups_assign_depths_in_sample_order_and_must_hold_every_sample() {
+        let words = |text: &str| text.split(' ').map(String::from).collect::<Vec<_>>();
+        let settings = Settings::parse(&words("samples=5 depths=30:2,5:3")).unwrap();
+        let depths: Vec<f64> = (0..5).map(|one| settings.depth_of(one)).collect();
+        assert_eq!(depths, vec![30.0, 30.0, 5.0, 5.0, 5.0]);
+        assert!(Settings::parse(&words("samples=6 depths=30:2,5:3")).is_err());
+        assert!(Settings::parse(&words("samples=5 depths=30:2,x:3")).is_err());
+        assert!(Settings::parse(&words("samples=5 cross=f2 founders=2")).is_err());
     }
 }
