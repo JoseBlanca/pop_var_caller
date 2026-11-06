@@ -139,8 +139,9 @@ Terms about phase, shared with the phase output spec:
   records are under cis than under trans (§2.5). Positive values favour cis.
 - **Consensus**: the pass's average of each sample's two haplotypes over its rounds (phase output
   spec §2.1). Where it leans by at least `LEAN_MIN` = 0.5 at a heterozygote, the pass can orient it.
-- **Population link**: a link the pass keeps because all 36 of its drawn paths agree and lean
-  (phase output spec §2.3).
+- **Population link**: a link the pass keeps because enough of its 36 drawn paths agree and lean —
+  0.8 of them by default (`--phase-min-path-agreement`), all of them when this spec was written
+  (phase output spec §2.3, §9).
 - **Copying length**, `S`: the pass's fitted length of the stretches a sample copies from one
   template, 30 or 300 kb. No link is kept between records farther apart than `S` (phase output spec
   §2.3).

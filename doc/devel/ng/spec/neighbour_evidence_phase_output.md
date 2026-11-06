@@ -472,9 +472,14 @@ Both questions were ruled by the owner on 2026-11-02:
 - **The 1% ceiling** (owner): a parameter the user may want to set. Measured (§7.1), the share of
   disagreeing paths is not an error rate. The owner then ruled to expose it as a **quality proxy**
   instead: `--phase-min-path-agreement`, the share of the 36 paths that must agree, and lean, at a
-  link. The default is 1 (all, the rule of §2.3); lowering it gives longer blocks with more wrong
-  links. The user page states the error rates measured for each kind of cohort, and says that 1 is
-  the strictest setting and still leaves outbred cohorts at 1.2% to 36% (§6).
+  link. Lowering it gives longer blocks with more wrong links. The user page states the error rates
+  measured for each kind of cohort, and says that 1 is the strictest setting and still leaves
+  outbred cohorts at 1.2% to 36% (§6).
+- **The default is 0.8** (owner, 2026-11-06; it was 1, all paths, until then): optimized for
+  inbreeding 0 to 0.8 and samples at 5× to 30×. From 12 samples up it keeps wrong links under half
+  a link in 100 and phases 3% to 27% more heterozygotes right than 1; at 4 samples no share
+  keeps under 1 in 100, and 0.8 raises them from 1.5–3.2 in 100 to 3.3–4.8
+  (`doc/devel/reports/implementations/phase_agreement_default_2026-11-06.md`).
 - **Read evidence through chain ids** (owner, 2026-11-02): now or later. Placed in a following stage
   (§8), with its reach measured first.
 

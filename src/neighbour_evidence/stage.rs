@@ -66,7 +66,7 @@ pub struct NeighbourEvidenceDecision {
     /// The window sizes the run plans with.
     pub sizes: WindowSizes,
     /// The share of drawn paths that must agree at a phase link (`--phase-min-path-agreement`,
-    /// phase output spec §9); [`decide`] sets all of them.
+    /// phase output spec §9); [`decide`] sets [`PathAgreement::DEFAULT`].
     pub path_agreement: PathAgreement,
     /// Whether each sample's fragments orient its haplotypes in the rounds' draws
     /// (`neighbour_evidence_reads_in_draw.md`); [`decide`] sets it. Off only where a test needs
@@ -160,7 +160,7 @@ pub fn decide(
         why,
         inbreeding_by_sample: inbreeding_by_sample.to_vec(),
         sizes: WindowSizes::default(),
-        path_agreement: PathAgreement::ALL,
+        path_agreement: PathAgreement::DEFAULT,
         reads_in_draw: true,
     }
 }
