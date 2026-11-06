@@ -17,7 +17,7 @@ The tools used in the comparison were:
 - HipSTR 0.6.2;
 - Beagle 4.1 and STITCH 1.8.5.
 
-## SNPs and indels across a chromosome: HG002, chromosome 20
+## HG002, chromosome 20
 
 GIAB sample HG002 over the whole of chromosome 20, scored against GIAB's v4.2.1 truth set in
 its confident regions. pvc version b45c7f50.
@@ -83,7 +83,15 @@ nearby SNPs and indels as one complex record):
 | 30× | 1 · 23 | 7 · 13 | 17 · 43 | 1 · 13 |
 | ~60× | 1 · 20 | 5 · 11 | 27 · 40 | 0 · 11 |
 
-## Genotype counts
+## The GIAB trio
+
+The child HG002 and the parents HG003 and HG004, called together over 100 regions (452 kb) where
+the truth sets of all three are confident. Counts are summed over the three samples. pvc version
+fedb2290.
+
+![SNP and indel errors in the GIAB trio, called jointly, at 5×, 10×, 30× and about 300×](figures/errors_giab_trio_snps_indels.svg)
+
+![STR and complex-variant errors in the GIAB trio, called jointly](figures/errors_giab_trio_strs_complex.svg)
 
 The figures show counts for three kinds of genotyping mistakes:
 
@@ -99,31 +107,18 @@ written as one record). A variant counted as complex for one caller may be a SNP
 for another: freebayes writes variants a few bases apart as one record, so most of its
 complex counts are SNPs and indels the other callers write separately.
 
-## The GIAB trio
-
-The child HG002 and the parents HG003 and HG004, called together over 100 regions (452 kb) where
-the truth sets of all three are confident. Counts are summed over the three samples. pvc version
-fedb2290.
-
-![SNP and indel errors in the GIAB trio, called jointly, at 5×, 10×, 30× and about 300×](figures/errors_giab_trio_snps_indels.svg)
-
-![STR and complex-variant errors in the GIAB trio, called jointly](figures/errors_giab_trio_strs_complex.svg)
-
-- **At 5× and 10×, pvc gets about as many genotypes wrong as the other callers, and leaves almost
-  none missing.** At 5×, each caller gives the wrong genotype for between about 180 and 260 of
+At 5× and 10×, pvc gets about as many genotypes wrong as the other callers, and leaves almost
+  none missing. At 5×, each caller gives the wrong genotype for between about 180 and 260 of
   the trio's true SNP genotypes. Besides those, GATK and DeepVariant leave about 150 missing, pvc
   about 12. The same holds for STRs: at 5× each caller gets 30 to 50 wrong, and GATK and
   DeepVariant leave another 17 and 25 missing, pvc 1.
-- **At 5× and 10×, pvc calls a few more SNPs where there is none**: about 10 at each depth, against
-  2 to 4 for the others.
-- **At 30× and above, every caller makes 12 errors or fewer of any kind.** Complex variants are
+
+At 30× and above, every caller makes 12 errors or fewer of any kind. Complex variants are
   almost error-free at every depth.
 
 **Mendelian errors.** In a trio, a child's genotype must be possible given the parents': a child
 `1/1` cannot have a `0/0` parent. A genotype that breaks this rule is a mistake in at least one of
-the three, whichever the truth is, so the count needs no truth set. Among the sites where all
-three samples have a genotype, the record passes the caller's filters, and at least one sample
-carries a variant:
+the three, whichever the truth is, so the count needs no truth set. 
 
 SNPs:
 
@@ -143,17 +138,13 @@ Indels:
 | 30× | 1 of 87 | 1 of 78 | 1 of 102 | 1 of 79 |
 | ~300× | 1 of 116 | 1 of 79 | 1 of 92 | 1 of 78 |
 
-The GIAB truth sets themselves have 0 errors among 667 SNP sites and 1 among 79 indel sites over
-these regions. At 5× the share of SNP sites with an error is about the same for the four callers,
-one in seven to one in nine; pvc checks more sites (579, against 428 to 510), because it leaves
-fewer genotypes missing. For indels at 5×, GATK has an error at one site in three, the other
+At 5× the share of SNP sites with an error is about the same for the four callers,
+one in seven to one in nine. For indels at 5×, GATK has an error at one site in three, the other
 three callers at about one in five.
 
-## Repeats: the GIAB tandem-repeat benchmark
+## GIAB tandem-repeats
 
-HG002 alone, over the 50,000 regions (6.1 Mb) of GIAB's tandem-repeat benchmark v1.0.1. pvc
-calls the STR loci with a dedicated STR model rather than the generic model used for SNPs and
-short indels. pvc version fedb2290.
+HG002 sample over the 50,000 regions (6.1 Mb) of GIAB's tandem-repeat benchmark v1.0.1. pvc version fedb2290.
 
 At each depth, how many of the 6,995 repeats where the truth carries a variant each caller
 genotypes right, compared as repeat lengths:
@@ -170,24 +161,24 @@ genotypes right, compared as repeat lengths:
 
 freebayes was not run on this benchmark.
 
-## Simulated STRs: stutter with an exact truth
+## Simulated STRs
 
-Real data cannot say how a caller copes with stutter, because neither the true genotypes at
-every repeat nor the stutter rates are known. Here both are. A 4 Mb genome is drawn with 3,000
+In the simulation a 4 Mb genome is drawn with 3,000
 STRs, 500 for each motif length from 1 to 6 bases, and reads are drawn from it through a stutter
-model, then mapped with minimap2. The simulation is run twice: once with PCR stutter, where a
+model, then mapped with minimap2. Per sample, 1,202 of the 3,000 STRs carry a variant
+in the truth and 1,798 are reference. The simulation is run twice: once with PCR stutter, where a
 read often gains or loses a repeat unit, and once with the much lower stutter of a PCR-free
 library. Each is called with 1 sample and with 50, at 5×, 15×, 30× and 60×.
 
-The unit counted is one sample at one STR. Per sample, 1,202 of the 3,000 STRs carry a variant
-in the truth and 1,798 are reference. Each cell gives two numbers:
-
-- the share of the variant genotypes called **right**: both of the sample's sequences over the
-  STR, and 30 bases either side, are the truth's;
-- the **false calls** per 1,000 reference genotypes: a variant called where the sample has none.
-
 pvc version fedb2290 estimated its parameters, stutter included, from the run's own reads. freebayes is kept at
 QUAL ≥ 20. HipSTR ran at its defaults.
+
+![False positives against false negatives in simulated homopolymers, 50 samples, with PCR stutter and PCR-free, 5× to 60×](figures/errors_stutter_homopolymers_50s.svg)
+
+*Homopolymers in 50 samples, with and without PCR stutter. Each line is one caller, joining its
+results from 5× to 60×: one point per depth, larger for more reads. False positives are counted
+among the 15,275 reference genotypes, false negatives among the 9,725 variant genotypes. The
+bottom-left corner is the best. Both panels have the same log scales. pvc version b45c7f50.*
 
 **PCR stutter.** Share right, then false calls per 1,000:
 
@@ -215,21 +206,18 @@ QUAL ≥ 20. HipSTR ran at its defaults.
 | 50 | 30× | 100% · 0 | 98% · 4 | 97% · 7 | 94% · 1 |
 | 50 | 60× | 100% · 0 | 99% · 2 | 99% · 3 | 94% · 0 |
 
-- **With PCR stutter, the callers without a stutter model call stutter as variants.** At 30× in
+The counts in these tables correspond one STR in one sample. Each cell gives two numbers:
+
+- the share of the variant genotypes called **right**: both of the sample's sequences over the
+  STR, and 30 bases either side, are the truth's;
+- the **false calls** per 1,000 reference genotypes: a variant called where the sample has none.
+
+With PCR stutter, the callers without a stutter model tend to call stutter as variants. At 30× in
   50 samples, GATK and freebayes call a variant at about 120 of every 1,000 reference genotypes,
   pvc at 7 and HipSTR at 16. More reads do not help them: GATK's false calls rise with depth,
-  in one sample from 28 per 1,000 at 5× to 219 at 60×. They are worst in homopolymers, where
-  stutter is highest: at 30× in 50 samples GATK calls a variant at 371 of every 1,000 reference
-  homopolymer genotypes and at 67 for longer motifs; pvc at 25 and 3.
-- **Without PCR stutter, every caller makes few false calls**, at most 22 per 1,000. The
-  differences are in the share right, and largest at 5× in 50 samples: pvc 75%, HipSTR 66%,
-  freebayes 59% and GATK 48%. GATK leaves about
-  one genotype in eight missing there (7,520 of 61,458).
-- **HipSTR calls nothing in one sample at its defaults.** It needs about 100 reads at a repeat
-  before it calls it. Given a fixed stutter model and no read floor, it reaches 91% right at 60×
-  with PCR stutter, with 139 false calls per 1,000.
-- **pvc's stutter estimated from the reads is as good as the true one.** Given the simulator's
-  own stutter rates instead, pvc gets the same share right to within 3 points in every row.
+  in one sample from 28 per 1,000 at 5× to 219 at 60×.
+
+Without PCR stutter, every caller makes few false calls, at most 22 per 1,000.
 
 ## Simulated inbreeding: does a wrong F cost genotypes?
 

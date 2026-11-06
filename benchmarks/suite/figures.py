@@ -503,76 +503,90 @@ SCATTER_SIZES = [5, 8.5, 12, 15.5, 19]
 
 def error_scatter_figure(rows, benchmark, title, subtitle, out, name):
     """Two figures, `<name>_scatter_snps_indels` and `<name>_scatter_strs_complex`."""
-    styles = {c: dict(STYLE[c], label=SCATTER_LABEL.get(c, STYLE[c]["label"]),
-                      linestyle="-") for c in ERROR_FIGURE_CALLERS}
     made = []
     for suffix, kinds_title, kinds in KIND_FIGURES:
         panels = [(t, error_counts(rows, benchmark, kind)) for t, kind in kinds]
         panels = [(t, c) for t, c in panels if c]
-        if not panels:
-            continue
-        depths = sorted({d for _, c in panels for d, _ in c}, key=depth_key)
-        fig, axes = plt.subplots(len(panels), 1, figsize=(6.4, 5.6 * len(panels)),
-                                 facecolor=SURFACE, squeeze=False)
-        for (panel, counts), ax in zip(panels, axes[:, 0]):
-            series = {}
-            for depth, caller in sorted(counts, key=lambda k: depth_key(k[0])):
-                c = counts[(depth, caller)]
-                series.setdefault(caller, []).append(
-                    (c.get("wrong_gt_truth_ref", 0), c.get("wrong_gt_truth_var", 0),
-                     depth))
-            style_axes(ax, "false positives: a variant called where the truth is reference",
-                       "false negatives: the truth has a variant and the call\n"
-                       "is not its genotype", panel)
-            size = {d: SCATTER_SIZES[i] for i, d in enumerate(depths)}
-            for caller in ERROR_FIGURE_CALLERS:
-                pts = series.get(caller)
-                if not pts:
-                    continue
-                st = styles[caller]
-                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-                ax.plot(xs, ys, color=st["color"], linewidth=1.6, alpha=0.7, zorder=2)
-                # Hollow, so markers that overlap where the callers crowd still show.
-                for x, y, depth in pts:
-                    ax.plot(x, y, linestyle="none", marker=st["marker"],
-                            markersize=size[depth], markerfacecolor="none",
-                            markeredgecolor=st["color"], markeredgewidth=1.8, zorder=3)
-                ax.annotate(st["label"], (xs[-1], ys[-1]), xytext=(10, 0),
-                            textcoords="offset points", fontsize=8.5, color=TEXT, va="center",
-                            zorder=4, gid="caller")
-            points = [p for pts in series.values() for p in pts]
-            for i, (setter, limits) in enumerate(((ax.set_xscale, ax.set_xlim),
-                                                  (ax.set_yscale, ax.set_ylim))):
-                values = [p[i] for p in points]
-                if min(values) == 0:
-                    # The zero stretch only where some caller has a zero.
-                    setter("symlog", linthresh=1, linscale=0.4)
-                    limits(-0.3, max(values) * 1.6)
-                else:
-                    limits(min(values) / 1.6, max(values) * 1.6)
-            fmt = FuncFormatter(lambda v, _: f"{v:,.0f}" if v >= 1 else "0")
-            minor = FuncFormatter(lambda v, _: f"{v:,.0f}" if is_two_or_five(v) else "")
-            for axis in (ax.xaxis, ax.yaxis):
-                axis.set_major_formatter(fmt)
-                axis.set_minor_formatter(minor if axis.get_scale() == "log" else NullFormatter())
-        fig.tight_layout(rect=(0, 0.03, 1, 1))
-        handles = [Line2D([], [], linestyle="none", marker="o", markersize=SCATTER_SIZES[i],
-                          markerfacecolor="none", markeredgecolor=TEXT_2, markeredgewidth=1.8,
-                          label=depth_label(d)) for i, d in enumerate(depths)]
-        fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
-                   fontsize=9, bbox_to_anchor=(0.5, -0.01), labelcolor=TEXT,
-                   title="read depth", title_fontsize=9)
-        pt = 1 / 72 / fig.get_figheight()
-        y = 4
-        for text, size, colour in ((subtitle, 9, TEXT_2), (f"{title}: {kinds_title}", 13, TEXT)):
-            if not text:
-                continue
-            wrapped = textwrap.fill(text, int(fig.get_figwidth() * 72 / (0.5 * size)))
-            fig.text(0.01, 1 + y * pt, wrapped, ha="left", va="bottom", color=colour,
-                     fontsize=size, linespacing=1.3)
-            y += (wrapped.count("\n") + 1) * size * 1.3 + 2
-        made.append(save(fig, out, f"{name}_scatter_{suffix}"))
+        if panels:
+            made.append(scatter_figure(panels, f"{title}: {kinds_title}", subtitle, out,
+                                       f"{name}_scatter_{suffix}"))
     return made
+
+
+def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALLERS,
+                   shared_axes=False):
+    """One panel a row, false positives against false negatives, one line a caller through its
+    depths. `panels`: (panel title, {(depth, caller): error counts}). With `shared_axes`, every
+    panel has the same scales, so the panels compare at a glance."""
+    styles = {c: dict(STYLE[c], label=SCATTER_LABEL.get(c, STYLE[c]["label"]),
+                      linestyle="-") for c in callers}
+    depths = sorted({d for _, c in panels for d, _ in c}, key=depth_key)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(6.4, 5.6 * len(panels)),
+                             facecolor=SURFACE, squeeze=False)
+    for (panel, counts), ax in zip(panels, axes[:, 0]):
+        series = {}
+        for depth, caller in sorted(counts, key=lambda k: depth_key(k[0])):
+            c = counts[(depth, caller)]
+            series.setdefault(caller, []).append(
+                (c.get("wrong_gt_truth_ref", 0), c.get("wrong_gt_truth_var", 0),
+                 depth))
+        style_axes(ax, "false positives: a variant called where the truth is reference",
+                   "false negatives: the truth has a variant and the call\n"
+                   "is not its genotype", panel)
+        size = {d: SCATTER_SIZES[i] for i, d in enumerate(depths)}
+        for caller in callers:
+            pts = series.get(caller)
+            if not pts:
+                continue
+            st = styles[caller]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            ax.plot(xs, ys, color=st["color"], linewidth=1.6, alpha=0.7, zorder=2)
+            # Hollow, so markers that overlap where the callers crowd still show.
+            for x, y, depth in pts:
+                ax.plot(x, y, linestyle="none", marker=st["marker"],
+                        markersize=size[depth], markerfacecolor="none",
+                        markeredgecolor=st["color"], markeredgewidth=1.8, zorder=3)
+            ax.annotate(st["label"], (xs[-1], ys[-1]), xytext=(10, 0),
+                        textcoords="offset points", fontsize=8.5, color=TEXT, va="center",
+                        zorder=4, gid="caller")
+        points = [p for pts in series.values() for p in pts]
+        if shared_axes:
+            points = [(c.get("wrong_gt_truth_ref", 0), c.get("wrong_gt_truth_var", 0))
+                      for _, cs in panels for c in cs.values()]
+        for i, (setter, limits) in enumerate(((ax.set_xscale, ax.set_xlim),
+                                              (ax.set_yscale, ax.set_ylim))):
+            values = [p[i] for p in points]
+            if min(values) == 0:
+                # The zero stretch only where some caller has a zero.
+                setter("symlog", linthresh=1, linscale=0.4)
+                limits(-0.3, max(values) * 1.6)
+            else:
+                limits(min(values) / 1.6, max(values) * 1.6)
+        fmt = FuncFormatter(lambda v, _: f"{v:,.0f}" if v >= 1 else "0")
+        minor = FuncFormatter(lambda v, _: f"{v:,.0f}" if is_two_or_five(v) else "")
+        for axis, (low, high) in ((ax.xaxis, ax.get_xlim()), (ax.yaxis, ax.get_ylim())):
+            axis.set_major_formatter(fmt)
+            # Over more than three decades the 2s and 5s crowd the decades' own labels.
+            crowded = low > 0 and high / low > 1e3
+            axis.set_minor_formatter(minor if axis.get_scale() == "log" and not crowded
+                                     else NullFormatter())
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    handles = [Line2D([], [], linestyle="none", marker="o", markersize=SCATTER_SIZES[i],
+                      markerfacecolor="none", markeredgecolor=TEXT_2, markeredgewidth=1.8,
+                      label=depth_label(d)) for i, d in enumerate(depths)]
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
+               fontsize=9, bbox_to_anchor=(0.5, -0.01), labelcolor=TEXT,
+               title="read depth", title_fontsize=9)
+    pt = 1 / 72 / fig.get_figheight()
+    y = 4
+    for text, size, colour in ((subtitle, 9, TEXT_2), (title, 13, TEXT)):
+        if not text:
+            continue
+        wrapped = textwrap.fill(text, int(fig.get_figwidth() * 72 / (0.5 * size)))
+        fig.text(0.01, 1 + y * pt, wrapped, ha="left", va="bottom", color=colour,
+                 fontsize=size, linespacing=1.3)
+        y += (wrapped.count("\n") + 1) * size * 1.3 + 2
+    return save(fig, out, name)
 
 
 # The simulated stuttering benchmark scores with its own scorer (scripts/ng_str_stutter_score.py):
@@ -617,6 +631,26 @@ def stutter_figures(rows, out):
             "Drawn 4 Mb genome with exact truth; the unit is one sample at one STR; "
             "HipSTR is not given the bundles", out, f"errors_stutter_{slug}_{samples}s"))
     return made
+
+
+# The homopolymer figure: the 50-sample cohort, one panel per library, drawn like the chromosome 20
+# scatter. A genotype left missing counts as a false negative.
+HOMOPOLYMER_CALLERS = ["pvc (fitted)", "GATK", "freebayes", "HipSTR"]
+
+
+def stutter_homopolymer_figure(rows, out, samples="50"):
+    panels = []
+    for title, dataset in (("PCR stutter", "simulated 4 Mb, pcr stutter"),
+                           ("PCR-free", "simulated 4 Mb, pcr-free stutter")):
+        counts = stutter_counts(rows, dataset, samples, ["STR segment, motif length 1"])
+        panels.append((title, {key: dict(c, wrong_gt_truth_var=c["wrong_gt_truth_var"]
+                                         + c["no_call"])
+                               for key, c in counts.items() if key[1] in HOMOPOLYMER_CALLERS}))
+    if not all(c for _, c in panels):
+        return None
+    return scatter_figure(panels, f"Errors — simulated homopolymers, {samples} samples", None,
+                          out, f"errors_stutter_homopolymers_{samples}s",
+                          callers=HOMOPOLYMER_CALLERS, shared_axes=True)
 
 
 # The performance figures' lines: (line, caller in the table, its stages in order of preference).
@@ -712,6 +746,7 @@ def main():
                                  "complex, not STRs", out, "errors_hg002_tr",
                                  exclude=("HipSTR",)),
         *stutter_figures(rows, out),
+        stutter_homopolymer_figure(rows, out),
         *inbreeding_figures(rows, out),
         inbreeding_scatter_figure(rows, out),
         performance_figure(
