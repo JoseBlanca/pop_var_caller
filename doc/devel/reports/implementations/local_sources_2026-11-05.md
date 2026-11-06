@@ -117,6 +117,45 @@ sample at 400 samples against 4.8 ms before, and grows with the cohort as the ol
 candidate against every compared record; the refine_sim benchmark on rick measures it at 400
 samples.
 
+### 4.1 The refine_sim benchmark on rick, 400 samples (2026-11-06)
+
+`run_suite.sh --only refine_sim --caller pvc`, results in `benchmark_results/pvc/7120e12d/`, against
+the pvc run before (`8f635ece`, which predates `refine_sources_2026-11-05.md` too, so the change
+measured is both) and the competitors' run of 2026-11-05. The F2 is the same design as §4; the
+natural cohorts have 400 samples, 100 each at 30×, 10×, 5× and 2×. SNPs, genotypes of samples, with
+the refinement pass on:
+
+| cohort, depth, reads | wrong, truth variant: before → now | wrong, truth reference | no call | right |
+|---|---|---|---|---|
+| F2 1×, with reads | 2,208 → **266** | 56 → 61 | 5 → 2 | 11,077 → 13,028 |
+| F2 1×, without reads | 14 → 45 | 0 → 2 | 3,449 → **966** | 4,531 → 6,990 |
+| outbred 2×, with reads | 1,842 → 1,838 | 1,510 → 1,549 | 140 → 27 | |
+| outbred 2×, without reads | 40 → 132 | 7 → 9 | 25,682 → **4,407** | 81,040 → 102,173 |
+| outbred 5×, without reads | 5 → 9 | 0 → 0 | 1,067 → 223 | 4,714 → 5,550 |
+| selfing 2×, with reads | 708 → **383** | 308 → 398 | 5 → 2 | |
+| selfing 2×, without reads | 34 → 116 | 7 → 23 | 2,700 → 840 | 35,931 → 37,589 |
+| selfing 5×, with reads | 266 → 171 | 177 → 233 | 2 → 0 | |
+
+- **The F2 gain repeats at full size**: heterozygotes called homozygous fall from 2,208 to 266, and
+  where an F2 plant has no read, the pass now fills 7 in 8 genotypes rather than 4 in 7.
+- **The natural cohorts fill far more genotypes without reads** (outbred 2×: no calls 25,682 →
+  4,407), at about 1 wrong for every 160 more filled right.
+- **Selfing**: false heterozygotes (wrong, truth reference) rise by 90 at 2× and 56 at 5×, against
+  325 and 95 fewer missed heterozygotes.
+- **Against the competitors** (same run's tables): at 2× outbred, with reads, pvc misses 1,838 true
+  variant genotypes, STITCH 1,878, Beagle 7,917, GATK 11,874; pvc leaves 27 without a call, STITCH
+  28,997. Without reads, Beagle calls everything and gets 1,886 wrong; pvc leaves 4,407 uncalled and
+  gets 141 wrong. On the F2, pvc gets 266 wrong with reads, STITCH 471, Beagle 4,144.
+- **Phase moved two ways.** Outbred: heterozygotes phased right fall from 108,656 to 98,871 of
+  145,951 (links 77,025 → 60,231; wrong links 13 → 1). Selfing: 8,875 → 10,059 of 14,206. F2: 122 →
+  3,087 of 7,107. Which of the two changes cost the outbred phase is not measured.
+- **Speed**: the pass (call-from-psps with it on, less with it off) takes 26 s at 400 outbred
+  samples against 39 s before, 24 s against 33 s selfing. Peak memory of call-from-psps with the
+  pass rises 1,707 → 1,782 MB outbred and 1,058 → 1,368 MB selfing.
+- Not this change: pvc's outbred 5× and 10× groups carry about 2,200 to 2,900 false variant
+  genotypes with reads (wrong, truth reference), refinement off and on, before and now, against
+  under 300 for every competitor. Not traced.
+
 ## 5. What is left
 
 - **A shallow close relative can rank below a deep distant one**: it cannot win a stretch it has no
