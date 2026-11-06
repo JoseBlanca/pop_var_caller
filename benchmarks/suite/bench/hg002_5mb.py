@@ -17,6 +17,8 @@ small variants, scored by RTG vcfeval inside the intervals, as for the per-sampl
 and memory rows are each caller's whole pipeline on this one sample at 6 threads: pvc both ways
 (one step, and generate-psps + estimate-parameters + call-from-psps), GATK HaplotypeCaller with 6
 pair-HMM threads, freebayes as 6 processes over blocks of the intervals.
+pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
+called with the SNP/indel model instead of left uncalled.
 """
 
 DEPTHS = ["30x", "full"]
@@ -53,7 +55,8 @@ def steps(ctx):
                     samples=1, depth=depth, region_bp=arms.BedLength(regions))
         for arm in ARMS:
             step, callset = arms.arm_steps(ctx, arm, f"hg002_5mb/{depth}", GRCH38, catalog,
-                                           {"HG002": alignment("HG002", depth)}, regions, base)
+                                           {"HG002": alignment("HG002", depth)}, regions, base,
+                                           call_satellites=arms.GIAB_CALL_SATELLITES)
             out.append(step)
             out.append(arms.score_step(ctx, callset, base, truth, regions, scoring,
                                        call_sample="HG002", truth_sample="HG002"))

@@ -9,10 +9,6 @@ sample for the one-sample stages (pvc generate-psps, GATK HaplotypeCaller GVCFs)
 process for the cohort stages, freebayes as 6 processes over blocks of the regions. GATK's cohort
 stages are single-threaded and run as GATK's joint-calling workflow runs them, one process per
 shard of the regions.
-
-GATK's GVCFs are made once, for the largest cohort (lib/arms.py, `gvcf_store_step`): a sample's
-GVCF is the same file in every cohort, and making it again for each would add hours that say
-nothing new. A cohort's per-sample stage figures are derived from those runs and marked so.
 """
 
 import os
@@ -31,12 +27,13 @@ wall_seconds is elapsed time, cpu_seconds user plus system time summed over ever
 peak_rss_mb_all_processes the largest total resident memory of the processes running at once (the
 real cost of a stage that runs one process per sample), peak_rss_mb_largest_process the largest
 single process. pvc is timed both ways it can be run: call-from-alignments in one step, and
-generate-psps, estimate-parameters and call-from-psps ("whole pipeline" is their sum). GATK makes
-each accession's GVCF once, in a run of the largest cohort, and each cohort's "HaplotypeCaller
-GVCFs" figures are derived from those runs (marked †); it then joins the GVCFs (GenomicsDBImport on
-x86-64, CombineGVCFs elsewhere) and genotypes them, one process per shard of the regions. The
-repeat catalogue (repeat-catalog), built once per reference, is timed separately under
-"repeat_catalog".
+generate-psps, estimate-parameters and call-from-psps ("whole pipeline" is their sum). pvc
+(defaults, 3 segments) is the one-step run split as GATK's and freebayes' are: the regions cut into
+3 equal segments, one call-from-alignments each, all at once with a third of the threads, and the
+VCFs joined ("whole pipeline" is both). GATK makes
+one GVCF per sample, then joins them (GenomicsDBImport on x86-64, CombineGVCFs elsewhere) and
+genotypes them, one process per shard of the regions. The repeat catalogue (repeat-catalog), built
+once per reference, is timed separately under "repeat_catalog".
 """
 
 SIZES = [1, 8, 62]
@@ -50,7 +47,7 @@ EXCLUDED = {
                                 "SL4.0ch08:54,312,875, so it has none in the regions on chromosomes "
                                 "9 to 12 (found 2026-10-22; the owner chose to drop it)",
 }
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
+ARMS = ["pvc_defaults", "pvc_fitted", "pvc_segments", "gatk", "freebayes"]
 LOCAL_REFERENCE = os.path.expanduser("~/genomes/s_lycopersicum/4.00/S_lycopersicum_chromosomes.4.00.fa")
 TOMATO1 = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "tomato",
                        "tomato1_cohort.tsv")
@@ -171,22 +168,13 @@ def steps(ctx):
     for size in sizes(ctx):
         if size > len(names):
             ctx.log(f"speed: {size} accessions asked for, the cohort has {len(names)}; skipped")
-    run_sizes = [size for size in sizes(ctx) if size <= len(names)]
-    # The cohorts are nested (the first 1, 2, 5, ... accessions), so GATK makes each accession's
-    # GVCF once, for the largest, and every cohort's GATK step joins its share of them.
-    gvcfs = None
-    if run_sizes:
-        largest = {s: samples[s] for s in names[:max(run_sizes)]}
-        gvcf_step, gvcfs = arms.gvcf_store_step(ctx, "speed/tomato", REFERENCE, largest, regions)
-    for size in run_sizes:
+            continue
         chosen = {s: samples[s] for s in names[:size]}
         base = dict(benchmark="speed", dataset="tomato cohort, SL4.0, 80 regions of 100 kb",
                     samples=size, depth="about 3x", region_bp=arms.BedLength(regions))
         for arm in ARMS:
-            if arm == "gatk" and gvcf_step not in out:
-                out.append(gvcf_step)
             step, _ = arms.arm_steps(ctx, arm, f"speed/tomato_{size}", REFERENCE, catalog, chosen,
-                                     regions, base, joint=True, gvcfs=gvcfs)
+                                     regions, base, joint=True)
             out.append(step)
         out.extend(readfloor.floor_steps(ctx, f"speed/tomato_{size}", REFERENCE, chosen, regions,
                                          base))

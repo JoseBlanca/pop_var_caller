@@ -32,6 +32,8 @@ DESCRIPTION = """
 Human (GRCh38). GIAB HG002, HG003 and HG004, each called alone over chromosome 22 inside its GIAB
 confident regions, at the depths the configuration names. Truth: GIAB v4.2.1 small variants,
 scored by RTG vcfeval, as for the per-sample panel.
+pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
+called with the SNP/indel model instead of left uncalled.
 """
 IN_FULL_RUN = False
 ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
@@ -61,7 +63,8 @@ def steps(ctx):
                         samples=1, depth=depth, region_bp=arms.BedLength(c["confident"]))
             for arm in ARMS:
                 step, callset = arms.arm_steps(ctx, arm, f"external_chr22/{s}/{depth}", reference,
-                                               catalog, {s: alignment}, c["confident"], base)
+                                               catalog, {s: alignment}, c["confident"], base,
+                                               call_satellites=arms.GIAB_CALL_SATELLITES)
                 out.append(step)
                 out.append(arms.score_step(ctx, callset, base, c["truth"], c["confident"], scoring,
                                            call_sample=s, truth_sample=s))

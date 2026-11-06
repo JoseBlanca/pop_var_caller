@@ -41,6 +41,11 @@ DESIGNS = ["pcr", "pcr_free"]
 SAMPLE_COUNTS = [1, 50]
 DEPTHS = [5, 15, 30, 60]
 SLICE_SETTINGS = "segments_per_period=10 bundles=10 genome_bp=300000 contigs=1"
+# The simulated reads are made once and kept. Their fingerprint is the settings and this number, not
+# the simulator's source: a change to the simulator does not remake them, and so does not rerun GATK
+# and the other competitors on new reads. Raise it when a simulator change should reach the
+# benchmark. The source's checksum is kept in the step's record (`meta`), for the record only.
+SIMULATION_VERSION = 1
 q = shlex.quote
 
 PVC_ARMS = ["pvc_defaults", "pvc_fitted"]
@@ -93,9 +98,10 @@ def _configuration(ctx, design, n_samples, depth):
                                        f"&& samtools faidx {q(reference)} "
                                        f"&& samtools dict {q(reference)} -o {q(d)}/reference.dict")],
                          logs)
-        # The typed STR segments must be the planted ones, and each planted bundle typed as one
-        # bundle with the caller's reference runs at the simulator's stutter sites; the driver's
-        # check, unchanged. Needs a catalogue, built here only for this check.
+        # The typed STR segments must be the planted ones; the driver's check, unchanged. Needs a
+        # catalogue, built here only for this check. (The check that each planted bundle was typed
+        # as one bundle went with its example, ng_str_bundle_runs, removed from the crate in
+        # 0f9281c5.)
         catalog = os.path.join(d, "check_catalog.parquet")
         check = (
             f"{q(ctx.pvc_bin)} repeat-catalog --reference {q(reference)} --output {q(catalog)} --force "
@@ -104,17 +110,14 @@ def _configuration(ctx, design, n_samples, depth):
             f"{q(confident)} calling > {q(d)}/typing_check.tsv "
             f"&& diff <(awk -F'\\t' '$4==\"ssr_locus\" {{print $1\"\\t\"($2-1)\"\\t\"$3\"\\t\"$6}}' "
             f"{q(d)}/typing_check.tsv | sort) <(sort {q(d)}/segments.bed) "
-            f"&& NG_REFERENCE_CHECK=skip {q(_example(ctx, 'ng_str_bundle_runs'))} {q(reference)} "
-            f"{q(confident)} > {q(d)}/bundle_runs_check.tsv "
-            f"&& python3 {q(os.path.join(ctx.project_dir, 'scripts', 'ng_str_stutter_check_bundles.py'))} {q(d)} "
             f"&& rm -f {q(reference)}.repeats.parquet {q(catalog)}")
         run_commands([("check_typing", check)], logs)
-        return {"measurement": m}
+        return {"measurement": m, "meta": {"simulator": file_identity(simulator_source)}}
 
+    simulator_source = os.path.join(ctx.project_dir, "examples", "ng_str_stutter_benchmark.rs")
     steps.append(Step(f"{name}/simulate", "input", simulate,
                       {"settings": settings.replace(f"threads={ctx.threads}", ""),
-                       "simulator": file_identity(os.path.join(
-                           ctx.project_dir, "examples", "ng_str_stutter_benchmark.rs"))}))
+                       "simulation": SIMULATION_VERSION}))
 
     def map_reads(d):
         cmds = []

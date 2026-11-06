@@ -4,6 +4,10 @@ Every finished step's `.done` file carries its rows. The table for one pvc commi
 that commit's pvc rows and the competitors' stored rows, so a pvc refresh never needs a competitor
 rerun to produce a complete table. Each row keeps the date its step ran, which is how the table shows
 that a competitor's figures are older than pvc's.
+
+A run that did not finish (`--mark-unfinished`, lib/steps.py) has one row, its wall time until it
+was stopped, with the reason in `outcome`; every other row's `outcome` is empty. Such a time is a
+lower bound, so it is marked in the summary and left out of every ratio and derived figure.
 """
 
 import bisect
@@ -13,9 +17,8 @@ import os
 import time
 
 COLUMNS = ["benchmark", "dataset", "samples", "depth", "region_bp", "variant_class", "caller",
-           "caller_version", "pvc_commit", "stage", "metric", "value", "date", "machine",
-           "host_load_start", "host_load_end", "other_cpu_cores", "calibration_seconds", "source",
-           "derived_from"]
+           "caller_version", "pvc_commit", "stage", "metric", "value", "outcome", "date", "machine",
+           "host_load_start", "host_load_end", "other_cpu_cores", "calibration_seconds", "source"]
 
 # A time figure whose step ran while processes other than the suite used more than this many cores
 # on average was not measured on a quiet machine, and is marked.
@@ -126,33 +129,24 @@ def build_table(ctx):
     load = HostLoad(os.path.join(ctx.results_root, "host_load.tsv"))
     rows = []
     sources = [(os.path.join(ctx.results_root, "competitors"), "-"), (ctx.pvc_root(), ctx.commit)]
-    records = [(record, commit) for directory, commit in sources for record in _records(directory)]
-    by_name = {record["name"]: record for record, _ in records}
-
-    def conditions(record):
-        """The host's load while the step ran, and its calibration."""
-        if not record or not record.get("measurement"):
-            return "", "", "", ""
-        return (load.at(record["started"]), load.at(record["ended"]),
-                load.other_mean(record["started"], record["ended"]),
-                record.get("calibration_s") or "")
-
-    for record, commit in records:
-        own = conditions(record)
-        for r in record.get("rows", []):
-            full = {c: "" for c in COLUMNS}
-            full.update(r)
-            full["pvc_commit"] = commit if full.get("caller", "").startswith("pvc") else "-"
-            full["date"] = record["date"]
-            full["machine"] = record["machine"]
-            if r.get("metric", "").endswith(TIME_METRICS):
-                # A derived figure was measured in the step it is derived from, under that
-                # step's load.
-                (full["host_load_start"], full["host_load_end"], full["other_cpu_cores"],
-                 full["calibration_seconds"]) = (conditions(by_name.get(r["derived_from"]))
-                                                 if r.get("derived_from") else own)
-            full["source"] = record["name"]
-            rows.append(full)
+    for directory, commit in sources:
+        for record in _records(directory):
+            measured = bool(record.get("measurement"))
+            load_start = load.at(record["started"]) if measured else ""
+            load_end = load.at(record["ended"]) if measured else ""
+            other = load.other_mean(record["started"], record["ended"]) if measured else ""
+            for r in record.get("rows", []):
+                full = {c: "" for c in COLUMNS}
+                full.update(r)
+                full["pvc_commit"] = commit if full.get("caller", "").startswith("pvc") else "-"
+                full["date"] = record["date"]
+                full["machine"] = record["machine"]
+                if r.get("metric", "").endswith(TIME_METRICS):
+                    full["host_load_start"], full["host_load_end"] = load_start, load_end
+                    full["other_cpu_cores"] = other
+                    full["calibration_seconds"] = record.get("calibration_s") or ""
+                full["source"] = record["name"]
+                rows.append(full)
     cals = [float(r["calibration_seconds"]) for r in rows if r["calibration_seconds"] not in ("", None)]
     _FASTEST_CALIBRATION[0] = min(cals) if cals else None
     rows.extend(_read_floor_ratios(rows))
@@ -171,7 +165,7 @@ def _read_floor_ratios(rows):
     """pvc's wall time over the read floor's, for each configuration that has both."""
     walls = {}
     for r in rows:
-        if r["metric"] == "wall_seconds":
+        if r["metric"] == "wall_seconds" and not r["outcome"]:
             walls[(r["benchmark"], r["dataset"], str(r["samples"]), str(r["depth"]),
                    r["caller"], r["stage"])] = r
     out = []
@@ -201,7 +195,7 @@ def _read_floor_ratios(rows):
 def _read_floor_section(rows):
     """The summary's side-by-side table of the read floor and pvc's reading step."""
     walls = {(r["benchmark"], r["dataset"], str(r["samples"]), str(r["depth"]), r["caller"],
-              r["stage"]): r for r in rows if r["metric"] == "wall_seconds"}
+              r["stage"]): r for r in rows if r["metric"] == "wall_seconds" and not r["outcome"]}
     lines = []
     for floor_stage, pvc_caller, pvc_stage in READ_FLOOR_PAIRS:
         for key, floor in sorted(walls.items(), key=lambda kv: (kv[0][0], kv[0][1], _num(kv[0][2]),
@@ -253,7 +247,8 @@ def _add_sample_section(rows, threads):
     samples. The joint steps are timed as they are.
     """
     walls = {(r["benchmark"], r["dataset"], str(r["samples"]), str(r["depth"]), r["caller"],
-              r["stage"]): float(r["value"]) for r in rows if r["metric"] == "wall_seconds"}
+              r["stage"]): float(r["value"]) for r in rows
+             if r["metric"] == "wall_seconds" and not r["outcome"]}
     configs = sorted({k[:4] for k in walls if k[5] == "generate-psps" and k[0] == "speed"},
                      key=lambda k: (k[0], k[1], _num(k[2])))
     lines = []
@@ -268,10 +263,11 @@ def _add_sample_section(rows, threads):
         geno = g("GATK", "GenotypeGVCFs")
         fit = g("pvc (fitted)", "estimate-parameters")
         direct = g("pvc (defaults)", "call-from-alignments")
+        segments = g("pvc (defaults, 3 segments)", "whole pipeline")
         fmt = lambda v: "." if v is None else f"{v:,.1f}"
         pvc_add = psp + call if psp is not None and call is not None else None
         gatk_add = gvcf + comb + geno if None not in (gvcf, comb, geno) else None
-        lines.append(f"| {key[2]} | {fmt(direct)} | {fmt(psp)} | {fmt(call)} | {fmt(pvc_add)} | "
+        lines.append(f"| {key[2]} | {fmt(direct)} | {fmt(segments)} | {fmt(psp)} | {fmt(call)} | {fmt(pvc_add)} | "
                      f"{fmt(fit)} | {fmt(gvcf)} | {fmt(comb)} | {fmt(geno)} | {fmt(gatk_add)} |")
     if not lines:
         return []
@@ -285,10 +281,10 @@ def _add_sample_section(rows, threads):
             "GenomicsDBImport on x86-64 and CombineGVCFs elsewhere (the stage rows name which).",
             "Tomato cohort; wall seconds.",
             "",
-            "| samples | pvc one step | pvc: one psp | pvc: call from psps | pvc: add a sample | "
+            "| samples | pvc one step | pvc one step, 3 segments | pvc: one psp | pvc: call from psps | pvc: add a sample | "
             "pvc: fit (optional) | GATK: one GVCF | GATK: join GVCFs | GATK: GenotypeGVCFs | "
             "GATK: add a sample |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"] + lines + [""]
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"] + lines + [""]
 
 
 def _num(value):
@@ -355,8 +351,8 @@ def write_summary(ctx, rows, benchmarks):
             for r in group:
                 k = (r["depth"], r["variant_class"], r["stage"], r["metric"])
                 value = _fmt(r["value"])
-                if r.get("derived_from"):
-                    value += " †"
+                if r["outcome"]:
+                    value = f"≥ {value} ✗"
                 if busy(r):
                     value += " ⚠"
                 cells.setdefault(k, {})[r["caller"]] = value
@@ -364,15 +360,16 @@ def write_summary(ctx, rows, benchmarks):
                 lines.append("| " + " | ".join(str(x) for x in k) + " | "
                              + " | ".join(cells[k].get(c, "") for c in callers) + " |")
             lines.append("")
-    if any(r.get("derived_from") for r in rows):
-        lines.append("† marks a time or memory figure derived, not measured: GATK's per-sample GVCFs "
-                     "are made once for every cohort drawn from the same samples, each sample's "
-                     "time and memory are measured there, and a cohort's figures are those runs "
-                     f"laid out {ctx.threads} at a time (lib/arms.py, `scheduled`). Its memory of "
-                     "every process at once is an upper bound.")
-        lines.append("")
     lines.extend(_add_sample_section(rows, ctx.threads))
     lines.extend(_read_floor_section(rows))
+    unfinished = sorted({(r["source"], r["value"], r["outcome"]) for r in rows if r["outcome"]})
+    if unfinished:
+        lines.append("✗ marks a run that did not finish: the figure is the time it ran before it "
+                     "was stopped, so the whole run takes at least that long.")
+        lines.append("")
+        for source, value, outcome in unfinished:
+            lines.append(f"- {source}: stopped after {_fmt(value)} s; {outcome}")
+        lines.append("")
     if any(busy(r) for r in rows):
         lines.append(f"⚠ marks a time or memory figure measured while processes other than the suite "
                      f"used more than {BUSY_OTHER_CPU:g} cores on average, or whose step's calibration "

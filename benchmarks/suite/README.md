@@ -81,7 +81,10 @@ regions; freebayes on the simulated 50-sample runs at 60×).
 
 A competitor's stored calls carry a fingerprint of its version, its command and its inputs. If an
 input has changed, the suite stops and names it rather than quietly rerunning hours of work; rerun
-with `--rerun-competitors` (narrowed with `--only` and `--caller`) to remake it. `--redo-step
+with `--rerun-competitors` (narrowed with `--only` and `--caller`) to remake it. The simulated reads
+(`stutter_sim`, `inbreeding_sim`) are fingerprinted by their settings and a `SIMULATION_VERSION`
+in the benchmark's module, not by the simulator's code, so a change to a simulator remakes nothing
+until that number is raised. `--redo-step
 <source>` redoes any one step, for instance a speed figure measured while the laptop was busy (the
 summary marks those with ⚠).
 
@@ -94,7 +97,7 @@ summary marks those with ⚠).
 | `hg002_5mb` | HG002 over 1,000 confident intervals (5.08 Mb), 30× and full depth; also the one-human-sample speed figures | the same |
 | `hg002_tr` | GIAB HG002 tandem-repeat benchmark, 50,000 regions, 5× to 300×; STR genotypes per tract | pvc (defaults, fitted), GATK, HipSTR |
 | `stutter_sim` | simulated 4 Mb genome with 3,000 STR segments and 500 bundles, PCR and PCR-free, 1 and 50 samples, 5× to 60× | pvc (defaults, fitted, true stutter), GATK, freebayes, HipSTR (twice) |
-| `refine_sim` | simulated cohorts for genotype refinement and phase: an F2 (two inbred parents at 30×, 20 F2 at 1×) and two natural populations from msprime (400 samples, 100 each at 30×, 20×, 10×, 5×; outbred, and selfing to F = 0.9); genotype errors per depth group and per sample with or without reads, phase switch errors | pvc with refinement off and on |
+| `refine_sim` | simulated cohorts for genotype refinement and phase: an F2 (two inbred parents at 30×, 20 F2 at 1×) and two natural populations from msprime (400 samples, 100 each at 30×, 10×, 5×, 2×; outbred, and selfing to F = 0.9); genotype errors per depth group and per sample with or without reads, phase switch errors | pvc with refinement off and on; GATK; GATK then Beagle 4.1 (imputation and phase from GATK's likelihoods); STITCH (SNPs only) |
 | `speed` | tomato cohort, 1, 8 and 62 accessions over 8 Mb (a 63rd, SRR7279543, has a truncated CRAM and is left out): wall time, CPU time, peak memory of each whole pipeline | pvc (both ways), GATK, freebayes |
 | read floor (in `speed` and `hg002_5mb`) | `samtools view -c -M -L` over the same files: the cost of only reading and decoding them, set beside pvc's `generate-psps` and `call-from-alignments` with their ratio | samtools, run once like a competitor |
 | `tomato_agreement` | pvc's 62-accession genotypes against GATK's (no truth set) | pvc against GATK |
@@ -127,18 +130,15 @@ How each is scored:
   the regions, as many at once as the suite has cores. They join the GVCFs with GenomicsDBImport,
   GATK's recommended route, on x86-64, and with CombineGVCFs on the arm64 laptop, where
   GenomicsDBImport's native library does not exist; the stage rows name the route.
-- **GVCFs made once:** where a benchmark calls nested cohorts (the speed benchmark's first 1, 2,
-  5, ... accessions), each sample's GATK GVCF is made once, in a run of the largest cohort, and
-  every cohort's GATK step joins its share. That cohort's per-sample stage figures are derived from
-  each sample's own measured time and memory, laid out as many at once as the suite has cores, and
-  are marked † in the summary.
 
 ## DeepVariant, and running on an x86-64 Linux server
 
 DeepVariant (1.10.0) and GLnexus (1.4.1), its joint genotyper for the trio, run in their official
-images. The dev container cannot start containers, so `run_suite.sh` starts a job runner on the
-host (`host_jobs.sh`) that runs only those two images, through the host's podman or Docker, with the
-project mounted and the data read-only, measured by the suite's own code inside them.
+images, and STITCH (1.8.5, `refine_sim`'s imputation competitor) in its Bioconda container. The dev
+container cannot start containers, so `run_suite.sh` starts a job runner on the host
+(`host_jobs.sh`) that runs only those three images, through the host's podman or Docker, with the
+project mounted and the data read-only, measured by the suite's own code inside them (STITCH's
+image has no Python, so its steps record their wall time only).
 
 - **On this Mac** (arm64) the runner says it cannot, and every DeepVariant step, with the scoring of
   its calls, is listed as skipped at the end of the run.

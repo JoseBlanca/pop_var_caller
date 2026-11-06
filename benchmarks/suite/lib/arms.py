@@ -6,22 +6,15 @@ An *arm* is one way of calling the same data:
 |-----------------|--------------------|----------------------------------------------------------------|
 | `pvc_defaults`  | pvc (defaults)     | `call-from-alignments --defaults`                              |
 | `pvc_fitted`    | pvc (fitted)       | `generate-psps`, `estimate-parameters`, `call-from-psps`       |
+| `pvc_segments`  | pvc (defaults, 3 segments) | `call-from-alignments --defaults` over 3 segments at once, joined |
 | `gatk`          | GATK               | HaplotypeCaller (one sample), or GVCFs, then a sharded join and GenotypeGVCFs |
 | `freebayes`     | freebayes          | one process per block of regions, all samples together         |
 
 Each arm is one step, and its scoring another. pvc's arms live under the pvc commit's directory and
 rerun for every commit; GATK's and freebayes' live under `competitors/` and run once.
 
-**GATK's per-sample GVCFs can be shared between cohorts** (`gvcf_store_step`). A sample's GVCF
-depends only on its reads, the reference and the regions, so a benchmark that calls nested cohorts
-(the speed benchmark's first 1, 2, 5, ... accessions) makes each sample's GVCF once, in one step
-over the largest cohort, and each cohort's GATK step runs only the joint stages. That cohort's
-"HaplotypeCaller GVCFs" figures are then derived, not measured (`scheduled`), and its rows say so
-in `derived_from`.
 """
 
-import heapq
-import json
 import os
 import shutil
 from collections import namedtuple
@@ -29,21 +22,33 @@ from collections import namedtuple
 from . import callers, hostjobs, pvc_eval, vcfeval
 from .measure import check_alignments, merge, run_commands, warm
 from .results import row, time_rows
-from .steps import DONE, Step, file_identity
+from .steps import Step, file_identity
 
 GRCH38 = os.path.expanduser(
     "~/genomes/h_sapiens/gca_grch38/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna")
 
-ARM_LABELS = {"pvc_defaults": "pvc (defaults)", "pvc_fitted": "pvc (fitted)", "gatk": "GATK",
+# pvc in one step over this many segments of the regions at once, each with an equal share of the
+# threads. Its memory does not shrink with the ground it covers (about 200 MB a sample on tomato,
+# rick, October 2026), so each segment costs a whole run's: 3 at 100 samples is about 61 GB, within
+# the suite's 80 GB, where 4 would be about 81 GB.
+PVC_SEGMENTS = 3
+
+ARM_LABELS = {"pvc_defaults": "pvc (defaults)", "pvc_fitted": "pvc (fitted)",
+              "pvc_segments": f"pvc (defaults, {PVC_SEGMENTS} segments)", "gatk": "GATK",
               "freebayes": "freebayes", "hipstr": "HipSTR", "deepvariant": "DeepVariant"}
-ARM_CALLER = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebayes": "freebayes",
-              "hipstr": "hipstr", "deepvariant": "deepvariant"}
-ARM_KIND = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "competitor",
+ARM_CALLER = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "pvc_segments": "pvc", "gatk": "gatk",
+              "freebayes": "freebayes", "hipstr": "hipstr", "deepvariant": "deepvariant"}
+ARM_KIND = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "pvc_segments": "pvc", "gatk": "competitor",
             "freebayes": "competitor", "hipstr": "competitor", "deepvariant": "competitor"}
-ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebayes": "freebayes",
-            "hipstr": "hipstr", "deepvariant": "deepvariant"}
+ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "pvc_segments": "pvc", "gatk": "gatk",
+            "freebayes": "freebayes", "hipstr": "hipstr", "deepvariant": "deepvariant"}
 # freebayes writes every candidate it considers; its documentation asks for a quality filter.
 MIN_QUAL = {"freebayes": 20}
+# The GIAB samples' benchmarks run pvc with --call-satellites (off by default): repeats longer than
+# the repeat model takes are called with the SNP/indel model instead of left uncalled. Their reads
+# are high quality with little stutter, so the SNPs and short indels inside satellites, which the
+# other callers report, can be called too (the owner's choice, 2026-10-30).
+GIAB_CALL_SATELLITES = True
 
 
 # What the scorers need of a reference: the FASTA, vcfeval's copy of it, and pvc_eval's STR regions
@@ -129,22 +134,6 @@ class CallSet:
         self.sample = sample
 
 
-class GvcfStore:
-    """Where `gvcf_store_step` leaves each sample's GVCF, and how long each took to make."""
-
-    def __init__(self, step_name, directory):
-        self.step_name = step_name
-        self.directory = directory
-
-    def gvcf(self, sample):
-        return os.path.join(self.directory, "gvcfs", f"{sample}.g.vcf.gz")
-
-    def made(self):
-        """Each sample's measurement (wall_s, user_s, sys_s, peak_rss_bytes), from the step's record."""
-        with open(os.path.join(self.directory, DONE)) as fh:
-            return json.load(fh)["meta"]["by_sample"]
-
-
 def _fingerprint(ctx, tool, files_by_sample, regions, reference):
     return {
         "tool": tool,
@@ -157,75 +146,6 @@ def _fingerprint(ctx, tool, files_by_sample, regions, reference):
 
 def _files(alignments_by_sample):
     return {s: (v if isinstance(v, list) else [v]) for s, v in alignments_by_sample.items()}
-
-
-def _make_gvcfs(ctx, reference, files, regions, d):
-    """Every sample's GVCF in `d/gvcfs`, one HaplotypeCaller process per sample, as many at once as
-    the suite has cores; returns the stage's measurement and each sample's own."""
-    gvcf_dir = os.path.join(d, "gvcfs")
-    os.makedirs(gvcf_dir)
-    m = run_commands(callers.gatk_gvcfs(ctx, reference, files, regions, gvcf_dir),
-                     os.path.join(d, "logs"), max_concurrent=ctx.threads)
-    by_label = {c["label"]: c for c in m["commands"]}
-    by_sample = {}
-    for s in files:
-        c = by_label[f"haplotypecaller.{s}"]
-        by_sample[s] = {k: c[k] for k in ("wall_s", "user_s", "sys_s", "peak_rss_bytes")}
-    return m, by_sample
-
-
-def gvcf_store_step(ctx, prefix, reference, alignments_by_sample, regions):
-    """One GATK GVCF per sample, made once for every cohort drawn from these samples.
-
-    Returns (step, GvcfStore). The step is a competitor step named `<prefix>/gatk_gvcfs`; its
-    record keeps each sample's own time and memory, from which a cohort's GATK step derives its
-    "HaplotypeCaller GVCFs" figures. The samples run as a cohort of all of them would, as many at
-    once as the suite has cores, so each one's time is taken under the load a cohort run puts on
-    the machine. Asked for more samples than it holds, the step's fingerprint no longer matches:
-    remake it with `--redo-step <prefix>/gatk_gvcfs`.
-    """
-    name = f"{prefix}/gatk_gvcfs"
-    store = GvcfStore(name, os.path.join(ctx.results_root, "competitors", name))
-    files = _files(alignments_by_sample)
-
-    def fingerprint():
-        return _fingerprint(ctx, ctx.version("gatk"), files, regions, reference)
-
-    def action(d):
-        flat = [f for fs in files.values() for f in fs]
-        check_alignments(flat + [reference])
-        warm(flat + [reference])  # every tool reads from memory (measure.warm)
-        os.makedirs(os.path.join(ctx.results_root, "java_tmp"), exist_ok=True)
-        m, by_sample = _make_gvcfs(ctx, reference, files, regions, d)
-        return {"measurement": m, "meta": {"by_sample": by_sample}}
-
-    return Step(name, "competitor", action, fingerprint, attrs={"caller": "gatk"}), store
-
-
-def scheduled(by_sample, slots):
-    """The figures of one stage that ran `by_sample`'s commands, `slots` at a time, in this order.
-
-    Derived from each command's own measurement, as measure.run_commands would have started them:
-    each starts when a slot frees. CPU time is exact, the sum. The wall time is the last finish.
-    The memory of everything at once is the largest sum of the peaks of the commands running
-    together, which counts each command at its peak for as long as it runs: an upper bound.
-    """
-    runs = list(by_sample.values())
-    free = [0.0] * max(1, min(slots, len(runs)))
-    spans = []
-    for r in runs:
-        start = heapq.heappop(free)
-        end = start + r["wall_s"]
-        heapq.heappush(free, end)
-        spans.append((start, end, r["peak_rss_bytes"]))
-    together = max(sum(p for s, e, p in spans if s <= t < e) for t, _, _ in spans)
-    return {
-        "wall_s": round(max(e for _, e, _ in spans), 3),
-        "user_s": round(sum(r["user_s"] for r in runs), 3),
-        "sys_s": round(sum(r["sys_s"] for r in runs), 3),
-        "max_single_rss_bytes": max(r["peak_rss_bytes"] for r in runs),
-        "peak_summed_rss_bytes": together,
-    }
 
 
 def _gatk_joint(ctx, reference, gvcfs, regions, calls, d):
@@ -251,13 +171,14 @@ def _gatk_joint(ctx, reference, gvcfs, regions, calls, d):
 
 
 def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, regions, base,
-              joint=False, gvcfs=None):
+              joint=False, call_satellites=False):
     """One arm's calling step on one configuration; returns (step, CallSet).
 
     `alignments_by_sample` maps sample name to its alignment file(s); several samples means a
     cohort, called jointly. `regions` is the BED the callers are restricted to. `base` is the row
-    configuration (benchmark, dataset, samples, depth, region_bp). `gvcfs`, a GvcfStore holding
-    every one of these samples, makes a joint GATK step take its GVCFs from there.
+    configuration (benchmark, dataset, samples, depth, region_bp). `call_satellites` runs pvc
+    with `--call-satellites`, which is off by default: repeats too long for the repeat model are
+    called with the SNP/indel model instead of left uncalled.
     """
     name = f"{prefix}/{arm}"
     kind = ARM_KIND[arm]
@@ -273,9 +194,11 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
         out = _fingerprint(ctx, ctx.version(ARM_TOOL[arm]) if kind != "pvc" else "pvc", files,
                            regions, reference)
         if arm == "gatk" and joint:
-            # A store's GVCFs are the same files this step would make (they depend on what the
-            # fingerprint already holds), so where they come from is not part of it.
             out["joint_route"] = callers.gatk_joint_route()
+        if arm == "pvc_segments":
+            out["segments"] = PVC_SEGMENTS
+        if kind == "pvc" and call_satellites:
+            out["call_satellites"] = True  # only when on, so earlier runs' records still match
         return out
 
     if arm == "pvc_defaults":
@@ -284,8 +207,36 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             warm(flat + [reference])  # every tool reads from memory (measure.warm)
             log = os.path.join(d, "pvc.log")
             m = run_commands([callers.pvc_call_from_alignments(
-                ctx, reference, catalog, flat, regions, calls, log)], os.path.join(d, "logs"))
+                ctx, reference, catalog, flat, regions, calls, log,
+                call_satellites=call_satellites)], os.path.join(d, "logs"))
             return {"measurement": m, "rows": time_rows(row_base, m, "call-from-alignments")}
+
+    elif arm == "pvc_segments":
+        def action(d):
+            check_alignments(flat + [reference])
+            warm(flat + [reference])  # every tool reads from memory (measure.warm)
+            logs = os.path.join(d, "logs")
+            segments = callers.split_regions_even(regions, os.path.join(d, "segments"),
+                                                  PVC_SEGMENTS)
+            threads = max(1, ctx.threads // len(segments))
+            seg_dir = os.path.join(d, "segment_vcfs")
+            os.makedirs(seg_dir)
+            vcfs, cmds = [], []
+            for bed in segments:
+                seg = os.path.splitext(os.path.basename(bed))[0]
+                vcfs.append(os.path.join(seg_dir, f"{seg}.vcf.gz"))
+                cmds.append(callers.pvc_call_from_alignments(
+                    ctx, reference, catalog, flat, bed, vcfs[-1], os.path.join(d, f"{seg}.log"),
+                    threads=threads, label=f"call_from_alignments.{seg}",
+                    call_satellites=call_satellites))
+            m_call = run_commands(cmds, logs, max_concurrent=len(segments))
+            m_join = run_commands([callers.pvc_join_segments(vcfs, calls)], logs)
+            shutil.rmtree(seg_dir)
+            total = merge(m_call, m_join)
+            rows = (time_rows(row_base, m_call, "call-from-alignments")
+                    + time_rows(row_base, m_join, "join segments")
+                    + time_rows(row_base, total, "whole pipeline"))
+            return {"measurement": total, "rows": rows}
 
     elif arm == "pvc_fitted":
         def action(d):
@@ -294,8 +245,8 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             psp_dir = os.path.join(d, "psps")
             logs = os.path.join(d, "logs")
             m_gen = run_commands(callers.pvc_generate_psps(
-                ctx, reference, catalog, files, regions, psp_dir, logs), logs,
-                max_concurrent=ctx.threads)
+                ctx, reference, catalog, files, regions, psp_dir, logs,
+                call_satellites=call_satellites), logs, max_concurrent=ctx.threads)
             psps = [os.path.join(psp_dir, f"{s}.psp") for s in samples]
             params = os.path.join(d, "fitted.parameters.toml")
             m_fit = run_commands([callers.pvc_estimate_parameters(
@@ -321,29 +272,24 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
                     ctx, reference, files[s][0], regions, calls, ctx.threads)],
                     os.path.join(d, "logs"))
                 return {"measurement": m, "rows": time_rows(row_base, m, "HaplotypeCaller")}
-            if gvcfs is None:
-                check_alignments(flat + [reference])
-                warm(flat + [reference])
-                m_hc, _ = _make_gvcfs(ctx, reference, files, regions, d)
-                paths = [os.path.join(d, "gvcfs", f"{s}.g.vcf.gz") for s in samples]
-                hc_rows = time_rows(row_base, m_hc, "HaplotypeCaller GVCFs")
-            else:
-                made = gvcfs.made()
-                m_hc = scheduled({s: made[s] for s in samples}, ctx.threads)
-                paths = [gvcfs.gvcf(s) for s in samples]
-                warm(paths + [reference])
-                hc_rows = [dict(r, derived_from=gvcfs.step_name)
-                           for r in time_rows(row_base, m_hc, "HaplotypeCaller GVCFs")]
+            # Every cohort makes its own samples' GVCFs, although a sample's GVCF is the same file
+            # in every cohort: its time is not. A GVCF made while 30 others run takes up to 1.7
+            # times as long as one made alone (rick, tomato, October 2026), so a cohort's figures
+            # come only from a run of that cohort.
+            check_alignments(flat + [reference])
+            warm(flat + [reference])  # every tool reads from memory (measure.warm)
+            gvcf_dir = os.path.join(d, "gvcfs")
+            os.makedirs(gvcf_dir)
+            m_hc = run_commands(callers.gatk_gvcfs(ctx, reference, files, regions, gvcf_dir),
+                                os.path.join(d, "logs"), max_concurrent=ctx.threads)
+            paths = [os.path.join(gvcf_dir, f"{s}.g.vcf.gz") for s in samples]
             route, m_join, m_geno = _gatk_joint(ctx, reference, paths, regions, calls, d)
-            measured = merge(m_join, m_geno)
-            total = merge(m_hc, measured)
-            rows = (hc_rows
+            total = merge(m_hc, m_join, m_geno)
+            rows = (time_rows(row_base, m_hc, "HaplotypeCaller GVCFs")
                     + time_rows(row_base, m_join, route)
                     + time_rows(row_base, m_geno, "GenotypeGVCFs")
-                    + [dict(r, derived_from=gvcfs.step_name) if gvcfs else r
-                       for r in time_rows(row_base, total, "whole pipeline")])
-            # The step's own measurement is what it ran: the joint stages alone, with a store.
-            return {"measurement": measured if gvcfs else total, "rows": rows}
+                    + time_rows(row_base, total, "whole pipeline"))
+            return {"measurement": total, "rows": rows}
 
     elif arm == "deepvariant":
         def action(d):
@@ -399,8 +345,20 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
     else:
         raise ValueError(arm)
 
+    # The stage a run that did not finish is reported under (`--mark-unfinished`): the one that
+    # names the arm's whole time.
+    whole = {"pvc_defaults": "call-from-alignments", "pvc_fitted": "whole pipeline",
+             "pvc_segments": "whole pipeline",
+             "gatk": "whole pipeline" if joint else "HaplotypeCaller", "freebayes": "freebayes",
+             "deepvariant": "DeepVariant + GLnexus" if joint else "DeepVariant"}[arm]
+
+    def unfinished(wall_s, note):
+        return [row(row_base, stage=whole, metric="wall_seconds", value=round(wall_s, 3),
+                    outcome=note)]
+
     step = Step(name, kind, action, fingerprint,
-                attrs={"caller": ARM_CALLER[arm], "depth": base.get("depth")})
+                attrs={"caller": ARM_CALLER[arm], "depth": base.get("depth")},
+                unfinished=unfinished)
     return step, CallSet(arm, name, calls)
 
 

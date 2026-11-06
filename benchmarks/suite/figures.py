@@ -659,6 +659,7 @@ def stutter_homopolymer_figure(rows, out, samples="50"):
 # cohort, and is in no line (the summary reports it on its own).
 PERF_LINES = [
     ("pvc, one step", "pvc (defaults)", ("call-from-alignments",)),
+    ("pvc, one step, 3 segments", "pvc (defaults, 3 segments)", ("whole pipeline",)),
     ("pvc, building psps", "pvc (fitted)", ("generate-psps",)),
     ("pvc, calling from psps", "pvc (fitted)", ("call-from-psps",)),
     ("GATK", "GATK", ("whole pipeline", "HaplotypeCaller")),
@@ -667,6 +668,8 @@ PERF_LINES = [
 ]
 PERF_STYLE = dict(STYLE)
 PERF_STYLE["pvc, one step"] = dict(STYLE["pvc (defaults)"], label="pvc, one step")
+PERF_STYLE["pvc, one step, 3 segments"] = dict(color="#2a78d6", linestyle="-.", marker="*",
+                                               label="pvc, one step, 3 segments")
 PERF_STYLE["pvc, building psps"] = dict(color="#2a78d6", linestyle="--", marker="s",
                                         label="pvc, building psps")
 PERF_STYLE["pvc, calling from psps"] = dict(color="#2a78d6", linestyle=":", marker="v",
@@ -680,6 +683,8 @@ def performance_series(rows, benchmark, label_of):
             if r["benchmark"] != benchmark or r["caller"] != caller or r["stage"] not in stages:
                 continue
             if r["metric"] not in ("wall_seconds", "peak_rss_mb_all_processes"):
+                continue
+            if r.get("outcome"):  # did not finish: a lower bound, not a point on the curve
                 continue
             key = (line, r["samples"], r["depth"])
             rank = stages.index(r["stage"])

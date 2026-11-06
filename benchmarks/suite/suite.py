@@ -45,6 +45,10 @@ def parse_args():
     p.add_argument("--redo-busy", action="store_true",
                    help="rerun pvc and competitor steps whose times were taken on a busy machine")
     p.add_argument("--summary-only", action="store_true")
+    p.add_argument("--mark-unfinished", metavar="NAME",
+                   help="record this failed or stopped step as done but not finished, with the "
+                        "time it ran (lib/steps.py); needs --note; then rebuild the summary")
+    p.add_argument("--note", help="why the step did not finish, for --mark-unfinished")
     p.add_argument("--status", action="store_true")
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--data-root", required=True)
@@ -69,15 +73,18 @@ def selected_benchmarks(ctx):
 
 def build_pvc(ctx):
     ctx.log("building pvc (release)")
-    # The stuttering benchmark's simulator and typing checks are examples of this crate.
-    examples = ["ng_str_stutter_benchmark", "ng_typed_region_dump", "ng_str_bundle_runs"]
-    cmd = ["cargo", "build", "--release", "--quiet", "--bin", "pvc"]
+    # The stuttering benchmark's simulator and typing check are examples of this crate. They need
+    # the bench-fixtures feature (the simulator's random draws live behind it), which pvc must not
+    # get, so they build in a call of their own, before pvc: pvc is linked last, from the library
+    # without the feature.
+    examples = ["ng_str_stutter_benchmark", "ng_typed_region_dump"]
+    cmd = ["cargo", "build", "--release", "--quiet", "--features", "bench-fixtures"]
     for e in examples:
         cmd += ["--example", e]
-    out = subprocess.run(cmd,
-                         cwd=ctx.project_dir, capture_output=True, text=True)
-    if out.returncode != 0:
-        sys.exit("pvc did not build:\n" + out.stderr[-4000:])
+    for c in (cmd, ["cargo", "build", "--release", "--quiet", "--bin", "pvc"]):
+        out = subprocess.run(c, cwd=ctx.project_dir, capture_output=True, text=True)
+        if out.returncode != 0:
+            sys.exit("pvc did not build:\n" + out.stderr[-4000:])
 
 
 def _steps(ctx, name):
@@ -111,7 +118,17 @@ def main():
         status(ctx, names)
         return 0
     code = 0
-    if not args.summary_only:
+    if args.mark_unfinished:
+        if not args.note:
+            sys.exit("--mark-unfinished needs --note: why the step did not finish")
+        found = [s for name in names for s in _steps(ctx, name) if s.name == args.mark_unfinished]
+        if not found:
+            sys.exit(f"no step named {args.mark_unfinished} in {', '.join(names)}")
+        try:
+            Runner(ctx).mark_unfinished(found[0], args.note)
+        except SuiteError as err:
+            sys.exit(f"error: {err}")
+    elif not args.summary_only:
         if not args.no_build:
             build_pvc(ctx)
         runner = Runner(ctx)

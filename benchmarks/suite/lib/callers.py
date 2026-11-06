@@ -24,6 +24,17 @@ q = shlex.quote
 
 # ---- pvc --------------------------------------------------------------------------------------
 
+# Genotype refinement (pvc's default, `auto`, runs it on 10 or more mostly inbred diploid samples) is
+# measured by refine_sim alone, which sets it itself; every other calling run turns it off.
+REFINE_OFF = "--refine-genotypes off "
+
+
+def _refine(extra):
+    """`extra` with refinement off added, unless `extra` sets it."""
+    extra = f"{extra} " if extra else ""
+    return extra if "--refine-genotypes" in extra else REFINE_OFF + extra
+
+
 def pvc_catalog(ctx, reference, out, log):
     return ("repeat_catalog",
             f"{q(ctx.pvc_bin)} repeat-catalog --reference {q(reference)} --output {q(out)} "
@@ -31,34 +42,53 @@ def pvc_catalog(ctx, reference, out, log):
 
 
 def pvc_call_from_alignments(ctx, reference, catalog, alignments, regions, out, log,
-                             parameters=None):
+                             parameters=None, threads=None, label="call_from_alignments",
+                             call_satellites=False):
     alignment_args = " ".join(f"--alignment {q(a)}" for a in alignments)
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     regions_arg = f"--regions {q(regions)}" if regions else ""
-    return ("call_from_alignments",
+    satellites = "--call-satellites " if call_satellites else ""
+    return (label,
             f"{q(ctx.pvc_bin)} call-from-alignments --reference {q(reference)} "
-            f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} "
-            f"--threads {ctx.threads} --output {q(out)} --log {q(log)} --force")
+            f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} {satellites}"
+            f"{REFINE_OFF}--threads {threads or ctx.threads} --output {q(out)} "
+            f"--log {q(log)} --force")
 
 
-def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, out_dir, log_dir):
-    """One command per sample. `alignments_by_sample` maps sample name to its alignment files."""
+def pvc_join_segments(segment_vcfs, out):
+    """The segments' VCFs, each indexed first (pvc writes none), joined in the reference's order."""
+    index = " && ".join(f"bcftools index -t {q(v)}" for v in segment_vcfs)
+    inputs = " ".join(q(v) for v in segment_vcfs)
+    return ("join_segments",
+            f"{index} && bcftools concat --no-version --allow-overlaps -Ou {inputs} "
+            f"| bcftools sort -Oz -o {q(out)} && bcftools index -t {q(out)}")
+
+
+def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, out_dir, log_dir,
+                      call_satellites=False):
+    """One command per sample. `alignments_by_sample` maps sample name to its alignment files.
+
+    `call_satellites` is recorded in each psp, so the commands that read them follow it.
+    """
     cmds = []
     regions_arg = f"--regions {q(regions)}" if regions else ""
+    satellites = " --call-satellites" if call_satellites else ""
     for sample, files in alignments_by_sample.items():
         alignment_args = " ".join(f"--alignment {q(a)}" for a in files)
         cmds.append((f"generate_psps.{sample}",
                      f"{q(ctx.pvc_bin)} generate-psps --reference {q(reference)} "
                      f"--catalog {q(catalog)} {alignment_args} {regions_arg} "
-                     f"--output-dir {q(out_dir)} --force"))
+                     f"--output-dir {q(out_dir)} --force{satellites}"))
     return cmds
 
 
-def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log):
+def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log, inbreeding=None):
+    """`inbreeding` states one F for every sample (`--inbreeding`) instead of fitting each one's."""
     psp_args = " ".join(f"--psp {q(p)}" for p in psps)
+    stated = f"--inbreeding {inbreeding} " if inbreeding is not None else ""
     return ("estimate_parameters",
             f"{q(ctx.pvc_bin)} estimate-parameters --reference {q(reference)} "
-            f"--catalog {q(catalog)} {psp_args} --threads {ctx.threads} --output {q(out)} "
+            f"--catalog {q(catalog)} {psp_args} {stated}--threads {ctx.threads} --output {q(out)} "
             f"--log {q(log)} --force")
 
 
@@ -68,7 +98,7 @@ def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None,
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     return ("call_from_psps",
             f"{q(ctx.pvc_bin)} call-from-psps --reference {q(reference)} --catalog {q(catalog)} "
-            f"{psp_args} {source} {extra} --threads {ctx.threads} --output {q(out)} "
+            f"{psp_args} {source} {_refine(extra)}--threads {ctx.threads} --output {q(out)} "
             f"--log {q(log)} --force")
 
 
@@ -165,16 +195,18 @@ def gatk_genotype_shards(ctx, reference, sources, shard_beds, out_dir):
 
 
 def gatk_gather(shard_vcfs, out):
-    """The shards' VCFs joined into one sorted, indexed VCF (GATK's GatherVcfs).
+    """The shards' VCFs joined into one indexed VCF, in the reference's order (GATK's GatherVcfs).
 
-    Sorted, not concatenated in the shards' order: GATK writes each shard in the reference's order,
-    so where the regions put one chromosome in two shards with others between them, a plain
-    concatenation stops ("the chromosome block chr18 is not contiguous") and leaves a partial file.
+    A plain concat needs each chromosome in one run of consecutive records, which shards of a BED
+    sorted by name do not give: GATK writes a shard in the reference's order, so one holding chr18
+    and chr2 regions starts with chr2, after the shard before it ended in chr18 (the GIAB trio's
+    regions, 2026-10-29). `--allow-overlaps` merges the shards through their indexes instead, still
+    in the shards' chromosome order, and the sort puts the result in the reference's.
     """
     inputs = " ".join(q(v) for v in shard_vcfs)
     return ("gather_shards",
-            f"bcftools concat --no-version -a -Ou {inputs} | bcftools sort -Oz -o {q(out)} "
-            f"&& bcftools index -t {q(out)}")
+            f"bcftools concat --no-version --allow-overlaps -Ou {inputs} "
+            f"| bcftools sort -Oz -o {q(out)} && bcftools index -t {q(out)}")
 
 
 # ---- freebayes --------------------------------------------------------------------------------
@@ -211,6 +243,43 @@ def split_regions(regions_bed, out_dir, blocks):
     paths = []
     for i, block in enumerate(files):
         path = os.path.join(out_dir, f"block{i:04d}.bed")
+        with open(path, "w") as fh:
+            for chrom, s, e in block:
+                fh.write(f"{chrom}\t{s}\t{e}\n")
+        paths.append(path)
+    return paths
+
+
+def split_regions_even(regions_bed, out_dir, parts):
+    """Split a BED into `parts` files of equal total length, each a contiguous run of the regions.
+
+    An interval is cut wherever a boundary falls, so one long interval (a whole chromosome) becomes
+    `parts` pieces. Fewer files when the regions hold fewer bases than `parts`.
+    """
+    intervals = []
+    with open(regions_bed) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith(("#", "track", "browser")):
+                continue
+            chrom, start, end = line.split()[:3]
+            intervals.append((chrom, int(start), int(end)))
+    total = sum(e - s for _, s, e in intervals)
+    parts = max(1, min(parts, total))
+    # Part i holds the bases from i * total // parts up to (i + 1) * total // parts of the regions
+    # laid end to end.
+    bounds = [i * total // parts for i in range(parts + 1)]
+    files = [[] for _ in range(parts)]
+    offset = 0
+    for chrom, start, end in intervals:
+        for i in range(parts):
+            lo, hi = max(bounds[i], offset), min(bounds[i + 1], offset + end - start)
+            if lo < hi:
+                files[i].append((chrom, start + lo - offset, start + hi - offset))
+        offset += end - start
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for i, block in enumerate(files):
+        path = os.path.join(out_dir, f"segment{i:02d}.bed")
         with open(path, "w") as fh:
             for chrom, s, e in block:
                 fh.write(f"{chrom}\t{s}\t{e}\n")
