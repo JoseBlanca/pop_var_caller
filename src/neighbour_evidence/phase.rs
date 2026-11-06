@@ -38,14 +38,23 @@ pub const MAX_PATHS: usize = u64::BITS as usize;
 pub const LEAN_MIN: f64 = 0.5;
 
 /// **The share of drawn paths that must agree at a link, and lean at both its records**
-/// (`--phase-min-path-agreement`, spec §9): a number in `(0, 1]`, all of them by default. The
-/// count of paths it asks for is rounded up, so 0.7 of 36 paths is 26.
+/// (`--phase-min-path-agreement`, spec §9): a number in `(0, 1]`, [`PathAgreement::DEFAULT`]
+/// unless the user sets it. The count of paths it asks for is rounded up, so 0.7 of 36 paths is 26.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathAgreement(f64);
 
 impl PathAgreement {
     /// All paths: the rule of spec §2.3.
     pub const ALL: Self = Self(1.0);
+
+    /// **The default: 0.8 of the paths, 29 of 36** (owner, 2026-11-06). Measured on simulated
+    /// cohorts at inbreeding 0, 0.5 and 0.8, samples at 5× to 30×: from 12 samples up it keeps
+    /// wrong links under half a link in 100 (all paths: under 0.3) and phases 3% to 27% more
+    /// heterozygotes right — at 40 outbred samples 16,033 against 13,831. 0.75 reaches 1 wrong link
+    /// in 100 at 12 outbred samples. At 4 samples no share keeps under 1 in 100: wrong links rise
+    /// from 1.5–3.2 in 100 with all paths to 3.3–4.8 at this share
+    /// (`doc/devel/reports/implementations/phase_agreement_default_2026-11-06.md`).
+    pub const DEFAULT: Self = Self(0.8);
 
     /// The share `share`, or `None` when it is not in `(0, 1]` (NaN included).
     #[must_use]
@@ -67,7 +76,7 @@ impl PathAgreement {
 
 impl Default for PathAgreement {
     fn default() -> Self {
-        Self::ALL
+        Self::DEFAULT
     }
 }
 

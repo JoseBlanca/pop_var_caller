@@ -85,7 +85,7 @@ cohorts at 3× (some samples at 30×), counting SNPs only:
 last two rows. The pass phases few genotypes there, but those it does phase are wrong far more
 often than elsewhere.
 
-`--phase-min-path-agreement` (default `1`) is the share of the drawn estimates that must agree for
+`--phase-min-path-agreement` (default `0.8`) is the share of the drawn estimates that must agree for
 a link to be written. Lower values give longer phase sets with more wrong links.
 
 ### Reads in the phase

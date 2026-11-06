@@ -483,7 +483,7 @@ fn a_path_agreement_is_a_share() {
             Some(share)
         );
     }
-    assert_eq!(PathAgreement::default(), PathAgreement::ALL);
+    assert_eq!(PathAgreement::default(), PathAgreement::DEFAULT);
 }
 
 /// **A tie between "kept" and "swapped" goes to "kept"**: one agreeing and one disagreeing site,
