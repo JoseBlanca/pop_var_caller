@@ -729,6 +729,28 @@ reports no frequency and a site quality of zero. Both are true, and neither is a
 cohort of thousands is unaffected in cost: the test is one comparison per genotype per sample per
 pass, beside the scoring that already reads the same row.
 
+#### 5.0.3 Nearly flat samples still echo a sample's copies back to it — measured, and kept
+
+**A sample's own copies can still reach its prior, through the others.** Its expected copies raise
+every other sample's prior; a sample with one or two reads follows its prior more than its reads,
+so its expected copies rise too, and summed over hundreds of such samples they come back. On the
+refine_sim outbred cohort (400 samples, 100 each at 30×, 10×, 5× and 2×), one sample with two
+sequencing errors at a base where nothing varies got back about 0.1 copies — enough to call it
+heterozygous at GQ 3 to 10. Those records are now dropped by the site quality
+([`calling_quality.md`](calling_quality.md) §5.2, the correction of 2026-11-06).
+
+**What remains was measured, and is too small to pay for.** The exact answer conditions each sample
+on every arrangement of the others' copies, as the site quality does for the whole locus — a fold
+per sample, so a locus costs the square of the cohort where the loop is linear. On the same cohort,
+with the same seed and no inbreeding coefficient on either side, the exact posteriors were compared
+with the loop's at the 1,577 records with at most 40 samples showing an alternative read (the
+loop, rewritten for the comparison, matched pvc's written calls at 607,376 of 607,469 genotypes).
+They disagree at 57 of the 19,102 genotypes that could differ: the exact call is right at 42, the
+loop's at 15 — a net 27 genotypes, against about 17,800 variant genotypes the cohort's calls get
+wrong where reads are present. At common variants the echo is a fraction of a copy against dozens
+of real ones and cannot tip a call. **Decision (owner, 2026-11-06): keep the loop.** A step
+quadratic in the cohort is the wrong trade for a caller meant for thousands of samples.
+
 ### 5.1 Re-fitting the slippage numbers at the locus — three settings, one to be measured
 
 **What is at stake.** How often a read gains or loses a whole repeat is measured before calling
