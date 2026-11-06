@@ -296,19 +296,23 @@ share_with_carriers_above_stated_frequency = { value = 0.026 }
 # them as slippage, which inflates its class's slip rate. Two rules leave such
 # tracts out, beside the guard (`over_guard_threshold`: more than one read in
 # ten of those differing from the reference differs by a non-whole number of
-# repeats). **The depth rule** (`too_deep`) leaves out a tract whose crossing
-# reads, summed over samples, exceed `depth_rule.times_expected` times what one
-# copy gives, or the count one copy reaches by chance less than
-# `depth_rule.chance` of the time where that is larger. What one copy gives is
-# `typical_depth` — the reads the typical tract would have if every read
-# reaching it crossed it — times the share of reaching reads that cross a tract
-# of that class. **The stutter-tail rule** (`in_stutter_tail`) leaves out a
-# tract where the reads off both alleles of the genotype each sample's reads
-# favour, summed over samples, are at least `stutter_tail_rule.times_rate` times
-# what the class's slip rate predicts and that many would occur by slippage less
-# than `stutter_tail_rule.chance` of the time. It runs in rounds, refitting each
-# motif length after each, until a round leaves nothing out (`settled = true`)
-# or `stutter_tail_rule.max_rounds` rounds have run.
+# repeats). Before all three, the fit leaves out every interrupted tract
+# (`interrupted`): one whose bases are not the motif tiled end to end, which
+# slips along its longest pure run rather than as a tract of its length; calling
+# scores such a tract at the class of that run. **The depth rule** (`too_deep`)
+# leaves out a tract whose crossing reads, summed over samples, exceed
+# `depth_rule.times_expected` times what one copy gives, or the count one copy
+# reaches by chance less than `depth_rule.chance` of the time where that is
+# larger. What one copy gives is `typical_depth` — the reads the typical tract
+# would have if every read reaching it crossed it — times the share of reaching
+# reads that cross a tract of that class. **The stutter-tail rule**
+# (`in_stutter_tail`) leaves out a tract where the reads off both alleles of the
+# genotype each sample's reads favour, summed over samples, are at least
+# `stutter_tail_rule.times_rate` times what the class's slip rate predicts and
+# that many would occur by slippage less than `stutter_tail_rule.chance` of the
+# time. It runs in rounds, refitting each motif length after each, until a round
+# leaves nothing out (`settled = true`) or `stutter_tail_rule.max_rounds` rounds
+# have run.
 #
 # `fitted` is how many of a class's tracts its slip rate was fitted from. A
 # class with `fitted = 0` and tracts left out has no slippage row of its own.
@@ -320,7 +324,7 @@ stutter_tail_by_period = [
     { period = 5, rounds = 10, settled = false },
 ]
 by_stratum = [
-    { period = 5, reference_repeats = 9, fitted = 50, over_guard_threshold = 1, too_deep = 7, in_stutter_tail = 2 },
+    { period = 5, reference_repeats = 9, fitted = 50, interrupted = 3, over_guard_threshold = 1, too_deep = 7, in_stutter_tail = 2 },
 ]
 
 [misread_after_runs]

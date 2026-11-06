@@ -105,7 +105,7 @@
 //!
 //! [repeat_tracts_left_out]         # informational: the tracts the stutter fit did not learn from
 //! typical_depth = 40.6
-//! by_stratum = [ … one row a class: fitted, over_guard_threshold, too_deep, in_stutter_tail … ]
+//! by_stratum = [ … one row a class: fitted, interrupted, over_guard_threshold, too_deep, in_stutter_tail … ]
 //!
 //! [repeat_tracts]                  # §3.7
 //! fallback_between_locus_share = { value = 0.09090909090909091, warrant = "defaulted" }
@@ -1258,6 +1258,11 @@ pub struct TractsLeftOutRow {
     pub period: u8,
     pub reference_repeats: u64,
     pub fitted: u64,
+    /// **Tracts left out because the catalog does not record them as perfect** (spec
+    /// `str_interrupted_tracts.md` §2), before the guard. Added in format 9; absent in an older
+    /// file, which left none out.
+    #[serde(default)]
+    pub interrupted: u64,
     pub over_guard_threshold: u64,
     pub too_deep: u64,
     pub in_stutter_tail: u64,
@@ -2187,6 +2192,7 @@ mod tests {
                     period: 5,
                     reference_repeats: 9,
                     fitted: 50,
+                    interrupted: 3,
                     over_guard_threshold: 1,
                     too_deep: 7,
                     in_stutter_tail: 2,

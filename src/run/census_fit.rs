@@ -729,6 +729,7 @@ fn the_tracts_left_out_as_written(left_out: &TractsLeftOut) -> RepeatTractsLeftO
                 period: row.stratum.period,
                 reference_repeats: row.stratum.reference_repeats,
                 fitted: row.fitted,
+                interrupted: row.interrupted,
                 over_guard_threshold: row.over_guard_threshold,
                 too_deep: row.too_deep,
                 in_stutter_tail: row.in_stutter_tail,
