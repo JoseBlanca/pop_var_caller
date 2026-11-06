@@ -79,6 +79,7 @@ use crate::parameter_estimation::joint::ssr_fit::{
 };
 use crate::parameter_estimation::joint::stratum_fits::{
     FittedAlleleLengthVariation, FittedSlippage, OwnFitStandardErrors, StratumFits,
+    StutterMultiplier,
 };
 use crate::parameter_estimation::misread_after_runs::FittedMisreadEntry;
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
@@ -507,6 +508,25 @@ impl ParametersFile {
                     .expect("validation refuses a fallback that is not a between-locus share"),
             ),
             with_own_shares.warrant.into(),
+        )
+        // **Each read group's stutter multipliers**; a file older than format 9 has none, and
+        // every multiplier is then one. `validate` has checked each is a finite positive number.
+        .with_stutter_multipliers(
+            tracts
+                .stutter_multiplier_by_read_group
+                .iter()
+                .map(|row| {
+                    (
+                        (ReadGroupId(row.read_group), row.period),
+                        StutterMultiplier {
+                            value: row.stutter_multiplier.value,
+                            standard_error: row.stutter_multiplier.standard_error,
+                            slipped_reads: row.slipped_reads,
+                            provenance: row.stutter_multiplier.warrant.into(),
+                        },
+                    )
+                })
+                .collect(),
         ))
     }
 
@@ -1251,6 +1271,7 @@ pub(super) mod tests {
         small.sequencing_batches.by_sample.truncate(1);
         small.inbreeding.by_sample.truncate(1);
         small.repeat_tracts.slippage_group_by_read_group.clear();
+        small.repeat_tracts.stutter_multiplier_by_read_group.clear();
         small.repeat_tracts.slippage_by_stratum_and_group.clear();
         small
             .repeat_tracts
@@ -2367,6 +2388,7 @@ mod the_north_star_round_trip {
             small.sequencing_batches.by_sample.truncate(1);
             small.inbreeding.by_sample.truncate(1);
             small.repeat_tracts.slippage_group_by_read_group.clear();
+            small.repeat_tracts.stutter_multiplier_by_read_group.clear();
             small.repeat_tracts.slippage_by_stratum_and_group.clear();
             small
                 .repeat_tracts

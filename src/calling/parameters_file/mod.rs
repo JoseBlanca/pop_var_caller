@@ -114,6 +114,7 @@
 //! allele_length_variation_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
 //! allele_length_variation_by_period = [ … only where the run asked for the middle rung … ]
 //! substitution_rate_by_stratum = [ … ]
+//! stutter_multiplier_by_read_group = [ … one row a (read group × motif length) … ]
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
 //! repeat_tract_outlier_weight = { value = 0.07, warrant = "defaulted" }
@@ -258,7 +259,12 @@ use serde::{Deserialize, Serialize};
 /// **Version 8** adds `[misread_after_runs]`, each read group's misread excess after runs
 /// (`doc/devel/ng/spec/str_context_error_fit.md` §5). Calling reads it. This build reads a version-7
 /// file with the table absent, and every read group then scores under the built-in table.
-pub const FORMAT_VERSION: u32 = 8;
+///
+/// **Version 9** adds `repeat_tracts.stutter_multiplier_by_read_group`: each read group's stutter
+/// relative to its slippage group's class rates, one row a read group and motif length
+/// (`doc/devel/ng/spec/str_library_stutter.md` §7). Calling reads it. A version-8 build refuses a
+/// version-9 file; this build reads a version-8 or older file with every multiplier one.
+pub const FORMAT_VERSION: u32 = 9;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -1377,6 +1383,13 @@ pub struct RepeatTracts {
     pub allele_length_variation_by_period: Vec<PeriodAlleleLengthVariationRow>,
     /// How often a base reads wrong inside a tract, per `(read group × stratum × ploidy)`.
     pub substitution_rate_by_stratum: Vec<SubstitutionRateRow>,
+    /// **Each read group's stutter multiplier, one row a `(read group × motif length)`**
+    /// (`str_library_stutter.md` §7): its reads slip at the class rate of its slippage group times
+    /// this, held below 0.95. Since format 9 a file that fitted any class has a row for every read
+    /// group at every motif length it fitted a class of; absent in an older file, which a reader
+    /// takes as every multiplier one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stutter_multiplier_by_read_group: Vec<StutterMultiplierRow>,
 }
 
 /// Which slippage group one read group's reads are drawn under.
@@ -1736,6 +1749,25 @@ pub struct SubstitutionRateRow {
     /// tracts — `table.bases_compared()` (`parameter_estimation/ssr`) — and **not in reads**: a
     /// read spanning a stratum contributes one read and as many bases as it crosses.
     pub rate: WarrantedValue,
+}
+
+/// **One read group's stutter multiplier at one motif length** (`str_library_stutter.md` §7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StutterMultiplierRow {
+    /// The run's dense read-group index.
+    pub read_group: u32,
+    /// How many bases one repeat unit is.
+    pub period: u8,
+    /// The multiplier: one is a read group of typical stutter for its slippage group. `fitted_here`
+    /// with a standard error where its reads placed it, without one where it leans on the pull
+    /// toward one as much as on its reads; `defaulted` at one for a read group the fit did not fit
+    /// apart, such as the only read group of a run.
+    pub stutter_multiplier: WarrantedValue,
+    /// The read group's expected slipped reads over the motif length's classes, without the pull;
+    /// absent where nothing was fitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slipped_reads: Option<f64>,
 }
 
 // ---------------------------------------------------------------------
@@ -2393,6 +2425,77 @@ mod tests {
                         standard_error: Some(0.000_173),
                     },
                 }],
+                // **Every shape a multiplier row takes**: fitted with an error, fitted leaning on
+                // the pull (no error), supplied, and the defaulted one of a read group fitted alone
+                // in its slippage group — every declared read group at both motif lengths.
+                stutter_multiplier_by_read_group: vec![
+                    StutterMultiplierRow {
+                        read_group: 0,
+                        period: 1,
+                        stutter_multiplier: WarrantedValue {
+                            value: 1.25,
+                            warrant: Warrant::FittedHere,
+                            observations: None,
+                            standard_error: Some(0.04),
+                        },
+                        slipped_reads: Some(1160.5),
+                    },
+                    StutterMultiplierRow {
+                        read_group: 0,
+                        period: 2,
+                        stutter_multiplier: WarrantedValue {
+                            value: 0.875,
+                            warrant: Warrant::FittedHere,
+                            observations: None,
+                            standard_error: None,
+                        },
+                        slipped_reads: Some(9.25),
+                    },
+                    StutterMultiplierRow {
+                        read_group: 1,
+                        period: 1,
+                        stutter_multiplier: WarrantedValue {
+                            value: 0.75,
+                            warrant: Warrant::FittedHere,
+                            observations: None,
+                            standard_error: Some(0.035),
+                        },
+                        slipped_reads: Some(812.25),
+                    },
+                    StutterMultiplierRow {
+                        read_group: 1,
+                        period: 2,
+                        stutter_multiplier: WarrantedValue {
+                            value: 1.125,
+                            warrant: Warrant::Supplied,
+                            observations: None,
+                            standard_error: Some(0.1),
+                        },
+                        slipped_reads: Some(160.0),
+                    },
+                    StutterMultiplierRow {
+                        read_group: 2,
+                        period: 1,
+                        stutter_multiplier: WarrantedValue {
+                            value: 1.0,
+                            warrant: Warrant::Defaulted,
+                            observations: None,
+                            standard_error: None,
+                        },
+                        slipped_reads: None,
+                    },
+                    StutterMultiplierRow {
+                        read_group: 2,
+                        period: 2,
+                        stutter_multiplier: WarrantedValue {
+                            value: 1.0,
+                            warrant: Warrant::Defaulted,
+                            observations: None,
+                            standard_error: None,
+                        },
+                        slipped_reads: None,
+                    },
+                ],
             },
             stated_constants: StatedConstants {
                 repeat_tract_outlier_weight: WarrantedValue {
@@ -2782,7 +2885,7 @@ mod tests {
         stripped
     }
 
-    /// **Every warranted number in the file is written the same way, and these six are all of
+    /// **Every warranted number in the file is written the same way, and these seven are all of
     /// them** — which is the whole of what this shape is for: a reader who has understood one has
     /// understood all of them.
     ///
@@ -2816,10 +2919,11 @@ mod tests {
                 ".misread_after_runs.entries.other_wrong",
                 ".repeat_tracts.fallback_between_locus_share",
                 ".repeat_tracts.fallback_between_locus_share_with_own_shares",
+                ".repeat_tracts.stutter_multiplier_by_read_group.stutter_multiplier",
                 ".repeat_tracts.substitution_rate_by_stratum.rate",
                 ".stated_constants.repeat_tract_outlier_weight",
             ],
-            "these eight numbers carry a warrant and nothing else does"
+            "these nine numbers carry a warrant and nothing else does"
         );
 
         for (path, table) in &found {
@@ -3119,6 +3223,7 @@ mod tests {
         empty.sequencing_batches.by_sample.clear();
         empty.inbreeding.by_sample.clear();
         empty.repeat_tracts.slippage_group_by_read_group.clear();
+        empty.repeat_tracts.stutter_multiplier_by_read_group.clear();
         empty.repeat_tracts.slippage_by_stratum_and_group.clear();
         empty
             .repeat_tracts
@@ -3305,26 +3410,30 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_eight() {
-        assert_eq!(FORMAT_VERSION, 8);
-        assert_eq!(a_file_using_every_shape().format_version, 8);
+    fn the_format_version_this_build_writes_is_nine() {
+        assert_eq!(FORMAT_VERSION, 9);
+        assert_eq!(a_file_using_every_shape().format_version, 9);
     }
 
     /// **A version-3 file reads, with both informational tables absent** — the fixture with its
     /// version set back, the two tables and format 5's key taken out of its text, and the outlier
     /// weight at the 0.20 a build before format 6 recorded — and passes a run's checks; **a
-    /// version-7 file is refused**; and a version-3 build's reader, which knows neither table,
+    /// version-10 file is refused**; and a version-3 build's reader, which knows neither table,
     /// would refuse a version-4 file rather than misread it: every table refuses a key it does not
     /// know, so the written text of either table, put in a file whose shape lacks it, is refused
     /// naming the key.
     #[test]
-    fn a_version_three_file_reads_without_the_tables_and_a_version_nine_file_is_refused() {
+    fn a_version_three_file_reads_without_the_tables_and_a_version_ten_file_is_refused() {
         let mut version_three = a_file_using_every_shape();
         version_three.format_version = 3;
         version_three.ordinary_site_prior.fitted_density = None;
         version_three.duplicated_positions = None;
         version_three.repeat_tracts_left_out = None;
         version_three.misread_after_runs = None;
+        version_three
+            .repeat_tracts
+            .stutter_multiplier_by_read_group
+            .clear();
         version_three
             .repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
@@ -3340,10 +3449,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         read.validate()
             .expect("a version-3 file passes the checks a run applies");
 
-        let mut version_nine = a_file_using_every_shape();
-        version_nine.format_version = 9;
-        let read = ParametersFile::from_toml(&version_nine.to_toml())
-            .expect("a version-9 file with this build's keys parses");
+        let mut version_ten = a_file_using_every_shape();
+        version_ten.format_version = 10;
+        let read = ParametersFile::from_toml(&version_ten.to_toml())
+            .expect("a version-10 file with this build's keys parses");
         assert!(matches!(
             read.validate(),
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"

@@ -267,6 +267,19 @@ holds, by depth and by the stutter tail, one row per stratum with the run's sett
 carries it into the file it writes back, and a file stamped below 7 that holds it is refused naming
 it, as above.
 
+*Amended 2026-11-03, format 8:* `[misread_after_runs]`, each read group's misread excess after
+runs ([`str_context_error_fit.md`](str_context_error_fit.md) §5). Calling reads it; a file stamped 7
+or below is read with the table absent, and every read group then scores under the built-in table.
+
+*Amended 2026-11-03, format 9* (written as format 8 on its branch, and renumbered when the branch
+was merged after the misread table, 2026-11-06): `repeat_tracts.stutter_multiplier_by_read_group`,
+each read group's stutter relative to its slippage group's class rates, one row a read group and
+motif length ([`str_library_stutter.md`](str_library_stutter.md) §7). Unlike the informational
+tables, calling reads it. A format-9 file has a row for every read group with a slippage group at
+every motif length with a slip rate, `defaulted` at one where the fit did not fit the read group
+apart; a missing, doubled or non-positive row is refused, as is the table in a file stamped below 9.
+A file stamped 8 or below is read with every multiplier one.
+
 **An alternative total of exactly zero is a real answer** — a fully invariant cohort — and is not
 floored on the way in or out; the flooring belongs to the per-locus expansion.
 

@@ -281,7 +281,33 @@ mod tests {
     /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
     /// Again the same day, when the section's note began saying the stutter-tail rule counts against
     /// the genotype each sample's reads favour: putting the old sentence back reproduces `10ac8802b6d82f5606bfa48a3932e109`.
-    const FITTED_PARAMETERS_MD5: &str = "446677ff535e95daf570473e65d61d5f";
+    /// **Re-recorded 2026-11-03** when the repeat-tract fit began fitting a stutter multiplier per
+    /// read group (`str_library_stutter.md`): this fixture's read groups are fitted apart, and
+    /// one class's slip rate moves from 0.0041936 to 0.0041942 and the allele-length curve's shares in their 11th digit; nothing else moves. Fitting with the multipliers off reproduces the
+    /// old checksum, `f4282c42a1b42d9f018ed23313e0310e`, exactly. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** when the parameters file reached format 8 and began writing
+    /// each read group's stutter multipliers (`str_library_stutter.md` §7): the file moves by
+    /// `format_version` and the new `stutter_multiplier_by_read_group` table with its note, and by
+    /// nothing else — taking both out reproduces the old checksum, `ea978f24444117cc4aa0b8592079f718`, exactly.
+    /// Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-04** when the repeat-tract fit began each motif length with one stutter
+    /// for every read group, the multipliers entering once it settles (`str_library_stutter.md`
+    /// §3.1): the fit stops at another point within its tolerance, and
+    /// a between-locus share moves from 0.25414575 to 0.25414573, a slip rate in its 12th digit and the multipliers in their 13th. It was `e901c340b920b887256274ad5cd493d4`. Recorded on the
+    /// macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-04, a second time**, when the repeat-tract fit's tolerance became 10⁻⁵
+    /// and its loop began jumping along its own path (`str_penalised_fit.md` §2.7, §2.8): the fit
+    /// stops sooner, and a between-locus share moves from 0.25414573 to 0.25414718 and a slip rate in its 8th digit. It was `07dd485da3fd17b375fe6be3985ae8a4`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `89d6f0d3b9ef190363b1dd6e1f233ae3`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: the file is
+    /// format 9, holding both main's `[misread_after_runs]` (format 8) and the branch's
+    /// per-read-group stutter multipliers, fitted with the branch's repeat-tract fit. Main's
+    /// checksum was `446677ff535e95daf570473e65d61d5f`. Recorded on the macOS host (arm64).
+    const FITTED_PARAMETERS_MD5: &str = "af874257c25115d294282a8720c6a3b9";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -465,7 +491,27 @@ mod tests {
     /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
     /// had moved this checksum to `796b4dc302a7fe575e3ce34e9eae05be`: taking the read-phase changes back out of the merged
     /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
-    const CALLS_MD5: &str = "b3864ddbf3a7042c1f2af1427d9167ed";
+    /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
+    /// read the multipliers yet. It was `50c08ae0a51e01882b70041979b99f83`. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** with parameters file format 8: only the `##pvcParameters` line
+    /// moves, which names the parameters file's checksum. It was `a5d975a05904fa2ce6dc868a04262806`. Recorded in the
+    /// Linux container (arm64).
+    /// **Re-recorded 2026-11-04** with the fit started from one stutter: only the `##pvcParameters` line moves,
+    /// which names the parameters file's checksum. It was `fa736a0151d9000c8ef1438659b919d9`. Recorded on the macOS host
+    /// (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-04, a second time**, with the tolerance of 10⁻⁵: only the
+    /// `##pvcParameters` line moves. It was `a0a300f1492b6a90dac4cac8f2d4f2c7`. Recorded on the macOS host (arm64) and in
+    /// the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `a17052e1575c8800c810cc67f7c9d913`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: calls scored with
+    /// main's misread table and the branch's per-read-group slip rates, and the
+    /// `##pvcParameters` line of the format-9 file. Main's checksum was `b3864ddbf3a7042c1f2af1427d9167ed`.
+    /// Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "3edb3436d3c8ae418d75385c2d289dd2";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -589,7 +635,33 @@ mod tests {
     /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
     /// Again the same day, when the section's note began saying the stutter-tail rule counts against
     /// the genotype each sample's reads favour: putting the old sentence back reproduces `41130496d7dc1120a2d2e4760af301f4`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "b9df0d719b55fa55576bf7c0b2da46ec";
+    /// **Re-recorded 2026-11-03** when the repeat-tract fit began fitting a stutter multiplier per
+    /// read group (`str_library_stutter.md`): this fixture's read groups are fitted apart, and
+    /// one class's slip rate moves from 0.0041936 to 0.0041942 and the allele-length curve's shares in their 11th digit; nothing else moves. Fitting with the multipliers off reproduces the
+    /// old checksum, `6a75cce6cf5adbc4558fc5a37f389b9d`, exactly. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** when the parameters file reached format 8 and began writing
+    /// each read group's stutter multipliers (`str_library_stutter.md` §7): the file moves by
+    /// `format_version` and the new `stutter_multiplier_by_read_group` table with its note, and by
+    /// nothing else — taking both out reproduces the old checksum, `5e4c1b74d5ef345a12de513258d55652`, exactly.
+    /// Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-04** when the repeat-tract fit began each motif length with one stutter
+    /// for every read group, the multipliers entering once it settles (`str_library_stutter.md`
+    /// §3.1): the fit stops at another point within its tolerance, and
+    /// a between-locus share moves from 0.25414575 to 0.25414573, a slip rate in its 12th digit and the multipliers in their 13th. It was `110c3129448b280ad39337581c42bcd0`. Recorded on the
+    /// macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-04, a second time**, when the repeat-tract fit's tolerance became 10⁻⁵
+    /// and its loop began jumping along its own path (`str_penalised_fit.md` §2.7, §2.8): the fit
+    /// stops sooner, and a between-locus share moves from 0.25414573 to 0.25414718 and a slip rate in its 8th digit. It was `5fe3d062a2de1be73e770e11269042fe`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `c01e4746bb2c4e30141a49ffe232df7f`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: the file is
+    /// format 9, holding both main's `[misread_after_runs]` (format 8) and the branch's
+    /// per-read-group stutter multipliers, fitted with the branch's repeat-tract fit. Main's
+    /// checksum was `b9df0d719b55fa55576bf7c0b2da46ec`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "846e1849bada1d77f30d131b03e4068c";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -751,7 +823,27 @@ mod tests {
     /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
     /// had moved this checksum to `2bf380c922ce33cb988c4de366b73449`: taking the read-phase changes back out of the merged
     /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "287c3582f20bf55bf771b587d2020ed3";
+    /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
+    /// read the multipliers yet. It was `62b2a7d1fa6a7c47667a7b816e44a864`. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** with parameters file format 8: only the `##pvcParameters` line
+    /// moves, which names the parameters file's checksum. It was `73881956d9d2bf64a8256b617d07de85`. Recorded in the
+    /// Linux container (arm64).
+    /// **Re-recorded 2026-11-04** with the fit started from one stutter: only the `##pvcParameters` line moves,
+    /// which names the parameters file's checksum. It was `72840a48ffc161e4e1ff3ec2053e27a6`. Recorded on the macOS host
+    /// (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-04, a second time**, with the tolerance of 10⁻⁵: only the
+    /// `##pvcParameters` line moves. It was `d86ea0d4c06d0056e4df8098f5af19bb`. Recorded on the macOS host (arm64) and in
+    /// the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `0d56b0fa0b87fdd90a238d9586288b22`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: calls scored with
+    /// main's misread table and the branch's per-read-group slip rates, and the
+    /// `##pvcParameters` line of the format-9 file. Main's checksum was `287c3582f20bf55bf771b587d2020ed3`.
+    /// Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "54454ccd4b0515cc172b90f3db41dc63";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -888,7 +980,33 @@ mod tests {
     /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
     /// Again the same day, when the section's note began saying the stutter-tail rule counts against
     /// the genotype each sample's reads favour: putting the old sentence back reproduces `5045368821e56ca04c011245fead47f7`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "64fa1cbb93de58c8e2dcc9608c52f891";
+    /// **Re-recorded 2026-11-03** when the repeat-tract fit began fitting a stutter multiplier per
+    /// read group (`str_library_stutter.md`): this fixture's read groups are fitted apart, and
+    /// one class's slip rate moves from 0.00032378388 to 0.00032378431 and the allele-length curve's shares in their 14th digit; nothing else moves. Fitting with the multipliers off reproduces the
+    /// old checksum, `64ed7e146fe238eebf7295aa10cd3666`, exactly. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** when the parameters file reached format 8 and began writing
+    /// each read group's stutter multipliers (`str_library_stutter.md` §7): the file moves by
+    /// `format_version` and the new `stutter_multiplier_by_read_group` table with its note, and by
+    /// nothing else — taking both out reproduces the old checksum, `f34a4d2c703f158a27bc3640c7a6aeb4`, exactly.
+    /// Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-04** when the repeat-tract fit began each motif length with one stutter
+    /// for every read group, the multipliers entering once it settles (`str_library_stutter.md`
+    /// §3.1): the fit stops at another point within its tolerance, and
+    /// a between-locus share moves in its 11th digit and the allele-length shares in their 13th. It was `617bdfd1b38087e6412a65bac2383e2f`. Recorded on the
+    /// macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-04, a second time**, when the repeat-tract fit's tolerance became 10⁻⁵
+    /// and its loop began jumping along its own path (`str_penalised_fit.md` §2.7, §2.8): the fit
+    /// stops sooner, and a between-locus share moves in its 10th digit and a slip rate in its 13th. It was `1965e6321bb9a454dad2d8268609ea42`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `11a412be1885f1107948ac12283f4c4e`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: the file is
+    /// format 9, holding both main's `[misread_after_runs]` (format 8) and the branch's
+    /// per-read-group stutter multipliers, fitted with the branch's repeat-tract fit. Main's
+    /// checksum was `64fa1cbb93de58c8e2dcc9608c52f891`. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "09db8d0e6ed8653a7f3c410c4837f351";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1066,7 +1184,27 @@ mod tests {
     /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
     /// had moved this checksum to `7d056dac9045e6d78ca5dfc75ccacd7c`: taking the read-phase changes back out of the merged
     /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "06e7857efabae5c3301911df9b5a26f0";
+    /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
+    /// read the multipliers yet. It was `3bfeadc38c78f7aa12e1f027f43a96a6`. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** with parameters file format 8: only the `##pvcParameters` line
+    /// moves, which names the parameters file's checksum. It was `e6fbf1ff12b25f63cc5e7192dda22efc`. Recorded in the
+    /// Linux container (arm64).
+    /// **Re-recorded 2026-11-04** with the fit started from one stutter: only the `##pvcParameters` line moves,
+    /// which names the parameters file's checksum. It was `0202f5e4ca2f1e7c04238cf63c1e11a5`. Recorded on the macOS host
+    /// (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-04, a second time**, with the tolerance of 10⁻⁵: only the
+    /// `##pvcParameters` line moves. It was `b1ee069b58448fe0320d1637696e76ae`. Recorded on the macOS host (arm64) and in
+    /// the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-05**, when the repeat-tract fit began summing a round's counts in fixed
+    /// chunks of rows side by side, and stopping its jumps once they stop helping
+    /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `90a30ab4bfb80c549a0b5e297543404a`.
+    /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: calls scored with
+    /// main's misread table and the branch's per-read-group slip rates, and the
+    /// `##pvcParameters` line of the format-9 file. Main's checksum was `06e7857efabae5c3301911df9b5a26f0`.
+    /// Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "9da65303da1580f10e2380b945a0e583";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

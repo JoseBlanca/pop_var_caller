@@ -116,6 +116,33 @@ pub(super) fn stutter_tail_line(
     )
 }
 
+/// **One motif length's read-group stutter multipliers** (spec `str_library_stutter.md` §3): how
+/// many read groups, the spread of their multipliers, and how many rest on the pull toward one,
+/// with too few slipped reads to carry an error of their own.
+pub(super) fn multipliers_line(
+    period: u8,
+    multipliers: &super::FittedMultipliers,
+    pull: f64,
+) -> String {
+    let mut sorted = multipliers.multipliers.clone();
+    sorted.sort_by(f64::total_cmp);
+    let (lowest, highest) = (sorted[0], sorted[sorted.len() - 1]);
+    let median = sorted[sorted.len() / 2];
+    let on_the_pull = multipliers
+        .slipped_reads
+        .iter()
+        .filter(|slipped| **slipped < pull)
+        .count();
+    format!(
+        "motif length {period}, each read group's stutter: the multipliers of {} read groups, \
+         each read group's slip rate relative to a typical one's: from {lowest:.3} to \
+         {highest:.3}, median {median:.3}; \
+         {on_the_pull} rest on the pull of {pull} reads toward one, with fewer slipped reads than \
+         that, and carry no error",
+        sorted.len()
+    )
+}
+
 /// **Warnings about classes the two rules emptied or cut heavily**: a class every tract of which
 /// was left out, and a class where either rule removed more than 1 tract in 10 of those the guard
 /// kept. The argument that the rules cannot bias a rate holds only while they cut a small share,
@@ -720,7 +747,7 @@ mod tests {
     };
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
-    use crate::parameter_estimation::joint::ssr_fit::expected_counts::DistinctRows;
+    use crate::parameter_estimation::joint::ssr_fit::expected_counts::{DistinctRows, RowKeying};
 
     /// The fit's outcomes and every line it logged.
     fn fit_and_log(
@@ -747,7 +774,7 @@ mod tests {
             &mut |line| lines.push(line),
             &|period, round, _| rounds.borrow_mut().push((period, round)),
         );
-        (outcomes.0, lines, rounds.into_inner())
+        (outcomes.outcomes, lines, rounds.into_inner())
     }
 
     /// The one line that starts with `prefix`.
@@ -849,7 +876,13 @@ mod tests {
         for evidence in &strata[..3] {
             let repeats = evidence.stratum.reference_repeats;
             let line = the_line(&lines, &format!("motif length 2 at {repeats} repeats: ")).text();
-            let distinct = DistinctRows::of(evidence, &excess).distinct_rows();
+            // The table the fit builds: keyed by read group when the cohort has two or more.
+            let keying = if evidence.read_groups.len() >= 2 {
+                RowKeying::ByReadGroup
+            } else {
+                RowKeying::Pooled
+            };
+            let distinct = DistinctRows::keyed(evidence, &excess, keying).distinct_rows();
             let expected = format!(
                 "{} loci with reads, {} (locus, sample) pairs with reads holding {distinct} \
                  distinct rows of read counts; F ",
@@ -1209,7 +1242,7 @@ mod tests {
         assert_eq!(
             round_line(2, 140, 3.14e-5, &a_narrow_production_fit()),
             "motif length 2, round 140 of at most 2000: the largest change in any number was \
-             3.1e-5 (it settles once every change is below 1e-7)"
+             3.1e-5 (it settles once every change is below 1e-5)"
         );
     }
 

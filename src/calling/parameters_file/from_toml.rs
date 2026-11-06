@@ -714,6 +714,7 @@ mod tests {
         file.format_version = 3;
         file.ordinary_site_prior.fitted_density = None;
         file.repeat_tracts_left_out = None;
+        file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.misread_after_runs = None;
         file.duplicated_positions = None;
         file.repeat_tracts
@@ -1444,6 +1445,36 @@ mod files_written_before_format_3 {
         }
     }
 
+    /// The rows a run writes for a file with no stutter multipliers: a `defaulted` one for every
+    /// read group with a slippage group, at every motif length with a slip rate.
+    fn the_defaulted_multipliers_of(
+        file: &ParametersFile,
+    ) -> Vec<super::super::StutterMultiplierRow> {
+        let periods: std::collections::BTreeSet<u8> = file
+            .repeat_tracts
+            .slippage_by_stratum_and_group
+            .iter()
+            .map(|row| row.period)
+            .collect();
+        let mut rows = Vec::new();
+        for group in &file.repeat_tracts.slippage_group_by_read_group {
+            for &period in &periods {
+                rows.push(super::super::StutterMultiplierRow {
+                    read_group: group.read_group,
+                    period,
+                    stutter_multiplier: super::super::WarrantedValue {
+                        value: 1.0,
+                        warrant: super::super::Warrant::Defaulted,
+                        observations: None,
+                        standard_error: None,
+                    },
+                    slipped_reads: None,
+                });
+            }
+        }
+        rows
+    }
+
     /// **A file main's build wrote survives a calling run byte for byte**: read and migrated,
     /// projected into a run's parameters, written back as the run writes the file it scored
     /// with, and written back again from that.
@@ -1493,6 +1524,9 @@ mod files_written_before_format_3 {
         // today's built-in in its place and writes that.
         read.stated_constants.repeat_tract_outlier_weight.value =
             crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+        // **A file from before format 9 has no stutter multipliers**, and a run reads every one as
+        // one: it writes a `defaulted` one for each read group at each motif length.
+        read.repeat_tracts.stutter_multiplier_by_read_group = the_defaulted_multipliers_of(&read);
         let once = written_back(&read);
         assert_eq!(once, read, "the run writes the migrated file");
         assert_eq!(once.to_toml(), read.to_toml(), "byte for byte");

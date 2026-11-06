@@ -28,6 +28,9 @@ sample the prior's pull on two-base direction numbers is a known dishonesty of t
 the prior's weight stays one read, on a three-seed sweep (§2.10.2); and the fit is made independent
 of the order the psps are named in before milestone D (§3, plan step C10).
 
+**Amended 2026-11-02, owner: a class of fewer than 3 loci takes its stutter from the curves and
+does not shape them (§2.11).**
+
 **Amended 2026-10-16, owner (§7):** where a thin class's errors start (§2.6) — the shorter share and
 the fall-off from 3 loci with reads, the slip rate, F and the allele-length shares from 8 — and a rare
 share's line lowered from 3 loci's worth to 1. Built in plan step D8.
@@ -149,6 +152,22 @@ one class's table of distinct rows is alive at once, whatever the thread count (
 §3). The cost: a class small enough to leave the machine idle is fitted on few threads, which at one
 sample costs seconds. Steps 2–3 are cheap (1–9% of the time on the bench).
 
+*One exception, 2026-11-05: a table keyed by read group* (`str_library_stutter.md` §3.2) *is built
+once for a run of rounds and kept*, each round giving it the round's multipliers: which distinct rows
+a class holds does not depend on them. What is alive at once is then every class's table of rows,
+not the rows' scores, which are still built and dropped a class at a time. Building the table every
+round had been the largest part of a round left on one thread: at 960 read groups and 200 loci a
+class on 32 threads of kimura the fit took 57.8 s with it and 37.1 s without, at a peak of 1.14 GB
+and 1.26 GB.
+
+*The scores, the read models and the counts are held in a few large arrays, not one small vector a
+row or a genotype* (2026-11-05). On Linux, vectors made on the pool's threads and freed on the
+calling one were freed slowly and one at a time: the read models' alone, about 200,000 vectors a
+class and round at 960 read groups, took 21 of the fit's 78 seconds on 32 threads, longer at 32
+threads than at one. Each round's counts are summed in fixed chunks of rows side by side, then the
+chunks in order, so the answer does not depend on the thread count; this sums in another order than
+row by row, and no number on tomato2 moved by more than 10⁻⁸ of itself.
+
 **Every class with reads at even one locus is fitted.** There is no refusal floor: a thin class's
 numbers come mostly from the curve, which is the point. *Main's floor of 8 loci
 (`DEFAULT_REFUSAL_FLOOR`, `ssr_fit.rs:1201`) existed to stop a per-class climb on too little; it has
@@ -219,6 +238,12 @@ slip rate 0.5% of its value low changes any call is not measured (§5).
   `track1_counting_fit_errors_2026-10-12.md` §7, "The rule now").
 
 ### 2.6 Standard errors
+
+*Cost, 2026-11-04*: each class's read model, which depends on the stutter and the read groups'
+multipliers alone, is built once and serves every tract's small table in the two per-tract passes
+(each tract's contribution to the spread, and each read group's to its multiplier's). Building one
+a tract cost, at 960 read groups and 1,000 tracts a class, 84 s of standard errors against 42 s;
+no number moves.
 
 **Every reported number carries one, computed as `H⁻¹(B + P)H⁻¹`**: H the penalised curvature of the
 objective, B the sum over loci of each locus's score contribution times itself, P the fit's prior —
@@ -308,7 +333,7 @@ these**:
 |---|---|---|
 | allele window | ±9 | `str_allele_window.md` |
 | start | slip rate 0.05, shorter share 0.5, fall-off 0.3 | bench; soft |
-| rounds at most / stop when no number moves more than | 2,000 / 10⁻⁷ | bench; soft |
+| rounds at most / stop when no number moves more than | 2,000 / 10⁻⁵ | §2.8, measured 2026-11-04 (was 10⁻⁷, the bench's); soft |
 | floor | one locus's worth + one draw a class | §2.4, measured |
 | prior under the three stutter curves: weight (`STUTTER_PRIOR_READS`) | one read's worth a class, each curve | §2.10.2; owner 2026-10-15, kept after C8's three-seed sweep of 0, 1 and 5 on held-out loci |
 | prior under the three stutter curves: centre (`STUTTER_PRIOR_CENTRE`) | slip rate 0.10, shorter share 0.5, fall-off 0.05: calling's default stutter | §2.10; owner 2026-10-15; not a measurement |
@@ -328,6 +353,53 @@ these**:
 
 Both change no number beyond about 10⁻⁶ (`cost_2026-10-14.md`). **Their gain falls with depth**: at
 30 reads a row repeats 3.6 times, at 300 reads 1.2 times.
+
+
+**Three ways to fewer rounds, owner 2026-11-04.** Near its answer the loop creeps: each round's
+step is about 0.93 times the last, so the last factor of 100 toward the tolerance takes about 60
+rounds, and a start ten times closer saves only about 32.
+
+- **The tolerance is 10⁻⁵** (was 10⁻⁷). On tomato2 it moves no read-group multiplier by more than
+  0.0004% and no slip rate by more than 0.06% (a class of 3 loci), at half the time (80 s → 39 s).
+  The numbers' own errors are 3% and more.
+- **The loop jumps along its own path, guarded** (`PenalisedFitConfig::extrapolate`; squared
+  extrapolation, Varadhan and Roland 2008). Two ordinary rounds record the path, from `θ₀` to `θ₁`
+  to `θ₂`; with `r = θ₁ − θ₀` and `v = θ₂ − θ₁ − r`, every number jumps to
+  `θ₀ − 2αr + α²v`, `α = −‖r‖/‖v‖` held between −50 and −1 (−1 lands on `θ₂`). The round after
+  the jump keeps it only if the reads' log-likelihood at the jumped numbers is not below that at
+  `θ₁`; otherwise the numbers return to `θ₂`. The numbers are those a round moves, on the scales
+  the curves draw them on: per class the slip rate, shorter share and fall-off as logits, the
+  spread and the allele-length shares as logarithms (the shares renormalised), and every
+  read-group multiplier as a logarithm. Not in the first five rounds of a counting run, nor while
+  the curves' stiffness is first searched for. On tomato2, at the tolerance of 10⁻⁵, the fit takes
+  32 s against 39 s; about half the jumps are undone. Dinucleotide multipliers move by up to 0.11%
+  and slip rates by up to 0.25% against the loop without it, the same at 10⁻⁷ and 10⁻⁵: the jumps
+  move the path along which the curves' stiffness is chosen.
+
+  **The jumps stop once they stop helping** (2026-11-05). The guard compares the reads'
+  log-likelihood, but an ordinary round climbs the penalised objective, which adds the curves' bend
+  penalties, the priors and the multipliers' pull to it. A round can lower the reads'
+  log-likelihood while it raises the objective, and a jump back toward where the cycle began then
+  passes the guard. On kimura's cohort of 2,655 read groups the homopolymer fit went round one cycle
+  of three rounds from round 226 to round 331, when it was stopped: its largest change was 6.6·10⁻⁴,
+  3.1·10⁻⁴ and 2.3·10⁻⁴ in every cycle. So a counting run keeps the lowest change of any round,
+  and once 30 rounds pass without a new lowest, lower by 1 in 100, it takes ordinary rounds to the
+  end; those climb the objective every time. A run that is settling keeps setting new lows, though
+  on tomato2 about half its jumps are turned back. *Measured on tomato2*: 16.0 s against 14.7 s with
+  the jumps never stopped; homopolymers to tetranucleotides take the same rounds (18, 168, 99, 58),
+  pentanucleotides 413 against 408 and hexanucleotides 412 against 193, whose rounds are cheap.
+  *Tried and dropped*: stopping after two cycles in a row whose largest change did not fall (the
+  kimura dinucleotide fit, set back by a turned-back jump every 33 rounds, never tripped it), and
+  after three cycles without a new lowest with a turned-back jump counted as none (22.6 s on
+  tomato2, trinucleotides 233 rounds against 99). *Not built*: guarding on the penalised objective itself, which is the exact
+  fix and needs every penalty and prior term summed in one place.
+- *Tried and dropped*: the same jump **without the guard** cut the rounds on drawn cohorts but on
+  tomato2 left the tetranucleotide fit unsettled after 2,000 rounds; **recomputing alternate
+  classes** each round, the rest reusing their last counts, needed proportionally more rounds
+  (129, 172 and 204 for every class, halves and thirds).
+
+*Measured on a drawn cohort of 960 read groups, 9 homopolymer classes of 1,000 loci at 3 reads, 6
+threads*: 303 s at the old settings, 87 s with the three above and the shared read model of §2.6.
 
 ### 2.9 What the run logs
 
@@ -676,6 +748,65 @@ The lead put five questions with a recommendation each; the owner answered all f
    the prior the ridge no longer sets any stutter number, and changing it would move F and the
    allele lengths for a reason unrelated to this fix.
 
+### 2.11 A class of one or two loci does not shape the stutter curves — owner 2026-11-02
+
+**A class with fewer than 3 loci with reads takes its three stutter numbers (slip rate, shorter
+share, fall-off) from the curves drawn through the other classes of its motif length, and its reads
+do not shape those curves** (`LOCI_TO_SHAPE_THE_STUTTER_CURVES`, the line where the direction
+numbers' errors start, §2.6). Its expected counts, the stutter prior at its repeat count and its
+part of the standard errors' slopes are left out of the three stutter curves; it still shapes the
+allele-length and F curves, and it is still called.
+
+**Why.** On tomato2 (59 accessions, about 3 reads), the tetranucleotide classes at 19 and 20 repeats
+hold one locus each, at the end of a slip-rate curve the fit drew straight (strength about 10¹⁰).
+Each could explain its one tract's reads as slips: 13.9 expected slipped reads at 19 repeats where
+an earlier fit had 0.26. That pulled the whole line steep, from 0.0043–0.0090 at 6 to 10 repeats to
+0.0025–0.023, and the two classes to slip rates of 0.78 and 0.86. It surfaced with the read-group
+multipliers ([`str_library_stutter.md`](str_library_stutter.md)), which tipped the fit into that
+solution; fitted without the classes of fewer than two loci, the rates at 6 to 9 repeats came back to
+0.0039–0.0076. The owner (2026-11-02): such classes "are not that important", so take defaults or
+extrapolate from the others. Extrapolating was chosen over calling's default (10% slipped at every
+repeat count), which is a worse guess for a long tetranucleotide than the curve.
+
+**When no class of a motif length has 3 loci**, every class keeps its own reads in the curves, as
+before: there is nothing else to extrapolate from, and the stutter prior (§2.10) is what holds them.
+
+**Beyond the outermost class that shapes the curves, a thin class is held flat at that class's three
+numbers**, not given the curves' continuation; between two shaping classes it takes the curves' value
+at its repeat count. A thin class's reads are also left out of the read-group multipliers' evidence
+([`str_library_stutter.md`](str_library_stutter.md) §3.4), since its rate is not its own. The
+continuation was measured and rejected (below): a straight logit line carried past its last data
+point can reach a rate above the multipliers' ceiling of 0.95, where no set of multipliers has a
+typical one of one.
+
+**Measured against drawn truth** (ignored test `measure_the_thin_class_rule_against_drawn_truth`:
+tomato2's own number of loci with reads in every class of motif lengths 1 and 2, 59 samples at 3
+reads, seeds 1–3). Median miss of the thin classes' slip rates, as |ln(fitted / true)|, over the three
+seeds:
+
+| a class of 1–2 loci gets | homopolymers | dinucleotides |
+|---|---|---|
+| its own reads (no rule) | 0.050 / 0.081 / 0.021 | 0.034 / 0.060 / 0.028 |
+| the outermost shaping class's numbers (built) | 0.158 / 0.122 / 0.043, all low | 0.023 / 0.086 / 0.001 |
+| the curves' continuation | 0.546 / 0.282 / 0.133 (worst ×0.31) | 0.053 / 0.242 / 0.030 (worst ×1.70) |
+
+The classes with 3 loci or more come out the same under all three. The drawn cohorts hold no odd
+locus, so the first row is the rule's cost and not the failure it guards against: on tomato2 the
+tetranucleotides at 19 and 20 repeats come out at 0.78 and 0.86 without the rule and at 0.009 with
+it. The flat hold's cost is a thin class at the end of a motif length whose stutter still rises with
+length, held at the rate of a shorter tract and so low.
+
+**A stopgap.** The rule is a threshold, so a class's treatment flips between 2 and 3 loci; the
+principled form counts evidence by loci and lets the prior and the neighbouring classes decide a thin
+class gradually (§6).
+
+**What it costs, measured** on a drawn cohort in the same corner (test
+`two_one_locus_classes_cannot_bend_the_stutter_curves`: dinucleotides with little stutter, five
+classes of 10 loci, 59 samples at 3 reads, and two one-locus classes read at every length from three
+repeats short to three long): the five classes' slip rates stay within 10% of a fit without the two,
+7% at 6 repeats, against 56% without the rule. What is left comes through the allele-length and F
+curves.
+
 ---
 
 ## 3. What will bite
@@ -781,6 +912,34 @@ The lead put five questions with a recommendation each; the owner answered all f
 
 ## 6. Deferred, with a recommended home
 
+- **Evidence counted by loci, not reads, so thin classes lean on the prior** *(owner, 2026-11-03:
+  "if our conclusion can change just because of a couple of data points we're at the mercy of random
+  noise")* → its own spec, after the read-group multipliers merge; it replaces §2.11's threshold.
+  Today every read of a class is independent evidence of the class's slip rate, so one locus read in
+  59 samples weighs hundreds of reads against a stutter prior of one (§2.10), and no prior of sensible
+  strength holds it. Give each locus its own slip rate, scattered around its class's rate with a
+  spread fitted per motif length: a class's evidence is then bounded by its loci, a one-locus class
+  counts about once however deep its reads, and the move from the prior and the neighbouring classes
+  to the class's own data is gradual instead of flipping between 2 and 3 loci. Every class's fit
+  changes, not only the thin ones', so it is measured on the §2.11 drawn cohorts and tomato2's
+  tetranucleotides before it replaces the rule.
+
+  **The prior's centre becomes a table measured on HG002** *(owner, 2026-11-03)*: slip rate by motif
+  length and repeat count, fitted on HG002 at 30× with the code of that time, in place of HipSTR's
+  0.10 at every repeat count (§2.10.2). Stutter changes about thirtyfold along a motif length: at
+  HG002 30× (benchmark run `e7964e29`, the repeat-region set) homopolymers slip at 0.004 at 8
+  repeats, 0.035 at 14 and 0.065 at 20, so a flat 0.10 is 10 to 30 times too high at short tracts,
+  for tomato2 as for HG002. Two cautions. Only well-read classes enter the table, held flat beyond
+  the last of them: HG002's own fit has the thin-class ends of §2.11 (six-base motifs at 11 repeats
+  0.21 at 30×, trinucleotides at 30 repeats 0.60 at 5×). And the weight stays low: HG002's libraries
+  are, as far as known, PCR-free, and tomato2 slips about five times more at 14 repeats in
+  homopolymers and dinucleotides (0.18 and 0.17 against 0.035 and 0.024), so the table is a centre for
+  thin classes, not a value well-read classes are pulled toward.
+
+  **The same table replaces HipSTR's constants as calling's default for a class with no reads**
+  *(owner, 2026-11-03)*: one table for both, so a class the fit could not place and a class it never
+  saw get the same stutter. It moves calls on every run that has such a class, so it is measured on
+  its own, on HG002 at 30× and 5× and on tomato2, apart from the fit's change.
 - **Stutter per slippage group and library multipliers** → `spec/str_library_stutter.md`, rebuilt on
   this fit; the climb-based prototype is deleted with the climb (§1.4).
 - **Gathering evidence one motif length at a time**, to bound the evidence's memory → the census-read

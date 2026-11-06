@@ -53,10 +53,29 @@ use super::census::Stratum;
 use super::share_curve::ShareSource;
 use super::slippage_curve::LevelSource;
 use super::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR;
-use super::ssr_fit::{LevelProvenance, SharesProvenance, Slippage, StratumOutcome};
+use super::ssr_fit::{
+    LevelProvenance, SharesProvenance, Slippage, StratumOutcome, read_group_level,
+};
 
 /// What one `(read group, stratum)` cell answers with.
 ///
+/// **One read group's stutter multiplier for one motif length**, and what stands behind it
+/// (`str_library_stutter.md` §3, §7). A read of the read group slips at
+/// [`read_group_level`](super::ssr_fit::read_group_level)`(class rate, value)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StutterMultiplier {
+    /// The multiplier: one is a read group of typical stutter for its slippage group.
+    pub value: f64,
+    /// Its standard error, on the multiplier's own scale; `None` where it leans on the pull toward
+    /// one as much as on its reads, or where nothing determined it.
+    pub standard_error: Option<f64>,
+    /// The read group's expected slipped reads over the motif length's classes, without the pull;
+    /// `None` where nothing was fitted.
+    pub slipped_reads: Option<f64>,
+    /// Fitted from this run's reads, defaulted to one, or supplied by a parameters file.
+    pub provenance: Provenance,
+}
+
 /// **The three numbers and where they came from, together.** A level fitted from 8,000 slipped
 /// reads and one read off a curve through four cells are the same `f64`, and a consumer that
 /// weighs them alike is treating an interpolation as a measurement
@@ -594,6 +613,10 @@ pub struct StratumFits {
     /// warrant is for. A file demoted to `supplied` (spec §2.1) and written back out re-emerged
     /// as `fitted_here`.
     stated_concentration_warrant: Provenance,
+    /// **Each read group's stutter multiplier, per motif length** (`str_library_stutter.md` §3): how
+    /// many times its slippage group's class rate its reads slip at. **A pair with no entry is one**,
+    /// which is what a run of one read group and a parameters file older than format 9 mean.
+    stutter_multipliers: BTreeMap<(ReadGroupId, u8), StutterMultiplier>,
 }
 
 impl StratumFits {
@@ -736,6 +759,7 @@ impl StratumFits {
             // `STATED_OWN_SHARES_CONCENTRATION`).
             stated_concentration_warrant: stated_warrant,
             stated_concentration_with_own_shares_warrant: stated_warrant,
+            stutter_multipliers: BTreeMap::new(),
             by_stratum,
             allele_length_variation_by_stratum,
             allele_length_variation_by_period: BTreeMap::new(),
@@ -870,6 +894,7 @@ impl StratumFits {
                 stated_concentration_with_own_shares,
             ),
             stated_concentration_with_own_shares_warrant,
+            stutter_multipliers: BTreeMap::new(),
         }
     }
 
@@ -1007,6 +1032,57 @@ impl StratumFits {
         self.stated_concentration
     }
 
+    /// **The same fits, with each read group's stutter multipliers**, keyed by read group and motif
+    /// length. A pair left out is a multiplier of one.
+    ///
+    /// # Panics
+    ///
+    /// On a multiplier that is not a finite positive number, naming the read group and motif
+    /// length: no rate can be scaled by one.
+    #[must_use]
+    pub fn with_stutter_multipliers(
+        mut self,
+        stutter_multipliers: BTreeMap<(ReadGroupId, u8), StutterMultiplier>,
+    ) -> Self {
+        for ((read_group, period), multiplier) in &stutter_multipliers {
+            assert!(
+                multiplier.value.is_finite() && multiplier.value > 0.0,
+                "read group {}'s stutter multiplier at motif length {period} is {}; a multiplier \
+                 is a finite positive number",
+                read_group.get(),
+                multiplier.value
+            );
+        }
+        self.stutter_multipliers = stutter_multipliers;
+        self
+    }
+
+    /// **A read group's stutter multiplier at a motif length**, where the fit or the file gave it
+    /// one; `None` is a multiplier of one.
+    #[must_use]
+    pub fn stutter_multiplier_of(
+        &self,
+        read_group: ReadGroupId,
+        period: u8,
+    ) -> Option<&StutterMultiplier> {
+        self.stutter_multipliers.get(&(read_group, period))
+    }
+
+    /// Every read group and motif length with a multiplier, in read-group order and then in motif
+    /// length.
+    pub fn each_stutter_multiplier(
+        &self,
+    ) -> impl Iterator<Item = (ReadGroupId, u8, &StutterMultiplier)> {
+        self.stutter_multipliers
+            .iter()
+            .map(|((read_group, period), multiplier)| (*read_group, *period, multiplier))
+    }
+
+    /// The read groups this run declared a slippage group for, in order.
+    pub fn read_groups(&self) -> impl Iterator<Item = ReadGroupId> {
+        self.slippage_group_of.keys().copied()
+    }
+
     /// **Where the bottom rung's stated strength came from** — see
     /// [`Self::stated_concentration`] for what the number is.
     ///
@@ -1053,6 +1129,10 @@ impl StratumFits {
     }
 
     /// The numbers for one read group at one stratum.
+    ///
+    /// **The slip rate is the read group's own**: its slippage group's class rate times its stutter
+    /// multiplier at the motif length ([`Self::with_stutter_multipliers`]), held below 0.95. The
+    /// shorter share, the fall-off and every provenance and error are the class's.
     ///
     /// **Fill the stratum from the *candidate*, not from the tract.** A read's chance of slipping
     /// is a property of the tract it was copied from, and that is the candidate allele
@@ -1105,9 +1185,16 @@ impl StratumFits {
         }
         // Indexed rather than `get`-ed from here on: `over` has checked that the three vectors
         // are the same length, and the bound above is that length.
-        fitted_at(row, stratum, index).ok_or(NoSlippage::GroupPutNoReadHere {
+        let mut fitted = fitted_at(row, stratum, index).ok_or(NoSlippage::GroupPutNoReadHere {
             slippage_group: group,
-        })
+        })?;
+        // **The read group's own slip rate**: its slippage group's class rate times its
+        // multiplier at this motif length (`str_library_stutter.md` §6). The shorter share and
+        // the fall-off are the class's for every read group.
+        if let Some(multiplier) = self.stutter_multipliers.get(&(read_group, period)) {
+            fitted.slippage.level = read_group_level(fitted.slippage.level, multiplier.value);
+        }
+        Ok(fitted)
     }
 
     /// Which slippage group a read group's reads are drawn under, for a caller reporting what it
@@ -1795,6 +1882,49 @@ mod tests {
             None,
             "and a read group the run never named has no group at all",
         );
+    }
+
+    /// **A read group is answered at its own slip rate**: the class rate times its multiplier at
+    /// the class's motif length, held below 0.95, with the class's shorter share and fall-off
+    /// (`str_library_stutter.md` §6). A read group without a multiplier, or at another motif
+    /// length, gets the class rate.
+    #[test]
+    fn each_read_group_slips_at_its_class_rate_times_its_multiplier() {
+        let multiplier = |value: f64| StutterMultiplier {
+            value,
+            standard_error: None,
+            slipped_reads: Some(100.0),
+            provenance: Provenance::FittedHere,
+        };
+        let fits = of_rows(
+            [derived(
+                stratum(2, 9),
+                vec![Some(slippage(0.08))],
+                vec![Some(from_the_cell(400.0))],
+            )],
+            BTreeMap::from([
+                (ReadGroupId(3), 0),
+                (ReadGroupId(4), 0),
+                (ReadGroupId(5), 0),
+            ]),
+        )
+        .with_stutter_multipliers(BTreeMap::from([
+            ((ReadGroupId(3), 2), multiplier(2.5)),
+            ((ReadGroupId(4), 1), multiplier(2.5)),
+            ((ReadGroupId(5), 2), multiplier(20.0)),
+        ]));
+        let class = slippage(0.08);
+        let at = |group: u32| fits.at(ReadGroupId(group), 2, 9).expect("fitted");
+
+        assert!((at(3).slippage.level - 0.20).abs() < 1e-15, "{:?}", at(3));
+        assert_eq!(at(3).slippage.shorter_share, class.shorter_share);
+        assert_eq!(at(3).slippage.fall_off, class.fall_off);
+        assert_eq!(
+            at(4).slippage.level,
+            0.08,
+            "its multiplier is for homopolymers"
+        );
+        assert_eq!(at(5).slippage.level, 0.95, "held below the ceiling");
     }
 
     /// **The four ways a lookup can come back empty are four different answers**, and a caller

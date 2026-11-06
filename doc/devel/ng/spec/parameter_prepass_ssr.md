@@ -1018,6 +1018,23 @@ hard rule because it is simpler, and the price, a few good tracts, is affordable
 A tract left out stays out: a later round never brings it back, which is what guarantees the rounds
 end.
 
+**A refit starts from the fit before** (owner, 2026-11-04; `PenalisedFitConfig::refit_from_the_fit_before`):
+its numbers, curves and read-group multipliers, wherever it fitted the same classes, and it runs to
+the tolerance from there. Any start leans the answer a little toward itself, within the tolerance
+and through the path along which the curves' stiffness is chosen; the fit before, a few tracts
+away, is a closer start than the starting stutter. *Measured on tomato2*: the repeat-tract fit
+takes 19 s against 23 s; a homopolymer multiplier moves by 0.01% and one slip rate by 0.4%, in a
+class of 3 loci.
+
+**It also keeps the between-locus share read off pairs** (2026-11-05): it counts with that share
+held from the start, then reads it off pairs again at the stiffness already chosen, until a reading
+moves it by less than the alternations' stopping step (`str_penalised_fit.md` §2.2). Counting with
+the share free had moved it back to where counting alone puts it, and the readings off pairs then
+redid the first fit's: on tomato2's homopolymers 30, 6 and 2 of the refit's 80 rounds, and on
+kimura's cohort of 2,655 read groups each refit took about 15 minutes. *Measured on tomato2*: the
+homopolymer refit takes 18 rounds against 80; a multiplier moves by at most 0.002% and a slip rate
+by at most 0.03% (homopolymers of 18 to 21 repeats), against errors of 3% and more.
+
 **Why rounds, and not one test.** A stratum's rate is inflated by its own outliers, so in the first
 round they do not look improbable. In the one-round prototype, hexanucleotides stayed at 4 to 11
 slips in 100 against 0 at confident tracts. Each round tests against a rate with the last round's

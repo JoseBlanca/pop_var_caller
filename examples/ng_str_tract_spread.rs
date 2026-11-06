@@ -58,12 +58,12 @@ struct Cli {
     fitted_parameters: PathBuf,
 }
 
-/// One sample's reads at a tract, its libraries pooled.
+/// One sample's reads at a tract, its read groups pooled.
 fn pooled(
     sample: &pop_var_caller::parameter_estimation::joint::ssr_fit::SampleTractReads,
 ) -> Vec<u64> {
     let mut row = vec![0_u64; (2 * RECORDED_OFFSET_RANGE + 1) as usize];
-    for (_, reads) in &sample.by_library {
+    for (_, reads) in &sample.by_read_group {
         for (bucket, count) in reads.iter().enumerate() {
             row[bucket] += u64::from(*count);
         }
