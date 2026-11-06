@@ -828,6 +828,16 @@ fn fit_one_period_leaving_out_the_stutter_tail(
                     rule,
                     period.multipliers.as_deref(),
                 );
+                tract_exclusion::probe_dump_round(
+                    outcome.rounds,
+                    evidence,
+                    homozygote_excess,
+                    period.slippage[point],
+                    fit.allele_span,
+                    rule,
+                    period.multipliers.as_deref(),
+                    &tracts,
+                );
                 (!tracts.is_empty()).then_some((class, tracts))
             })
             .collect();

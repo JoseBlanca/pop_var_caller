@@ -57,6 +57,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// PROBE ONLY (tail-rule-probe): which stratum and locus each tract came from, keyed by the address
+/// of its `samples` buffer, which moving the `TractReads` does not change.
+pub static PROBE_TRACT_ORIGIN: std::sync::Mutex<Option<std::collections::HashMap<usize, (u8, u64, usize)>>> =
+    std::sync::Mutex::new(None);
+
 use rayon::prelude::*;
 
 pub mod expected_counts;
@@ -1322,6 +1327,16 @@ pub fn gather_strata(
                                 by_read_group: by_read_group.into_iter().collect(),
                             });
                         }
+                    }
+                    if !reads.samples.is_empty() {
+                        PROBE_TRACT_ORIGIN
+                            .lock()
+                            .unwrap()
+                            .get_or_insert_with(Default::default)
+                            .insert(
+                                reads.samples.as_ptr() as usize,
+                                (stratum.period, stratum.reference_repeats, locus),
+                            );
                     }
                     evidence.guard_reads += guard.non_whole_reads;
                     if guard.is_over_threshold() {

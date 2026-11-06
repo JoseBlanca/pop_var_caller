@@ -354,6 +354,98 @@ pub(super) fn tracts_in_the_stutter_tail(
     .collect()
 }
 
+/// PROBE ONLY (tail-rule-probe): one line a tract of `evidence` for this round's test, appended to
+/// the file `TAIL_DUMP` names.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn probe_dump_round(
+    round: usize,
+    evidence: &StratumEvidence,
+    homozygote_excess: &[f64],
+    slippage: Slippage,
+    allele_span: i32,
+    rule: &StutterTailRule,
+    multipliers: Option<&[f64]>,
+    flagged: &[usize],
+) {
+    use std::io::Write;
+    let Ok(path) = std::env::var("TAIL_DUMP") else {
+        return;
+    };
+    let reads = reads_off_the_genotype_the_reads_favour(
+        evidence,
+        homozygote_excess,
+        slippage,
+        allele_span,
+        multipliers,
+    );
+    let origin = super::PROBE_TRACT_ORIGIN.lock().unwrap();
+    let mut text = String::new();
+    for (index, (tract, counted)) in evidence.tracts.iter().zip(&reads).enumerate() {
+        let locus = origin
+            .as_ref()
+            .and_then(|map| map.get(&(tract.samples.as_ptr() as usize)))
+            .map_or(-1, |(_, _, locus)| *locus as i64);
+        // Summed over samples: reads in each length bucket; samples with reads; samples whose reads
+        // sit at three or more lengths; samples whose second-commonest length holds at least 3
+        // reads and 30 in 100 of the sample's.
+        let mut histogram: Vec<u64> = Vec::new();
+        let (mut samples, mut three_lengths, mut two_strong) = (0_u64, 0_u64, 0_u64);
+        for sample in &tract.samples {
+            let mut summed: Vec<u64> = Vec::new();
+            for (_, counts) in &sample.by_read_group {
+                if summed.len() < counts.len() {
+                    summed.resize(counts.len(), 0);
+                }
+                for (bucket, count) in counts.iter().enumerate() {
+                    summed[bucket] += u64::from(*count);
+                }
+            }
+            if histogram.len() < summed.len() {
+                histogram.resize(summed.len(), 0);
+            }
+            for (bucket, count) in summed.iter().enumerate() {
+                histogram[bucket] += count;
+            }
+            let total: u64 = summed.iter().sum();
+            if total == 0 {
+                continue;
+            }
+            samples += 1;
+            if summed.iter().filter(|count| **count > 0).count() >= 3 {
+                three_lengths += 1;
+            }
+            let mut sorted = summed.clone();
+            sorted.sort_unstable_by(|a, b| b.cmp(a));
+            if sorted.len() > 1 && sorted[1] >= 3 && sorted[1] as f64 >= 0.3 * total as f64 {
+                two_strong += 1;
+            }
+        }
+        let mean_rate = counted
+            .expected_slipped
+            .map_or(slippage.level, |expected| expected / counted.crossing.max(1) as f64);
+        let p = binomial_upper_tail(counted.crossing, mean_rate.min(1.0), counted.off_length);
+        let histogram: Vec<String> = histogram.iter().map(u64::to_string).collect();
+        text.push_str(&format!(
+            "{round}\t{}\t{}\t{index}\t{locus}\t{}\t{}\t{}\t{}\t{}\t{p:e}\t{}\t{samples}\t{three_lengths}\t{two_strong}\t{}\n",
+            evidence.stratum.period,
+            evidence.stratum.reference_repeats,
+            slippage.level,
+            mean_rate,
+            counted.crossing,
+            counted.off_length,
+            rule.times_rate * mean_rate * counted.crossing as f64,
+            u8::from(flagged.binary_search(&index).is_ok()),
+            histogram.join(","),
+        ));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("TAIL_DUMP opens");
+    file.write_all(text.as_bytes()).expect("TAIL_DUMP writes");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

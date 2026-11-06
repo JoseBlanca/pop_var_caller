@@ -95,13 +95,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sample_of.insert(read_group.get(), row.sample);
         }
     }
+    // PROBE ONLY (tail-rule-probe): each tract's position, as `strata_of_kept_loci` orders them;
+    // the n-th of a class is its locus n.
+    {
+        let mut with_position: Vec<((u32, u64, u64), String, u8, u64)> = opened
+            .plan
+            .loci
+            .ssr()
+            .iter_sorted()
+            .into_iter()
+            .flat_map(|((period, reference_repeats), segments)| {
+                let contig_of = &contig_of;
+                segments.iter().filter_map(move |segment| {
+                    contig_of(segment.chrom()).map(|contig| {
+                        (
+                            (contig.get(), segment.start(), segment.end()),
+                            segment.chrom().to_string(),
+                            period,
+                            reference_repeats,
+                        )
+                    })
+                })
+            })
+            .collect();
+        with_position.sort_unstable_by_key(|(position, ..)| *position);
+        let mut next: BTreeMap<(u8, u64), usize> = BTreeMap::new();
+        let mut loci = BufWriter::new(File::create(format!("{}.loci.tsv", cli.args.output.display()))?);
+        writeln!(loci, "period\treference_repeats\tlocus\tchrom\tstart\tend")?;
+        for ((_, start, end), chrom, period, repeats) in &with_position {
+            let locus = next.entry((*period, *repeats)).or_insert(0);
+            writeln!(loci, "{period}\t{repeats}\t{locus}\t{chrom}\t{start}\t{end}")?;
+            *locus += 1;
+        }
+    }
+    let mut config = PenalisedFitConfig::production();
+    if std::env::var("PROBE_POOLED").is_ok() {
+        config.read_group_multiplier_pull = None;
+    }
+    let mut exclusion = TractExclusion::production();
+    if let Ok(periods) = std::env::var("PROBE_PERIODS") {
+        let periods: Vec<u8> = periods.split(',').map(|p| p.parse().unwrap()).collect();
+        if let Some(rule) = exclusion.depth.take() {
+            let deep = pop_var_caller::parameter_estimation::joint::ssr_fit::tract_exclusion::leave_out_deep_tracts(&mut strata, &rule);
+            eprintln!("depth rule over every class: typical depth {:?}, {} left out", deep.typical_depth, deep.tracts);
+        }
+        strata.retain(|class| periods.contains(&class.stratum.period));
+    }
     let started = std::time::Instant::now();
-    let fit = fit_repeat_tracts(
-        &mut strata,
-        &excess,
-        &PenalisedFitConfig::production(),
-        &TractExclusion::production(),
-    );
+    let fit = fit_repeat_tracts(&mut strata, &excess, &config, &exclusion);
     eprintln!("repeat-tract fit: {:.1} s", started.elapsed().as_secs_f64());
 
     let mut out = BufWriter::new(File::create(&cli.args.output)?);
