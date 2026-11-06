@@ -1,14 +1,87 @@
 # Accuracy
 
-Accuray comparison of pvc, GATK, freebayes, DeepVariant.
+pvc's accuracy has been compared with that of other tools on:
 
-All the results on this page were measured on : pvc fedb2290, GATK 4.6.0.0, freebayes 1.3.6,
-DeepVariant 1.10.0 (each sample called alone, then merged with GLnexus 1.4.1 where there are
-several), HipSTR 0.6.2. pvc ran its full pipeline: pileup files, then parameters estimated from
-the data, then calling.
+- real human data from Genome in a Bottle (GIAB), and on
+- simulations.
 
-The reads come from the Genome in a Bottle (GIAB) consortium's samples, downsampled at random
-from the full data to each lower depth. Each depth is a separate run.
+The real reads are GIAB's, downsampled at random from the full data to each lower depth; each
+depth is a separate run.
+
+The tools used in the comparison were:
+
+- GATK 4.6.0.0, HaplotypeCaller and joint genotyping;
+- freebayes 1.3.6;
+- DeepVariant 1.10.0;
+- GLnexus 1.4.1;
+- HipSTR 0.6.2;
+- Beagle 4.1 and STITCH 1.8.5.
+
+## SNPs and indels across a chromosome: HG002, chromosome 20
+
+GIAB sample HG002 over the whole of chromosome 20, scored against GIAB's v4.2.1 truth set in
+its confident regions. pvc version b45c7f50.
+
+![False positives against false negatives for SNPs and indels in HG002 over chromosome 20, 5× to about 60×](figures/errors_giab_chr20_scatter_snps_indels.svg)
+
+![False positives against false negatives for STRs and complex variants in HG002 over chromosome 20](figures/errors_giab_chr20_scatter_strs_complex.svg)
+
+*Each line corresponds to one caller, joining its results from 5× to about 60×: one point per depth, larger
+for more reads. The bottom-left corner is the best. The axes are on a log scale.*
+
+Number of false variants (a
+variant called where the truth is reference) and the missed variants (the truth has a variant
+and the call does not give its genotype).
+
+**SNPs**, of about 63,700 true SNPs:
+
+| depth | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|
+| 5× | 516 · 18,117 | 151 · 18,601 | 127 · 23,346 | 199 · 17,698 |
+| 10× | 335 · 4,383 | 227 · 4,083 | 90 · 8,247 | 183 · 3,427 |
+| 30× | 114 · 429 | 318 · 332 | 130 · 519 | 81 · 251 |
+| ~60× | 80 · 290 | 362 · 254 | 165 · 280 | 58 · 206 |
+
+DeepVariant makes the fewest mistakes at 30× and 60×, and pvc the next fewest. At 5× pvc calls
+the most false SNPs.
+
+**Indels**, of about 3,400 true indels:
+
+| depth | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|
+| 5× | 3 · 1,059 | 28 · 1,020 | 5 · 1,366 | 20 · 1,012 |
+| 10× | 6 · 290 | 29 · 226 | 2 · 558 | 19 · 221 |
+| 30× | 4 · 36 | 8 · 25 | 3 · 89 | 1 · 21 |
+| ~60× | 3 · 27 | 7 · 16 | 4 · 59 | 0 · 15 |
+
+**STRs**, of about 11,150 true STR variants:
+
+| depth | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|
+| 5× | 104 · 4,282 | 29 · 4,658 | 22 · 5,321 | 59 · 4,184 |
+| 10× | 123 · 1,555 | 37 · 1,899 | 22 · 2,727 | 81 · 1,358 |
+| 30× | 33 · 166 | 50 · 216 | 26 · 485 | 17 · 85 |
+| ~60× | 21 · 83 | 70 · 72 | 39 · 184 | 5 · 35 |
+
+pvc calls the most false STR variants at 5× and 10×. DeepVariant makes the fewest mistakes at
+30× and 60×.
+
+At 5× and 10× most of the missed STR variants are heterozygotes: few reads cross the STR, so
+often only one of the two alleles is seen. Of the 11,150 true STR variants, about 7,300 are
+heterozygous and 3,900 homozygous. At 5× every caller misses about half of the heterozygotes
+(49% to 65%), but only 14% to 17% of the homozygotes, and 85% to 88% of each caller's missed
+STR variants are heterozygotes. Most of these are called homozygous for the reference allele.
+At 10× the callers miss 17% to 34% of the heterozygotes and 4% to 7% of the homozygotes.
+
+**Complex variants**, of about 250 true complex variants (about 1,300 for freebayes, which writes
+nearby SNPs and indels as one complex record):
+
+| depth | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|
+| 5× | 1 · 129 | 5 · 120 | 11 · 215 | 3 · 115 |
+| 10× | 1 · 56 | 6 · 47 | 13 · 113 | 0 · 42 |
+| 30× | 1 · 23 | 7 · 13 | 17 · 43 | 1 · 13 |
+| ~60× | 1 · 20 | 5 · 11 | 27 · 40 | 0 · 11 |
 
 ## Genotype counts
 
@@ -22,19 +95,29 @@ The figures show counts for three kinds of genotyping mistakes:
 
 The panels split the variants by what they are in the truth set and the call: SNPs, indels, STRs
 (a change in the number of copies of a repeat unit), and complex variants (several changes
-written as one record). A variant counted as complex for one caller may be an SNP or an indel
+written as one record). A variant counted as complex for one caller may be a SNP or an indel
 for another: freebayes writes variants a few bases apart as one record, so most of its
 complex counts are SNPs and indels the other callers write separately.
 
 ## The GIAB trio
 
 The child HG002 and the parents HG003 and HG004, called together over 100 regions (452 kb) where
-the truth sets of all three are confident. Counts are summed over the three samples.
+the truth sets of all three are confident. Counts are summed over the three samples. pvc version
+fedb2290.
 
 ![SNP and indel errors in the GIAB trio, called jointly, at 5×, 10×, 30× and about 300×](figures/errors_giab_trio_snps_indels.svg)
 
 ![STR and complex-variant errors in the GIAB trio, called jointly](figures/errors_giab_trio_strs_complex.svg)
 
+- **At 5× and 10×, pvc gets about as many genotypes wrong as the other callers, and leaves almost
+  none missing.** At 5×, each caller gives the wrong genotype for between about 180 and 260 of
+  the trio's true SNP genotypes. Besides those, GATK and DeepVariant leave about 150 missing, pvc
+  about 12. The same holds for STRs: at 5× each caller gets 30 to 50 wrong, and GATK and
+  DeepVariant leave another 17 and 25 missing, pvc 1.
+- **At 5× and 10×, pvc calls a few more SNPs where there is none**: about 10 at each depth, against
+  2 to 4 for the others.
+- **At 30× and above, every caller makes 12 errors or fewer of any kind.** Complex variants are
+  almost error-free at every depth.
 
 **Mendelian errors.** In a trio, a child's genotype must be possible given the parents': a child
 `1/1` cannot have a `0/0` parent. A genotype that breaks this rule is a mistake in at least one of
@@ -70,7 +153,7 @@ three callers at about one in five.
 
 HG002 alone, over the 50,000 regions (6.1 Mb) of GIAB's tandem-repeat benchmark v1.0.1. pvc
 calls the STR loci with a dedicated STR model rather than the generic model used for SNPs and
-short indels.
+short indels. pvc version fedb2290.
 
 At each depth, how many of the 6,995 repeats where the truth carries a variant each caller
 genotypes right, compared as repeat lengths:
@@ -86,22 +169,6 @@ genotypes right, compared as repeat lengths:
 | ~300× | 90% | 91% | 91% | 77% |
 
 freebayes was not run on this benchmark.
-
-## SNPs and indels across a chromosome: HG002, chromosome 20
-
-HG002 over the whole of chromosome 20 (64 Mb), scored against GIAB's v4.2.1 truth set in
-its confident regions.
-
-The figures represent false
-positives across (a variant called where the truth is reference) and false negatives down (the truth
-has a variant and the call does not give its genotype). Each line is one caller, one point per
-depth; the more reads, the larger the point. The nearer a point is to the bottom-left corner, the
-fewer the mistakes.
-
-![False positives against false negatives for SNPs and indels in HG002 over chromosome 20, 5× to about 60×](figures/errors_giab_chr20_scatter_snps_indels.svg)
-
-![False positives against false negatives for STRs and complex variants in HG002 over chromosome 20](figures/errors_giab_chr20_scatter_strs_complex.svg)
-
 
 ## Simulated STRs: stutter with an exact truth
 
@@ -119,7 +186,7 @@ in the truth and 1,798 are reference. Each cell gives two numbers:
   STR, and 30 bases either side, are the truth's;
 - the **false calls** per 1,000 reference genotypes: a variant called where the sample has none.
 
-pvc estimated its parameters, stutter included, from the run's own reads. freebayes is kept at
+pvc version fedb2290 estimated its parameters, stutter included, from the run's own reads. freebayes is kept at
 QUAL ≥ 20. HipSTR ran at its defaults.
 
 **PCR stutter.** Share right, then false calls per 1,000:
@@ -183,8 +250,8 @@ pvc ran three ways:
 - **F = 0**, its defaults, which take every sample as outbred;
 - **F = 0.9 stated** for every sample, the opposite mistake for the outbred groups.
 
-The 30× rows come from pvc c3d1ed69, as the run with fedb2290 has not reached that depth yet.
-At the depths both versions ran, their results differ by less than a tenth of a point.
+pvc version fedb2290, except the 30× rows, which come from c3d1ed69. At the depths both versions
+ran, their results differ by less than a tenth of a point.
 
 **pvc's estimate of F.** The mean of the 10 estimates in each group, with the lowest and highest,
 against the F the simulation actually produced:
@@ -266,7 +333,7 @@ fewer. Every error in the group's 10 samples, wrong and missing together:
   are 13 planted SNPs inside tandem repeats 186 to 1,957 bases long. pvc treats repeats longer
   than 100 bases as satellites and does not call them unless run with `--call-satellites`; it
   writes no record there, while GATK calls the SNPs. At 30× these 13 SNPs are 400 of pvc's
-  genotypes over the 50 samples. pvc is being rerun with satellites called. A wrong F shows
+  genotypes over the 50 samples. A wrong F shows
   instead as homozygotes called heterozygous: at F = 1, 30 with F = 0 and none with F estimated.
 - **At 15×, pvc makes the fewest errors in both groups, but DeepVariant genotypes more of the
   real variants right.** Adding the three marks, at F = 1 pvc makes 148 errors, GATK 169 and
@@ -359,7 +426,10 @@ writes no phase, and GATK phases a few hundred heterozygotes at most.
   fills nothing.
 - **pvc calls far more false variants in the outbred 5× and 10× groups: 2,947 and 2,175, against
   278 or fewer for every other tool.** They appear with refinement off as well, so the refinement
-  does not cause them. Their cause has not been traced.
+  does not cause them. Almost all are a heterozygote in one sample only, at a position where two
+  of that sample's reads carry the same sequencing error. They come from a defect in how pvc
+  scores a site's quality in a large cohort, which will be corrected in a later version. Their
+  genotype quality (GQ) is low, 3 to 10, so a filter on GQ removes them.
 - **Beagle phases more heterozygotes; pvc's phase almost never switches.** In the outbred
   population Beagle phases 135,247 of the 145,951 heterozygotes right and pvc 98,871, but Beagle
   switches copies at about 4 links in 100 and pvc at 1 in 60,231. In the F2 Beagle switches at

@@ -565,6 +565,8 @@ def error_scatter_figure(rows, benchmark, title, subtitle, out, name):
         pt = 1 / 72 / fig.get_figheight()
         y = 4
         for text, size, colour in ((subtitle, 9, TEXT_2), (f"{title}: {kinds_title}", 13, TEXT)):
+            if not text:
+                continue
             wrapped = textwrap.fill(text, int(fig.get_figwidth() * 72 / (0.5 * size)))
             fig.text(0.01, 1 + y * pt, wrapped, ha="left", va="bottom", color=colour,
                      fontsize=size, linespacing=1.3)
@@ -689,9 +691,8 @@ def main():
         *vcfeval_benchmark_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20",
                                  "GIAB v4.2.1 confident regions; scored by pvc_eval; depths from "
                                  "5× to ~60×", out, "errors_giab_chr20"),
-        *error_scatter_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20",
-                              "GIAB v4.2.1 confident regions; scored by pvc_eval; one point per "
-                              "depth, larger for more reads; the bottom-left corner is the best",
+        # No subtitle: doc/user/accuracy.md explains the figure in its caption.
+        *error_scatter_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20", None,
                               out, "errors_giab_chr20"),
         *vcfeval_benchmark_figure(rows, "giab_panel", "Errors — GIAB HG002, HG003, HG004 panel",
                                  "100 confident regions per sample, each sample called alone, "

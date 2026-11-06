@@ -25,6 +25,8 @@ statistical models behind the calls, see [doc/methods/](../methods/) *(in prepar
 - [Limits and refusals](limits.md): what pvc does not call, its hard limits, why a run can refuse
   to start, and what a failed run leaves behind.
 - [Estimating contamination](../help/estimate_contamination.md).
+- [Accuracy](accuracy.md): how pvc's genotypes compare with GATK's, freebayes', DeepVariant's
+  and other tools' on real and simulated data, from one sample to 400 and from 1× to about 300×.
 
 `pvc <command> --help` lists every option of a command with its default.
 
