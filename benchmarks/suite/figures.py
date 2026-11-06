@@ -340,6 +340,62 @@ def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggreg
     return made
 
 
+# The refinement benchmark (bench/refine_sim.py): one panel per cohort, at the depth where the
+# refinement matters most, genotypes with and without reads summed. SNPs only, because STITCH calls
+# only SNPs; the figure with every class of variant and no STITCH told the same story (owner,
+# 6 November 2026).
+# No fourth hue separates from the three for every reader, so GATK + Beagle, which refines GATK's
+# calls, takes GATK's colour, and STITCH the light neutral HipSTR has in the repeat benchmarks,
+# where STITCH never appears.
+REFINE_PANELS = [
+    ("F2, 20 plants at 1×", "simulated F2", "F2 1x"),
+    ("outbred, 100 samples at 5×", "simulated natural population, outbred", "5x"),
+    ("selfing F = 0.9, 100 samples at 5×", "simulated natural population, selfing F = 0.9", "5x"),
+]
+REFINE_STYLE = {"pvc (refinement on)": dict(STYLE["pvc (fitted)"], label="pvc"),
+                "GATK": STYLE["GATK"],
+                "GATK + Beagle 4.1": dict(STYLE["GATK"], label="GATK + Beagle"),
+                "STITCH": dict(STYLE["HipSTR"], label="STITCH")}
+REFINE_FIGURES = [
+    ("errors_refine_sim_snps", "Errors — refined genotypes, simulated cohorts: SNPs",
+     "SNPs only, with and without reads summed", ("SNP",),
+     ["pvc (refinement on)", "GATK", "GATK + Beagle 4.1", "STITCH"]),
+]
+
+
+def refine_figures(rows, out):
+    wanted = {metric for metric, _, _ in ERROR_MARKS}
+    made = []
+    saved = {c: STYLE.get(c) for c in REFINE_STYLE}
+    STYLE.update(REFINE_STYLE)  # dot_panel colours rows by STYLE
+    try:
+        for name, title, subtitle, kinds, callers in REFINE_FIGURES:
+            classes = {f"{k}, {reads}" for k in kinds for reads in ("with reads", "without reads")}
+            panels = []
+            for panel, dataset, group in REFINE_PANELS:
+                acc = collections.defaultdict(lambda: collections.defaultdict(float))
+                for r in rows:
+                    if (r["benchmark"] == "refine_sim" and r["dataset"] == dataset
+                            and r["depth"] == group and r["stage"] == "error type"
+                            and r["variant_class"] in classes and r["caller"] in callers
+                            and r["metric"] in wanted):
+                        # One depth group for every panel, so the callers' rows line up across them.
+                        acc[("", r["caller"])][r["metric"]] += float(r["value"])
+                # A count the table has no row for is a zero (Beagle leaves no genotype missing); it
+                # must be in the counts so the panel's axis makes room for zero.
+                panels.append((panel, {k: {m: v.get(m, 0.0) for m in wanted}
+                                       for k, v in acc.items()}))
+            made.append(error_figure(panels, title, subtitle, out, name, ncols=1, callers=callers,
+                                     label=lambda c: REFINE_STYLE[c]["label"]))
+    finally:
+        for c, st in saved.items():
+            if st is None:
+                STYLE.pop(c, None)
+            else:
+                STYLE[c] = st
+    return made
+
+
 # The simulated inbreeding benchmark (bench/inbreeding_sim.py) counts each sample's genotype against
 # the truth by true and called genotype; these sums gather them into the error types. One figure per
 # group of samples with the same F, at one depth. pvc is drawn only with F estimated (owner,
@@ -751,6 +807,7 @@ def main():
                                  "complex, not STRs", out, "errors_hg002_tr",
                                  exclude=("HipSTR",)),
         *stutter_figures(rows, out),
+        *refine_figures(rows, out),
         stutter_homopolymer_figure(rows, out),
         *inbreeding_figures(rows, out),
         inbreeding_scatter_figure(rows, out),

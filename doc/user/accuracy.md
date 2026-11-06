@@ -331,11 +331,9 @@ fewer. Every error in the group's 10 samples, wrong and missing together:
 
 ## Simulated cohorts: genotypes refined from the other samples
 
-At low depth many genotypes have one read or none. pvc can then refine each sample's genotypes
-from the other samples: it works out which samples' haplotypes the sample's two copies resemble
+pvc can take into account the other samples' haplotypes at the surrounding loci, as priors, to refine each sample's genotypes: it works out which samples' haplotypes the sample's two copies resemble
 along the genome, and calls the sample from its own reads together with theirs. Where the sample
-has no read at all, this fills a genotype the reads alone could not give. Beagle and STITCH do the
-same job without a reference panel.
+has no read at all, this fills a genotype the reads alone could not give. This approach is similar to that of Beagle and STITCH.
 
 Three cohorts are simulated over one 4 Mb genome, with reads mapped by minimap2:
 
@@ -355,6 +353,12 @@ The tools:
 
 Beagle and STITCH were given the simulation's true recombination rate and, in the two
 populations, its true effective size. STITCH calls only SNPs, so the tables count SNPs only.
+
+![Errors of pvc, GATK, GATK + Beagle and STITCH on SNPs, in the F2 at 1× and in the outbred and selfing populations at 5×](figures/errors_refine_sim_snps.svg)
+
+*The errors in the F2's 20 plants at 1× and in the 100 samples at 5× of each population, SNPs
+only because STITCH calls only SNPs; genotypes with and without reads summed. pvc version
+7120e12d.*
 
 Each table cell gives three counts of one sample's genotype at one SNP, in this order:
 
