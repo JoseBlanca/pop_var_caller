@@ -170,13 +170,16 @@ such record:
   `1 − Σ_a q_self(a) · p(a)` — what an unrelated sample would show.
 
 **Judged stretch by stretch, ranked by stretches won (owner, 2026-11-05).** The compared records
-are cut, in record order, into **stretches** that each hold one unit of expected disagreement: a
-stretch ends at the record where `e`, summed over its records, reaches 1, counting only records at
+are cut, in record order, into **stretches** that each hold `I` units of expected disagreement: a
+stretch ends at the record where `e`, summed over its records, reaches `I`, counting only records at
 which some candidate is informative; what is left after the last such record joins the stretch
-before it, so no stretch is judged on less, and a window holding less than one unit is one
-stretch. One unit is about two SNPs
-at frequency ½ where the sample is certain, or about twenty at 5%. In each stretch every candidate
-gets a score from its own `d` and `e` there:
+before it, so no stretch is judged on less, and a window holding less than `I` is one stretch. One
+unit is about two SNPs at frequency ½ where the sample is certain, or about twenty at 5%.
+
+**`I` grows with the cohort (owner, 2026-11-06):** `I = max(1, ln(N / 7))`, `N` the other samples —
+one unit up to 19 of them, 1.7 at 39, 4.0 at 399, 4.9 at 999, 6.6 at 4,999
+(`templates::stretch_information`). In each stretch every candidate gets a score from its own `d`
+and `e` there:
 
 - the score is the mean of the rate's Beta(`d + 1`, `e − d + 1`) posterior plus two of its standard
   deviations — pessimistic, so a rate measured on little scores worse — with `d` capped at `e`, so a
@@ -205,9 +208,23 @@ siblings; stretch wins raised the heterozygous offspring genotypes called right 
 6 (selfing); samples at 5× gained up to 3 in 100, and samples at 10× and above did not move
 (`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
 
-- *Why one unit and two winners:* tuned on those cohorts. Longer stretches, four winners, and fixed
-  stretches of 50 records all measured worse; so did growing a stretch until its
-  candidates separated. Two winners are one a copy.
+- *Why two winners:* tuned on those cohorts; four measured worse, and so did fixed stretches of 50
+  records and growing a stretch until its candidates separated. Two winners are one a copy.
+- *Why `I` grows with the cohort — changed 2026-11-06:* among many candidates some unrelated one
+  matches a short stretch as well as a relative by chance, and takes the relative's place. At 400
+  samples one unit gave a stretch 6.5 winning samples where two were asked for, against 2.45 at 40,
+  and the phase lost about a tenth: heterozygotes phased right fell from 108,656 to 98,871 of
+  145,951 in the refine_sim benchmark's outbred cohort. Longer stretches there recovered it and
+  called fewer true variants wrong — 4 units: 108,600 phased right and 2,201 wrong against 2,771; 6
+  units: 111,110 and 2,145. The F2 runs the other way: on 20 offspring at 1×, every length above one
+  unit called more heterozygotes wrong or missing (266 wrong with reads at one unit, 298 at two, 337
+  at three), and making its crossovers ten times rarer did not change that, so it is not the
+  benchmark's dense crossovers; why the F2 wants short stretches is not traced. At 40 samples
+  (outbred) and 400 (selfing) lengths 1 to 6 measured level, within 1 in 100 of every genotype class.
+  The form follows a crude count — if an unrelated candidate matches `I` units with chance about
+  `e^−I`, the cohort's chance matches are `N·e^−I`, and `I = ln(N / 7)` holds them to about seven —
+  and the 7 is measured, the value that keeps the F2 at one unit and gives 400 samples four
+  (`doc/devel/reports/implementations/stretch_scale_2026-11-06.md`).
 - *Why land by wins:* on the F2, landing every template alike kept 74 heterozygotes in 100 right
   against 81; in the natural cohorts it made no difference.
 - *Tried and not adopted* (same report): IMPUTE5's choice, the haplotypes sharing the longest exact
@@ -224,13 +241,11 @@ wins fewer stretches than a deep sample that is only fairly close, and may rank 
 loses accuracy — a cohort with shallow close relatives and many deep distant samples — is not
 measured.
 
-**At thousands of samples, chance matches — not measured.** One unit is short: an unrelated sample
-shows no disagreement over it about one time in three (`e^−1`). With a few dozen candidates that
-rarely matters; with thousands, many unrelated samples tie a true relative in every stretch, and a
-relative wins clearly only if it matches over more of the window than chance does — an F2 parent
-matches over about half of it. The stretch's information and its two winners were tuned at 20 and
-40 samples; the refine_sim benchmark measures 400; at several thousand the rule may need longer
-stretches, and that is not measured.
+**Above 400 samples — not measured.** `I` was set from cohorts of 22, 40 and 400 samples. At
+several thousand it gives 6 to 7 units, about 12 to 14 SNPs at frequency ½; whether that keeps
+chance matches out without stretches spanning a copy's change of source is not measured. A cohort
+of close relatives that is also large — a big family or breeding population — gets long stretches
+though the F2 measured best at short ones; that case is not measured either.
 
 **Why against the frequencies — changed 2026-11-05.** The rule before scored the plain
 disagreement, `½ Σ_a |q_self(a) − q_other(a)|`, over the shared records, and it favoured exactly
