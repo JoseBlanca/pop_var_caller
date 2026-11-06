@@ -287,6 +287,15 @@ pub struct StratumEvidence {
     /// crossed: the share is over every tract of the stratum, so the guard cannot move it
     /// (`parameter_prepass_ssr.md` §4.6.1).
     pub reads_crossing_tracts_over_guard_threshold: u64,
+    /// **Tracts left out because the catalog does not record them as perfect**: their bases are
+    /// not the motif tiled end to end, as `TTTTTTTAAATTTTTTTTT` is not. Such a tract slips along
+    /// its longest pure run, far less than a pure tract of its length, so its reads would pull the
+    /// class's rate down (spec `str_interrupted_tracts.md` §2). Left out before the guard.
+    pub tracts_interrupted: u64,
+    /// **Reads that crossed a tract left out as interrupted**, over every sample and read group.
+    /// Counted as crossed by the depth rule's crossing share, as the guard's are, so the share is
+    /// over every tract of the stratum.
+    pub reads_crossing_interrupted_tracts: u64,
     /// Tracts left out because their reads, summed over every sample, far exceed what one copy
     /// gives: the depth rule (`parameter_prepass_ssr.md` §4.6.1, [`tract_exclusion`]).
     pub tracts_too_deep: u64,
@@ -1102,7 +1111,29 @@ fn ln_gamma(x: f64) -> f64 {
 // Reading the records
 // ---------------------------------------------------------------------
 
-/// Which stratum each kept STR locus is in, in the order the records index them.
+/// **One kept STR tract as the fit reads it**: the stratum it is in, and whether it is
+/// interrupted, which the fit needs because the census does not record it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptTract {
+    pub stratum: Stratum,
+    /// The catalog does not record the tract as perfect (`SsrSegment::is_perfect`), so the fit
+    /// leaves it out (spec `str_interrupted_tracts.md` §2).
+    pub interrupted: bool,
+}
+
+impl KeptTract {
+    /// A pure tract of `stratum`.
+    #[must_use]
+    pub fn pure(stratum: Stratum) -> Self {
+        Self {
+            stratum,
+            interrupted: false,
+        }
+    }
+}
+
+/// Which stratum each kept STR locus is in, and whether it is interrupted, in the order the
+/// records index them.
 ///
 /// **The record entry carries an index and nothing else** — no coordinates, no stratum — so
 /// the order has to be rebuilt from the same kept-loci object the writer was given. That is
@@ -1113,8 +1144,8 @@ fn ln_gamma(x: f64) -> f64 {
 pub fn strata_of_kept_loci(
     loci: &CensusLoci,
     contig_of: &dyn Fn(&str) -> Option<ContigId>,
-) -> Vec<Stratum> {
-    let mut with_position: Vec<((u32, u64, u64), Stratum)> = loci
+) -> Vec<KeptTract> {
+    let mut with_position: Vec<((u32, u64, u64), KeptTract)> = loci
         .ssr()
         .iter_sorted()
         .into_iter()
@@ -1123,9 +1154,14 @@ pub fn strata_of_kept_loci(
                 contig_of(segment.chrom()).map(|contig| {
                     (
                         (contig.get(), segment.start(), segment.end()),
-                        Stratum {
-                            period,
-                            reference_repeats,
+                        KeptTract {
+                            stratum: Stratum {
+                                period,
+                                reference_repeats,
+                            },
+                            // PROBE ONLY: PROBE_KEEP_INTERRUPTED fits them as before.
+                            interrupted: !segment.is_perfect()
+                                && std::env::var("PROBE_KEEP_INTERRUPTED").is_err(),
                         },
                     )
                 })
@@ -1133,10 +1169,7 @@ pub fn strata_of_kept_loci(
         })
         .collect();
     with_position.sort_unstable_by_key(|(position, _)| *position);
-    with_position
-        .into_iter()
-        .map(|(_, stratum)| stratum)
-        .collect()
+    with_position.into_iter().map(|(_, tract)| tract).collect()
 }
 
 /// Gather one stratum's evidence a locus at a time, from a whole cohort's records.
@@ -1154,7 +1187,9 @@ pub fn strata_of_kept_loci(
 /// Every sample must hold evidence for the same STR loci in the same order, which the
 /// recording-terms check the cohort makes at its door has already refused to let fail silently.
 ///
-/// **`strata` is one entry per kept tract, in genome order** — the stratum each tract is in.
+/// **`strata` is one entry per kept tract, in genome order** — the stratum each tract is in,
+/// and whether it is interrupted, which leaves it out of the evidence and counted
+/// ([`StratumEvidence::tracts_interrupted`]).
 /// The census stores a tract under an index within its own stratum, so this list is also what
 /// says how many tracts each stratum holds, and a section of a different length means the loci
 /// and the evidence were built from different selections.
@@ -1164,7 +1199,7 @@ pub fn strata_of_kept_loci(
 /// When a sample's section for a stratum is not as long as that stratum's share of `strata`.
 pub fn gather_strata(
     cohort: &mut CohortCensusEvidence,
-    strata: &[Stratum],
+    strata: &[KeptTract],
     slippage_group_of: &BTreeMap<ReadGroupId, u32>,
 ) -> Result<Vec<StratumEvidence>, CensusError> {
     let groups = slippage_group_of
@@ -1191,10 +1226,16 @@ pub fn gather_strata(
         .map(|(index, read_group)| (read_group.id, ReadGroupIndex(index as u32)))
         .collect();
 
-    // How many tracts each stratum holds, which is the length its sections are built at.
+    // How many tracts each stratum holds, which is the length its sections are built at, and
+    // which of them, by index within the stratum, are interrupted.
     let mut tracts_in: BTreeMap<Stratum, usize> = BTreeMap::new();
-    for stratum in strata {
-        *tracts_in.entry(*stratum).or_insert(0) += 1;
+    let mut interrupted_in: BTreeMap<Stratum, Vec<bool>> = BTreeMap::new();
+    for tract in strata {
+        *tracts_in.entry(tract.stratum).or_insert(0) += 1;
+        interrupted_in
+            .entry(tract.stratum)
+            .or_default()
+            .push(tract.interrupted);
     }
     let band: Vec<Stratum> = tracts_in.keys().copied().collect();
     let names: Vec<String> = cohort.sample_names().map(str::to_string).collect();
@@ -1256,7 +1297,7 @@ pub fn gather_strata(
         let gathered: Vec<StratumEvidence> = tracts_in
             .iter()
             .enumerate()
-            .map(|(index, (stratum, tracts))| {
+            .map(|(index, (stratum, _))| {
                 stage.now_and_then(|into| {
                     format!(
                         "repeat-tract evidence: stratum {} of {}; {into}",
@@ -1274,6 +1315,8 @@ pub fn gather_strata(
                     reads_crossing_tracts_over_guard_threshold: 0,
                     tracts_too_deep: 0,
                     tracts_in_stutter_tail: 0,
+                    tracts_interrupted: 0,
+                    reads_crossing_interrupted_tracts: 0,
                     reads_reaching_not_crossing: 0,
                     guard_reads: 0,
                     bases_compared: 0,
@@ -1296,7 +1339,7 @@ pub fn gather_strata(
                     }
                 }
 
-                for locus in 0..*tracts {
+                for (locus, &interrupted) in interrupted_in[stratum].iter().enumerate() {
                     let mut reads = TractReads::default();
                     // **Summed over every sample and read group, then tested once**: the guard
                     // is a test of the tract (spec §3.3). Tested a section at a time, one stray
@@ -1339,6 +1382,15 @@ pub fn gather_strata(
                             );
                     }
                     evidence.guard_reads += guard.non_whole_reads;
+                    // **An interrupted tract is left out first**, before the guard: it slips along
+                    // its longest pure run, not as a tract of its length (spec
+                    // `str_interrupted_tracts.md` §2). Its reads still count toward the crossing
+                    // share, as the guard's do.
+                    if interrupted {
+                        evidence.tracts_interrupted += 1;
+                        evidence.reads_crossing_interrupted_tracts += reads.crossing_reads();
+                        continue;
+                    }
                     if guard.is_over_threshold() {
                         evidence.tracts_over_guard_threshold += 1;
                         evidence.reads_crossing_tracts_over_guard_threshold +=
@@ -1365,10 +1417,14 @@ pub fn gather_strata(
             .iter()
             .map(|stratum| stratum.tracts_over_guard_threshold)
             .sum();
+        let interrupted: u64 = gathered
+            .iter()
+            .map(|stratum| stratum.tracts_interrupted)
+            .sum();
         stage.always(|into| {
             format!(
-                "repeat-tract evidence: arranged, {into}; {dropped} tract(s) left out by the \
-                 guard; {rows} (tract, sample) pairs with reads of the {pairs} the kept tracts \
+                "repeat-tract evidence: arranged, {into}; {interrupted} interrupted tract(s) \
+                 left out, then {dropped} by the guard; {rows} (tract, sample) pairs with reads of the {pairs} the kept tracts \
                  make ({:.1} in every 100), holding {} by the vectors' sizes, {:.0} bytes a pair \
                  with reads",
                 100.0 * rows as f64 / pairs.max(1) as f64,
@@ -1572,6 +1628,8 @@ pub mod bench_fixtures {
             reads_crossing_tracts_over_guard_threshold: 0,
             tracts_too_deep: 0,
             tracts_in_stutter_tail: 0,
+            tracts_interrupted: 0,
+            reads_crossing_interrupted_tracts: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
             // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero
@@ -1689,10 +1747,43 @@ mod tests {
         };
         let mut cohort = cohort_with_one_stray_read(40, 17);
         let groups: BTreeMap<ReadGroupId, u32> = (0..40).map(|g| (ReadGroupId(g), 0)).collect();
-        let gathered = gather_strata(&mut cohort, &[stratum], &groups).expect("resident");
+        let gathered =
+            gather_strata(&mut cohort, &[KeptTract::pure(stratum)], &groups).expect("resident");
         assert_eq!(gathered[0].tracts_over_guard_threshold, 0);
         assert_eq!(gathered[0].tracts.len(), 1, "the tract is kept");
         assert_eq!(gathered[0].guard_reads, 1);
+    }
+
+    /// **An interrupted tract is left out before the guard, and its reads still count as
+    /// crossing** (spec `str_interrupted_tracts.md` §2): the same cohort as above, its one tract
+    /// marked interrupted, gives no tract, one counted as interrupted, none to the guard, and every
+    /// read the pure tract held counted among the interrupted tracts' crossing reads.
+    #[test]
+    fn an_interrupted_tract_is_left_out_and_its_reads_still_cross() {
+        let stratum = Stratum {
+            period: 2,
+            reference_repeats: 6,
+        };
+        let groups: BTreeMap<ReadGroupId, u32> = (0..40).map(|g| (ReadGroupId(g), 0)).collect();
+        let mut cohort = cohort_with_one_stray_read(40, 17);
+        let pure =
+            gather_strata(&mut cohort, &[KeptTract::pure(stratum)], &groups).expect("resident");
+        let crossing = pure[0].tracts[0].crossing_reads();
+        assert!(crossing > 0);
+        let mut cohort = cohort_with_one_stray_read(40, 17);
+        let interrupted = KeptTract {
+            stratum,
+            interrupted: true,
+        };
+        let gathered = gather_strata(&mut cohort, &[interrupted], &groups).expect("resident");
+        assert!(gathered[0].tracts.is_empty(), "the tract is left out");
+        assert_eq!(gathered[0].tracts_interrupted, 1);
+        assert_eq!(
+            gathered[0].tracts_over_guard_threshold, 0,
+            "before the guard"
+        );
+        assert_eq!(gathered[0].reads_crossing_interrupted_tracts, crossing);
+        assert_eq!(gathered[0].guard_reads, pure[0].guard_reads);
     }
 
     /// And the pooled test still removes a tract whose cohort-wide share is over one in ten: a
@@ -1705,7 +1796,8 @@ mod tests {
         };
         let mut cohort = cohort_with_one_stray_read(1, 0);
         let groups = BTreeMap::from([(ReadGroupId(0), 0)]);
-        let gathered = gather_strata(&mut cohort, &[stratum], &groups).expect("resident");
+        let gathered =
+            gather_strata(&mut cohort, &[KeptTract::pure(stratum)], &groups).expect("resident");
         assert_eq!(gathered[0].tracts_over_guard_threshold, 1);
         assert!(gathered[0].tracts.is_empty());
     }
@@ -2095,6 +2187,8 @@ mod evidence_size {
             reads_crossing_tracts_over_guard_threshold: 0,
             tracts_too_deep: 0,
             tracts_in_stutter_tail: 0,
+            tracts_interrupted: 0,
+            reads_crossing_interrupted_tracts: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
             bases_compared: 0,

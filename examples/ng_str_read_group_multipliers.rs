@@ -169,13 +169,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ))?);
     writeln!(
         classes,
-        "period\treference_repeats\tloci_with_reads\tslip_rate"
+        "period\treference_repeats\tloci_with_reads\tslip_rate\toff_reference_share\tconcentration"
     )?;
     for (evidence, outcome) in strata.iter().zip(&fit.outcomes) {
         if let Some(Some(slippage)) = outcome.slippage().first() {
+            // PROBE ONLY: the allele-length prior's spread, the share of chromosomes away from the
+            // reference length, and its concentration.
+            let (off, concentration) = match outcome {
+                pop_var_caller::parameter_estimation::joint::ssr_fit::StratumOutcome::Fitted(f) => {
+                    let shares = &f.allele_length_variation;
+                    let total: f64 = shares.iter().sum();
+                    (1.0 - shares[shares.len() / 2] / total, f.concentration.unwrap_or(f64::NAN))
+                }
+                _ => (f64::NAN, f64::NAN),
+            };
             writeln!(
                 classes,
-                "{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{off}\t{concentration}",
                 evidence.stratum.period,
                 evidence.stratum.reference_repeats,
                 evidence.tracts_with_reads(),
