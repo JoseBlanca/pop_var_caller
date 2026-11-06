@@ -1015,10 +1015,18 @@ a write and a read.
    `SETTLED_FRACTION` of its error on every input tried (1, 4 and 59 tomato samples). It replaces
    `SETTLED_FRACTION` as what stops the SNP/indel fit; `SETTLED_FRACTION` keeps only its reporting
    role (§3.5).
-3. **Is the outer-product estimator close enough to the observed information here?** — OPEN.
-   *Leaning:* yes for the well-determined parameters, possibly not for the Beta shapes at three reads.
-   **Settled by:** §3.6 items 2 and 3; if it is not, Louis's method replaces it for the cohort-level
-   block only (eight parameters, affordable).
+3. **Is the outer-product estimator close enough to the observed information here?** — DECIDED
+   2026-11-06 (owner): **the outer product stays, for both the Newton step and the reported errors.**
+   Measured on the tomato cohort
+   ([`../../reports/implementations/fit_curvature_2026-11-06.md`](../../reports/implementations/fit_curvature_2026-11-06.md)):
+   it is wrong in both directions, up to seven times too sharp along the mismapped share at 10
+   samples, so that share's error is too small by 1.4 to 1.75. But stepping with the true curvature
+   took the 59-sample finish from 15 passes to 70, and exact errors from the true curvature cost
+   about 7% of the fit at 59 samples and take errors away from quantities derived from parameters on
+   their bounds. Louis's method on the cohort's eight alone was measured not to help: the gap lies
+   along the cohort and the samples' own parameters together.
+   *Original leaning:* yes for the well-determined parameters, possibly not for the Beta shapes at
+   three reads.
    *Evidence, 2026-10-16 — a finding for later, not acted on by the 2026-10-16 changes*
    ([`../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md`](../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md)
    §3.2): near the maximum every whole Newton step solved with the outer-product information is
