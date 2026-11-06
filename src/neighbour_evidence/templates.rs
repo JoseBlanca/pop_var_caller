@@ -19,7 +19,8 @@
 //! lowest scores there win it, with any tied with the last of them; a candidate with nothing to be
 //! judged on in a stretch cannot win it. Candidates rank by stretches won, then by their score over
 //! the whole window, then by sample order, and the first `K` are the templates. A template's
-//! stretches won also set how often a copy that changes template lands on it (§3.3, §3.5).
+//! stretches won also set how often a copy that changes template lands on it, steeply: to the
+//! fourth power (§3.3, §3.5).
 //!
 //! Why stretches: a sample's two copies change template along the window at every crossover in its
 //! ancestry. A whole-window score ranks highest whoever is fairly close everywhere; the samples a
@@ -79,9 +80,21 @@ pub const TOLERATED_CHANCE_MATCHES: f64 = 8.0;
 pub const STRETCH_WINNERS: usize = 2;
 
 /// **A template's landing weight before the stretches it won** (§3.3, §3.5): its weight is
-/// stretches won plus this, so a template that won none is still landed on, half as often as one
-/// that won a single stretch.
+/// `(stretches won + this)` to [`LANDING_WEIGHT_POWER`], so a template that won none is still
+/// landed on, though 81 times less often than one that won a single stretch.
 pub const LANDING_WEIGHT_BASE: f64 = 0.5;
+
+/// **How steeply landing favours the templates that won the most stretches** (§3.3, §3.5): a
+/// template that won twice as many stretches as another is landed on about 16 times as often. Templates
+/// rank by stretches won, but a 1× F2 plant's siblings still win about two of every three stretch
+/// places beside its parents, because at one read a site a heterozygous stretch looks as much like
+/// a sibling as like either parent; landed on in proportion to their wins, the siblings' soft
+/// shares took copies the parents explain with certainty. At this power the F2's offspring (two
+/// inbred parents at 30×, 20 offspring at 1×) phased 4,607 heterozygotes right against 2,775, the
+/// parents' only as templates having given 89.7 heterozygotes right in 100 and this 89.5; the
+/// 400-sample outbred and selfing cohorts measured level. Powers 4 to 6 measured alike on the F2,
+/// and 2 no better than 1 (`landing_power_2026-11-06.md`).
+pub const LANDING_WEIGHT_POWER: i32 = 4;
 
 /// **One chosen template**: who it is — a sample, or a sample's haplotype — and how many stretches
 /// of the window it won (§3.3).
@@ -95,10 +108,11 @@ pub struct ChosenTemplate<T> {
 
 impl<T> ChosenTemplate<T> {
     /// **How likely, relative to the other templates, a copy that changes template is to land on
-    /// this one** (§3.3, §3.5): stretches won plus [`LANDING_WEIGHT_BASE`].
+    /// this one** (§3.3, §3.5): stretches won plus [`LANDING_WEIGHT_BASE`], to
+    /// [`LANDING_WEIGHT_POWER`].
     #[must_use]
     pub fn landing_weight(&self) -> f64 {
-        self.stretches_won as f64 + LANDING_WEIGHT_BASE
+        (self.stretches_won as f64 + LANDING_WEIGHT_BASE).powi(LANDING_WEIGHT_POWER)
     }
 }
 
