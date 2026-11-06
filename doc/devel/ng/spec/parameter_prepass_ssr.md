@@ -1006,6 +1006,9 @@ hard rule because it is simpler, and the price, a few good tracts, is affordable
 
 #### The order things happen in
 
+0. **Interrupted segments** are left out first (ADDED 2026-11-06,
+   [`str_interrupted_tracts.md`](str_interrupted_tracts.md) §2): a segment the catalog does not
+   record as perfect.
 1. **The guard**, as today ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md)
    §3.3): a tract where more than one read in ten of those differing from the reference differs by
    a non-whole number of repeats.
