@@ -7,7 +7,7 @@ the stages of `scripts/ng_str_stutter_benchmark.sh`, split the suite's way:
 | stage                                   | kind       | made                         |
 |-----------------------------------------|------------|------------------------------|
 | simulate, check the typing, map         | input      | once                         |
-| GATK, freebayes, HipSTR (twice)         | competitor | once                         |
+| GATK, freebayes, DeepVariant, HipSTR (twice) | competitor | once                    |
 | repeat catalogue; pvc defaults, fitted, true stutter | pvc | every pvc commit          |
 | scoring                                 | score      | competitors once, pvc per commit |
 
@@ -33,6 +33,7 @@ at one STR segment (or bundle): `right` means both called sequences over the seg
 each side are the truth's; `false_call` is a variant called where the truth has none. pvc (fitted)
 fits its stutter from the run's own reads with `estimate-parameters`; pvc (true stutter) is given
 the simulator's rates and is a reference row, not a user's result. freebayes is kept at QUAL ≥ 20.
+DeepVariant calls each sample alone and GLnexus joins them.
 HipSTR is given the segments only, not the bundles, once at its defaults and once with a fixed
 stutter model and no read floor (its defaults call nothing below about 100 reads a locus).
 """
@@ -49,12 +50,14 @@ SIMULATION_VERSION = 1
 q = shlex.quote
 
 PVC_ARMS = ["pvc_defaults", "pvc_fitted"]
-COMPETITOR_ARMS = ["gatk", "freebayes"]
+COMPETITOR_ARMS = ["gatk", "freebayes", "deepvariant"]
 LABELS = {"ng_defaults": "pvc (defaults)", "ng_fitted": "pvc (fitted)",
           "ng_true_stutter": "pvc (true stutter)", "gatk": "GATK", "freebayes": "freebayes",
-          "hipstr": "HipSTR", "hipstr_fixed_stutter": "HipSTR (fixed stutter)"}
+          "deepvariant": "DeepVariant", "hipstr": "HipSTR",
+          "hipstr_fixed_stutter": "HipSTR (fixed stutter)"}
 TOOLS = {"ng_defaults": "pvc", "ng_fitted": "pvc", "ng_true_stutter": "pvc", "gatk": "gatk",
-         "freebayes": "freebayes", "hipstr": "hipstr", "hipstr_fixed_stutter": "hipstr"}
+         "freebayes": "freebayes", "deepvariant": "deepvariant", "hipstr": "hipstr",
+         "hipstr_fixed_stutter": "hipstr"}
 OUTCOMES = ["right", "length_right", "wrong", "called_reference", "no_call", "false_call",
             "ref_right"]
 
@@ -169,6 +172,7 @@ def _configuration(ctx, design, n_samples, depth):
     pvc_calls = {"ng_defaults": callsets["pvc_defaults"].path,
                  "ng_fitted": callsets["pvc_fitted"].path, "ng_true_stutter": true_calls}
     competitor_calls = {"gatk": callsets["gatk"].path, "freebayes": callsets["freebayes"].path,
+                        "deepvariant": callsets["deepvariant"].path,
                         "hipstr": hipstr_steps[0][1], "hipstr_fixed_stutter": hipstr_steps[1][1]}
     # Once pvc's calls are scored its psps are deleted: about 100 MB a sample at 30x, some 25 GB
     # over the grid for every pvc commit. The true-stutter step remakes them if it must rerun.

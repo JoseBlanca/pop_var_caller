@@ -635,7 +635,7 @@ def stutter_figures(rows, out):
 
 # The homopolymer figure: the 50-sample cohort, one panel per library, drawn like the chromosome 20
 # scatter. A genotype left missing counts as a false negative.
-HOMOPOLYMER_CALLERS = ["pvc (fitted)", "GATK", "freebayes", "HipSTR"]
+HOMOPOLYMER_CALLERS = ["pvc (fitted)", "GATK", "freebayes", "DeepVariant", "HipSTR"]
 
 
 def stutter_homopolymer_figure(rows, out, samples="50"):
