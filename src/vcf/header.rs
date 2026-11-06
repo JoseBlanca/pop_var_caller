@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use thiserror::Error;
 
 use crate::neighbour_evidence::stage::NeighbourEvidenceDecision;
+use crate::types::Ploidy;
 
 /// The largest contig length a VCF `##contig` line can carry.
 ///
@@ -598,7 +599,26 @@ const FILTER_DECLARATIONS: &[&str] = &[
     r#"##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">"#,
 ];
 
-/// **Every `FORMAT` field the file can carry, declared** — spec §7.
+/// `GT`'s declaration as calling writes it: never phased.
+pub(crate) const UNPHASED_GENOTYPE_DECLARATION: &str =
+    r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#;
+
+/// `GT`'s declaration where the neighbour-evidence pass ran: it writes the phase it is confident
+/// of (`neighbour_evidence_phase_output.md` §3).
+pub(crate) const PHASED_GENOTYPE_DECLARATION: &str = r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype; phased (|) where PS is set, unphased (/) elsewhere">"#;
+
+/// `PS`'s declaration, where the neighbour-evidence pass ran (phase output spec §3).
+pub(crate) const PHASE_SET_DECLARATION: &str = r#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the POS of the first phased record of this block; records of a sample with the same PS are phased together">"#;
+
+/// **What stands in for calling's `GT` declaration where the pass ran**: the phased `GT`, then
+/// `PS` beside it.
+pub(crate) fn phased_genotype_declarations() -> [String; 2] {
+    [
+        PHASED_GENOTYPE_DECLARATION.to_string(),
+        PHASE_SET_DECLARATION.to_string(),
+    ]
+}
+
 /// `GP`'s declaration as calling writes it.
 const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities, VCF genotype order">"#;
 
@@ -606,8 +626,9 @@ const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Fl
 /// §4.1).
 const REFINED_GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">"#;
 
+/// **Every `FORMAT` field the file can carry, declared** — spec §7.
 const FORMAT_DECLARATIONS: &[&str] = &[
-    r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#,
+    UNPHASED_GENOTYPE_DECLARATION,
     r#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred probability the called genotype is wrong, capped at 99">"#,
     r#"##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Reads this sample observed at the locus, whether or not a written allele explains them">"#,
     r#"##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Reads whose sequence matched each allele exactly, REF first">"#,
@@ -632,7 +653,7 @@ const FORMAT_DECLARATIONS: &[&str] = &[
 /// production's rule: `##reference=` states nothing and invites a reader to think the run had a
 /// reference it could not name.
 #[must_use]
-pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
+pub fn header_text(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> String {
     // **Destructured exhaustively, so a field added to the metadata cannot be silently left out
     // of the header it exists to state.** That is not hypothetical: the filter's provenance field
     // was added one commit ago, and reading the metadata field by field is what would have let it
@@ -678,6 +699,15 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
             decision.as_header_value()
         ));
     }
+    // Stated whenever the run phases from reads alone, phased or not, so the header does not
+    // depend on the data (read phase spec §3).
+    let phased_from_reads_alone = writes_phase_from_reads_alone(metadata, ploidy);
+    if phased_from_reads_alone {
+        lines.push(format!(
+            "##readBackedPhase={}",
+            read_backed_phase_header_value()
+        ));
+    }
 
     lines.extend(INFO_DECLARATIONS.iter().map(ToString::to_string));
     if *low_base_quality_test {
@@ -692,13 +722,17 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     let refined = neighbour_evidence
         .as_ref()
         .is_some_and(|decision| decision.ran);
-    lines.extend(FORMAT_DECLARATIONS.iter().map(|declaration| {
+    for declaration in FORMAT_DECLARATIONS {
         if refined && *declaration == GENOTYPE_POSTERIOR_DECLARATION {
-            REFINED_GENOTYPE_POSTERIOR_DECLARATION.to_string()
+            lines.push(REFINED_GENOTYPE_POSTERIOR_DECLARATION.to_string());
+        } else if (refined || phased_from_reads_alone)
+            && *declaration == UNPHASED_GENOTYPE_DECLARATION
+        {
+            lines.extend(phased_genotype_declarations());
         } else {
-            (*declaration).to_string()
+            lines.push((*declaration).to_string());
         }
-    }));
+    }
 
     let mut headings = FIXED_COLUMN_HEADINGS.to_string();
     for name in metadata.sample_names() {
@@ -710,6 +744,32 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     let mut text = lines.join("\n");
     text.push('\n');
     text
+}
+
+/// **Whether a run writes phase from reads alone** (read phase spec §2.6): where the
+/// neighbour-evidence pass does not run, at ploidy two. The writer runs the stage and the header
+/// declares what it writes on this one condition, so the two cannot disagree.
+#[must_use]
+pub fn writes_phase_from_reads_alone(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> bool {
+    ploidy.get() == 2
+        && !metadata
+            .neighbour_evidence()
+            .is_some_and(|decision| decision.ran)
+}
+
+/// **`##readBackedPhase=`'s value**: the thresholds phase from reads alone was written with (read
+/// phase spec §3).
+#[must_use]
+pub fn read_backed_phase_header_value() -> String {
+    format!(
+        "<link_min={:.2},break_min={:.2},error_floor={},gq_min={},reach={},read_cap={}>",
+        crate::read_phase::link::LINK_MIN,
+        crate::read_phase::link::BREAK_MIN,
+        crate::read_phase::link::ERROR_FLOOR,
+        crate::read_phase::link::GQ_MIN,
+        crate::read_phase::fragments::READ_REACH,
+        crate::read_phase::capture::READ_ALLELES_KEPT,
+    )
 }
 
 /// One `##contig` line. The digest is written only where the run has one — see
@@ -861,7 +921,7 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
             windowed: None,
         });
 
-        let text = header_text(&metadata);
+        let text = header_text(&metadata, Ploidy::try_new(2).expect("diploid"));
         let lines: Vec<&str> = text.lines().collect();
         let calibration = lines
             .iter()
@@ -894,23 +954,48 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
             &["HG002", "HG003"],
         );
 
-        let expected = format!(
-            "##fileformat=VCFv4.4\n\
-             ##source=pvc {version}\n\
-             ##commandline=ng call --reference ref.fa cohort/*.cram\n\
-             ##reference=/genomes/ref.fa\n\
-             ##pvcLog=pvc_calls.log\n\
-             ##pvcParameters=defaults\n\
-             ##contig=<ID=chr1,length=248956422>\n\
-             {info}\n{filter}\n{format}\n\
-             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\tHG003\n",
-            version = env!("CARGO_PKG_VERSION"),
-            info = INFO_DECLARATIONS.join("\n"),
-            filter = FILTER_DECLARATIONS.join("\n"),
-            format = FORMAT_DECLARATIONS.join("\n"),
-        );
+        let expected = |read_backed: &str, format: &str| {
+            format!(
+                "##fileformat=VCFv4.4\n\
+                 ##source=pvc {version}\n\
+                 ##commandline=ng call --reference ref.fa cohort/*.cram\n\
+                 ##reference=/genomes/ref.fa\n\
+                 ##pvcLog=pvc_calls.log\n\
+                 ##pvcParameters=defaults\n\
+                 ##contig=<ID=chr1,length=248956422>\n\
+                 {read_backed}{info}\n{filter}\n{format}\n\
+                 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\tHG003\n",
+                version = env!("CARGO_PKG_VERSION"),
+                info = INFO_DECLARATIONS.join("\n"),
+                filter = FILTER_DECLARATIONS.join("\n"),
+            )
+        };
 
-        assert_eq!(header_text(&metadata), expected);
+        // **Diploid, refinement not run: phase from reads alone**, stated whether or not anything
+        // is phased (read phase spec §3): its thresholds, and `GT` and `PS` as the pass declares
+        // them.
+        let phased_format: Vec<String> = FORMAT_DECLARATIONS
+            .iter()
+            .flat_map(|declaration| {
+                if *declaration == UNPHASED_GENOTYPE_DECLARATION {
+                    phased_genotype_declarations().to_vec()
+                } else {
+                    vec![(*declaration).to_string()]
+                }
+            })
+            .collect();
+        assert_eq!(
+            header_text(&metadata, Ploidy::try_new(2).expect("diploid")),
+            expected(
+                "##readBackedPhase=<link_min=5.29,break_min=2.20,error_floor=0.01,gq_min=30,reach=1000,read_cap=32>\n",
+                &phased_format.join("\n")
+            )
+        );
+        // **Any other ploidy writes no phase**, and the header says nothing of it.
+        assert_eq!(
+            header_text(&metadata, Ploidy::try_new(4).expect("tetraploid")),
+            expected("", &FORMAT_DECLARATIONS.join("\n"))
+        );
     }
 
     #[test]
@@ -928,10 +1013,10 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         );
 
         assert!(
-            header_text(&metadata)
+            header_text(&metadata, Ploidy::try_new(2).expect("diploid"))
                 .contains("##contig=<ID=chr1,length=1000,md5=6aef897c3d6ff0c78aff06ac189178dd>"),
             "got {}",
-            header_text(&metadata)
+            header_text(&metadata, Ploidy::try_new(2).expect("diploid"))
         );
     }
 
@@ -945,8 +1030,11 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
             }],
             &["one"],
         );
-        assert!(header_text(&metadata).contains("##contig=<ID=chr1,length=1000>\n"));
-        assert!(!header_text(&metadata).contains("md5="));
+        assert!(
+            header_text(&metadata, Ploidy::try_new(2).expect("diploid"))
+                .contains("##contig=<ID=chr1,length=1000>\n")
+        );
+        assert!(!header_text(&metadata, Ploidy::try_new(2).expect("diploid")).contains("md5="));
     }
 
     #[test]
@@ -963,7 +1051,7 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         )
         .expect("a well-formed header");
 
-        let text = header_text(&metadata);
+        let text = header_text(&metadata, Ploidy::try_new(2).expect("diploid"));
         assert!(!text.contains("##commandline"), "got {text}");
         assert!(!text.contains("##reference"), "got {text}");
         // The one that is present still is.
@@ -977,7 +1065,7 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         // The rule that keeps a file self-describing: nothing may appear in a record that the
         // header did not declare. These are the ids the encoder emits.
         let metadata = metadata_with(Vec::new(), &["one"]);
-        let text = header_text(&metadata);
+        let text = header_text(&metadata, Ploidy::try_new(2).expect("diploid"));
 
         for id in [
             "AF", "AC", "AN", "DP", "ABPEN", "SPPEN", "MQREF", "MQALT", "MQDIFF", "STR", "RU",
@@ -999,7 +1087,10 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         // declaration fails here rather than in a consumer.
         use crate::vcf::FilterVerdict;
 
-        let text = header_text(&metadata_with(Vec::new(), &["one"]));
+        let text = header_text(
+            &metadata_with(Vec::new(), &["one"]),
+            Ploidy::try_new(2).expect("diploid"),
+        );
         for verdict in [
             FilterVerdict::Pass,
             FilterVerdict::EmDidNotConverge,
@@ -1016,14 +1107,20 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
 
     #[test]
     fn the_header_ends_with_a_newline_so_the_first_record_follows_directly() {
-        let text = header_text(&metadata_with(Vec::new(), &["one"]));
+        let text = header_text(
+            &metadata_with(Vec::new(), &["one"]),
+            Ploidy::try_new(2).expect("diploid"),
+        );
         assert!(text.ends_with('\n'));
         assert!(!text.ends_with("\n\n"));
     }
 
     #[test]
     fn the_sample_names_close_the_column_headings_in_the_run_s_order() {
-        let text = header_text(&metadata_with(Vec::new(), &["c", "a", "b"]));
+        let text = header_text(
+            &metadata_with(Vec::new(), &["c", "a", "b"]),
+            Ploidy::try_new(2).expect("diploid"),
+        );
         let headings = text
             .lines()
             .next_back()

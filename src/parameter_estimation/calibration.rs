@@ -329,6 +329,7 @@ mod tests {
 
     fn locus(kind: LocusKind, observations: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(10),

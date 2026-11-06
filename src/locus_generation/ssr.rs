@@ -3575,8 +3575,14 @@ mod tally {
             let tie = spanning(10, 26); // 10 left, 10 right
             let one_short = spanning(11, 26); // 9 left, 11 right
             let outcomes = vec![
-                (&mostly_right, observed(b"CACACA", ReadWitness::Complete, -1.0)),
-                (&mostly_left, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (
+                    &mostly_right,
+                    observed(b"CACACA", ReadWitness::Complete, -1.0),
+                ),
+                (
+                    &mostly_left,
+                    observed(b"CACACA", ReadWitness::Complete, -1.0),
+                ),
                 (&tie, observed(b"CACACA", ReadWitness::Complete, -1.0)),
                 (&one_short, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
@@ -4299,6 +4305,7 @@ where
         // kind), and the flanks split out of the fetched margin (spec §3).
         let (left_flank, reference_bases, right_flank) = locus.split_flanks();
         Ok(Some(SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig,
                 start: Position(segment.start()),

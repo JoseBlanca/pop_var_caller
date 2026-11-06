@@ -16,9 +16,15 @@ use std::process;
 // allocates on the merge thread, because the observations it walks were
 // allocated by the sample sweeps and released as it passes them, and a
 // system allocator takes a lock per cross-thread free.
-#[cfg(feature = "alloc-mimalloc")]
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// A heap profile of a whole run (`--no-default-features --features dhat-heap`): DHAT takes the
+// allocator slot and writes `dhat-heap.json` in the working directory when `main` returns.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use clap::{CommandFactory, FromArgMatches};
 use pop_var_caller::cli::command_line::settings_of;
@@ -26,11 +32,13 @@ use pop_var_caller::cli::run_output;
 use pop_var_caller::cli::{
     Cli, DevCommand, PopVarCallerCommand, run_call_from_alignments, run_call_from_psps,
     run_estimate_contamination, run_estimate_parameters, run_generate_psps, run_inspect_psp,
-    run_refine_genotypes, run_repeat_catalog, run_typed_regions,
+    run_repeat_catalog, run_typed_regions,
 };
 use pop_var_caller::error_render::format_error_chain;
 
 fn main() {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     run_output::install(cli.quiet, settings_of(&matches));
@@ -56,9 +64,6 @@ fn main() {
         }
         PopVarCallerCommand::EstimateParameters(args) => {
             run_estimate_parameters(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::RefineGenotypes(args) => {
-            run_refine_genotypes(&args).map_err(|e| format_error_chain(&e))
         }
         PopVarCallerCommand::Dev(DevCommand::InspectPsp(args)) => {
             run_inspect_psp(&args).map_err(|e| format_error_chain(&e))

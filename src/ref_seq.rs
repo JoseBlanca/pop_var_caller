@@ -324,6 +324,18 @@ impl<T: EvictableRefSeq + ?Sized> EvictableRefSeq for std::sync::Arc<T> {
     }
 }
 
+/// **The reference a CRAM decode reads through**: raw bases for each slice's span, and eviction
+/// of what lies behind it.
+///
+/// A decode copies each slice's span out of the reader, so nothing it has passed is wanted
+/// again, but a windowed reader extends forward to serve the next slice when that starts close
+/// behind — and consecutive slices of a whole-genome CRAM always do. Without eviction each open
+/// file's reader grew to the contig up to the walk's position: on 62 samples that was most of a
+/// run's memory (`perf_pipeline_2026-11-04.md`).
+pub trait SliceReference: RawRefSeq + EvictableRefSeq {}
+
+impl<T: RawRefSeq + EvictableRefSeq + ?Sized> SliceReference for T {}
+
 #[cfg(test)]
 /// A synthetic, fully in-memory reference: each contig's bytes held directly, indexed by
 /// [`ContigId`] (`contigs[i]` is `ContigId(i)`). For tests — it needs no FASTA on disk,

@@ -1,4 +1,4 @@
-format_version = 8
+format_version = 9
 ploidy = 2
 
 [fitted_from]
@@ -269,6 +269,316 @@ fitted = 50
 over_guard_threshold = 1
 too_deep = 7
 in_stutter_tail = 2
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 8
+longest_run = 8
+base = "next_base"
+through_reads = 4321
+arriving_first_reads = 3456
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0015
+warrant = "fitted_here"
+standard_error = 0.00075
+
+[misread_after_runs.entries.as_the_run.observations]
+reads = 4321
+
+[misread_after_runs.entries.other_wrong]
+value = 0.00022500000000000002
+warrant = "fitted_here"
+standard_error = 0.000125
+
+[misread_after_runs.entries.other_wrong.observations]
+reads = 4321
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 9
+longest_run = 9
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0025
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.00032500000000000004
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 10
+longest_run = 10
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0035
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.00042500000000000003
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 11
+longest_run = 11
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0045000000000000005
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.0005250000000000001
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 12
+longest_run = 12
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0055
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.000625
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 13
+longest_run = 13
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.006500000000000001
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.0007250000000000001
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 14
+longest_run = 14
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0075
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.000825
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 15
+longest_run = 15
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0085
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.000925
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 16
+longest_run = 16
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0095
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001025
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 17
+longest_run = 17
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0105
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.0011250000000000001
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 18
+longest_run = 18
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0115
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001225
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 19
+longest_run = 19
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0125
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001325
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 20
+longest_run = 20
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0135
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001425
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 21
+longest_run = 21
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0145
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001525
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 22
+longest_run = 22
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0155
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.0016250000000000001
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 23
+base = "next_base"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0165
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.0017250000000000002
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 8
+longest_run = 11
+base = "further_on"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001825
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 12
+longest_run = 15
+base = "further_on"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.001925
+warrant = "defaulted"
+
+[[misread_after_runs.entries]]
+read_group = 1
+shortest_run = 16
+base = "further_on"
+through_reads = 17
+arriving_first_reads = 23
+
+[misread_after_runs.entries.as_the_run]
+value = 0.0
+warrant = "defaulted"
+
+[misread_after_runs.entries.other_wrong]
+value = 0.002025
+warrant = "defaulted"
 
 [repeat_tracts.fallback_between_locus_share]
 value = 0.22222222222222224

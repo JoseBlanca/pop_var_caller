@@ -715,6 +715,7 @@ mod tests {
         file.ordinary_site_prior.fitted_density = None;
         file.repeat_tracts_left_out = None;
         file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+        file.misread_after_runs = None;
         file.duplicated_positions = None;
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
@@ -1523,7 +1524,7 @@ mod files_written_before_format_3 {
         // today's built-in in its place and writes that.
         read.stated_constants.repeat_tract_outlier_weight.value =
             crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
-        // **A file from before format 8 has no stutter multipliers**, and a run reads every one as
+        // **A file from before format 9 has no stutter multipliers**, and a run reads every one as
         // one: it writes a `defaulted` one for each read group at each motif length.
         read.repeat_tracts.stutter_multiplier_by_read_group = the_defaulted_multipliers_of(&read);
         let once = written_back(&read);

@@ -137,6 +137,7 @@ fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObs
 /// One sample's locus, over the reference base `A`.
 fn sample_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
     SampleLocusObservations {
+        chain_id_base: 0,
         region: region(),
         reference_bases: Box::from(b"A".as_slice()),
         observations,

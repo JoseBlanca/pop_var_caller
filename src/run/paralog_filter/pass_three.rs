@@ -149,7 +149,8 @@ pub fn write_the_records_the_filter_kept_explaining(
         });
     }
 
-    let entries = spill.read().map_err(PassThreeError::Spill)?;
+    // The one reader of the fragments: they go to the writer beside each line.
+    let entries = spill.read_with_fragments().map_err(PassThreeError::Spill)?;
     let mut did = WhatTheFilterDid::default();
     // **Taken front to back, never indexed.** The pairing is positional and this is what makes
     // it hold: the iterator advances once per record, in step with the read.
@@ -169,7 +170,7 @@ pub fn write_the_records_the_filter_kept_explaining(
         .map(|windowed| windowed.posteriors.iter());
 
     for (read_so_far, entry) in entries.enumerate() {
-        let entry =
+        let (entry, fragments) =
             entry.map_err(|source| PassThreeError::Spill(spill.naming_this_file(source)))?;
         // Counting from one, because it is a place in a file a person will look for.
         let ordinal = read_so_far as u64 + 1;
@@ -254,7 +255,7 @@ pub fn write_the_records_the_filter_kept_explaining(
         )?;
 
         writer
-            .write_line(RecordPlace::from(&entry), &line)
+            .write_line(RecordPlace::from(&entry), line, fragments)
             .map_err(|source| PassThreeError::Write {
                 contig: entry.contig.get(),
                 position: entry.position.get(),

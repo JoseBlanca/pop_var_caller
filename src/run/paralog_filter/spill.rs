@@ -33,7 +33,26 @@
 //!     mean_depth     4 bytes   -- an f32's bits, little-endian
 //!     ref_reads      varint    -- AD[0]
 //!     alt_reads      varint    -- every alternative's reads, summed
+//!   fragments_bytes  varint    -- the section below's length, so pass two steps over it unread
+//!   fragments:
+//!     count          varint
+//!     per entry, sorted by sample and then fragment:
+//!       sample       varint
+//!       fragment     varint
+//!       allele       varint    -- numbered as the record numbers its alleles
+//!       error_phred  u8        -- at most LARGEST_ERROR_PHRED
 //! ```
+//!
+//! **The fragments are the record's reads that reach another record** (read phase spec §2.4),
+//! which the line never carries. Only pass three reads them, handing them to the writer beside
+//! the line; pass two, which reads every entry to score it, steps over the section by its length.
+//! **They travel beside an entry, never inside it**: [`SpillEntry`] has no fragments field, the
+//! writer takes them as their own argument, and only [`SpillReaderWithFragments`] gives them back,
+//! as the second half of each item. A pass three switched to pass two's reader does not compile,
+//! rather than writing every line without its reads.
+//! At the top of the range they are the larger part of an entry — 3,000 samples × 32 read alleles
+//! × about 6 bytes, against a line of about 150 kB (spec §4.1) — so skipping them unread is what
+//! keeps pass two's reading at what it was.
 //!
 //! **Every record's samples carry both signals** (spec §3.2): coverage, and the split between
 //! reads carrying the reference allele and reads carrying any other — repeat tracts included,
@@ -66,6 +85,8 @@ use thiserror::Error;
 
 use super::WindowCoverage;
 use crate::psp::varint::{MAX_VARINT_BYTES, VarintError, decode_u64_leb128, encode_u64_leb128};
+use crate::read_phase::capture::LARGEST_ERROR_PHRED;
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 use crate::types::{ContigId, Position};
 
 /// The field names the decoder reports, one per field of the layout above.
@@ -84,6 +105,12 @@ mod field {
     pub const MEAN_DEPTH: &str = "mean_depth";
     pub const REF_READS: &str = "ref_reads";
     pub const ALT_READS: &str = "alt_reads";
+    pub const FRAGMENTS_BYTES: &str = "fragments_bytes";
+    pub const FRAGMENT_COUNT: &str = "fragment_count";
+    pub const FRAGMENT_SAMPLE: &str = "fragment_sample";
+    pub const FRAGMENT: &str = "fragment";
+    pub const FRAGMENT_ALLELE: &str = "fragment_allele";
+    pub const FRAGMENT_ERROR_PHRED: &str = "fragment_error_phred";
 }
 
 /// The most per-sample entries reserved up front from a decoded count, so that a corrupt count
@@ -220,6 +247,19 @@ pub enum SpillError {
         value: u64,
     },
 
+    /// A length-prefixed section held bytes past the last entry its own count declared: its
+    /// length and its count disagree, so one of them is damaged.
+    #[error(
+        "the paralog spill's {field} section holds {unread} byte(s) past its last entry; its \
+         length and its count disagree"
+    )]
+    SectionLongerThanItsEntries {
+        /// The section whose length and count disagree.
+        field: &'static str,
+        /// The bytes left over.
+        unread: u64,
+    },
+
     /// The file ended at an entry boundary holding a different number of entries than were
     /// written — fewer, if it lost its tail; more, if something else wrote to it.
     ///
@@ -285,14 +325,18 @@ impl<W: Write> SpillWriter<W> {
         }
     }
 
-    /// Append one entry.
+    /// Append one entry, with the record's fragments beside it.
     ///
     /// # Errors
     ///
     /// If the sink refuses the bytes. An entry the sink refused is not counted.
-    pub fn append(&mut self, entry: &SpillEntry) -> Result<(), SpillError> {
+    pub fn append(
+        &mut self,
+        entry: &SpillEntry,
+        fragments: &RecordFragments,
+    ) -> Result<(), SpillError> {
         self.scratch.clear();
-        encode_entry(entry, &mut self.scratch);
+        encode_entry(entry, fragments, &mut self.scratch);
         self.sink
             .write_all(&self.scratch)
             .map_err(|source| SpillError::Write { source })?;
@@ -361,22 +405,42 @@ pub struct SpillReader<R: BufRead> {
     /// call is silent where forgetting an argument does not compile.
     entries_expected: u64,
     entries_read: u64,
+    /// Whether each entry's fragments are read, or stepped over unread (pass two).
+    fragments: FragmentsSection,
+    /// Scratch for one entry's fragments section, reused across entries.
+    section: Vec<u8>,
+}
+
+/// What a reader does with each entry's fragments section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FragmentsSection {
+    /// Step over it by its length: pass two's reader.
+    Skip,
+    /// Decode it: pass three's.
+    Read,
 }
 
 impl<R: BufRead> SpillReader<R> {
     /// Start reading from `source`, which must be positioned at an entry boundary, expecting
-    /// `entries_expected` of them.
+    /// `entries_expected` of them. Each entry's fragments are stepped over unread; only
+    /// [`SpillReaderWithFragments`] gives them back.
     ///
     /// **The count is required because a spill that lost its tail on an entry boundary is byte
     /// for byte the prefix of a complete one**, so nothing in the bytes can tell the two apart.
     /// It has to come from the side that wrote them, and a reader that could be built without
     /// it would make the shortfall silent again.
     pub fn new(source: R, entries_expected: u64) -> Self {
+        Self::over(source, entries_expected, FragmentsSection::Skip)
+    }
+
+    fn over(source: R, entries_expected: u64, fragments: FragmentsSection) -> Self {
         Self {
             source,
             failed: false,
             entries_expected,
             entries_read: 0,
+            fragments,
+            section: Vec::new(),
         }
     }
 
@@ -389,6 +453,12 @@ impl<R: BufRead> SpillReader<R> {
     /// stream that ends *inside* an entry is an error, not an end**, and so is one that ends
     /// on a boundary too early.
     pub fn next_entry(&mut self) -> Option<Result<SpillEntry, SpillError>> {
+        self.next_decoded()
+            .map(|decoded| decoded.map(|(entry, _)| entry))
+    }
+
+    /// The next entry and its fragments — empty unless this reader reads them.
+    fn next_decoded(&mut self) -> Option<Result<(SpillEntry, RecordFragments), SpillError>> {
         if self.failed {
             return None;
         }
@@ -412,7 +482,7 @@ impl<R: BufRead> SpillReader<R> {
             }
             return None;
         }
-        let decoded = decode_entry(&mut self.source);
+        let decoded = decode_entry(&mut self.source, self.fragments, &mut self.section);
         match &decoded {
             Ok(_) => self.entries_read += 1,
             Err(_) => self.failed = true,
@@ -431,6 +501,32 @@ impl<R: BufRead> Iterator for SpillReader<R> {
 
 impl<R: BufRead> FusedIterator for SpillReader<R> {}
 
+/// **Pass three's reader**: each entry with the record's fragments beside it, by type — the one
+/// reader that decodes them (read phase spec §4.1). Otherwise [`SpillReader`]: the same count, the
+/// same refusals, the same terminal failure.
+pub struct SpillReaderWithFragments<R: BufRead>(SpillReader<R>);
+
+impl<R: BufRead> SpillReaderWithFragments<R> {
+    /// As [`SpillReader::new`], decoding each entry's fragments.
+    pub fn new(source: R, entries_expected: u64) -> Self {
+        Self(SpillReader::over(
+            source,
+            entries_expected,
+            FragmentsSection::Read,
+        ))
+    }
+}
+
+impl<R: BufRead> Iterator for SpillReaderWithFragments<R> {
+    type Item = Result<(SpillEntry, RecordFragments), SpillError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_decoded()
+    }
+}
+
+impl<R: BufRead> FusedIterator for SpillReaderWithFragments<R> {}
+
 /// **One entry, already turned into the bytes the spill stores** — so that the encoding can be
 /// done on the thread that called the locus, and the thread that writes only copies bytes.
 ///
@@ -443,14 +539,15 @@ pub struct EncodedSpillEntry {
 }
 
 impl EncodedSpillEntry {
-    /// Encode `entry` as [`SpillWriter::append`] would write it.
+    /// Encode `entry`, with the record's fragments beside it, as [`SpillWriter::append`] would
+    /// write it.
     ///
     /// # Errors
     ///
     /// None today; the `Result` is kept so a refusal the codec gains later reaches every caller.
-    pub fn of(entry: &SpillEntry) -> Result<Self, SpillError> {
+    pub fn of(entry: &SpillEntry, fragments: &RecordFragments) -> Result<Self, SpillError> {
         let mut bytes = Vec::new();
-        encode_entry(entry, &mut bytes);
+        encode_entry(entry, fragments, &mut bytes);
         Ok(Self { bytes })
     }
 }
@@ -459,7 +556,7 @@ impl EncodedSpillEntry {
 ///
 /// **The entry and each sample are destructured exhaustively**, so a field added to either
 /// struct stops the build here instead of vanishing from the file.
-fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
+fn encode_entry(entry: &SpillEntry, fragments: &RecordFragments, out: &mut Vec<u8>) {
     let SpillEntry {
         contig,
         position,
@@ -486,6 +583,40 @@ fn encode_entry(entry: &SpillEntry, out: &mut Vec<u8>) {
         encode_u64_leb128(u64::from(*ref_reads), out);
         encode_u64_leb128(u64::from(*alt_reads), out);
     }
+
+    // The section's length goes first, so it is summed before anything is written: no
+    // intermediate buffer per entry.
+    let section_bytes = leb128_bytes(fragments.len() as u64)
+        + fragments
+            .entries()
+            .iter()
+            .map(|entry| {
+                leb128_bytes(u64::from(entry.sample))
+                    + leb128_bytes(u64::from(entry.fragment))
+                    + leb128_bytes(u64::from(entry.allele))
+                    + 1
+            })
+            .sum::<usize>();
+    encode_u64_leb128(section_bytes as u64, out);
+    encode_u64_leb128(fragments.len() as u64, out);
+    for entry in fragments.entries() {
+        let FragmentAllele {
+            sample,
+            fragment,
+            allele,
+            error_phred,
+        } = *entry;
+        encode_u64_leb128(u64::from(sample), out);
+        encode_u64_leb128(u64::from(fragment), out);
+        encode_u64_leb128(u64::from(allele), out);
+        out.push(error_phred);
+    }
+}
+
+/// How many bytes [`encode_u64_leb128`] writes for `value`: seven bits a byte, at least one.
+fn leb128_bytes(value: u64) -> usize {
+    let bits = (u64::BITS - (value | 1).leading_zeros()) as usize;
+    bits.div_ceil(7)
 }
 
 /// The window pair, by bit pattern, so an absent one survives the round trip.
@@ -499,8 +630,13 @@ fn encode_window(window: &WindowCoverage, out: &mut Vec<u8>) {
     out.extend_from_slice(&mean_depth.to_bits().to_le_bytes());
 }
 
-/// Read one entry from `source`, which is positioned at its first byte.
-fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
+/// Read one entry from `source`, which is positioned at its first byte, and its fragments —
+/// empty when `fragments` says to step over them. `section` is scratch for the section's bytes.
+fn decode_entry<R: BufRead>(
+    source: &mut R,
+    fragments: FragmentsSection,
+    section: &mut Vec<u8>,
+) -> Result<(SpillEntry, RecordFragments), SpillError> {
     let contig = read_u32(source, field::CONTIG)?;
     let position = read_varint(source, field::POSITION)?;
     let is_repeat_tract = read_bool(source, field::IS_REPEAT_TRACT)?;
@@ -524,13 +660,124 @@ fn decode_entry<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
         samples.push(sample);
     }
 
-    Ok(SpillEntry {
-        contig: ContigId(contig),
-        position: Position(position),
-        is_repeat_tract,
-        line,
-        samples,
-    })
+    let fragments = read_fragments_section(source, fragments, samples.len(), section)?;
+
+    Ok((
+        SpillEntry {
+            contig: ContigId(contig),
+            position: Position(position),
+            is_repeat_tract,
+            line,
+            samples,
+        },
+        fragments,
+    ))
+}
+
+/// The largest fragments section the decoder will believe: 3,000 samples × 32 read alleles × at most
+/// 16 bytes is 1.5 MiB, so 64 MiB is far above any real entry and still bounds what one corrupt
+/// length can make the reader hold, as [`MAX_LINE_BYTES`] does for the line.
+const MAX_FRAGMENTS_BYTES: usize = 64 * 1024 * 1024;
+
+/// The fewest bytes one fragment entry encodes to: four fields of at least one byte each.
+const MIN_FRAGMENT_ENTRY_BYTES: usize = 4;
+
+/// **Read the fragments section, or step over it**: its length, then — when `fragments` says
+/// read — its entries, and otherwise that many bytes consumed unread, which is pass two's case.
+///
+/// A decoded entry is refused when its sample is not one of the entry's `sample_count`, its
+/// allele does not fit a `u16`, or its Phred is above [`LARGEST_ERROR_PHRED`]: none of those can
+/// be written, so each is damage, and read as data it would change or drop phase silently.
+fn read_fragments_section<R: BufRead>(
+    source: &mut R,
+    fragments: FragmentsSection,
+    sample_count: usize,
+    section: &mut Vec<u8>,
+) -> Result<RecordFragments, SpillError> {
+    let length = read_usize(source, field::FRAGMENTS_BYTES)?;
+    if length > MAX_FRAGMENTS_BYTES {
+        return Err(SpillError::OutOfRange {
+            field: field::FRAGMENTS_BYTES,
+            value: length as u64,
+        });
+    }
+    if fragments == FragmentsSection::Skip {
+        let skipped = io::copy(&mut source.by_ref().take(length as u64), &mut io::sink()).map_err(
+            |source| SpillError::Read {
+                field: field::FRAGMENTS_BYTES,
+                source,
+            },
+        )?;
+        if skipped != length as u64 {
+            return Err(SpillError::Truncated {
+                field: field::FRAGMENTS_BYTES,
+            });
+        }
+        return Ok(RecordFragments::default());
+    }
+    section.clear();
+    let bytes_read = source
+        .by_ref()
+        .take(length as u64)
+        .read_to_end(section)
+        .map_err(|source| SpillError::Read {
+            field: field::FRAGMENTS_BYTES,
+            source,
+        })?;
+    if bytes_read != length {
+        return Err(SpillError::Truncated {
+            field: field::FRAGMENTS_BYTES,
+        });
+    }
+    let mut bytes = section.as_slice();
+    let count = read_usize(&mut bytes, field::FRAGMENT_COUNT)?;
+    // Every entry takes at least four bytes, so a count the section cannot hold is refused
+    // before anything is reserved for it.
+    if count > length / MIN_FRAGMENT_ENTRY_BYTES {
+        return Err(SpillError::OutOfRange {
+            field: field::FRAGMENT_COUNT,
+            value: count as u64,
+        });
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let sample = read_u32(&mut bytes, field::FRAGMENT_SAMPLE)?;
+        if sample as usize >= sample_count {
+            return Err(SpillError::OutOfRange {
+                field: field::FRAGMENT_SAMPLE,
+                value: u64::from(sample),
+            });
+        }
+        let fragment = read_u32(&mut bytes, field::FRAGMENT)?;
+        let allele = read_varint(&mut bytes, field::FRAGMENT_ALLELE)?;
+        let allele = u16::try_from(allele).map_err(|_| SpillError::OutOfRange {
+            field: field::FRAGMENT_ALLELE,
+            value: allele,
+        })?;
+        let error_phred =
+            read_byte(&mut bytes, field::FRAGMENT_ERROR_PHRED)?.ok_or(SpillError::Truncated {
+                field: field::FRAGMENT_ERROR_PHRED,
+            })?;
+        if error_phred > LARGEST_ERROR_PHRED {
+            return Err(SpillError::OutOfRange {
+                field: field::FRAGMENT_ERROR_PHRED,
+                value: u64::from(error_phred),
+            });
+        }
+        entries.push(FragmentAllele {
+            sample,
+            fragment,
+            allele,
+            error_phred,
+        });
+    }
+    if !bytes.is_empty() {
+        return Err(SpillError::SectionLongerThanItsEntries {
+            field: field::FRAGMENTS_BYTES,
+            unread: bytes.len() as u64,
+        });
+    }
+    Ok(RecordFragments::from_entries(entries))
 }
 
 /// Read the record's line: a length, then that many bytes.

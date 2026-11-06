@@ -81,8 +81,10 @@ mod tests {
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
     use crate::cli::test_fixtures::{
-        AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SATELLITE, SECOND_SAMPLES_SUBSTITUTION, TRACT,
-        VARYING_CONTIG, a_varying_cohort_on_disk, a_varying_cohort_with_a_satellite_on_disk,
+        AVaryingCohort, FIRST_SAMPLES_SECOND_SUBSTITUTION, FIRST_SAMPLES_SUBSTITUTION, SATELLITE,
+        SECOND_SAMPLES_SUBSTITUTION, TRACT, VARYING_CONTIG,
+        a_deep_varying_cohort_with_phased_pairs_on_disk, a_varying_cohort_on_disk,
+        a_varying_cohort_with_a_phased_pair_on_disk, a_varying_cohort_with_a_satellite_on_disk,
     };
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
@@ -146,7 +148,8 @@ mod tests {
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
-            neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
+            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
+            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             locus_builder_regions_len: None,
             threads: 0,
             min_copies: MinCopies::default(),
@@ -194,9 +197,19 @@ mod tests {
         cohort: &AVaryingCohort,
         setting: crate::run::RepeatGroundSetting,
     ) -> PathBuf {
+        walked_into_psps_over(cohort, setting, None, "psps")
+    }
+
+    /// The same, over `regions` when given, into the directory `directory` names.
+    fn walked_into_psps_over(
+        cohort: &AVaryingCohort,
+        setting: crate::run::RepeatGroundSetting,
+        regions: Option<PathBuf>,
+        directory: &str,
+    ) -> PathBuf {
         use crate::run::RepeatGroundSetting;
 
-        let psps = cohort.directory.path().join("psps");
+        let psps = cohort.directory.path().join(directory);
         let generic_path_only = setting == RepeatGroundSetting::GenericPathOnly;
         run_generate_psps(&GeneratePspsArgs {
             call_satellites: setting == RepeatGroundSetting::CallSatellites,
@@ -205,7 +218,7 @@ mod tests {
             catalog: (!generic_path_only).then(|| cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output_dir: psps.clone(),
-            regions: None,
+            regions,
             force: true,
             build_index_if_missing: false,
             min_copies: MinCopies::default(),
@@ -253,7 +266,8 @@ mod tests {
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
-            neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
+            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
+            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
@@ -453,6 +467,227 @@ mod tests {
             from_alignments, from_psps,
             "one cohort filtered two ways must give one VCF, whole",
         );
+    }
+
+    /// Sample `one`'s `GT` and `PS` at each record, by `POS`.
+    fn first_samples_phase(lines: &[String]) -> Vec<(u64, String, String)> {
+        samples_phase(lines, 0)
+    }
+
+    /// One sample's `GT` and `PS` at each record, by `POS`.
+    fn samples_phase(lines: &[String], sample: usize) -> Vec<(u64, String, String)> {
+        lines
+            .iter()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let columns: Vec<&str> = line.split('\t').collect();
+                let keys: Vec<&str> = columns[8].split(':').collect();
+                let values: Vec<&str> = columns[9 + sample].split(':').collect();
+                let value_of = |key: &str| {
+                    keys.iter()
+                        .position(|name| *name == key)
+                        .and_then(|at| values.get(at))
+                        .map_or(String::new(), |value| (*value).to_owned())
+                };
+                (
+                    columns[1].parse().expect("a POS"),
+                    value_of("GT"),
+                    value_of("PS"),
+                )
+            })
+            .collect()
+    }
+
+    /// **Reads phase the first sample's two sites together, and the same phase comes out of
+    /// either route, at one thread or four, and with the hidden-duplication filter on or off**
+    /// (read phase spec §2.6, §7.5).
+    ///
+    /// The first sample is heterozygous at 121 and 161 (1-based), in cis on the same reads, about a
+    /// dozen of which cover both: the two are written `0|1` in the phase set 121. Two samples are
+    /// too few for refinement, so this is phase from reads alone. It is one corner of the range —
+    /// twenty reads a position, single-end reads 100 bases long — and it pins the route the read
+    /// alleles take, not how often reads phase.
+    #[test]
+    fn reads_phase_a_pair_alike_whatever_the_route_the_threads_or_the_filter() {
+        let cohort = a_varying_cohort_with_a_phased_pair_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let mut one_thread = alignments_args(&cohort, &output);
+        one_thread.threads = 1;
+        run_call_from_alignments(&one_thread).expect("the cohort calls on one thread");
+        let from_alignments = comparable(&output);
+        let phase = first_samples_phase(&from_alignments);
+        let at = |position: u64| {
+            phase
+                .iter()
+                .find(|(pos, _, _)| *pos == position)
+                .map(|(_, genotype, phase_set)| (genotype.as_str(), phase_set.as_str()))
+        };
+        let first = FIRST_SAMPLES_SUBSTITUTION as u64 + 1;
+        let second = FIRST_SAMPLES_SECOND_SUBSTITUTION as u64 + 1;
+        assert_eq!(at(first), Some(("0|1", "121")), "{phase:?}");
+        assert_eq!(at(second), Some(("0|1", "121")), "{phase:?}");
+
+        let mut four_threads = alignments_args(&cohort, &output);
+        four_threads.threads = 4;
+        run_call_from_alignments(&four_threads).expect("the cohort calls on four threads");
+        assert_eq!(
+            comparable(&output),
+            from_alignments,
+            "one thread and four write one VCF"
+        );
+
+        let from_psps = called_from_psps(&cohort, &output, &["one", "two"]);
+        assert_eq!(
+            from_psps, from_alignments,
+            "both routes write one VCF, phase included"
+        );
+
+        let mut filtered = alignments_args(&cohort, &output);
+        filtered.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_alignments(&filtered).expect("the cohort calls, filtered");
+        assert_eq!(
+            without_the_filters_info_fields(&without_the_filters_header_lines(&comparable(
+                &output
+            ))),
+            from_alignments,
+            "the filter, flagging nothing, leaves the phase as it was: the fragments reach pass \
+             three through the spill",
+        );
+    }
+
+    /// **With more than 32 reads a sample at the linked records, so the read cap decides which
+    /// reads phase, both routes write one VCF, and a `--regions` run over one walked region writes
+    /// that region's records as the whole-contig run does** (read phase spec §2.4, §7.5).
+    ///
+    /// The second sample's pair, at 456 and 496, lies in the walked region after the repeat tract:
+    /// a whole-contig run numbers its reads after every read of the first region, a `--regions` run
+    /// over that region alone from zero. The cap keys on a read's rank in its region, the same in
+    /// both. Every read here carries the pair in cis, so this pins the route and the numbering
+    /// the cap sees end to end; which reads the cap keeps is pinned by
+    /// `read_phase::capture`'s tests and the walker's rank oracle.
+    #[test]
+    fn with_the_read_cap_binding_both_routes_and_a_regions_run_write_one_phase() {
+        let cohort = a_deep_varying_cohort_with_phased_pairs_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+        let whole = called_from_alignments(&cohort, &output);
+
+        let at = |lines: &[String], sample: usize, position: u64| {
+            samples_phase(lines, sample)
+                .into_iter()
+                .find(|(pos, _, _)| *pos == position)
+                .map(|(_, genotype, phase_set)| (genotype, phase_set))
+        };
+        let pair =
+            |genotype: &str, phase_set: &str| Some((genotype.to_owned(), phase_set.to_owned()));
+        assert_eq!(at(&whole, 0, 121), pair("0|1", "121"));
+        assert_eq!(at(&whole, 0, 161), pair("0|1", "121"));
+        assert_eq!(at(&whole, 1, 456), pair("0|1", "456"));
+        assert_eq!(at(&whole, 1, 496), pair("0|1", "456"));
+        let depth_at_121: u32 = whole
+            .iter()
+            .find(|line| line.starts_with("chrV\t121\t"))
+            .and_then(|line| line.split('\t').nth(9))
+            .and_then(|column| column.split(':').nth(2))
+            .and_then(|depth| depth.parse().ok())
+            .expect("a DP at 121");
+        assert!(depth_at_121 > 32, "the cap must bind: DP {depth_at_121}");
+
+        let from_psps = called_from_psps(&cohort, &output, &["one", "two"]);
+        assert_eq!(
+            from_psps, whole,
+            "both routes write one VCF with the cap binding"
+        );
+
+        // The walked region after the tract alone: 221 to 600, 1-based.
+        let bed = cohort.directory.path().join("after_the_tract.bed");
+        std::fs::write(&bed, format!("chrV\t{}\t600\n", TRACT.1)).expect("the BED writes");
+        let mut regions = alignments_args(&cohort, &output);
+        regions.regions = Some(bed);
+        run_call_from_alignments(&regions).expect("the region calls");
+        let in_region = |lines: &[String]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|line| !line.starts_with('#'))
+                .filter(|line| {
+                    line.split('\t')
+                        .nth(1)
+                        .and_then(|position| position.parse::<usize>().ok())
+                        .is_some_and(|position| position > TRACT.1)
+                })
+                .cloned()
+                .collect()
+        };
+        let alone = comparable(&output);
+        assert_eq!(at(&alone, 1, 456), pair("0|1", "456"));
+        assert_eq!(
+            in_region(&alone),
+            in_region(&whole),
+            "the region's records, phase included, as the whole-contig run writes them"
+        );
+    }
+
+    /// **The walked region's first id reaches the read cap, end to end** (read phase spec §2.4,
+    /// §7.5; review M5): the deep cohort is walked into psps whole, and over the walked region
+    /// after the tract alone, as `--regions` walks it. A whole walk numbers that region's reads
+    /// after every read of the first region, a `--regions` walk from zero. At every one of the
+    /// second sample's records there with more than 32 reads, the merge's own capture, read as
+    /// `(read − the record's chain_id_base, allele)`, is the same 32 entries both ways.
+    ///
+    /// A cap keyed on raw ids keeps different reads in the two walks, so this fails if the
+    /// generator stamps the wrong base, the psp loses it, or the merge does not pass it to the
+    /// cap. (The VCF-level test above cannot: every read there is cis, so any 32 phase alike.)
+    #[test]
+    fn the_cap_keeps_the_same_ranks_whole_contig_and_regions() {
+        use crate::psp::PspReader;
+        use crate::run::cohort_merge::build::captured_at_one_record;
+
+        let cohort = a_deep_varying_cohort_with_phased_pairs_on_disk();
+        let bed = cohort.directory.path().join("after_the_tract.bed");
+        std::fs::write(&bed, format!("chrV\t{}\t600\n", TRACT.1)).expect("the BED writes");
+        let setting = crate::run::RepeatGroundSetting::StrPaths;
+        let whole = walked_into_psps_over(&cohort, setting, None, "psps_whole");
+        let alone = walked_into_psps_over(&cohort, setting, Some(bed), "psps_after_the_tract");
+
+        let deep_records = |directory: &Path| {
+            let mut psp =
+                PspReader::open(&psp_path_for(directory, "two")).expect("the sample's psp opens");
+            psp.records()
+                .expect("its records walk")
+                .map(|found| found.expect("a record reads").record.expect("a built body"))
+                .filter(|record| record.region.start.get() > TRACT.1 as u64)
+                .filter(|record| {
+                    record
+                        .observations
+                        .iter()
+                        .map(|sequence| sequence.chain_ids.len())
+                        .sum::<usize>()
+                        > crate::read_phase::capture::READ_ALLELES_KEPT
+                })
+                .collect::<Vec<_>>()
+        };
+        let ranks = |record: &crate::locus_generation::SampleLocusObservations| {
+            captured_at_one_record(record)
+                .into_iter()
+                .map(|(read, allele)| (read.wrapping_sub(record.chain_id_base), allele))
+                .collect::<Vec<_>>()
+        };
+        let (from_whole, from_alone) = (deep_records(&whole), deep_records(&alone));
+        assert!(
+            !from_alone.is_empty(),
+            "the region has records the cap binds at"
+        );
+        assert_eq!(from_whole.len(), from_alone.len());
+        for (in_whole, in_alone) in from_whole.iter().zip(&from_alone) {
+            assert_eq!(in_whole.region, in_alone.region);
+            assert_ne!(
+                in_whole.chain_id_base, in_alone.chain_id_base,
+                "the whole walk numbers this region after the first, or the test cannot fail"
+            );
+            let kept = ranks(in_alone);
+            assert_eq!(kept.len(), crate::read_phase::capture::READ_ALLELES_KEPT);
+            assert_eq!(ranks(in_whole), kept, "at {:?}", in_whole.region);
+        }
     }
 
     /// **Spec §10's third oracle: the drop-mode file is the tag-mode file without its tagged
@@ -1176,7 +1411,8 @@ mod tests {
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
-            neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
+            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
+            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,

@@ -303,7 +303,11 @@ mod tests {
     /// chunks of rows side by side, and stopping its jumps once they stop helping
     /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `89d6f0d3b9ef190363b1dd6e1f233ae3`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const FITTED_PARAMETERS_MD5: &str = "74942ccad3ca54fa0959b382db29b57d";
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: the file is
+    /// format 9, holding both main's `[misread_after_runs]` (format 8) and the branch's
+    /// per-read-group stutter multipliers, fitted with the branch's repeat-tract fit. Main's
+    /// checksum was `446677ff535e95daf570473e65d61d5f`. Recorded on the macOS host (arm64).
+    const FITTED_PARAMETERS_MD5: &str = "af874257c25115d294282a8720c6a3b9";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -474,6 +478,19 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `443a89c2b2066d269a43107f4e253a16`, exactly. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** when calling began writing phase from reads alone where refinement
+    /// does not run, at ploidy two (`neighbour_evidence_read_phase.md` §2.6, §3): the header gains
+    /// `##readBackedPhase=` and the `PS` declaration, `GT`'s declaration becomes the phased one, and
+    /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
+    /// Taking those back out reproduces the previous checksum, `c8201d16bc0d8574c123c88f082846fd`, exactly
+    /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `f6a351a2d1ab5ed90b039229431a0fce`, exactly. Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
+    /// had moved this checksum to `796b4dc302a7fe575e3ce34e9eae05be`: taking the read-phase changes back out of the merged
+    /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
     /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
     /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
     /// read the multipliers yet. It was `50c08ae0a51e01882b70041979b99f83`. Recorded in the Linux container (arm64).
@@ -490,7 +507,11 @@ mod tests {
     /// chunks of rows side by side, and stopping its jumps once they stop helping
     /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `a17052e1575c8800c810cc67f7c9d913`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const CALLS_MD5: &str = "019c3de63c364651173693f426e3c899";
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: calls scored with
+    /// main's misread table and the branch's per-read-group slip rates, and the
+    /// `##pvcParameters` line of the format-9 file. Main's checksum was `b3864ddbf3a7042c1f2af1427d9167ed`.
+    /// Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "3edb3436d3c8ae418d75385c2d289dd2";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -636,7 +657,11 @@ mod tests {
     /// chunks of rows side by side, and stopping its jumps once they stop helping
     /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `c01e4746bb2c4e30141a49ffe232df7f`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "a6f0ab45333b6d2248310eeb06abc7fe";
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: the file is
+    /// format 9, holding both main's `[misread_after_runs]` (format 8) and the branch's
+    /// per-read-group stutter multipliers, fitted with the branch's repeat-tract fit. Main's
+    /// checksum was `b9df0d719b55fa55576bf7c0b2da46ec`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "846e1849bada1d77f30d131b03e4068c";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -785,6 +810,19 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `35933d51ad28e7a7f30ac8272e18c6d5`, exactly. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** when calling began writing phase from reads alone where refinement
+    /// does not run, at ploidy two (`neighbour_evidence_read_phase.md` §2.6, §3): the header gains
+    /// `##readBackedPhase=` and the `PS` declaration, `GT`'s declaration becomes the phased one, and
+    /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
+    /// Taking those back out reproduces the previous checksum, `9c7bbea51346dd01e20110add15602bd`, exactly
+    /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `9854cc0eb1e1e45a103174d1027bf52c`, exactly. Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
+    /// had moved this checksum to `2bf380c922ce33cb988c4de366b73449`: taking the read-phase changes back out of the merged
+    /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
     /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
     /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
     /// read the multipliers yet. It was `62b2a7d1fa6a7c47667a7b816e44a864`. Recorded in the Linux container (arm64).
@@ -801,7 +839,11 @@ mod tests {
     /// chunks of rows side by side, and stopping its jumps once they stop helping
     /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `0d56b0fa0b87fdd90a238d9586288b22`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const WITH_ERRORS_CALLS_MD5: &str = "2b9c26ea96b6b3170229d6b193d1a580";
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: calls scored with
+    /// main's misread table and the branch's per-read-group slip rates, and the
+    /// `##pvcParameters` line of the format-9 file. Main's checksum was `287c3582f20bf55bf771b587d2020ed3`.
+    /// Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "54454ccd4b0515cc172b90f3db41dc63";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -960,7 +1002,11 @@ mod tests {
     /// chunks of rows side by side, and stopping its jumps once they stop helping
     /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `11a412be1885f1107948ac12283f4c4e`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "b25ac05704bc2abd1a3a55d2d8935495";
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: the file is
+    /// format 9, holding both main's `[misread_after_runs]` (format 8) and the branch's
+    /// per-read-group stutter multipliers, fitted with the branch's repeat-tract fit. Main's
+    /// checksum was `64fa1cbb93de58c8e2dcc9608c52f891`. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "09db8d0e6ed8653a7f3c410c4837f351";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1125,6 +1171,19 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `c21340eb1a9d52d3b5f540a95e45969c`, exactly. Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-03** when calling began writing phase from reads alone where refinement
+    /// does not run, at ploidy two (`neighbour_evidence_read_phase.md` §2.6, §3): the header gains
+    /// `##readBackedPhase=` and the `PS` declaration, `GT`'s declaration becomes the phased one, and
+    /// every record gains `PS` in `FORMAT` and `.` in each column; this cohort phases no column.
+    /// Taking those back out reproduces the previous checksum, `7cf07f4fe020c7c469bcfc58d3d40fa4`, exactly
+    /// (`tmp/strip_phase.py`). Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-03** when `##readBackedPhase=` began stating the break threshold and
+    /// the read cap (`break_min=2.20`, `read_cap=32`; review of 2026-11-03, Mi8): that one header
+    /// line changes and nothing else — with the line's old value the run reproduces the previous
+    /// checksum, `2d033ca39c8b3f0b00111c43da652db9`, exactly. Recorded on macOS (arm64).
+    /// **Re-recorded 2026-11-04** on merging `neighbour-pass` into main, whose STR misread table
+    /// had moved this checksum to `7d056dac9045e6d78ca5dfc75ccacd7c`: taking the read-phase changes back out of the merged
+    /// run's VCF (`tmp/strip_phase.py`) reproduces that checksum exactly. Recorded on macOS (arm64).
     /// **Re-recorded 2026-11-03** with the per-read-group stutter multipliers: only the
     /// `##pvcParameters` line moves, which names the parameters file's checksum; calling does not
     /// read the multipliers yet. It was `3bfeadc38c78f7aa12e1f027f43a96a6`. Recorded in the Linux container (arm64).
@@ -1141,7 +1200,11 @@ mod tests {
     /// chunks of rows side by side, and stopping its jumps once they stop helping
     /// (`str_penalised_fit.md` §2.2, §2.8): sums in another order. It was `90a30ab4bfb80c549a0b5e297543404a`.
     /// Recorded on the macOS host (arm64) and in the Linux container (arm64), which agree.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "7adde21dfbc0fa181a0e6bf7f7d7a93b";
+    /// **Re-recorded 2026-11-06** on merging `stutter-per-read-group` into main: calls scored with
+    /// main's misread table and the branch's per-read-group slip rates, and the
+    /// `##pvcParameters` line of the format-9 file. Main's checksum was `06e7857efabae5c3301911df9b5a26f0`.
+    /// Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "9da65303da1580f10e2380b945a0e583";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -1203,7 +1266,8 @@ mod tests {
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
-            neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
+            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
+            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,

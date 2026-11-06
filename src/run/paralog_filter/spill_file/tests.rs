@@ -12,6 +12,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use super::{SpillFile, SpillFileError};
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::RunError;
 use crate::run::paralog_filter::{
     SpillEntry, SpillError, SpillWriter, SpilledSample, WindowCoverage,
@@ -76,7 +77,9 @@ fn a_record_at(position: u64) -> SpillEntry {
 fn encoded_length(records: &[SpillEntry]) -> u64 {
     let mut writer = SpillWriter::new(Vec::new());
     for record in records {
-        writer.append(record).expect("a Vec sink never refuses");
+        writer
+            .append(record, &RecordFragments::default())
+            .expect("a Vec sink never refuses");
     }
     writer.finish().expect("a Vec sink never refuses").len() as u64
 }
@@ -125,7 +128,9 @@ fn the_file_does_not_exist_until_the_first_record_is_written() {
          leaves nothing"
     );
 
-    spill.append(&a_record_at(100)).expect("the first record");
+    spill
+        .append(&a_record_at(100), &RecordFragments::default())
+        .expect("the first record");
 
     assert!(spill.path().exists(), "the first record creates the file");
 }
@@ -141,7 +146,9 @@ fn the_file_is_gone_when_the_run_ends_normally() {
 
     {
         let mut spill = SpillFile::beside(&output);
-        spill.append(&a_record_at(100)).expect("a record");
+        spill
+            .append(&a_record_at(100), &RecordFragments::default())
+            .expect("a record");
         spill.finish_writing().expect("the flush");
         assert!(path.exists(), "the file is there while the run holds it");
     }
@@ -158,7 +165,9 @@ fn the_file_is_gone_when_the_run_returns_an_error() {
     // `RunError` would leave it.
     fn a_run_that_fails(output: &std::path::Path) -> Result<(), RunError> {
         let mut spill = SpillFile::beside(output);
-        spill.append(&a_record_at(100)).expect("a record");
+        spill
+            .append(&a_record_at(100), &RecordFragments::default())
+            .expect("a record");
         Err(a_run_error())?;
         unreachable!("the run returned above")
     }
@@ -184,7 +193,9 @@ fn the_file_is_gone_when_a_panic_unwinds_through_the_run() {
     // and no message at all. One backtrace in the log is the cheaper price.
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut spill = SpillFile::beside(&output);
-        spill.append(&a_record_at(100)).expect("a record");
+        spill
+            .append(&a_record_at(100), &RecordFragments::default())
+            .expect("a record");
         panic!("a deliberate panic: the run fell over with its spill open");
     }));
 
@@ -203,7 +214,9 @@ fn the_file_is_gone_even_when_the_writer_was_never_finished() {
 
     {
         let mut spill = SpillFile::beside(&output);
-        spill.append(&a_record_at(100)).expect("a record");
+        spill
+            .append(&a_record_at(100), &RecordFragments::default())
+            .expect("a record");
         // No `finish_writing`: the run ends with the writer still open.
     }
 
@@ -251,7 +264,7 @@ fn something_already_at_the_path_is_refused_rather_than_overwritten() {
 
     let mut spill = SpillFile::beside(&output);
 
-    match spill.append(&a_record_at(100)) {
+    match spill.append(&a_record_at(100), &RecordFragments::default()) {
         Err(SpillFileError::SomethingIsAlreadyThere { path: named }) => {
             assert_eq!(named, path);
         }
@@ -270,11 +283,13 @@ fn something_already_at_the_path_is_refused_rather_than_overwritten() {
 fn a_second_spill_for_one_output_is_refused_rather_than_clobbering_the_first() {
     let output = an_output_path("a_second_spill_for_one_output_is_refused");
     let mut first = SpillFile::beside(&output);
-    first.append(&a_record_at(100)).expect("a record");
+    first
+        .append(&a_record_at(100), &RecordFragments::default())
+        .expect("a record");
     let bytes_before = fs::metadata(first.path()).expect("the file").len();
 
     let mut second = SpillFile::beside(&output);
-    let outcome = second.append(&a_record_at(200));
+    let outcome = second.append(&a_record_at(200), &RecordFragments::default());
 
     assert!(matches!(
         outcome,
@@ -294,11 +309,13 @@ fn appending_after_pass_one_has_ended_is_refused() {
     // *tail* — and the record count is already settled.
     let output = an_output_path("appending_after_pass_one_has_ended_is_refused");
     let mut spill = SpillFile::beside(&output);
-    spill.append(&a_record_at(100)).expect("a record");
+    spill
+        .append(&a_record_at(100), &RecordFragments::default())
+        .expect("a record");
     spill.finish_writing().expect("the flush");
     let bytes_after_pass_one = fs::metadata(spill.path()).expect("the file").len();
 
-    match spill.append(&a_record_at(200)) {
+    match spill.append(&a_record_at(200), &RecordFragments::default()) {
         Err(SpillFileError::AppendedAfterPassOneEnded { path }) => {
             assert_eq!(path, spill.path());
         }
@@ -324,7 +341,9 @@ fn the_records_come_back_from_the_file_bit_for_bit() {
     let written: Vec<SpillEntry> = (0..3).map(|index| a_record_at(100 + index)).collect();
 
     for record in &written {
-        spill.append(record).expect("a record");
+        spill
+            .append(record, &RecordFragments::default())
+            .expect("a record");
     }
     spill.finish_writing().expect("the flush");
 
@@ -358,8 +377,12 @@ fn the_file_can_be_read_twice() {
     // the same file, from the beginning.
     let output = an_output_path("the_file_can_be_read_twice");
     let mut spill = SpillFile::beside(&output);
-    spill.append(&a_record_at(100)).expect("a record");
-    spill.append(&a_record_at(101)).expect("a record");
+    spill
+        .append(&a_record_at(100), &RecordFragments::default())
+        .expect("a record");
+    spill
+        .append(&a_record_at(101), &RecordFragments::default())
+        .expect("a record");
     spill.finish_writing().expect("the flush");
 
     let first_pass: Vec<u64> = spill
@@ -400,7 +423,9 @@ fn finishing_pass_one_twice_leaves_the_records_where_they_are() {
     // would be lost as what looks later like a missing tail.
     let output = an_output_path("finishing_pass_one_twice_leaves_the_records_where_they_are");
     let mut spill = SpillFile::beside(&output);
-    spill.append(&a_record_at(100)).expect("a record");
+    spill
+        .append(&a_record_at(100), &RecordFragments::default())
+        .expect("a record");
     spill.finish_writing().expect("the first flush");
     let bytes = fs::metadata(spill.path()).expect("the file").len();
 
@@ -422,7 +447,9 @@ fn reading_before_pass_one_has_ended_is_refused() {
     }
 
     // Open but not flushed: at 64 KiB of buffering, reading here usually sees nothing at all.
-    spill.append(&a_record_at(100)).expect("a record");
+    spill
+        .append(&a_record_at(100), &RecordFragments::default())
+        .expect("a record");
     match spill.read() {
         Err(SpillFileError::PassOneHasNotEnded { path }) => assert_eq!(path, spill.path()),
         other => panic!("expected the read to be refused, got {:?}", other.err()),
@@ -438,7 +465,9 @@ fn a_spill_whose_tail_was_lost_is_refused_rather_than_read_short() {
     let three: Vec<SpillEntry> = (0..3).map(|index| a_record_at(100 + index)).collect();
     let mut spill = SpillFile::beside(&output);
     for record in &three {
-        spill.append(record).expect("a record");
+        spill
+            .append(record, &RecordFragments::default())
+            .expect("a record");
     }
     spill.finish_writing().expect("the flush");
 
@@ -497,7 +526,7 @@ fn a_spill_that_cannot_be_created_names_the_path_and_says_what_the_filesystem_sa
         .join("cohort.vcf");
     let mut spill = SpillFile::beside(&output);
 
-    match spill.append(&a_record_at(100)) {
+    match spill.append(&a_record_at(100), &RecordFragments::default()) {
         Err(SpillFileError::Create { path, source }) => {
             assert_eq!(path, spill.path());
             assert_eq!(source.kind(), std::io::ErrorKind::NotFound);

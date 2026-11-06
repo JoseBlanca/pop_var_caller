@@ -105,6 +105,7 @@ use crate::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
     GenotypeRows, InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
 };
+use likelihood::run_context::MisreadTable;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
@@ -857,7 +858,13 @@ pub struct FrozenParameters<'a> {
     /// [`RunParameters::view`](run_parameters::RunParameters::view), which passes on whatever
     /// its own parameters hold.
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
+    /// **Each read group's misread table after runs** (`str_context_error_fit.md` §6); a read
+    /// group absent from it scores under [`MisreadTable::defaults`].
+    misread_tables: &'a BTreeMap<ReadGroupId, MisreadTable>,
 }
+
+/// No read group's own misread table: what a view built without one points at.
+static NO_MISREAD_TABLES: BTreeMap<ReadGroupId, MisreadTable> = BTreeMap::new();
 
 impl<'a> FrozenParameters<'a> {
     /// Gather the run's frozen parameters for a run the fit **did** measure contamination
@@ -1076,6 +1083,7 @@ impl<'a> FrozenParameters<'a> {
             ssr_substitution_rate,
             ploidy,
             repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
+            misread_tables: &NO_MISREAD_TABLES,
         }
     }
 
@@ -1104,6 +1112,25 @@ impl<'a> FrozenParameters<'a> {
     pub fn with_repeat_tract_outlier_weight(mut self, weight: RepeatTractOutlierWeight) -> Self {
         self.repeat_tract_outlier_weight = weight;
         self
+    }
+
+    /// **The same view with each read group's own misread table** — what
+    /// [`RunParameters::view`](run_parameters::RunParameters::view) passes on.
+    #[inline]
+    #[must_use]
+    pub fn with_misread_tables(mut self, tables: &'a BTreeMap<ReadGroupId, MisreadTable>) -> Self {
+        self.misread_tables = tables;
+        self
+    }
+
+    /// **The misread table a read group's reads are scored under at repeat tracts**: its own,
+    /// or the default where the run holds none for it.
+    #[inline]
+    #[must_use]
+    pub fn misread_table(&self, read_group: ReadGroupId) -> &'a MisreadTable {
+        self.misread_tables
+            .get(&read_group)
+            .unwrap_or(&*likelihood::run_context::DEFAULT_MISREAD_TABLE)
     }
 
     /// **The share of a repeat tract's reads charged to none of its candidate alleles**, with

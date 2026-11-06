@@ -50,6 +50,8 @@ use crate::parameter_estimation::depth_bins::{DepthBin, DepthBinEdges};
 use crate::parameter_estimation::joint::loci::{
     CensusLoci, CensusLociDigest, CensusLociDigester, SelectionTerms,
 };
+use crate::parameter_estimation::misread_after_runs::{MisreadCounter, MisreadCountsByEntry};
+use crate::ref_seq::RefSeq;
 use crate::repeat_catalog::StratumCounts;
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
 
@@ -1573,6 +1575,10 @@ pub struct SampleCensusEvidence {
     /// **What this sample's own base qualities claimed**, per read group — Σ `ln P(this read is
     /// wrong)` and how many reads that ran over.
     minted: BTreeMap<ReadGroupId, MintedReadErrors>,
+    /// **How much more often this sample's reads misread a base after a run when they were
+    /// sequenced through it**, per read group (`str_context_error_fit.md` §3). Empty where the walk
+    /// counted none.
+    misread_after_runs: BTreeMap<ReadGroupId, MisreadCountsByEntry>,
     sections: Sections,
 }
 
@@ -1590,6 +1596,7 @@ impl SampleCensusEvidence {
             terms,
             declared,
             minted,
+            misread_after_runs: BTreeMap::new(),
             sections: Sections::resident(sections),
         }
     }
@@ -1614,6 +1621,7 @@ impl SampleCensusEvidence {
             terms,
             declared,
             minted,
+            misread_after_runs: BTreeMap::new(),
             sections: Sections::backed(path, at, directory),
         }
     }
@@ -1637,6 +1645,25 @@ impl SampleCensusEvidence {
     #[must_use]
     pub fn minted_read_errors(&self) -> &BTreeMap<ReadGroupId, MintedReadErrors> {
         &self.minted
+    }
+
+    /// **How much more often this sample's reads misread a base after a run when sequenced
+    /// through it**, per read group — what the misread table is fitted from
+    /// (`str_context_error_fit.md` §3–§4).
+    #[must_use]
+    pub fn misread_after_runs(&self) -> &BTreeMap<ReadGroupId, MisreadCountsByEntry> {
+        &self.misread_after_runs
+    }
+
+    /// **The same census with these misread counts** — how a walk's writer and a census file's
+    /// reader attach the table, which the constructors leave empty.
+    #[must_use]
+    pub fn with_misread_after_runs(
+        mut self,
+        counts: BTreeMap<ReadGroupId, MisreadCountsByEntry>,
+    ) -> Self {
+        self.misread_after_runs = counts;
+        self
     }
 
     /// **The same census with these claimed-error totals**, for a test whose drawn samples are built
@@ -1668,6 +1695,11 @@ impl SampleCensusEvidence {
                 .minted
                 .into_iter()
                 .filter_map(|(group, totals)| of.get(&group).map(|now| (*now, totals)))
+                .collect(),
+            misread_after_runs: self
+                .misread_after_runs
+                .into_iter()
+                .filter_map(|(group, counts)| of.get(&group).map(|now| (*now, counts)))
                 .collect(),
             sections: self.sections.renumbered(of),
             ..self
@@ -2401,6 +2433,9 @@ pub struct CensusWriter {
     minted: BTreeMap<ReadGroupId, MintedReadErrors>,
     /// Scratch for the accumulator, cleared and refilled once a locus rather than allocated.
     minted_scratch: Vec<(ReadGroupId, MintedReadErrors)>,
+    /// **The count of misreads after runs**, where the walk handed the writer its reference
+    /// ([`Self::count_misreads_after_runs`]); `None` writes an empty table.
+    misread_counter: Option<MisreadCounter>,
     sample: String,
     /// Ground whose loci this census does not count, in genome order: the satellites a
     /// `--call-satellites` walk handed to the generic path ([`Self::leave_out`]). Empty otherwise.
@@ -2524,6 +2559,7 @@ impl CensusWriter {
             declared,
             minted: BTreeMap::new(),
             minted_scratch: Vec::new(),
+            misread_counter: None,
             sample,
             left_out: Vec::new(),
         }
@@ -2553,6 +2589,10 @@ impl CensusWriter {
             self.minted.entry(group).or_default().add(totals);
         }
 
+        if let Some(counter) = &mut self.misread_counter {
+            counter.add_locus(locus);
+        }
+
         match &locus.kind {
             LocusKind::Generic => self.add_generic(locus),
             LocusKind::Ssr(_) => self.add_ssr(locus),
@@ -2570,6 +2610,17 @@ impl CensusWriter {
     /// locus's read errors for the base-quality calibration, and satellite loci in that tally
     /// moved each library's error multiplier in its seventh figure on the test cohort.
     pub fn leave_out(&mut self, spans: &[GenomeRegion]) {
+        self.leave_out_spans(spans);
+    }
+
+    /// **Count misreads after runs from here on, reading the walk's reference through
+    /// `reference`** (`str_context_error_fit.md` §3). Without it the census carries an empty
+    /// table, which every fit reads as nothing counted.
+    pub fn count_misreads_after_runs(&mut self, reference: Box<dyn RefSeq + Send>) {
+        self.misread_counter = Some(MisreadCounter::new(reference));
+    }
+
+    fn leave_out_spans(&mut self, spans: &[GenomeRegion]) {
         self.left_out = spans.to_vec();
     }
 
@@ -2970,6 +3021,11 @@ impl CensusWriter {
             self.declared,
             self.minted,
             sections,
+        )
+        .with_misread_after_runs(
+            self.misread_counter
+                .map(MisreadCounter::finish)
+                .unwrap_or_default(),
         )
     }
 }
@@ -4109,6 +4165,7 @@ mod tests {
         observations: Vec<SequenceObservation>,
     ) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(position),
@@ -4327,6 +4384,7 @@ mod tests {
     /// The three-base-motif tract at 200, which `two_stratum_writer` keeps.
     fn atg_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(200),
@@ -4346,6 +4404,7 @@ mod tests {
 
     fn ssr_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(100),

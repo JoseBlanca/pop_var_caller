@@ -62,6 +62,26 @@ boundary ([`run_streaming.md`](run_streaming.md) §4.3). So the stored form is f
 that preserves equality over a window of one locus — the compression is a storage concern that
 touches no calling code.
 
+**Amended 2026-11-03: the guarantee is now wider, and a stored form must keep it.** Read-backed
+phase ([`neighbour_evidence_read_phase.md`](neighbour_evidence_read_phase.md) §2.1) follows one
+read across several cohort loci, so it needs more than equality inside one locus. Within one
+sample's evidence (one psp, or one sample's alignments in direct mode):
+
+- **an id is never given to two reads.** The allocator lives for the whole walk and never reuses
+  an id, across walked regions and chromosomes. Mates pair by read group and read name together,
+  so two libraries of one sample that reuse a read name give two ids;
+- **within one walked region, a read keeps one id at every locus it covers**, including across
+  block boundaries, which restate the live ids rather than renumber them;
+- **a read that crosses a walked-region boundary gets a new id in the second region.** That loses
+  evidence and never joins two reads.
+
+The value is now used in one place: a read's **rank in its walked region**, `id − chain_id_base`,
+where `chain_id_base` is the first id the walk issued in that region, which every record carries
+(format 1.1, [`psp_file_format.md`](psp_file_format.md) §4.3). Read-backed phase keys its cap of
+32 reads a sample at a record on that rank, so it is the same whether the region was walked alone
+or inside a longer walk. **No future encoding may renumber ids per block or per region**: equality
+across loci and the rank both depend on the ids being the walk's own.
+
 ---
 
 ## 2. What this document is for

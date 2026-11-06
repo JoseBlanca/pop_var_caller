@@ -2111,6 +2111,15 @@ comparisons one by one.
 - **Latest fixes-applied:** [fixes_applied_str_bundles_partial_reads_followup_2026-10-12.md](doc/devel/reports/reviews/fixes_applied_str_bundles_partial_reads_followup_2026-10-12.md)
 - **Open:** step 4c follow-up review Mi2–Mi12 (deferred). Step 4b review M4 (segments compare right-flank partial reads out of phase — separate change); M7, Mi2–Mi5. From step 4: M4, M8–M12 (tests and a refactor).
 
+#### Neighbour-evidence pass, with phased templates and written phase (`neighbour_evidence_pass.md`, `neighbour_evidence_phasing.md`, `neighbour_evidence_phase_output.md`, `neighbour_evidence_read_phase.md`)
+- **Status:** fixes-applied — phase from reads built, reviewed and its review's findings fixed (2026-11-03, `dba90cca`..`1e531539`; dispositions in the review report); phase output built, reviewed, fixes applied (branch `neighbour-pass`, pushed; not merged)
+- **Spec:** [neighbour_evidence_pass.md](doc/devel/ng/spec/neighbour_evidence_pass.md), [neighbour_evidence_phasing.md](doc/devel/ng/spec/neighbour_evidence_phasing.md), [neighbour_evidence_phase_output.md](doc/devel/ng/spec/neighbour_evidence_phase_output.md); **Research:** [phasing_for_the_pass_2026-11-02.md](doc/devel/ng/research/neighbour_evidence/phasing_for_the_pass_2026-11-02.md), [phase_blocks_check_2026-11-02.md](doc/devel/ng/research/neighbour_evidence/phase_blocks_check_2026-11-02.md)
+(doc/devel/reports/implementations/read_phase_2026-11-03.md); [phase_output_2026-11-02.md](doc/devel/reports/implementations/phase_output_2026-11-02.md)
+(doc/devel/reports/reviews/read_phase_2026-11-03.md); [neighbour_evidence_phase_output_2026-11-02.md](doc/devel/reports/reviews/neighbour_evidence_phase_output_2026-11-02.md) (spec review: [neighbour_evidence_phase_output_spec_review_2026-11-02.md](doc/devel/reports/reviews/neighbour_evidence_phase_output_spec_review_2026-11-02.md)); earlier: [neighbour_evidence_phasing_2026-11-02.md](doc/devel/reports/reviews/neighbour_evidence_phasing_2026-11-02.md)
+- **Open:** outbred cohorts with many founders phase wrongly (4.7% of links at 64 founders) — reads cut it to 3.6% on dense-SNP cohorts, still above 1 in 100 (read phase spec Q3); read-phase review: Mi21 (keeper and stage cost at 3,000 samples) unmeasured, Mi7's allele-index newtype and two nits deferred (see the review's dispositions); the error-floor fit on HG002, the tomato read check and the STR-segment loss unmeasured; review M5/M6 remainders (back-pointer tie, a core with fewer than 3 of a continuing block's records); path bits 16 bytes an allele pair, not packed; both bit-exact tests (posteriors, phase) confirmed on Linux; cost at 500–3,000 samples; the tomato run on kimura.
+
+---
+
 ## Standing project-wide items
 
 Not bound to a specific component; pick up whenever the active feature

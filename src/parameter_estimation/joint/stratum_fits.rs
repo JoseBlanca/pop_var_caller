@@ -615,7 +615,7 @@ pub struct StratumFits {
     stated_concentration_warrant: Provenance,
     /// **Each read group's stutter multiplier, per motif length** (`str_library_stutter.md` §3): how
     /// many times its slippage group's class rate its reads slip at. **A pair with no entry is one**,
-    /// which is what a run of one read group and a parameters file older than format 8 mean.
+    /// which is what a run of one read group and a parameters file older than format 9 mean.
     stutter_multipliers: BTreeMap<(ReadGroupId, u8), StutterMultiplier>,
 }
 

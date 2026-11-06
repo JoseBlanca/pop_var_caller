@@ -74,7 +74,8 @@ pub use scoring_context::{
     WhyNoCoverageModel,
 };
 pub use spill::{
-    EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample,
+    EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillReaderWithFragments, SpillWriter,
+    SpilledSample,
 };
 pub use spill_file::{SpillFile, SpillFileError};
 

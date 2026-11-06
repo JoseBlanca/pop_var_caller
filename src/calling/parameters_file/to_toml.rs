@@ -68,11 +68,11 @@ use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, GroupOfNumbers, InbreedingRow, InformationalNumber, LevelOrigin, LevelSmoothing,
-    PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow,
-    SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin,
-    SlippageCurve, SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome,
-    StratumAlleleLengthVariationRow, StutterMultiplierRow, SubstitutionRateRow, Warrant,
-    WarrantedValue,
+    MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow,
+    ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung,
+    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
+    SnpIndelFitStart, StartOutcome, StratumAlleleLengthVariationRow, StutterMultiplierRow,
+    SubstitutionRateRow, Warrant, WarrantedValue,
 };
 
 impl ParametersFile {
@@ -487,6 +487,24 @@ impl ParametersFile {
                         row.in_stutter_tail
                     )
                 }),
+            );
+        }
+
+        // **Calling reads this one**: each read group's repeat tracts are scored under its rows.
+        if let Some(misread) = &self.misread_after_runs {
+            section(&mut out, "misread_after_runs");
+            note(
+                &mut out,
+                &[
+                    "How much more often each read group's reads misread a base after a long run of one base when they were sequenced through the run than when they reached the base from the other side (doc/devel/ng/spec/str_context_error_fit.md). Calling adds these excesses to the repeat-tract substitution rate, for the reads of the direction that crossed the run only.",
+                    "",
+                    "One row per read group and entry. An entry is a run of one base, `shortest_run` to `longest_run` bases long (no `longest_run`: that long or longer), and a base either the next one after it (`base = \"next_base\"`) or one of the 19 after that (`\"further_on\"`). At the next base, `as_the_run` is the excess chance of reading the base as one more base of the run, and `other_wrong` that of any other wrong base; further on, `other_wrong` is any wrong base. `through_reads` and `arriving_first_reads` are the reads behind the two rates. An entry with fewer than 1,000 reads in either group takes the built-in default and is marked `defaulted`.",
+                ],
+            );
+            one_a_line(
+                &mut out,
+                "entries",
+                misread.entries.iter().map(a_misread_after_run_row),
             );
         }
 
@@ -1813,6 +1831,33 @@ fn the_word_for_start_outcome(ended: StartOutcome) -> &'static str {
         StartOutcome::AtThePassLimit => "at_the_pass_limit",
         StartOutcome::AgreedWithAnEarlierStart => "agreed_with_an_earlier_start",
     }
+}
+
+/// One row of `[misread_after_runs]`, on one line; a missing standard error or longest length
+/// is a key that is not there.
+fn a_misread_after_run_row(row: &MisreadAfterRunRow) -> String {
+    let mut fields = vec![
+        ("read_group", row.read_group.to_string()),
+        ("shortest_run", a_toml_integer(row.shortest_run)),
+    ];
+    if let Some(longest) = row.longest_run {
+        fields.push(("longest_run", a_toml_integer(longest)));
+    }
+    fields.push((
+        "base",
+        a_toml_string(match row.base {
+            MisreadBase::NextBase => "next_base",
+            MisreadBase::FurtherOn => "further_on",
+        }),
+    ));
+    fields.push(("as_the_run", a_warranted_value(&row.as_the_run)));
+    fields.push(("other_wrong", a_warranted_value(&row.other_wrong)));
+    fields.push(("through_reads", a_toml_integer(row.through_reads)));
+    fields.push((
+        "arriving_first_reads",
+        a_toml_integer(row.arriving_first_reads),
+    ));
+    an_inline_table(&fields)
 }
 
 fn the_word_for_warrant(warrant: Warrant) -> &'static str {

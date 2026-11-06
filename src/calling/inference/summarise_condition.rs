@@ -1982,7 +1982,15 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     // than assumed so that the day one does, this walk needs no change.
     let contamination_of_each_read_group = parameters.contamination_by_read_group();
     let buffers = scratch.tract_locus_buffers_mut();
-    let contexts = buffers.fits.scoring_contexts(&scored_candidates);
+    let mut contexts = buffers.fits.scoring_contexts(&scored_candidates);
+    // **Each read group's own misread table after runs** (`str_context_error_fit.md` §6). The
+    // contexts are read-group-major, the read group's index its identifier, as the gathering
+    // filled them.
+    for (cell, context) in contexts.iter_mut().enumerate() {
+        let group = u32::try_from(cell / scored_candidates.len())
+            .expect("a run has fewer read groups than a u32 can name");
+        context.misread_after_runs = parameters.misread_table(crate::types::ReadGroupId(group));
+    }
     let locus = buffers.fits.locus_parameters(
         &scored_candidates,
         &contexts,

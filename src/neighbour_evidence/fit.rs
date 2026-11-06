@@ -76,14 +76,20 @@ impl SampleFit {
         self.frozen
     }
 
-    /// The parameters the sample is walked with now.
+    /// The parameters the sample is walked with now, with the pass's `mismatch` and
+    /// `background_landing_share` (`WalkParameters`).
     #[must_use]
-    pub fn parameters(&self, mismatch: f64) -> WalkParameters {
+    pub fn parameters(
+        &self,
+        mismatch: f64,
+        background_landing_share: Option<f64>,
+    ) -> WalkParameters {
         WalkParameters {
             segment_bases: SEGMENT_GRID[self.chosen / RUN_GRID.len()],
             run_bases: RUN_GRID[self.chosen % RUN_GRID.len()],
             autozygous_share: self.autozygous_share,
             mismatch,
+            background_landing_share,
         }
     }
 
@@ -91,16 +97,18 @@ impl SampleFit {
     /// frozen: the twelve grid walks at the current `F`, their log-likelihoods added to the running
     /// totals, the best total chosen, and `F` re-estimated from that grid point's walk.
     /// `informative_records` is how many of the window's sites are informative records of the
-    /// sample.
+    /// sample. `template_weights` is the walk's, as [`walk`] takes it.
     pub fn fit_window(
         &mut self,
         sites: &[WalkSite<'_>],
         templates: usize,
+        template_weights: Option<&[f64]>,
         informative_records: usize,
         mismatch: f64,
+        background_landing_share: Option<f64>,
     ) -> WalkParameters {
         if self.frozen || sites.is_empty() {
-            return self.parameters(mismatch);
+            return self.parameters(mismatch, background_landing_share);
         }
         let mut autozygous_sums = [0.0; GRID_POINTS];
         for (point, (summed, autozygous_sum)) in self
@@ -112,11 +120,13 @@ impl SampleFit {
             let result = walk(
                 sites,
                 templates,
+                template_weights,
                 WalkParameters {
                     segment_bases: SEGMENT_GRID[point / RUN_GRID.len()],
                     run_bases: RUN_GRID[point % RUN_GRID.len()],
                     autozygous_share: self.autozygous_share,
                     mismatch,
+                    background_landing_share,
                 },
             );
             *summed += result.log_likelihood;
@@ -136,7 +146,7 @@ impl SampleFit {
             clamp_share(self.autozygous_probability_sum / self.autozygous_sites as f64);
         self.informative_records_fitted += informative_records;
         self.frozen = self.informative_records_fitted >= FIT_RECORDS;
-        self.parameters(mismatch)
+        self.parameters(mismatch, background_landing_share)
     }
 }
 

@@ -165,6 +165,7 @@ where
 
         let (left_flank, reference_bases, right_flank) = locus.split_flanks();
         Ok(Some(SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: reference_bases.into(),
             observations: measured.observations,

@@ -19,8 +19,13 @@ use std::io::Cursor;
 
 use proptest::prelude::*;
 
-use super::{EncodedSpillEntry, SpillEntry, SpillError, SpillReader, SpillWriter, SpilledSample};
+use super::{
+    EncodedSpillEntry, MAX_FRAGMENTS_BYTES, SpillEntry, SpillError, SpillReader,
+    SpillReaderWithFragments, SpillWriter, SpilledSample, leb128_bytes,
+};
 use crate::psp::varint::encode_u64_leb128;
+use crate::read_phase::capture::LARGEST_ERROR_PHRED;
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 use crate::run::paralog_filter::WindowCoverage;
 use crate::types::{ContigId, Position};
 
@@ -103,6 +108,22 @@ fn a_tiny_record() -> SpillEntry {
     }
 }
 
+/// The fragments [`a_tiny_record`] is written with: one, of its one sample.
+fn a_tiny_records_fragments() -> RecordFragments {
+    RecordFragments::from_entries(vec![FragmentAllele {
+        sample: 0,
+        fragment: 5,
+        allele: 1,
+        error_phred: 30,
+    }])
+}
+
+/// [`a_tiny_record`]'s bytes, with its fragments: the encoding every test that corrupts a byte
+/// by index starts from.
+fn a_tiny_records_bytes() -> Vec<u8> {
+    encoded_bytes_with_fragments(&[(a_tiny_record(), a_tiny_records_fragments())])
+}
+
 /// Offsets into [`a_tiny_record`]'s encoding, read off the byte list in
 /// [`the_encoding_matches_the_layout_the_spec_fixes`].
 const TRACT_FLAG_OFFSET_IN_TINY_RECORD: usize = 3;
@@ -179,12 +200,21 @@ fn window_holds_the_same_bits(window: &WindowCoverage, other: &WindowCoverage) -
         && mean_depth.to_bits() == other_mean_depth.to_bits()
 }
 
-/// The bytes the writer produces for these entries.
+/// The bytes the writer produces for these entries, each written without fragments.
 fn encoded_bytes(entries: &[SpillEntry]) -> Vec<u8> {
+    let entries: Vec<(SpillEntry, RecordFragments)> = entries
+        .iter()
+        .map(|entry| (entry.clone(), RecordFragments::default()))
+        .collect();
+    encoded_bytes_with_fragments(&entries)
+}
+
+/// The bytes the writer produces for these entries, each with its fragments.
+fn encoded_bytes_with_fragments(entries: &[(SpillEntry, RecordFragments)]) -> Vec<u8> {
     let mut writer = SpillWriter::new(Vec::new());
-    for entry in entries {
+    for (entry, fragments) in entries {
         writer
-            .append(entry)
+            .append(entry, fragments)
             .expect("a Vec sink never refuses bytes");
     }
     assert_eq!(writer.entries_written(), entries.len() as u64);
@@ -196,6 +226,18 @@ fn round_trip(entries: &[SpillEntry]) -> Vec<SpillEntry> {
     SpillReader::new(Cursor::new(encoded_bytes(entries)), entries.len() as u64)
         .map(|entry| entry.expect("every entry the writer wrote reads back"))
         .collect()
+}
+
+/// Encode the entries with their fragments and read both back with pass three's reader.
+fn round_trip_with_fragments(
+    entries: &[(SpillEntry, RecordFragments)],
+) -> Vec<(SpillEntry, RecordFragments)> {
+    SpillReaderWithFragments::new(
+        Cursor::new(encoded_bytes_with_fragments(entries)),
+        entries.len() as u64,
+    )
+    .map(|entry| entry.expect("every entry the writer wrote reads back"))
+    .collect()
 }
 
 /// Assert one entry survives the file unchanged, and hand back what came out of it.
@@ -550,6 +592,42 @@ fn a_stream_of_records_comes_back_in_the_order_it_was_written() {
     assert!(holds_the_same_bits(&third, &read[2]));
 }
 
+/// **The fragments ride the spill, and only pass three's reader reads them** (read phase spec
+/// §4.1): the reader pass three opens gets them back exactly, beside their entry; pass two's
+/// steps over them by their length and still meets the next entry where it starts.
+#[test]
+fn fragments_are_read_back_by_pass_three_and_stepped_over_by_pass_two() {
+    let deep = a_snp_two_samples_covered();
+    let deep_fragments = RecordFragments::from_entries(
+        (0..40)
+            .map(|at| FragmentAllele {
+                sample: at % 2,
+                fragment: 1_000 + at * 7,
+                allele: (at % 2) as u16,
+                error_phred: 20 + (at % 30) as u8,
+            })
+            .collect(),
+    );
+    let after = a_tract_two_samples_covered();
+    let written = [
+        (deep.clone(), deep_fragments.clone()),
+        (after.clone(), RecordFragments::default()),
+    ];
+
+    let read = round_trip_with_fragments(&written);
+    assert!(holds_the_same_bits(&deep, &read[0].0));
+    assert_eq!(read[0].1, deep_fragments);
+    assert!(holds_the_same_bits(&after, &read[1].0));
+    assert!(read[1].1.is_empty());
+
+    let skipped: Vec<SpillEntry> =
+        SpillReader::new(Cursor::new(encoded_bytes_with_fragments(&written)), 2)
+            .collect::<Result<_, _>>()
+            .expect("pass two reads both");
+    assert!(holds_the_same_bits(&deep, &skipped[0]));
+    assert!(holds_the_same_bits(&after, &skipped[1]));
+}
+
 #[test]
 fn an_empty_file_yields_no_entries() {
     let mut reader = SpillReader::new(Cursor::new(Vec::new()), 0);
@@ -565,7 +643,7 @@ fn the_encoding_matches_the_layout_the_spec_fixes() {
     // Pins the field order and each field's width. A codec whose encoder and decoder agree
     // with each other but not with §3.4 passes every round trip above and fails this.
     assert_eq!(
-        encoded_bytes(&[a_tiny_record()]),
+        a_tiny_records_bytes(),
         vec![
             0x01, // contig 1, one varint byte                          — offset 0
             0xAC, 0x02, // position 300, two varint bytes               — offsets 1, 2
@@ -577,6 +655,12 @@ fn the_encoding_matches_the_layout_the_spec_fixes() {
             0x00, 0x00, 0x00, 0x40, // mean_depth 2.0
             0x03, // ref_reads 3
             0x82, 0x01, // alt_reads 130, two varint bytes
+            0x05, // the fragments section is five bytes long          — offset 19
+            0x01, // one fragment allele
+            0x00, // sample 0
+            0x05, // fragment 5
+            0x01, // allele 1
+            0x1E, // error Phred 30
         ]
     );
 }
@@ -609,12 +693,16 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
         (16, "ref_reads"),
         (17, "alt_reads"),
         (18, "alt_reads"),
+        (19, "fragments_bytes"),
+        (20, "fragments_bytes"),
+        (22, "fragments_bytes"),
+        (24, "fragments_bytes"),
     ];
 
-    let whole = encoded_bytes(&[a_tiny_record()]);
+    let whole = a_tiny_records_bytes();
     assert_eq!(
         whole.len(),
-        19,
+        25,
         "the byte list moved and the offsets below move with it"
     );
 
@@ -632,6 +720,9 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
     }
 }
 
+/// An empty fragments section closes every entry: its length, one byte, then a count of zero.
+const EMPTY_FRAGMENTS_SECTION_BYTES: usize = 2;
+
 #[test]
 fn a_failure_inside_the_samples_names_which_sample() {
     // At a cohort of three thousand a message that names only the field points at three
@@ -647,7 +738,8 @@ fn a_failure_inside_the_samples_names_which_sample() {
     }])
     .len();
     let bytes_per_sample = (whole.len() - head) / 3;
-    let two_bytes_into_the_second_sample = head + bytes_per_sample + 2;
+    let two_bytes_into_the_second_sample =
+        head - EMPTY_FRAGMENTS_SECTION_BYTES + bytes_per_sample + 2;
 
     let mut reader = SpillReader::new(
         Cursor::new(whole[..two_bytes_into_the_second_sample].to_vec()),
@@ -665,7 +757,7 @@ fn a_failure_inside_the_samples_names_which_sample() {
 
 #[test]
 fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
-    let mut bytes = encoded_bytes(&[a_tiny_record()]);
+    let mut bytes = a_tiny_records_bytes();
     bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 2;
     let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
@@ -898,7 +990,7 @@ fn the_reader_stops_after_a_decode_error() {
     // A stream that failed once is not at an entry boundary any more, so bytes from the middle
     // of an entry would decode — plausibly — into a record that was never written.
     let mut bytes = vec![0x01, 0x01, 0x02]; // contig, position, then a flag byte of 2
-    bytes.extend_from_slice(&encoded_bytes(&[a_tiny_record()]));
+    bytes.extend_from_slice(&a_tiny_records_bytes());
     let mut reader = SpillReader::new(Cursor::new(bytes), 1);
 
     assert!(matches!(
@@ -916,7 +1008,7 @@ fn the_reader_stops_after_a_decode_error() {
 fn append_reports_a_sink_that_refused_the_bytes_and_does_not_count_the_entry() {
     let mut writer = SpillWriter::new(RefusesEverything);
     assert!(matches!(
-        writer.append(&a_tiny_record()),
+        writer.append(&a_tiny_record(), &a_tiny_records_fragments()),
         Err(SpillError::Write { .. })
     ));
     assert_eq!(writer.entries_written(), 0);
@@ -954,7 +1046,7 @@ fn any_float() -> impl Strategy<Value = f32> {
 ///
 /// **The shape follows the tract flag** rather than being drawn beside it, which is the writer's
 /// rule and now also the file's: there is one flag, and it decides.
-fn any_entry() -> impl Strategy<Value = SpillEntry> {
+fn any_entry() -> impl Strategy<Value = (SpillEntry, RecordFragments)> {
     (
         any::<u32>(),
         any::<u64>(),
@@ -964,22 +1056,52 @@ fn any_entry() -> impl Strategy<Value = SpillEntry> {
             (any_float(), any_float(), any::<u32>(), any::<u32>()),
             0..300,
         ),
+        // Fragments: sample indices are reduced into the entry's sample count below; fragment
+        // numbers and alleles span every varint length their types allow.
+        prop::collection::vec(
+            (
+                any::<u32>(),
+                any::<u32>(),
+                any::<u16>(),
+                0..=LARGEST_ERROR_PHRED,
+            ),
+            0..40,
+        ),
     )
-        .prop_map(|(contig, position, is_repeat_tract, line, samples)| {
-            let samples = samples
-                .into_iter()
-                .map(|(gc, depth, ref_reads, alt_reads)| {
-                    a_sample_with_a_window(gc, depth, ref_reads, alt_reads)
-                })
-                .collect();
-            SpillEntry {
-                contig: ContigId(contig),
-                position: Position(position),
-                is_repeat_tract,
-                line,
-                samples,
-            }
-        })
+        .prop_map(
+            |(contig, position, is_repeat_tract, line, samples, drawn)| {
+                let samples: Vec<SpilledSample> = samples
+                    .into_iter()
+                    .map(|(gc, depth, ref_reads, alt_reads)| {
+                        a_sample_with_a_window(gc, depth, ref_reads, alt_reads)
+                    })
+                    .collect();
+                let sample_count = samples.len() as u32;
+                let fragments = RecordFragments::from_entries(if sample_count == 0 {
+                    Vec::new()
+                } else {
+                    drawn
+                        .into_iter()
+                        .map(|(sample, fragment, allele, error_phred)| FragmentAllele {
+                            sample: sample % sample_count,
+                            fragment,
+                            allele,
+                            error_phred,
+                        })
+                        .collect()
+                });
+                (
+                    SpillEntry {
+                        contig: ContigId(contig),
+                        position: Position(position),
+                        is_repeat_tract,
+                        line,
+                        samples,
+                    },
+                    fragments,
+                )
+            },
+        )
 }
 
 proptest! {
@@ -987,9 +1109,22 @@ proptest! {
     fn any_stream_of_entries_comes_back_bit_for_bit(
         entries in prop::collection::vec(any_entry(), 1..8)
     ) {
-        let read = round_trip(&entries);
+        let read = round_trip_with_fragments(&entries);
         prop_assert_eq!(read.len(), entries.len());
-        for (wrote, came_back) in entries.iter().zip(&read) {
+        for ((wrote, fragments), (came_back, fragments_back)) in entries.iter().zip(&read) {
+            prop_assert!(holds_the_same_bits(wrote, came_back));
+            prop_assert_eq!(fragments, fragments_back);
+        }
+        // Pass two's reader steps over every section and meets every entry where it starts.
+        let bare: Vec<SpillEntry> = entries.iter().map(|(entry, _)| entry.clone()).collect();
+        let skipped: Vec<SpillEntry> = SpillReader::new(
+            Cursor::new(encoded_bytes_with_fragments(&entries)),
+            entries.len() as u64,
+        )
+        .collect::<Result<_, _>>()
+        .expect("pass two reads every entry");
+        prop_assert_eq!(skipped.len(), bare.len());
+        for (wrote, came_back) in bare.iter().zip(&skipped) {
             prop_assert!(holds_the_same_bits(wrote, came_back));
         }
     }
@@ -1001,18 +1136,134 @@ proptest! {
 #[test]
 fn an_entry_encoded_ahead_of_time_writes_what_append_writes() {
     let entries = [
-        a_snp_two_samples_covered(),
-        a_tract_two_samples_covered(),
-        a_tiny_record(),
+        (a_snp_two_samples_covered(), RecordFragments::default()),
+        (a_tract_two_samples_covered(), a_tiny_records_fragments()),
+        (a_tiny_record(), a_tiny_records_fragments()),
     ];
     let mut writer = SpillWriter::new(Vec::new());
-    for entry in &entries {
-        let encoded = EncodedSpillEntry::of(entry).expect("a well-formed entry encodes");
+    for (entry, fragments) in &entries {
+        let encoded = EncodedSpillEntry::of(entry, fragments).expect("a well-formed entry encodes");
         writer
             .append_encoded(&encoded)
             .expect("a Vec takes every byte");
     }
     assert_eq!(writer.entries_written(), entries.len() as u64);
     let written = writer.finish().expect("a Vec flushes");
-    assert_eq!(written, encoded_bytes(&entries));
+    assert_eq!(written, encoded_bytes_with_fragments(&entries));
+}
+
+// ---------------------------------------------------------------------------
+// A damaged fragments section, read by pass three
+// ---------------------------------------------------------------------------
+
+/// Offset of [`a_tiny_record`]'s fragments section length, from the byte list in
+/// [`the_encoding_matches_the_layout_the_spec_fixes`]; the section's five bytes follow it.
+const FRAGMENTS_LENGTH_OFFSET_IN_TINY_RECORD: usize = 19;
+
+/// What pass three's reader makes of these bytes, holding one entry.
+fn read_with_fragments(bytes: Vec<u8>) -> Result<(SpillEntry, RecordFragments), SpillError> {
+    SpillReaderWithFragments::new(Cursor::new(bytes), 1)
+        .next()
+        .expect("the reader yields something for one entry's bytes")
+}
+
+/// **Each kind of damage to a fragments section is refused, naming its field** (review Mi2): a
+/// count the section cannot hold, bytes past the last entry, an allele past `u16`, a section
+/// longer than any real one, a Phred above the largest stored, and a sample the entry does not
+/// have. Before, the last two decoded as data and changed phase silently, and bytes past the last
+/// entry were reported as an out-of-range length.
+#[test]
+fn a_damaged_fragments_section_is_refused() {
+    let base = a_tiny_records_bytes();
+    let at = FRAGMENTS_LENGTH_OFFSET_IN_TINY_RECORD;
+    let with = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut bytes = base.clone();
+        edit(&mut bytes);
+        read_with_fragments(bytes)
+    };
+
+    // A count of 2 in a five-byte section: two entries need at least eight bytes.
+    match with(&|bytes| bytes[at + 1] = 2) {
+        Err(SpillError::OutOfRange { field, value: 2 }) => assert_eq!(field, "fragment_count"),
+        other => panic!("a count the section cannot hold gave {other:?}"),
+    }
+    // A count of 0, leaving the four bytes of the one entry unread.
+    match with(&|bytes| bytes[at + 1] = 0) {
+        Err(SpillError::SectionLongerThanItsEntries { field, unread: 4 }) => {
+            assert_eq!(field, "fragments_bytes");
+        }
+        other => panic!("bytes past the last entry gave {other:?}"),
+    }
+    // An allele of 65,536: three varint bytes in place of one, the section's length grown to fit.
+    match with(&|bytes| {
+        bytes[at] = 7;
+        bytes.splice(at + 4..at + 5, [0x80, 0x80, 0x04]);
+    }) {
+        Err(SpillError::OutOfRange { field, value }) => {
+            assert_eq!((field, value), ("fragment_allele", 65_536));
+        }
+        other => panic!("an allele past u16 gave {other:?}"),
+    }
+    // A section declared longer than MAX_FRAGMENTS_BYTES.
+    match with(&|bytes| {
+        let mut length = Vec::new();
+        encode_u64_leb128(MAX_FRAGMENTS_BYTES as u64 + 1, &mut length);
+        bytes.splice(at..at + 1, length);
+    }) {
+        Err(SpillError::OutOfRange { field, .. }) => assert_eq!(field, "fragments_bytes"),
+        other => panic!("an oversized section gave {other:?}"),
+    }
+    // A Phred of 61, one above the largest a read allele stores.
+    match with(&|bytes| bytes[at + 5] = LARGEST_ERROR_PHRED + 1) {
+        Err(SpillError::OutOfRange { field, value: 61 }) => {
+            assert_eq!(field, "fragment_error_phred");
+        }
+        other => panic!("a Phred above the largest stored gave {other:?}"),
+    }
+    // Sample 1 in an entry with one sample.
+    match with(&|bytes| bytes[at + 2] = 1) {
+        Err(SpillError::OutOfRange { field, value: 1 }) => assert_eq!(field, "fragment_sample"),
+        other => panic!("a sample the entry does not have gave {other:?}"),
+    }
+    // And the undamaged bytes read back whole.
+    let (entry, fragments) = read_with_fragments(base).expect("the undamaged entry");
+    assert!(holds_the_same_bits(&entry, &a_tiny_record()));
+    assert_eq!(fragments, a_tiny_records_fragments());
+}
+
+/// **A file cut inside the fragments section is refused by both readers**, each naming the
+/// section: pass two's while stepping over it, pass three's while reading it.
+#[test]
+fn a_file_cut_inside_the_fragments_section_is_refused_by_both_readers() {
+    let whole = a_tiny_records_bytes();
+    for cut in FRAGMENTS_LENGTH_OFFSET_IN_TINY_RECORD + 1..whole.len() {
+        let bytes = whole[..cut].to_vec();
+        match SpillReader::new(Cursor::new(bytes.clone()), 1).next_entry() {
+            Some(Err(error)) => assert_eq!(truncated_field(&error), "fragments_bytes", "{cut}"),
+            other => panic!("pass two read a file cut after {cut} bytes as {other:?}"),
+        }
+        match read_with_fragments(bytes) {
+            Err(error) => assert_eq!(truncated_field(&error), "fragments_bytes", "{cut}"),
+            other => panic!("pass three read a file cut after {cut} bytes as {other:?}"),
+        }
+    }
+}
+
+/// **The encoder's length of a varint is the bytes it writes**, at every boundary of seven bits.
+#[test]
+fn the_section_length_counts_the_bytes_each_varint_takes() {
+    for value in [
+        0,
+        1,
+        127,
+        128,
+        16_383,
+        16_384,
+        u64::from(u32::MAX),
+        u64::MAX,
+    ] {
+        let mut out = Vec::new();
+        encode_u64_leb128(value, &mut out);
+        assert_eq!(leb128_bytes(value), out.len(), "{value}");
+    }
 }

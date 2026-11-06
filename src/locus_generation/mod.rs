@@ -60,6 +60,12 @@ pub struct SampleLocusObservations {
     /// What kind of locus this is, and the extras that kind carries — read off the
     /// type, never inferred from which fields are populated.
     pub kind: LocusKind,
+    /// **The first chain id the walk issued in the walked region this record came from**, so that
+    /// `id − chain_id_base` is a read's rank within its region: the same number whether the region
+    /// was walked alone or after other ground, in direct mode or from a psp (read phase spec §2.4).
+    /// Raw ids count up across a whole walk and are not. Zero on records that name no reads (STR
+    /// records) and on hand-built ones.
+    pub chain_id_base: u64,
 }
 
 impl SampleLocusObservations {
@@ -1411,6 +1417,7 @@ mod tests {
 
     fn locus(region: GenomeRegion, observed: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
+            chain_id_base: 0,
             region,
             reference_bases: Box::from(&b""[..]),
             observations: observed,
@@ -1871,6 +1878,7 @@ mod tests {
     #[test]
     fn a_locus_of_each_kind_can_be_built() {
         let generic = SampleLocusObservations {
+            chain_id_base: 0,
             region: region(100, 100),
             reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
@@ -1896,6 +1904,7 @@ mod tests {
         assert_eq!(generic.observations[0].num_obs, 9);
 
         let ssr = SampleLocusObservations {
+            chain_id_base: 0,
             region: region(10_442, 10_461),
             reference_bases: Box::from(&b"ATATATATATATATATATAT"[..]),
             observations: Vec::new(),
@@ -1912,6 +1921,7 @@ mod tests {
         assert!(matches!(ssr.kind, LocusKind::Ssr(_)));
 
         let bundle = SampleLocusObservations {
+            chain_id_base: 0,
             region: region(200, 260),
             reference_bases: Box::from(&b"N"[..]),
             observations: Vec::new(),

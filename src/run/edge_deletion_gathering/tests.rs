@@ -169,6 +169,35 @@ fn a_flank_half_written_as_a_substitution_is_absorbed_into_the_str_record() {
     assert_eq!(counts.generic_records_merged, 1);
 }
 
+/// **A generic record merged into an STR record takes its read alleles with it, and they are
+/// counted** (read phase spec §2.3, step 3): the merged record's alleles are haplotypes over a
+/// wider span, and an STR record names no reads.
+#[test]
+fn a_merged_generic_records_read_alleles_are_lost_and_counted() {
+    use crate::read_phase::capture::ReadAllele;
+    use crate::read_phase::record_reads::{RecordReadAlleles, SampleReadAllele};
+    let mut gathering = EdgeDeletionGathering::default();
+    let tract = a_tract_widened_right(&[(&[1, 2], 30.0)]);
+    let mut snp = a_snp_at_110(&[(&[0, 1], 40.0)]);
+    snp.replace_read_alleles(RecordReadAlleles::from_merge(
+        (0..3)
+            .map(|read| SampleReadAllele {
+                sample: 0,
+                read_allele: ReadAllele {
+                    read,
+                    allele: 1,
+                    error_phred: 30,
+                },
+            })
+            .collect(),
+        Some,
+    ));
+    let out = written(&mut gathering, vec![tract, snp]);
+    assert_eq!(out.len(), 1, "one record: {out:?}");
+    assert!(out[0].read_alleles().is_empty());
+    assert_eq!(gathering.counts().read_alleles_lost_to_a_merge, 3);
+}
+
 /// **Another sample's own SNP becomes an allele of the STR record, and the STR record wins
 /// where the generic call disagrees.** Sample 0 carries the deletion and its generic call is
 /// `0/1`: the deletion takes the `G`, the expansion pairs with the reference. Sample 1 carries

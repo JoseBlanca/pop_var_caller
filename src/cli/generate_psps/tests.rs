@@ -577,6 +577,26 @@ fn a_samples_reads_reach_its_psp() {
         records > 0,
         "zeta's three reads must put records in its psp, and got {records}",
     );
+    // Each record carries its walked region's first chain id, and no read it names was issued
+    // before it (read phase spec §2.4).
+    let mut reader =
+        PspReader::open(&psp_path_for(&args.output_dir, "zeta")).expect("a finished psp opens");
+    for record in reader.records().expect("the walk starts") {
+        let record = record
+            .expect("a record reads")
+            .record
+            .expect("a whole walk builds every record");
+        for observation in &record.observations {
+            assert!(
+                observation
+                    .chain_ids
+                    .iter()
+                    .all(|&id| id >= record.chain_id_base),
+                "a read below its region's first id at {:?}",
+                record.region
+            );
+        }
+    }
 
     // And the sample with no reads still gets a whole, openable, empty psp — §12.9's
     // analysed-but-empty case reaching the command.

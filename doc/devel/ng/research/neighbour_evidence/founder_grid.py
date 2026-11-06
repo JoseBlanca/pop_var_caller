@@ -4,6 +4,9 @@ cell, called by pvc with the pass off and on, scored against the simulator's tru
 usage: uv run python founder_grid.py <work dir> <cell> [<cell> ...]
        uv run python founder_grid.py --rescore <cell dir> [<cell dir> ...]
        a cell is founders,inbreeding,samples,depth  e.g. 16,0.95,50,3
+       or founders,inbreeding,samples,depth,snp_rate  e.g. 64,0,50,3,0.01, named f64_F0_n50_d3_s0.01
+       a mixed-depth cell's depth is shallow+deepxcount  e.g. 16,0.95,50,3+30x10: the first ten
+       samples (sim000 to sim009) at 30x, the rest at 3x
 
 Each cell's files go in <work dir>/f<founders>_F<inbreeding>_n<samples>_d<depth>/; a cell whose
 score.json exists is skipped. Needs, on PATH or by absolute path below: minimap2, samtools, and the
@@ -13,7 +16,7 @@ Scoring: SNP records whose position and alleles match a truth record; one unit i
 one record. Rows split by whether calling gave the sample a genotype there (it had reads) or wrote
 `./.` (it had none). For the pass's calls, the observed error rate by GQ bin.
 """
-import collections, gzip, json, os, subprocess, sys, time
+import collections, glob, gzip, json, os, subprocess, sys, time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..'))
 PVC = os.path.join(ROOT, 'target', 'release', 'pvc')
@@ -102,18 +105,25 @@ def score(cell_dir):
 
 
 def cell(work, spec):
-    founders, inbreeding, samples, depth = spec.split(',')
-    name = f'f{founders}_F{inbreeding}_n{samples}_d{depth}'
+    founders, inbreeding, samples, depth, *rest = spec.split(',')
+    snp_rate = rest[0] if rest else None
+    name = f'f{founders}_F{inbreeding}_n{samples}_d{depth}' + (f'_s{snp_rate}' if snp_rate else '')
     d = os.path.join(work, name)
     if os.path.exists(os.path.join(d, 'score.json')):
         return
+    deep = ''
+    if '+' in depth:
+        depth, deep_part = depth.split('+')
+        deep_depth, deep_samples = deep_part.split('x')
+        deep = f'deep_samples={deep_samples} deep_depth={deep_depth} '
     os.makedirs(d, exist_ok=True)
     log = os.path.join(d, 'driver.log')
     timings = {}
     began = time.time()
     if not os.path.exists(os.path.join(d, 'sim', 'truth.vcf.gz')):
-        run(f'{SIMULATOR} {d}/sim samples={samples} depth={depth} founders={founders} '
-            f'inbreeding={inbreeding} {GENOME} design=pcr_free threads={THREADS} seed=20261102', log)
+        run(f'{SIMULATOR} {d}/sim samples={samples} depth={depth} {deep}founders={founders} '
+            f'inbreeding={inbreeding} {GENOME} design=pcr_free threads={THREADS} seed=20261102'
+            + (f' snp_rate={snp_rate}' if snp_rate else ''), log)
         run(f'samtools faidx {d}/sim/reference.fa && bgzip -f {d}/sim/truth.vcf', log)
     timings['simulate'] = time.time() - began
     names = [f'sim{i:03d}' for i in range(int(samples))]
@@ -144,7 +154,7 @@ def cell(work, spec):
     timings['estimate_parameters'] = time.time() - began
     for mode in ('off', 'on'):
         began = time.time()
-        run(f'{PVC} call-from-psps {common} --parameters {d}/params.toml --neighbour-evidence {mode} '
+        run(f'{PVC} call-from-psps {common} --parameters {d}/params.toml --refine-genotypes {mode} '
             f'--output {d}/calls_{mode}.vcf.gz --log {d}/call_{mode}.log --force', log)
         timings[f'call_{mode}'] = time.time() - began
     count, gq = score(d)
@@ -152,9 +162,29 @@ def cell(work, spec):
         tally = [line.strip() for line in handle if 'neighbour-evidence pass:' in line]
     with open(os.path.join(d, 'score.json'), 'w') as handle:
         json.dump({'cell': name, 'founders': int(founders), 'inbreeding': float(inbreeding),
-                   'samples': int(samples), 'depth': float(depth), 'counts': count, 'gq': gq,
+                   'samples': int(samples), 'depth': float(depth), 'deep': deep.strip(),
+                   'counts': count, 'gq': gq,
                    'timings': timings, 'pass_log': tally}, handle, indent=1)
     print(name, 'done', flush=True)
+
+
+def refine_call(pvc, cell, label, threads):
+    """Calls the cell again with refinement on (`pvc refine-genotypes`, which re-called the pass-off
+    VCF, was removed on 2026-11-03): the same psps, catalog and parameters founder_grid.py used.
+    Returns the VCF and the fill-check table the run writes beside it."""
+    out = os.path.join(cell, f'refined_{label}.vcf.gz')
+    table = os.path.join(cell, f'refined_{label}.fill_check.tsv')
+    if not os.path.exists(out):
+        psps = sorted(glob.glob(os.path.join(cell, 'psps', '*.psp')))
+        command = [pvc, 'call-from-psps', '--reference', os.path.join(cell, 'sim', 'reference.fa'),
+                   '--catalog', os.path.join(cell, 'catalog.parquet')]
+        for psp in psps:
+            command += ['--psp', psp]
+        command += ['--parameters', os.path.join(cell, 'params.toml'), '--refine-genotypes', 'on',
+                    '--output', out, '--log', os.path.join(cell, f'refined_{label}.log'),
+                    '--threads', str(threads), '--force']
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out, table
 
 
 def rescore(cell_dir):

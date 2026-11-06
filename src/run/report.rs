@@ -246,6 +246,13 @@ impl<'a> RunReport<'a> {
                     gathering.generic_records_left_unmerged,
                 ));
             }
+            if gathering.read_alleles_lost_to_a_merge > 0 {
+                lines.push(format!(
+                    "  reads' alleles the merged SNP/indel records carried, lost to read-backed \
+                     phase with them: {}",
+                    gathering.read_alleles_lost_to_a_merge,
+                ));
+            }
         }
     }
 

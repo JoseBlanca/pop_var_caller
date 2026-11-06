@@ -8,12 +8,19 @@
 //! `GP` and the repeat counts, recounts `AC` and `AN`, and drops the alternative alleles no
 //! sample is called with any more, subsetting every per-allele and per-genotype field as calling
 //! does (`vcf_output.md` §7.2). `PL`, `DP`, `QUAL`, `FILTER` and every other field are kept.
+//!
+//! **The phase** (`neighbour_evidence_phase_output.md` §3): a column the pass phased is written
+//! `a|b`, copy 0's allele first, and its block in a `PS` field appended after every other; `PS` is
+//! `.` in every other column, and the repeat counts follow the written `GT`'s order.
 
 use super::model::GenotypePairs;
 use super::records::{SampleColumns, SiteRecord};
 use super::refine::{Outcome, RefinedRecord};
 use crate::calling::quality::score_best_genotype;
 use crate::vcf::encode::{posteriors_text, written_genotype_quality};
+use crate::vcf::line_fields::{
+    ALT_COLUMN, COLUMNS_BEFORE_THE_SAMPLES, FORMAT_COLUMN, INFO_COLUMN, LineFields, parse_genotype,
+};
 
 /// `INFO` keys with one value per alternative allele (`Number=A` in the header).
 const PER_ALTERNATIVE_INFO: [&str; 4] = ["AF", "AC", "MQALT", "MQDIFF"];
@@ -27,7 +34,8 @@ pub struct RewriteTally {
     pub called: u64,
     /// Of those, columns whose reads said nothing — `./.` before the pass (§4.2).
     pub called_without_reads: u64,
-    /// Columns re-called and written `./.` for lack of evidence nearby (§4.2).
+    /// Columns of samples without reads re-called and written `./.`: no evidence nearby, `GQ` below
+    /// the floor, or probably copying the background (§4.2).
     pub withheld: u64,
     /// Re-called columns whose genotype differs from calling's.
     pub genotypes_changed: u64,
@@ -69,18 +77,16 @@ impl RewriteTally {
 /// diploid.
 #[must_use]
 pub fn site_of(line: &[u8], samples: usize) -> Option<SiteRecord> {
-    let text = std::str::from_utf8(line).ok()?;
-    let fields: Vec<&str> = text.split('\t').collect();
-    if fields.len() != 9 + samples || fields[6] != "PASS" || fields[4] == "." {
+    let fields = LineFields::parse(line)?;
+    if fields.column_count() != samples || !fields.is_pass() || fields.fixed[ALT_COLUMN] == "." {
         return None;
     }
-    let position: u64 = fields[1].parse().ok()?;
-    let allele_count = fields[4].split(',').count() + 1;
+    let position: u64 = fields.fixed[1].parse().ok()?;
+    let allele_count = fields.fixed[ALT_COLUMN].split(',').count() + 1;
     let genotype_count = allele_count * (allele_count + 1) / 2;
-    let format: Vec<&str> = fields[8].split(':').collect();
-    let phred_at = format.iter().position(|key| *key == "PL")?;
-    let posterior_at = format.iter().position(|key| *key == "GP")?;
-    let alt_frequencies: Vec<f64> = info_values(fields[7], "AF")?
+    let phred_at = fields.format_key("PL")?;
+    let posterior_at = fields.format_key("GP")?;
+    let alt_frequencies: Vec<f64> = info_values(fields.fixed[INFO_COLUMN], "AF")?
         .split(',')
         .map(str::parse)
         .collect::<Result<_, _>>()
@@ -89,7 +95,7 @@ pub fn site_of(line: &[u8], samples: usize) -> Option<SiteRecord> {
         return None;
     }
     let mut parsed: Vec<Option<(Vec<u32>, Vec<f64>)>> = Vec::with_capacity(samples);
-    for column in &fields[9..] {
+    for column in fields.columns() {
         let values: Vec<&str> = column.split(':').collect();
         let phred = values.get(phred_at).copied().unwrap_or(".");
         let posteriors = values.get(posterior_at).copied().unwrap_or(".");
@@ -136,17 +142,6 @@ fn info_values<'a>(info: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-/// A written `GT`'s two alleles, ascending, or `None` for a no-call.
-fn parse_genotype(text: &str) -> Option<(usize, usize)> {
-    let mut alleles = text.split(['/', '|']).map(str::parse::<usize>);
-    let first = alleles.next()?.ok()?;
-    let second = alleles.next()?.ok()?;
-    if alleles.next().is_some() {
-        return None;
-    }
-    Some((first.min(second), first.max(second)))
-}
-
 /// **Rewrites a site's line with the pass's result** — `None` when no alternative allele is left
 /// called and the record is dropped. `refined` is the line's [`RefinedRecord`]; `pairs` a
 /// genotype-order cache the caller keeps.
@@ -163,11 +158,11 @@ pub(crate) fn rewrite_line(
 ) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(line).expect("a site line is text");
     let fields: Vec<&str> = text.split('\t').collect();
-    let alternatives: Vec<&str> = fields[4].split(',').collect();
+    let alternatives: Vec<&str> = fields[ALT_COLUMN].split(',').collect();
     let allele_count = alternatives.len() + 1;
     let old_pairs: Vec<(usize, usize)> = pairs.of(allele_count).to_vec();
     let genotype_count = old_pairs.len();
-    let format: Vec<&str> = fields[8].split(':').collect();
+    let format: Vec<&str> = fields[FORMAT_COLUMN].split(':').collect();
     let key = |name: &str| format.iter().position(|field| *field == name);
     let genotype_at = key("GT").expect("a site has GT");
     let quality_at = key("GQ");
@@ -175,9 +170,20 @@ pub(crate) fn rewrite_line(
     let phred_at = key("PL").expect("a site has PL");
     let posterior_at = key("GP").expect("a site has GP");
     let repeats_at = key("REPCN").or_else(|| key("REPCNB"));
-    let mut columns: Vec<Vec<String>> = fields[9..]
+    // `PS` goes after every field the line has, so each field the pass rewrites keeps its place.
+    let phase_set_at = key("PS").unwrap_or(format.len());
+    let field_count = format.len().max(phase_set_at + 1);
+    let mut columns: Vec<Vec<String>> = fields[COLUMNS_BEFORE_THE_SAMPLES..]
         .iter()
-        .map(|column| column.split(':').map(str::to_string).collect())
+        .map(|column| {
+            let mut values: Vec<String> = column.split(':').map(str::to_string).collect();
+            // A column may drop trailing fields; `PS` must land in its own place. A column with more
+            // fields than `FORMAT` is kept as it is.
+            if values.len() < field_count {
+                values.resize(field_count, ".".to_string());
+            }
+            values
+        })
         .collect();
     tally.sites += 1;
 
@@ -254,13 +260,32 @@ pub(crate) fn rewrite_line(
     for (sample, column) in columns.iter_mut().enumerate() {
         let outcome = refined.outcomes[sample];
         let recalled = outcome != Outcome::Unchanged;
-        let genotype_text = |genotype: Option<(usize, usize)>| match genotype {
-            Some((first, second)) => format!("{}/{}", new_index[first], new_index[second]),
-            None => "./.".to_string(),
+        // The phase, where the pass wrote one for this very genotype: copy 0's allele first.
+        let phase = refined.phases[sample].filter(|phase| {
+            outcome == Outcome::Called
+                && genotypes[sample]
+                    == Some((
+                        phase.copy_0_allele.min(phase.copy_1_allele),
+                        phase.copy_0_allele.max(phase.copy_1_allele),
+                    ))
+        });
+        let genotype_text = |genotype: Option<(usize, usize)>| match (genotype, phase) {
+            (Some(_), Some(phase)) => {
+                format!(
+                    "{}|{}",
+                    new_index[phase.copy_0_allele], new_index[phase.copy_1_allele]
+                )
+            }
+            (Some((first, second)), None) => {
+                format!("{}/{}", new_index[first], new_index[second])
+            }
+            (None, _) => "./.".to_string(),
         };
         if recalled || subsetting {
             column[genotype_at] = genotype_text(genotypes[sample]);
         }
+        column[phase_set_at] =
+            phase.map_or_else(|| ".".to_string(), |phase| phase.phase_set.to_string());
         let posteriors: Option<Vec<f64>> = if recalled {
             Some(
                 refined.posteriors[sample * genotype_count..(sample + 1) * genotype_count].to_vec(),
@@ -314,7 +339,10 @@ pub(crate) fn rewrite_line(
         if let (Some(repeats_at), true) = (repeats_at, recalled) {
             column[repeats_at] = match genotypes[sample] {
                 None => ".".to_string(),
-                Some((first, second)) => [first, second]
+                Some(pair) => phase
+                    .map_or([pair.0, pair.1], |phase| {
+                        [phase.copy_0_allele, phase.copy_1_allele]
+                    })
                     .iter()
                     .map(|&allele| {
                         repeat_counts[allele].clone().unwrap_or_else(|| {
@@ -333,7 +361,7 @@ pub(crate) fn rewrite_line(
         }
     }
     // Calling's genotypes, to count the ones the pass moved and the calls made without reads.
-    for (sample, column) in fields[9..].iter().enumerate() {
+    for (sample, column) in fields[COLUMNS_BEFORE_THE_SAMPLES..].iter().enumerate() {
         if refined.outcomes[sample] != Outcome::Called {
             continue;
         }
@@ -354,7 +382,7 @@ pub(crate) fn rewrite_line(
         copies[second] += 1;
         called_copies += 2;
     }
-    let info: Vec<String> = fields[7]
+    let info: Vec<String> = fields[INFO_COLUMN]
         .split(';')
         .map(|entry| {
             let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
@@ -385,12 +413,15 @@ pub(crate) fn rewrite_line(
         .map(|&allele| alternatives[allele - 1])
         .collect::<Vec<_>>()
         .join(",");
-    let mut out: Vec<String> = fields[..9]
+    let mut out: Vec<String> = fields[..COLUMNS_BEFORE_THE_SAMPLES]
         .iter()
         .map(|field| (*field).to_string())
         .collect();
-    out[4] = alt;
-    out[7] = info.join(";");
+    out[ALT_COLUMN] = alt;
+    out[INFO_COLUMN] = info.join(";");
+    if phase_set_at == format.len() {
+        out[FORMAT_COLUMN] = format!("{}:PS", fields[FORMAT_COLUMN]);
+    }
     out.extend(columns.iter().map(|column| column.join(":")));
     Some(out.join("\t").into_bytes())
 }

@@ -752,6 +752,9 @@ struct RegionWalk {
     /// It is still the same moment: nothing touches the allocator between `begin_segment`
     /// and the region opening.
     chain_ids_at_open: ChainIdAllocatorCounters,
+    /// The first chain id this region's walk issues, read at the same moment: each record the
+    /// region yields carries it as `chain_id_base` (read phase spec §2.4).
+    chain_id_base: u64,
     /// The position the reference readers were last told to keep from. The walk releases
     /// again once the locus it yields is [`REFERENCE_RELEASE_STRIDE_BP`] past the one it last
     /// released behind.
@@ -1154,14 +1157,15 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
         loop {
             // PANIC-FREE: opened immediately above, and every path that clears
             // the walk returns rather than looping.
-            let clamp = self.walk.as_ref().expect("the walk was just opened").region;
+            let opened = self.walk.as_ref().expect("the walk was just opened");
+            let (clamp, chain_id_base) = (opened.region, opened.chain_id_base);
             let walker = &mut self
                 .chromosome
                 .as_mut()
                 .expect("the walk was just opened, so its chromosome's walker is here")
                 .walker;
             match walker.next() {
-                Some(Ok(locus)) => {
+                Some(Ok(mut locus)) => {
                     // **Measurement scaffolding: the clamp is where a locus becomes real.**
                     // The walk builds records in the halo beyond the region, so a census that
                     // counted at build time would count reads at loci nothing ever sees. Off
@@ -1175,6 +1179,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
                     }
                     if clamp.contains(locus.region.start) {
                         self.release_reference_inside_the_region(locus.region.start);
+                        locus.chain_id_base = chain_id_base;
                         return Ok(Some(locus));
                     }
                     self.counts.records_outside_region += 1;
@@ -1268,9 +1273,11 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
         // **After the move, not before**, so a region that could not be reached leaves no
         // half-open walk behind for `end_walk` to fold.
         let chain_ids_at_open = walker.chain_id_counters();
+        let chain_id_base = walker.next_chain_id();
         self.walk = Some(RegionWalk {
             region,
             chain_ids_at_open,
+            chain_id_base,
             reference_kept_from,
         });
         Ok(())

@@ -7,7 +7,7 @@ deleted on 2026-10-16. **What carries over unchanged from that design:** the pro
 owner's three rulings (§1.3), the model (§2), the pull toward one (§3.5) and how calling uses a
 multiplier (§6). **What is new:** where the multipliers sit in the penalised fit (§3), what it costs
 (§3.2, measured), the range of inputs (§4), the duplicated-tract rules (§5), the parameters file at
-format version 8 (§7) and the renaming (§9). **The owner answered §11's three questions on
+format version 9 (§7) and the renaming (§9). **The owner answered §11's three questions on
 2026-11-02**: the name `ReadGroupStutter`; **one multiplier per read group and motif length**, not one
 across every motif length, unless evidence shows the motif lengths behave alike; and kimura is free
 for a couple of days for the measurements.
@@ -399,7 +399,10 @@ refit, where it runs, pulls toward the read group's own rate.
 
 ---
 
-## 7. The parameters file, version 8
+## 7. The parameters file, version 9
+
+*Written as version 8; renumbered 9 on merging into main (2026-11-06), where version 8 had
+already gone to `[misread_after_runs]`.*
 
 **A new table, `repeat_tracts.stutter_multiplier_by_read_group`**: one row a read group and motif
 length, in the shape of `base_quality_calibration.by_read_group`:
@@ -418,8 +421,8 @@ stutter_multiplier_by_read_group = [
   the pull.
 - **Validation**: a finite positive value; every read group of the file has exactly one row for every
   motif length the file holds a fitted class of.
-- **Format version 8.** A version-7 build refuses a version-8 file with its existing message; this
-  build reads a version-7 or older file with every multiplier one.
+- **Format version 9.** A version-8 build refuses a version-9 file with its existing message; this
+  build reads a version-8 or older file with every multiplier one.
 - **The file's note** says what a multiplier is, that a class rate is the rate of a read group of
   typical stutter (§2.2), that `mᵣ · Lₛ` is capped at 0.95, and that the shorter share and the
   fall-off are one a class.
@@ -502,7 +505,7 @@ Each step its own commit, with a test that fails without it; the plan document's
 
 Before step 2, the counting tool of §3.2 runs on kimura's cohort, so the keyed table's size at
 thousands of read groups is known before the code that holds it is written.
-5. **The parameters file, version 8** (§7).
+5. **The parameters file, version 9** (§7).
 6. **Calling reads the multipliers** (§6). **Calls move.**
 
 Then §8's measurements, and a report.

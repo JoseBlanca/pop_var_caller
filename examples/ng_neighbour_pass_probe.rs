@@ -8,7 +8,8 @@
 //!
 //! Reads an uncompressed pvc VCF and the run's parameters file, keeps the PASS records with rows,
 //! plans each contig's windows and solves them, and writes one line per sample per record:
-//! `contig pos ref alt sample row calling_gt outcome pass_gt pass_probability`. `row` is
+//! `contig pos ref alt sample row calling_gt outcome pass_gt pass_probability checked disagreed`
+//! (the sample's neighbour check in the window, `refine::NeighbourCheck`). `row` is
 //! `informative`, `flat` or `absent`; `outcome` is `unchanged`, `called` or `withheld`. Scoring
 //! against a truth set is the driver's job. Window sizes default to the spec's; smaller ones make a
 //! small simulated genome hold several windows.
@@ -19,7 +20,9 @@ use std::process::ExitCode;
 
 use pop_var_caller::neighbour_evidence::fit::SampleFit;
 use pop_var_caller::neighbour_evidence::records::{SampleColumns, SampleRow, SiteRecord};
-use pop_var_caller::neighbour_evidence::refine::{Outcome, refine_window};
+use pop_var_caller::neighbour_evidence::refine::{
+    BACKGROUND_LANDING_SHARE, MISMATCH, NoReadRule, Outcome, refine_window,
+};
 use pop_var_caller::neighbour_evidence::templates::MAX_TEMPLATES;
 use pop_var_caller::neighbour_evidence::windows::{WindowSizes, plan_window};
 
@@ -181,7 +184,7 @@ fn main() -> ExitCode {
     let mut out = BufWriter::new(std::fs::File::create(&args[3]).expect("the output"));
     writeln!(
         out,
-        "contig\tpos\tref\talt\tsample\trow\tcalling_gt\toutcome\tpass_gt\tpass_probability"
+        "contig\tpos\tref\talt\tsample\trow\tcalling_gt\toutcome\tpass_gt\tpass_probability\tchecked\tdisagreed\tbackground_copy"
     )
     .expect("write");
     let mut windows = 0;
@@ -201,7 +204,10 @@ fn main() -> ExitCode {
                 contig_lengths.get(contig).copied(),
                 &mut fits,
                 MAX_TEMPLATES,
+                NoReadRule::default(),
             );
+            let checks = refined.checks;
+            let refined = refined.records;
             for (offset, result) in refined.iter().enumerate() {
                 let kept = &kept[plan.core_start + offset];
                 let genotypes = kept.record.genotype_count();
@@ -233,12 +239,15 @@ fn main() -> ExitCode {
                     };
                     writeln!(
                         out,
-                        "{}\t{}\t{}\t{}\t{name}\t{row}\t{}\t{outcome_text}\t{pass_gt}\t{probability:.4}",
+                        "{}\t{}\t{}\t{}\t{name}\t{row}\t{}\t{outcome_text}\t{pass_gt}\t{probability:.4}\t{}\t{}\t{:.4}",
                         kept.contig,
                         kept.record.position,
                         kept.reference,
                         kept.alternatives,
-                        kept.calls[sample]
+                        kept.calls[sample],
+                        checks[sample].checked,
+                        checks[sample].disagreed,
+                        result.background_copy[sample]
                     )
                     .expect("write");
                 }
@@ -253,7 +262,7 @@ fn main() -> ExitCode {
         contigs.len()
     );
     for (sample, fit) in samples.iter().zip(&fits) {
-        let parameters = fit.parameters(0.01);
+        let parameters = fit.parameters(MISMATCH, Some(BACKGROUND_LANDING_SHARE));
         eprintln!(
             "{sample}\tS={}\tR={}\tF={:.3}",
             parameters.segment_bases, parameters.run_bases, parameters.autozygous_share

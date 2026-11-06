@@ -45,15 +45,19 @@ pass must re-measure them (§8).
 
 ### 1.2 Non-goals
 
-- **Phasing.** The pass infers which samples a sample copies, not which of its alleles sit on one
-  chromosome; `GT` stays unphased.
+- **Phasing — in two companion specs.** The pass phases samples to give each other haplotype
+  templates ([`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md)) and writes the phase
+  in confident blocks ([`neighbour_evidence_phase_output.md`](neighbour_evidence_phase_output.md))
+  (owner, 2026-11-02).
 - **New loci.** A locus pvc did not build stays unbuilt; the pass changes genotypes only. On one
   tomato accession alone at 3×, 42% of the true non-reference genotypes were at such loci (report
   §5.2); that loss belongs to candidate generation, not here.
 - **Read linkage** — reads covering two sites. Left out by the owner's ruling (report §11).
-- **Outbred cohorts.** Using shared haplotypes there needs phased templates and repeated sweeps over
-  the cohort ([`07_decision`](../research/phasing_imputation/07_decision_separate_tool_and_route.md)
-  §2); this pass does neither and is off there (§5).
+- **Outbred cohorts, without phased templates.** Using shared haplotypes there needs phased templates
+  and repeated sweeps over the cohort
+  ([`07_decision`](../research/phasing_imputation/07_decision_separate_tool_and_route.md) §2); this
+  spec's pass does neither and is off there (§5). Partly outbred cohorts are what
+  [`neighbour_evidence_phasing.md`](neighbour_evidence_phasing.md) adds.
 
 ### 1.3 Vocabulary
 
@@ -151,19 +155,122 @@ What a record contributes depends on what it carries:
 
 ### 3.3 The templates
 
-For each sample and window, the `K = min(16, N − 1)` other samples whose allele shares agree best with
-its own, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the sample's informative records
-in the window — on a fixed sample of at most 500 of them, spread evenly over them by record order
-(the `i`-th of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and
-weighs the whole window, not its left margin. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
-what the prototype ran; how accuracy and cost move with `K` is a measurement (§8).
+For each sample and window, the `K = min(16, N − 1)` other samples that most often disagree with it
+least **over short stretches of the window, against what the cohort's allele frequencies predict for
+an unrelated sample, judged only where both have reads, with more data preferred between two that
+disagree about as little** (owner, 2026-11-02 and 2026-11-05). The records compared are the sample's informative records in the
+window — a fixed sample of at most 500 of them, spread evenly over them by record order (the `i`-th
+of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and weighs the whole
+window, not its left margin. Of those, a candidate is compared where it is informative too. At each
+such record:
+
+- the **observed** disagreement is the chance that one allele drawn from each sample differs,
+  `1 − Σ_a q_self(a) · q_other(a)`;
+- the **expected** disagreement is the same against the cohort's frequencies,
+  `1 − Σ_a q_self(a) · p(a)` — what an unrelated sample would show.
+
+**Judged stretch by stretch, ranked by stretches won (owner, 2026-11-05).** The compared records
+are cut, in record order, into **stretches** that each hold one unit of expected disagreement: a
+stretch ends at the record where `e`, summed over its records, reaches 1, counting only records at
+which some candidate is informative; what is left after the last such record joins the stretch
+before it, so no stretch is judged on less, and a window holding less than one unit is one
+stretch. One unit is about two SNPs
+at frequency ½ where the sample is certain, or about twenty at 5%. In each stretch every candidate
+gets a score from its own `d` and `e` there:
+
+- the score is the mean of the rate's Beta(`d + 1`, `e − d + 1`) posterior plus two of its standard
+  deviations — pessimistic, so a rate measured on little scores worse — with `d` capped at `e`, so a
+  candidate less alike than an unrelated sample scores as one;
+- a candidate with `e` = 0 there — no shared record, or only records where every sample carries the
+  same allele — has nothing to be judged on and cannot win the stretch;
+- the two lowest scores **win** the stretch, and so does any candidate tied with the second. From
+  phasing round 2, where the candidates are haplotypes, the two places go to two samples, each
+  scoring by its better copy — so a homozygous sample's two equal copies do not take both
+  (phasing spec §2.3).
+
+Candidates rank by stretches won, most first; then by the same score over the whole window's
+compared records; then by sample order. The first `K` are the templates. **A template's stretches
+won also set where a copy that changes template lands** (§3.5): with weight `wins + ½`, so a
+template that won nothing is still reachable, at half the weight of one that won a single stretch.
+
+**Why stretches — changed 2026-11-05.** A sample's two copies change template along the window at
+every crossover in its ancestry. A whole-window score ranks highest whoever is fairly close
+everywhere; the samples a copy actually copies are close over a part each — an F2 plant's parents
+over the stretches either side of a crossover — and only stretches short enough to fall between
+crossovers see that. On the simulated F2 (two inbred parents at 30×, 20 offspring at 1×) the
+whole-window rule often left an offspring's parents out of its templates or buried them among
+siblings; stretch wins raised the heterozygous offspring genotypes called right from 72 and 67 in
+100 to 82 and 81 on two simulations, with the wrong calls among them falling from 6 and 7 in 100 to
+3. In 40-sample natural cohorts at 1×, heterozygotes right rose by about 5 in 100 (outbred) and 4 to
+6 (selfing); samples at 5× gained up to 3 in 100, and samples at 10× and above did not move
+(`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
+
+- *Why one unit and two winners:* tuned on those cohorts. Longer stretches, four winners, and fixed
+  stretches of 50 records all measured worse; so did growing a stretch until its
+  candidates separated. Two winners are one a copy.
+- *Why land by wins:* on the F2, landing every template alike kept 74 heterozygotes in 100 right
+  against 81; in the natural cohorts it made no difference.
+- *Tried and not adopted* (same report): IMPUTE5's choice, the haplotypes sharing the longest exact
+  run of likeliest alleles with the sample, in rounds 2 and later — no better than stretch wins on
+  the natural cohorts, worse for selfing at 1×, and adding nothing measurable on top of them; and
+  Beagle's composite templates, one re-chosen in every stretch — re-chosen from the sample's own
+  reads every few records, they echo those reads back, and the F2 fell to 18 in 100.
+
+**Data wins near ties, and certainty is not penalised.** Within a stretch the pessimistic score
+charges a candidate for how little it is judged on, so a deep sample beats a shallow one that agrees
+as well — and it is the deep sample whose own data fills a site the target has none at. **The cost,
+stated:** a shallow candidate cannot win a stretch it has no reads in, so a shallow close relative
+wins fewer stretches than a deep sample that is only fairly close, and may rank below it. Where that
+loses accuracy — a cohort with shallow close relatives and many deep distant samples — is not
+measured.
+
+**At thousands of samples, chance matches — not measured.** One unit is short: an unrelated sample
+shows no disagreement over it about one time in three (`e^−1`). With a few dozen candidates that
+rarely matters; with thousands, many unrelated samples tie a true relative in every stretch, and a
+relative wins clearly only if it matches over more of the window than chance does — an F2 parent
+matches over about half of it. The stretch's information and its two winners were tuned at 20 and
+40 samples; the refine_sim benchmark measures 400; at several thousand the rule may need longer
+stretches, and that is not measured.
+
+**Why against the frequencies — changed 2026-11-05.** The rule before scored the plain
+disagreement, `½ Σ_a |q_self(a) − q_other(a)|`, over the shared records, and it favoured exactly
+the samples that carry least information:
+
+- a sample whose genotype is uncertain has shares near the frequencies, and two uncertain samples
+  differ little from each other — so a 1× sibling looked closer to a 1× F2 plant than its 30×
+  parents, whose shares are 0 or 1;
+- a record where the whole cohort carries one allele is agreement everyone shares, and counted as
+  much as one that separates relatives. A 1× sample's confident records are mostly of that kind.
+
+On the simulated F2 (two inbred parents at 30×, 20 offspring at 1×), most offspring copied neither
+parent, and 30 of 100 heterozygous offspring genotypes came out right; with this rule and the
+background as a last resort (below), 51 of 100. In two 40-sample natural cohorts with samples at 1×
+and 2×, both changes together gained 3 to 7 genotypes in 100 at 1× and did not move the samples
+at 5× and above by more than 1 in 100
+(`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
+
+Why only where both have reads: a sample without reads carries the cohort's frequency, and counting
+that as disagreement would rank a shallow close relative below a deep distant one. On the founder
+simulator the change from the earlier rule, which did count it, moved fills and errors by at most a
+dozen genotypes in any cohort, uniform or mixed in depth (10 samples at 30× among 40 at 3× or 5×; 5
+among 15), because a 3× sample has reads at about 95% of records and the earlier rule's charge for
+the rest was small. It is kept as the rule that says what it measures; where it should matter — 1×
+shallow samples among deep ones, cohorts far larger than `K` — is not measured. **The sample itself is never a template.** `K` = 16 was
+what the prototype ran; 2, 4 and 8 measured worse on every cohort of the 2026-11-05 report.
 
 **A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
 frequencies — `AF`, the reference taking the rest. A copy that matches none of the sampled
 haplotypes — an introgression, a private lineage — copies the background, and its genotype falls back
-to what the cohort's frequencies say rather than to the nearest template's allele. It is one template
-among `K + 1` in every respect: pair states with it, an autozygous state copying it, the same mismatch
-blur.
+to what the cohort's frequencies say rather than to the nearest template's allele. It takes part as
+a template does — pair states with it, an autozygous state copying it, the same mismatch blur — but
+**it is a last resort: a copy that changes template lands on it with probability 10⁻⁵** (§3.5;
+owner, 2026-11-05). As one template among 17 alike it was copied in place of real ones wherever an
+allele stood near 50%: at one read a site, a source that predicts each allele with even odds explains
+a heterozygote as well as the two haplotypes that make it, and in an F2 every allele stands at 50%.
+At 10⁻⁵ it is copied only where no sampled template explains the reads; across the cohorts measured,
+any share at or below 10⁻⁴ gave the same results as leaving it out, so the share's exact value does
+not matter there. The stretches it exists for — a haplotype no other sample carries — are absent
+from those cohorts, so how well it still serves them is not measured.
 
 A sample with no
 informative record in the window has no basis for choosing templates and is not re-called in it.
@@ -188,8 +295,10 @@ and nothing else.
 
 Between records `d` bases apart:
 
-- **A copy keeps its template** with probability `e^(−d/S)`, and otherwise draws one uniformly; in
-  the non-autozygous state the two copies do this independently.
+- **A copy keeps its template** with probability `e^(−d/S)`, and otherwise draws one: the
+  background with probability 10⁻⁵, each of the `K` sampled templates a share of the rest in
+  proportion to its stretches won plus ½ (§3.3; before 2026-11-05 every one of the `K + 1` alike). In the non-autozygous state the two
+  copies do this independently.
 - **The autozygous state is a two-state Markov chain** with runs of mean `R` and gaps of mean
   `R′ = R · (1 − F) / F`, so a share `F` of the sample is autozygous in the long run:
 
@@ -200,7 +309,11 @@ Between records `d` bases apart:
   returns to `F`. *Corrected 2026-11-01:* the first version, and the prototype the report measured,
   used `e^(−d/R)` and `e^(−d/R′)` as the two stays, which across a long gap swaps the states: a
   sample 99% autozygous before a centromere came out 1% after it.
-- A change of state draws its templates afresh.
+- A change of state draws its templates afresh, with the same landing chances, and the walk's first
+  record starts from them too: autozygous on template `k` with `F · w(k)`, the pair `(k₁, k₂)` with
+  `(1 − F) · w(k₁) · w(k₂)`, `w` the landing chance (`WalkParameters::landing_weights`,
+  `src/neighbour_evidence/model.rs`; the weights from `ChosenTemplate::landing_weight`,
+  `templates.rs`).
 
 **The parameters, per sample.** `F` starts at the sample's fitted inbreeding coefficient from the
 parameters file, clamped to [0.01, 0.99], and is re-estimated as the mean autozygous posterior,
@@ -309,6 +422,39 @@ not say which samples a sample copies leaves its posterior near the cohort's fre
 (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1). *This narrows ruling Q1 to the cases its
 reason covers; the owner's to confirm, §11 Q1.*
 
+**And only if the sample is copying the background template there with probability at most 0.1**
+(owner, 2026-11-02): the walk's posterior probability that the autozygous state copies the
+background, or either copy of a pair does (§3.3). Where no other sample carries the sample's
+haplotype, the call is the cohort's frequency again, however confident its `GQ`. On the founder
+simulator's inbred cohorts, the calls this withholds between 0.1 and 0.5 were wrong 13 times in 165,
+and those above 0.5 85 times in 719, against 1 to 2 in 100 for the calls kept; at 10 samples and 1×
+the limit keeps 101 of 294 calls, 2 of them wrong, from 47 (same report, the background-copy
+section).
+
+### 4.3 Each sample's fills, checked on its own data
+
+The test of hiding genotypes the reads settled and asking the pass for them is done for every
+sample at every such record, at no cost (owner, 2026-11-02): the walk's prediction without the
+sample's own reads at a record is what a no-read call there would be written with. At each core
+record where the sample's own evidence settles its genotype — posterior at least 0.999 from its
+reads and calling's prior, the cohort's allele frequencies and its inbreeding — and where the §4.2
+rules would have written the prediction as a call, the prediction's genotype is compared with the
+settled one. The prior has to be in "settled": at 3× reads alone never tell a homozygote from a
+heterozygote with confidence, and a check that needed them ran on no shallow sample — the samples
+that are filled.
+
+The run reports, for each sample, the no-read calls written, the records checked and how many the
+prediction got wrong: in a table beside the VCF, `<name>.fill_check.tsv`, and summarised in the log,
+with the share given only for samples checked at 30 records or more. It is a best case — a record
+no read reached can be harder than one where the sample had reads.
+
+On the founder simulator (`validate_fill_check.py`): at 3× the cohort's estimated fill error rate
+against its true one was 1.10% against 1.52%, 0.63% against 0.49%, 0.13% against 0.15%, and on the
+outbred cohorts 4.16% against 2.90% and 5.52% against 4.55%; samples reported at 0–0.5% were truly
+wrong at 0.17% of their fills, at 2–5% at 1.5%. At 1× almost no sample has a settled genotype and
+the share is not given — the corner where fills are worst (2–2.5% wrong) goes unestimated, and the
+log says so.
+
 ---
 
 ## 5. When it runs
@@ -323,7 +469,8 @@ taken once, before the first record is written:
 - **The cohort's median fitted inbreeding coefficient at least `F_min`.** Starting value 0.5. The
   outbred simulation gained nothing; between the two ends is unmeasured.
 
-Both are starting values, to be set from §8's measurements. `--neighbour-evidence auto|on|off`,
+Both are starting values, to be set from §8's measurements. `--refine-genotypes auto|on|off` (named
+`--neighbour-evidence` until 2026-11-03),
 `auto` the default, overrides the decision either way — except that `on` cannot run the pass on one
 sample or at a ploidy other than two. The median of an even count is the mean of the middle two.
 Within a window a sample's `K` is fixed at `min(16, N − 1)`; a template without a row at a record
@@ -349,10 +496,11 @@ the file**, since the pass can drop records.
     1.5-Mb windows this cohort size needs (below) about 1,800 windows, 8 × 10¹² over the genome —
     about half an hour.
   - *The walks*: forward and backward cost about `2 · 3 · (K² + K)` ≈ 1,600 operations a sample a
-    record, and the posterior `K²·A + K·A²` ≈ 580; with every record walked twice (once in its core,
-    once in a neighbour's margin) about 4,400 a sample a record. Over 24 million records and 3,000
-    samples that is 3 × 10¹⁴ operations, **about 21 core-hours** at 4 × 10⁹ a second; at 57 samples,
-    25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
+    record, and the posterior `K²·A + K·A²` ≈ 580. Every record is walked in its core and in its
+    neighbours' margins: twice at the default sizes (a 2-Mb core, 1-Mb margins), three times at the
+    floor this cohort size reaches (0.5-Mb core and margins) — about 6,500 a sample a record. Over
+    24 million records and 3,000 samples that is 4.7 × 10¹⁴ operations, **about 33 core-hours** at
+    4 × 10⁹ a second; at 57 samples, at default sizes, 25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
 - **Three reads a position.** Where it helps: the prototype's gains are all at 1× and 3×.
 - **Three hundred reads.** The sample's own likelihood dominates every emission and the posterior is
   the calling's; the pass costs time and changes nearly nothing. It still runs if the switch says so:
@@ -365,8 +513,9 @@ twice that at three alleles, 400 at ten. At 3,000 samples and tomato's density a
 sample-records, about 5 GB biallelic — by shrinking the core first and the margins to their 500-kb
 floor; at 3,000 samples that is a 1.5-Mb window. Past the floor, at about 3,000 samples, the budget
 is exceeded rather than the margins shortened, and the run report says by how much. A walk keeps its
-forward vectors, `K² + K` numbers a record: as `f32`, 44 MB a sample over a 40,000-record window, one
-per thread.
+forward vectors, `K² + K` numbers a record, and its per-site terms for the backward sweep
+(`SiteTerms`, about as many): as `f64`, about 207 MB a sample over a 40,000-record window, one per
+thread.
 
 ---
 
@@ -451,6 +600,9 @@ All four as recommended.
    `##refineGenotypesCommandline=`. The pass always runs (it is the command's purpose); a cohort
    it cannot run on — one sample, a ploidy other than two — is an error naming why. On the
    20-sample simulated cohort its records are byte-identical to those the in-run pass wrote.
+
+   *Removed 2026-11-03* (owner; read phase spec §5): refinement runs only inside a calling run,
+   because read evidence never reaches a VCF, so a refinement of a file could not use it.
 
 ---
 

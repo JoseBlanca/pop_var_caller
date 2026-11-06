@@ -37,6 +37,7 @@ pub mod cohort_merge;
 pub mod depth_ceiling;
 pub mod edge_deletion_gathering;
 pub mod explain;
+pub mod fragment_keeper;
 pub mod gatherer;
 pub mod paralog_filter;
 pub mod psp_caller;

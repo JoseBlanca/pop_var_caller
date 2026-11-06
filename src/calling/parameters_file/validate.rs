@@ -117,22 +117,32 @@ impl ParametersFile {
         self.the_prior_seed_is_a_pair_of_concentrations()?;
         self.the_informational_tables_hold_numbers()?;
         self.the_tracts_left_out_hold_numbers()?;
+        self.the_misread_table_is_not_older_than_its_format()?;
         self.the_repeat_tract_numbers_are_what_they_claim()?;
         self.every_read_group_has_a_stutter_multiplier()?;
         self.every_stated_constant_is_in_range()?;
         Ok(())
     }
 
-    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
-    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
-    /// a spread, and a number marked `separately_determined = false` refused if it carries a
-    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
-    /// and not the population.
-    ///
-    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
-    /// says version 3 and holds one cannot say which format it was written in — the refusal the
-    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
-    /// the tables.
+    /// **`[misread_after_runs]` is not in a file stamped before format 8**, which had no such
+    /// table. Its rows are checked where they are read (`to_run_parameters`), which names the row.
+    fn the_misread_table_is_not_older_than_its_format(&self) -> Result<(), ParametersFileError> {
+        if self.misread_after_runs.is_some()
+            && self.format_version < FORMAT_THAT_ADDED_THE_MISREAD_TABLE
+        {
+            return Err(refuse(
+                "misread_after_runs",
+                format!(
+                    "is a format-{FORMAT_THAT_ADDED_THE_MISREAD_TABLE} table in a file whose \
+                     `format_version` says {}, so it is not clear which format the file was \
+                     written in; set `format_version` to the format the file was written in",
+                    self.format_version
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// **`[repeat_tracts_left_out]` holds finite numbers, and is not in a file stamped before format
     /// 7**, which had no such table — the same refusal [`Self::the_informational_tables_hold_numbers`]
     /// gives format 4's tables. Nothing else is checked: no run reads it.
@@ -173,13 +183,13 @@ impl ParametersFile {
     }
 
     /// **Each read group's stutter multipliers are finite positive numbers, one row a read group
-    /// and motif length, and in a format-8 file every read group the file declares a slippage
+    /// and motif length, and in a format-9 file every read group the file declares a slippage
     /// group for has one at every motif length it holds a fitted class of**
     /// (`str_library_stutter.md` §7).
     ///
     /// **Complete, because a missing row would be read as one**: calling scales a read group's
     /// class rates by its multiplier and takes one where the file has none, which is what an older
-    /// file means and not what a format-8 file whose row was deleted means. A row for a read group
+    /// file means and not what a format-9 file whose row was deleted means. A row for a read group
     /// with no slippage group, or a motif length with no fitted class, is a number no lookup
     /// reaches, refused as the other tables refuse a stray key.
     fn every_read_group_has_a_stutter_multiplier(&self) -> Result<(), ParametersFileError> {
@@ -272,6 +282,16 @@ impl ParametersFile {
         Ok(())
     }
 
+    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
+    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
+    /// a spread, and a number marked `separately_determined = false` refused if it carries a
+    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
+    /// and not the population.
+    ///
+    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
+    /// says version 3 and holds one cannot say which format it was written in — the refusal the
+    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
+    /// the tables.
     fn the_informational_tables_hold_numbers(&self) -> Result<(), ParametersFileError> {
         if self.format_version < FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES {
             let tables = [
@@ -1436,11 +1456,15 @@ fn the_unit_of(count: EvidenceCount) -> &'static str {
 /// 4. A file stamped with an earlier version and holding either is refused.
 const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
 
+/// **The format that added `[misread_after_runs]`**: 8. A file stamped earlier and holding it is
+/// refused.
+const FORMAT_THAT_ADDED_THE_MISREAD_TABLE: u32 = 8;
+
 /// **The format that added `[repeat_tracts_left_out]`**: 7. A file stamped earlier and holding it is
 /// refused.
 const FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT: u32 = 7;
 /// The format that added `repeat_tracts.stutter_multiplier_by_read_group`.
-const FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS: u32 = 8;
+const FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS: u32 = 9;
 
 /// The format that gave the tract ladder's second rung its own stated between-locus share,
 /// `repeat_tracts.fallback_between_locus_share_with_own_shares`.
@@ -2316,6 +2340,7 @@ mod tests {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2326,6 +2351,7 @@ mod tests {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             as_written_before_format_6(file);
@@ -2334,19 +2360,26 @@ mod tests {
             file.format_version = 5;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             as_written_before_format_6(file);
         });
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
         });
         accepted(|file| {
             file.format_version = 7;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
         });
-        accepted(|file| file.format_version = 8);
-        let (field, _) = refused(|file| file.format_version = 9);
+        accepted(|file| {
+            file.format_version = 8;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+        });
+        accepted(|file| file.format_version = 9);
+        let (field, _) = refused(|file| file.format_version = 10);
         assert_eq!(field, "format_version");
     }
 
@@ -2365,6 +2398,7 @@ mod tests {
             file.format_version = 5;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
         });
         assert_eq!(field, "stated_constants.repeat_tract_outlier_weight");
     }
@@ -2441,6 +2475,7 @@ mod tests {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             file.duplicated_positions = None;
         });
         assert_eq!(field, "ordinary_site_prior.fitted_density");
@@ -2450,6 +2485,7 @@ mod tests {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             file.ordinary_site_prior.fitted_density = None;
         });
         assert_eq!(field, "duplicated_positions");
@@ -2457,6 +2493,7 @@ mod tests {
             file.format_version = 3;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2468,6 +2505,7 @@ mod tests {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             file.stated_constants.repeat_tract_outlier_weight.value =
@@ -2487,6 +2525,7 @@ mod tests {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
         });
     }
 
@@ -2499,6 +2538,7 @@ mod tests {
             file.format_version = 4;
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.misread_after_runs = None;
         });
         assert_eq!(
             field,
@@ -2673,6 +2713,7 @@ mod tests {
         file.format_version = 1;
         file.repeat_tracts_left_out = None;
         file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+        file.misread_after_runs = None;
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;
@@ -2722,8 +2763,8 @@ mod tests {
     /// defaulted scale of one, and the file's claim that the library was fitted is gone with no
     /// message. That is spec §5's third row arriving through the back door.
     /// **Every declared read group has a stutter multiplier at every motif length with a slip rate,
-    /// once, finite and above zero; and the table is a format-8 one** (`str_library_stutter.md`
-    /// §7). A missing row would be read as a multiplier of one, which a format-8 file does not
+    /// once, finite and above zero; and the table is a format-9 one** (`str_library_stutter.md`
+    /// §7). A missing row would be read as a multiplier of one, which a format-9 file does not
     /// mean.
     #[test]
     fn a_stutter_multiplier_missing_doubled_or_not_a_multiplier_is_refused() {
@@ -2762,13 +2803,13 @@ mod tests {
                 .push(stray);
         });
         assert_eq!(field, format!("{at}[read_group = 0, period = 5]"));
-        // A format-8 table in a file that says 7 cannot say which format it was written in; the
-        // same file without it is a format-7 file, read with every multiplier one.
-        let (field, problem) = refused(|file| file.format_version = 7);
+        // A format-9 table in a file that says 8 cannot say which format it was written in; the
+        // same file without it is a format-8 file, read with every multiplier one.
+        let (field, problem) = refused(|file| file.format_version = 8);
         assert_eq!(field, at);
-        assert!(problem.contains("format-8 table"), "{problem}");
+        assert!(problem.contains("format-9 table"), "{problem}");
         accepted(|file| {
-            file.format_version = 7;
+            file.format_version = 8;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         });
     }
@@ -3584,7 +3625,7 @@ mod tests {
             refused(|file| file.ordinary_site_prior.reference_concentration = 0.0),
             refused(|file| file.repeat_tracts.fallback_between_locus_share.value = 0.0),
             refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = 2.0),
-            refused(|file| file.format_version = 9),
+            refused(|file| file.format_version = 10),
             // **The nested paths, which are what an earlier version of this test could not
             // see.** It compared only the last segment, so a refusal that named the row's
             // `shorter_share` where the key is `shorter_share_smoothing` passed on the strength

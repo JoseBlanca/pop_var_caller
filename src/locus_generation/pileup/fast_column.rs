@@ -549,6 +549,7 @@ pub(super) fn try_ordinary_column(
 
     super::column_census::FAST_COLUMNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(FastColumn::Emitted(SampleLocusObservations {
+        chain_id_base: 0,
         region: GenomeRegion {
             contig: ContigId(chrom_id),
             start: Position(u64::from(walker_pos)),

@@ -551,7 +551,8 @@ fn the_copied_scorer_agrees_with_productions() {
     assert!(
         widest_gap <= 1e-10,
         "the widest gap between ng and production over {loci_scored} randomised loci was \
-         {widest_gap:e} nats, where it has been 3.6e-12 since the maths moved to libm; the \
+         {widest_gap:e} nats, where it has been 7.3e-12 since the scorer took one logarithm \
+         a group of samples (3.6e-12 when the maths moved to libm); the \
          port's arithmetic has moved"
     );
 }
