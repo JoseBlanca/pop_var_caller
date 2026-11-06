@@ -193,8 +193,9 @@ and `e` there:
 
 Candidates rank by stretches won, most first; then by the same score over the whole window's
 compared records; then by sample order. The first `K` are the templates. **A template's stretches
-won also set where a copy that changes template lands** (§3.5): with weight `wins + ½`, so a
-template that won nothing is still reachable, at half the weight of one that won a single stretch.
+won also set where a copy that changes template lands** (§3.5): with weight `(wins + ½)⁴`, so a
+template that won twice as many stretches is landed on about 16 times as often, and one that won nothing
+is still reachable, at an 81st of the weight of one that won a single stretch.
 
 **Why stretches — changed 2026-11-05.** A sample's two copies change template along the window at
 every crossover in its ancestry. A whole-window score ranks highest whoever is fairly close
@@ -229,6 +230,18 @@ siblings; stretch wins raised the heterozygous offspring genotypes called right 
   (`doc/devel/reports/implementations/stretch_scale_2026-11-06.md`).
 - *Why land by wins:* on the F2, landing every template alike kept 74 heterozygotes in 100 right
   against 81; in the natural cohorts it made no difference.
+- *Why to the fourth power — changed 2026-11-06:* a 1× F2 plant's parents rank first, but its
+  siblings still win about two of every three stretch places: at one read a site, a heterozygous
+  stretch looks as much like a heterozygous sibling as like either parent, and no single candidate
+  can show it is the pair of parents. Landed on in proportion to their wins, the siblings took
+  copies the parents explain with certainty, and their soft shares left heterozygotes uncalled.
+  With the parents as the only templates the local F2 called 89.7 heterozygotes in 100 right
+  against 85.2; landing at the fourth power gave 89.5, without being told who the parents are. On
+  the refine_sim benchmark's F2 it phased 4,607 heterozygotes right against 2,775, missed 208
+  variant genotypes against 284 and left 795 genotypes without reads uncalled against 1,050, for 19
+  more false variants (13 → 32); the 400-sample outbred and selfing cohorts measured level, within 1
+  in 100 of every class (outbred: 61 fewer missed, 63 more false). Powers 4 to 6 measured alike on
+  the F2; 2 gained nothing (`doc/devel/reports/implementations/landing_power_2026-11-06.md`).
 - *Tried and not adopted* (same report): IMPUTE5's choice, the haplotypes sharing the longest exact
   run of likeliest alleles with the sample, in rounds 2 and later — no better than stretch wins on
   the natural cohorts, worse for selfing at 1×, and adding nothing measurable on top of them; and

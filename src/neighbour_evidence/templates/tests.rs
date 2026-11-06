@@ -262,7 +262,8 @@ fn one_stretch(copies: usize, observed: &[Option<f64>]) -> Vec<usize> {
 
 /// **A stretch's winners are the [`STRETCH_WINNERS`] best and any tied with the last of them**; a
 /// candidate not judged there does not win it. Each landing weight is the stretches won plus
-/// [`LANDING_WEIGHT_BASE`].
+/// [`LANDING_WEIGHT_BASE`], to [`LANDING_WEIGHT_POWER`]: a template that won twice as many
+/// stretches lands about 16 times as often.
 #[test]
 fn ties_with_the_last_winner_win_too() {
     let won = one_stretch(1, &[Some(0.0), Some(0.5), Some(0.5), Some(1.0), None]);
@@ -271,7 +272,15 @@ fn ties_with_the_last_winner_win_too() {
         source: 0,
         stretches_won: 3,
     };
-    assert!((template.landing_weight() - (3.0 + LANDING_WEIGHT_BASE)).abs() < 1e-15);
+    assert!((template.landing_weight() - (3.0 + LANDING_WEIGHT_BASE).powi(4)).abs() < 1e-12);
+    let weight = |won: usize| {
+        ChosenTemplate {
+            source: 0,
+            stretches_won: won,
+        }
+        .landing_weight()
+    };
+    assert!((weight(0) * 81.0 - weight(1)).abs() < 1e-12);
 }
 
 /// **A sample's two haplotypes take one winner's place between them** (phasing spec §2.3): sample
