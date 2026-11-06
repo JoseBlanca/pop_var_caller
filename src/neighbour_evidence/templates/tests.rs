@@ -217,25 +217,43 @@ fn the_samples_a_copy_copies_win_the_stretches_they_match() {
     }
 }
 
-/// **A stretch ends once it holds [`STRETCH_INFORMATION`]** of expected disagreement, counting
-/// only records some candidate is judged at; what is left after the last joins the one before it,
-/// and a window holding less than one unit is one stretch.
+/// **A stretch ends once it holds the information asked** of expected disagreement, counting only
+/// records some candidate is judged at; what is left after the last joins the one before it, and a
+/// window holding less is one stretch.
 #[test]
 fn a_stretch_ends_once_it_holds_enough_to_judge_by() {
     let expected = [0.5, 0.5, 0.3, 0.3, 0.3, 0.2, 0.4, 0.2];
     let everywhere = [true; 8];
-    assert_eq!(stretches(&expected, &everywhere), vec![0..2, 2..8]);
+    assert_eq!(stretches(&expected, &everywhere, 1.0), vec![0..2, 2..8]);
     let mut gap = everywhere;
     gap[1] = false;
-    assert_eq!(stretches(&expected, &gap), vec![0..4, 4..8]);
-    assert_eq!(stretches(&[0.3, 0.3], &[true; 2]), vec![0..2]);
-    assert_eq!(stretches(&[], &[]), Vec::<Range<usize>>::new());
+    assert_eq!(stretches(&expected, &gap, 1.0), vec![0..4, 4..8]);
+    assert_eq!(stretches(&expected, &everywhere, 0.8), vec![0..2, 2..5, 5..8]);
+    assert_eq!(stretches(&expected, &everywhere, 1.5), vec![0..8]);
+    assert_eq!(stretches(&[0.3, 0.3], &[true; 2], 1.0), vec![0..2]);
+    assert_eq!(stretches(&[], &[], 1.0), Vec::<Range<usize>>::new());
+}
+
+/// **Stretches lengthen with the cohort, as the log of its other samples**: one unit up to 21 of
+/// them, then `ln(other_samples / 8)`.
+#[test]
+fn stretches_lengthen_with_the_log_of_the_cohort() {
+    assert_eq!(stretch_information(1), MIN_STRETCH_INFORMATION);
+    assert_eq!(stretch_information(21), MIN_STRETCH_INFORMATION);
+    assert!(stretch_information(22) > MIN_STRETCH_INFORMATION);
+    for (other_samples, units) in [(39, 1.58), (399, 3.91), (999, 4.83), (4_999, 6.44)] {
+        assert!(
+            (stretch_information(other_samples) - units).abs() < 0.01,
+            "{other_samples} other samples: {}",
+            stretch_information(other_samples)
+        );
+    }
 }
 
 /// Stretch sums over one record expecting 1, `copies` candidates a sample, each candidate's
 /// observed disagreement there given.
 fn one_stretch(copies: usize, observed: &[Option<f64>]) -> Vec<usize> {
-    let mut sums = StretchSums::new(vec![1.0], &[true], copies);
+    let mut sums = StretchSums::new(vec![1.0], &[true], 1.0, copies);
     for &candidate in observed {
         sums.add([candidate]);
     }

@@ -12,8 +12,10 @@
 //! frequencies — scores as an unrelated one, not a close one (owner, 2026-11-05).
 //!
 //! **Judged stretch by stretch, ranked by stretches won** (owner, 2026-11-05). The compared records
-//! are cut, in order, into stretches that each hold [`STRETCH_INFORMATION`] of expected
-//! disagreement — about two common SNPs. In each stretch the [`STRETCH_WINNERS`] candidates with the
+//! are cut, in order, into stretches that each hold [`stretch_information`] of expected
+//! disagreement — one unit, about two common SNPs, up to 19 other samples, and more in a larger
+//! cohort, so that an unrelated sample matching a stretch by chance does not take a relative's
+//! place (§3.3). In each stretch the [`STRETCH_WINNERS`] candidates with the
 //! lowest scores there win it, with any tied with the last of them; a candidate with nothing to be
 //! judged on in a stretch cannot win it. Candidates rank by stretches won, then by their score over
 //! the whole window, then by sample order, and the first `K` are the templates. A template's
@@ -53,12 +55,24 @@ pub const MAX_TEMPLATES: usize = 16;
 /// The most of a sample's informative records its templates are chosen over (§3.3).
 pub const AGREEMENT_RECORDS: usize = 500;
 
-/// **How much a stretch must hold before its candidates are judged in it** (§3.3): a stretch of
-/// compared records ends once the disagreement an unrelated sample would show the sample over it,
-/// `Σ 1 − Σ_a q_self(a) · p(a)`, reaches this. One is about two SNPs at frequency ½ where the sample
-/// is certain, or twenty at 5%. Tuned on the cohorts of the 2026-11-05 report (40 samples at 1× to
-/// 30×, and an F2 of 20 offspring at 1×): longer stretches measured worse there.
-pub const STRETCH_INFORMATION: f64 = 1.0;
+/// **The least a stretch holds before its candidates are judged in it** (§3.3), in units of the
+/// disagreement an unrelated sample would show the sample over it, `Σ 1 − Σ_a q_self(a) · p(a)`.
+/// One is about two SNPs at frequency ½ where the sample is certain, or twenty at 5%. Small cohorts
+/// hold their stretches to this: on an F2 of 20 offspring at 1×, two units called 3 to 13 more
+/// heterozygotes in 1,000 wrong or missing than one did, with crossovers as dense as the
+/// benchmark's or ten times rarer (`stretch_scale_2026-11-06.md`).
+pub const MIN_STRETCH_INFORMATION: f64 = 1.0;
+
+/// **How many chance matches a stretch may draw** (§3.3), the scale of [`stretch_information`]: a
+/// stretch holds `ln(other samples / this)` units, so that — if an unrelated sample matches a
+/// stretch of `I` units as well as a relative with chance about `e^-I` — about this many of the
+/// cohort's samples do. Measured, not derived: the model is crude, and 8 is the value that keeps
+/// the 22-sample F2 at one unit — its best length: 3,087 heterozygotes phased right there, against
+/// 2,837 to 3,043 at the other lengths tried from 0.8 to 1.5 — while a 400-sample outbred cohort
+/// gets 3.9, near the four units that recovered the phase one unit lost there (98,871 → 108,600
+/// heterozygotes phased right, of 145,951) and called 570 fewer true variants wrong
+/// (`stretch_scale_2026-11-06.md`).
+pub const TOLERATED_CHANCE_MATCHES: f64 = 8.0;
 
 /// **How many samples win each stretch**, besides any tied with the last of them (§3.3): one a copy.
 /// Four measured worse than two on the cohorts of the 2026-11-05 report.
@@ -109,7 +123,12 @@ pub fn choose_templates(
             allele_mismatch(record.template_shares(sample), record.background_shares())
         })
         .collect();
-    let mut sums = StretchSums::new(expected, &judged_records(records, sample, &compared), 1);
+    let mut sums = StretchSums::new(
+        expected,
+        &judged_records(records, sample, &compared),
+        stretch_information(others.len()),
+        1,
+    );
     for &other in &others {
         sums.add(compared.iter().map(|&index| {
             let record = &records[index];
@@ -231,7 +250,12 @@ pub(crate) fn choose_haplotypes(
         .collect();
     // Candidate `2·j + copy` is copy `copy` of the `j`-th other sample.
     let others: Vec<usize> = (0..samples).filter(|&other| other != sample).collect();
-    let mut sums = StretchSums::new(expected, &judged_records(records, sample, compared), 2);
+    let mut sums = StretchSums::new(
+        expected,
+        &judged_records(records, sample, compared),
+        stretch_information(others.len()),
+        2,
+    );
     let mut carried = Vec::new();
     for &other in &others {
         for copy in 0..2 {
@@ -284,18 +308,33 @@ fn judged_records(records: &[SiteRecord], sample: usize, compared: &[usize]) -> 
         .collect()
 }
 
+/// **How much a stretch holds when `other_samples` samples compete for it** (§3.3):
+/// `ln(other_samples / TOLERATED_CHANCE_MATCHES)` units, never less than
+/// [`MIN_STRETCH_INFORMATION`] — one unit up to 21 other samples, 1.6 at 39, 3.9 at 399, 4.8 at
+/// 999 and 6.4 at 4,999. It counts samples in every round, also from round 2 where each sample
+/// offers two haplotypes: the scale was measured that way, and a sample takes at most one of a
+/// stretch's places. Short stretches see a copy's change of source where it happens, but among
+/// many candidates some unrelated one matches a short stretch by chance; at 400 samples one unit
+/// gave a stretch 6.5 winners where two were asked for.
+#[must_use]
+pub fn stretch_information(other_samples: usize) -> f64 {
+    (other_samples as f64 / TOLERATED_CHANCE_MATCHES)
+        .ln()
+        .max(MIN_STRETCH_INFORMATION)
+}
+
 /// **The stretches the compared records are cut into**, in order (§3.3): each ends at the record
-/// where the expected disagreement summed over it reaches [`STRETCH_INFORMATION`], counting only
-/// records where `judged[record]`. What is left after the last such record joins the stretch before
-/// it, so no stretch is judged on less; a window holding less than one unit is one stretch.
-fn stretches(expected: &[f64], judged: &[bool]) -> Vec<Range<usize>> {
+/// where the expected disagreement summed over it reaches `information`, counting only records
+/// where `judged[record]`. What is left after the last such record joins the stretch before it, so
+/// no stretch is judged on less; a window holding less than `information` is one stretch.
+fn stretches(expected: &[f64], judged: &[bool], information: f64) -> Vec<Range<usize>> {
     let mut stretches: Vec<Range<usize>> = Vec::new();
     let (mut start, mut held) = (0, 0.0);
     for (record, (&expected, &judged)) in expected.iter().zip(judged).enumerate() {
         if judged {
             held += expected;
         }
-        if held >= STRETCH_INFORMATION {
+        if held >= information {
             stretches.push(start..record + 1);
             (start, held) = (record + 1, 0.0);
         }
@@ -350,10 +389,10 @@ impl Judged {
 }
 
 impl StretchSums {
-    /// Stretches cut over `expected` where `judged`, no candidate added yet; `copies` candidates to
-    /// a sample.
-    fn new(expected: Vec<f64>, judged: &[bool], copies: usize) -> Self {
-        let cut = stretches(&expected, judged);
+    /// Stretches of `information` cut over `expected` where `judged`, no candidate added yet;
+    /// `copies` candidates to a sample.
+    fn new(expected: Vec<f64>, judged: &[bool], information: f64, copies: usize) -> Self {
+        let cut = stretches(&expected, judged, information);
         let mut stretch_of = vec![0; expected.len()];
         for (stretch, range) in cut.iter().enumerate() {
             stretch_of[range.clone()].fill(stretch);
