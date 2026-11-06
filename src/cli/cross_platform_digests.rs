@@ -511,7 +511,12 @@ mod tests {
     /// main's misread table and the branch's per-read-group slip rates, and the
     /// `##pvcParameters` line of the format-9 file. Main's checksum was `b3864ddbf3a7042c1f2af1427d9167ed`.
     /// Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "3edb3436d3c8ae418d75385c2d289dd2";
+    /// **Re-recorded 2026-11-06**, when the site quality stopped counting each arrangement of the
+    /// cohort's copies twice (`calling_quality.md` §5.2): every record's `QUAL` fell by 3.0, the
+    /// `10·log₁₀ 2` two samples predict — chrV:121 520.2 to 517.2, the repeat tract at chrV:201
+    /// 112.3 to 109.3, chrV:456 519.6 to 516.6. No genotype and no fitted number moved. It was
+    /// `3edb3436d3c8ae418d75385c2d289dd2`. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "8a037a8542205d42116a3ff52b92c5bc";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -843,7 +848,10 @@ mod tests {
     /// main's misread table and the branch's per-read-group slip rates, and the
     /// `##pvcParameters` line of the format-9 file. Main's checksum was `287c3582f20bf55bf771b587d2020ed3`.
     /// Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "54454ccd4b0515cc172b90f3db41dc63";
+    /// **Re-recorded 2026-11-06**, when the site quality stopped counting each arrangement of the
+    /// cohort's copies twice (`calling_quality.md` §5.2): only the calls moved, the parameters file
+    /// did not. It was `54454ccd4b0515cc172b90f3db41dc63`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "55175fcd3d222db39b21ffeb9994ae1e";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -1204,7 +1212,10 @@ mod tests {
     /// main's misread table and the branch's per-read-group slip rates, and the
     /// `##pvcParameters` line of the format-9 file. Main's checksum was `06e7857efabae5c3301911df9b5a26f0`.
     /// Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "9da65303da1580f10e2380b945a0e583";
+    /// **Re-recorded 2026-11-06**, when the site quality stopped counting each arrangement of the
+    /// cohort's copies twice (`calling_quality.md` §5.2): only the calls moved, the parameters file
+    /// did not. It was `9da65303da1580f10e2380b945a0e583`. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "2c1f1ceeec780ecd5ed4e6f3da251411";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

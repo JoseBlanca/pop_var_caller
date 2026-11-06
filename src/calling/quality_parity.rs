@@ -47,6 +47,12 @@
 //! pins value for value, and the same two concentrations. The numbers must agree. This is the
 //! arm that says the four steps were ported correctly.
 //!
+//! **Since 2026-11-06 they agree only where no arrangement is counted twice**: at one sample,
+//! and where nobody carries the variant. Production applied the Beta-Binomial `P(K = k)` to a
+//! fold that had already summed the arrangements reaching `k`; ng takes one arrangement's
+//! prior (`doc/devel/ng/spec/calling_quality.md` §5.2). The cohort fixtures with a carrier now
+//! hold ng to that model, computed independently in the tests, and below production.
+//!
 //! **Arm two — ng's fitted prior.** The same table, with ng seeded from a run's own fitted
 //! spectrum instead of the two GATK constants (spec §5.4). **A silent agreement here is a
 //! failure rather than a pass**: it would mean the seed never reached the prior. So
@@ -294,6 +300,77 @@ mod tests {
         table
     }
 
+    /// **The site quality the model gives this locus, written independently of ng's fold**: in
+    /// logs throughout, over the diploid genotype order of the VCF specification, with each
+    /// sample's entry at `c` non-reference copies weighted by its `C(2, c)` orderings and each
+    /// total by the prior of one arrangement, `B(α_alt + k, α_ref + n − k) / B(α_alt, α_ref)`.
+    fn by_arrangement(locus: &Locus<'_>) -> f64 {
+        use crate::genetics::lgamma;
+        fn log_sum_exp(a: f64, b: f64) -> f64 {
+            let top = a.max(b);
+            if top == f64::NEG_INFINITY {
+                return top;
+            }
+            top + crate::float::ln(crate::float::exp(a - top) + crate::float::exp(b - top))
+        }
+        let mut non_reference_copies = Vec::new();
+        for second in 0..locus.alleles {
+            for first in 0..=second {
+                non_reference_copies.push(usize::from(first != 0) + usize::from(second != 0));
+            }
+        }
+        let orderings = [0.0, crate::float::ln(2.0), 0.0];
+        let mut totals = vec![0.0];
+        for row in locus.log_likelihoods.chunks_exact(locus.genotypes()) {
+            let mut by_copies = [f64::NEG_INFINITY; 3];
+            for (&likelihood, &copies) in row.iter().zip(&non_reference_copies) {
+                by_copies[copies] = log_sum_exp(by_copies[copies], likelihood);
+            }
+            let mut next = vec![f64::NEG_INFINITY; totals.len() + 2];
+            for (total, &log) in totals.iter().enumerate() {
+                for copies in 0..3 {
+                    next[total + copies] = log_sum_exp(
+                        next[total + copies],
+                        log + by_copies[copies] + orderings[copies],
+                    );
+                }
+            }
+            totals = next;
+        }
+        let alpha_reference = locus.reference_concentration;
+        let alpha_alternative = locus.per_alternative_concentration * (locus.alleles - 1) as f64;
+        let chromosomes = 2.0 * locus.samples as f64;
+        let log_beta = |a: f64, b: f64| lgamma(a) + lgamma(b) - lgamma(a + b);
+        let mut log_all = f64::NEG_INFINITY;
+        for (total, log) in totals.iter_mut().enumerate() {
+            let total = total as f64;
+            *log += log_beta(alpha_alternative + total, alpha_reference + chromosomes - total)
+                - log_beta(alpha_alternative, alpha_reference);
+            log_all = log_sum_exp(log_all, *log);
+        }
+        -10.0 * (totals[0] - log_all) / std::f64::consts::LN_10
+    }
+
+    /// **Where ng departs from production on purpose** (2026-11-06): production's prior on the
+    /// cohort's count was the Beta-Binomial `P(K = k)`, applied to a fold that had already summed
+    /// over the arrangements reaching `k`, so it counted every arrangement twice. ng takes one
+    /// arrangement's prior. At one sample the two agree; with a carrier in a cohort ng must
+    /// score what the model gives, [`by_arrangement`], and below production.
+    fn assert_departs_downward(locus: &Locus<'_>, what: &str) {
+        let production = locus.production_site_quality();
+        let ng = locus.ng_at_productions_prior();
+        let model = by_arrangement(locus);
+        assert!(
+            (ng - model).abs() < TOLERANCE,
+            "{what}: ng's site quality is {ng} where the model gives {model}"
+        );
+        assert!(
+            ng < production - 1.0,
+            "{what}: production counted the arrangements twice and so scored higher; ng gave \
+             {ng} against production's {production}"
+        );
+    }
+
     fn assert_agrees(locus: &Locus<'_>, what: &str) {
         let production = locus.production_site_quality();
         let ng = locus.ng_at_productions_prior();
@@ -336,11 +413,12 @@ mod tests {
     }
 
     /// **A cohort with one carrier**, where the fold has to spread one copy over eighty
-    /// chromosomes.
+    /// chromosomes — and where ng now scores the model, below production's double count.
+    /// Measured: 2.23 Phred against production's 14.63.
     #[test]
-    fn one_carrier_in_a_cohort_scores_the_same_on_both_sides() {
+    fn one_carrier_in_a_cohort_scores_the_model_and_below_production() {
         let table = one_carrier_among(39);
-        assert_agrees(
+        assert_departs_downward(
             &Locus::at_productions_prior(&table, 40, 2),
             "one carrier among forty",
         );
@@ -348,9 +426,10 @@ mod tests {
 
     /// **A triallelic locus**, where the collapse to (reference, any-non-reference) is doing
     /// something rather than being the identity: six genotypes fold into three copy counts,
-    /// and production's `α_alt` is the sum over *two* alternatives rather than one.
+    /// and production's `α_alt` is the sum over *two* alternatives rather than one. Measured:
+    /// 11.05 Phred against production's 20.76.
     #[test]
-    fn a_triallelic_locus_scores_the_same_on_both_sides() {
+    fn a_triallelic_locus_scores_the_model_and_below_production() {
         // The six genotypes of a diploid three-allele locus, in the table's order.
         let carrier = [-9.0, 0.0, -9.0, -3.0, -9.0, -9.0];
         let reference = [0.0, -7.0, -14.0, -7.0, -14.0, -14.0];
@@ -358,7 +437,7 @@ mod tests {
         for _ in 0..9 {
             table.extend_from_slice(&reference);
         }
-        assert_agrees(
+        assert_departs_downward(
             &Locus::at_productions_prior(&table, 10, 3),
             "one carrier among ten at a triallelic locus",
         );
@@ -384,7 +463,8 @@ mod tests {
     /// had hard-coded `(10, 0.01)` instead of reading the pair it is given would pass all of
     /// them. Moving both constants — the reference side down by a factor of ten, the
     /// alternative side up by a hundred — makes that port disagree, and makes a port that
-    /// reads only one of the two disagree as well.
+    /// reads only one of the two disagree as well. Since ng stopped counting the arrangements
+    /// twice, it is held to the model at the moved pair rather than to production.
     #[test]
     fn both_sides_read_the_same_concentrations_and_not_two_that_happen_to_agree() {
         let table = one_carrier_among(19);
@@ -403,9 +483,15 @@ mod tests {
             "the two concentration pairs have to give production materially different \
              qualities, or this fixture is not testing that either side reads them"
         );
-        assert_agrees(
+        assert_departs_downward(
             &moved,
             "one carrier among twenty at a moved concentration pair",
+        );
+        assert!(
+            (moved.ng_at_productions_prior() - shipped.ng_at_productions_prior()).abs() > 1.0,
+            "ng must read the pair it is handed: {} at the moved pair, {} at the shipped one",
+            moved.ng_at_productions_prior(),
+            shipped.ng_at_productions_prior()
         );
     }
 
@@ -422,9 +508,9 @@ mod tests {
     /// carrier among forty must score *below* production's pair at human diversity and *above*
     /// it at ten times that.
     ///
-    /// **Measured on this fixture:** 14.63 Phred under production's `(10, 0.01)`, **6.16**
-    /// under `(1, 1e-3)` and **15.09** under `(1, 1e-2)` — so 8.5 Phred down at the neutral end
-    /// and 0.5 up at the diverse one. The two are not the table's 7 and 3, and are not checked
+    /// **Measured on this fixture:** 2.23 Phred under production's `(10, 0.01)`, **0.31**
+    /// under `(1, 1e-3)` and **2.42** under `(1, 1e-2)` — so 1.9 Phred down at the neutral end
+    /// and 0.2 up at the diverse one. The two are not the table's 7 and 3, and are not checked
     /// against them: §5.4 tabulates the prior toll alone, at a different cohort size, where
     /// these are qualities with a carrier's reads in them.
     ///
