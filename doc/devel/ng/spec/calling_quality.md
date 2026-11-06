@@ -324,12 +324,33 @@ Four steps, in the order the code runs them, ported from
 
 1. **Collapse.** Each sample's row over candidate genotypes becomes a row over *how many
    non-reference copies that genotype has* — `ploidy + 1` entries, three for a diploid, by
-   log-sum-exp over the genotypes that share a count. This is the only step that reads the full
-   table, and it is why the baseline is computed in the worker (§3.2).
+   log-sum-exp over the genotypes that share a count — and each entry is multiplied by
+   `C(ploidy, c)`, the orderings of the sample's chromosomes that carry `c` copies: two for a
+   diploid heterozygote. This is the only step that reads the full table, and it is why the
+   baseline is computed in the worker (§3.2).
 2. **Convolve.** Fold the samples one at a time into a running distribution over the cohort allele
-   count: after `s` samples the array holds the log-probability of each total from 0 to `s·ploidy`.
-3. **Apply the prior** on the cohort allele count (§5.4).
+   count: after `s` samples the array holds, at each total from 0 to `s·ploidy`, the sum over every
+   arrangement of copies that reaches it.
+3. **Apply the prior of one arrangement** with that total (§5.4):
+   `B(α_alt + k, α_ref + n − k) / B(α_alt, α_ref)`.
 4. **Normalise** over every possible total and read off the entry at zero.
+
+> **A correction, 2026-11-06: step 3 used to apply the Beta-Binomial `P(K = k)`**, which already
+> counts the `C(n, k)` ways to place `k` copies on `n` chromosomes, to a fold that had summed over
+> those arrangements itself — so each arrangement was counted twice. Production did the same and
+> the port reproduced it. At one sample the two forms agree, since `C(2, c)` is the whole of the
+> extra factor; in a cohort it rewards totals that weakly covered samples cannot rule out — `n / 2`
+> at one copy, far more at twenty. On the refine_sim outbred cohort (400 samples, 2× to 30×), one
+> sample with two sequencing errors at a base where nothing varies got a `QUAL` of about 110; the
+> model gives about 0.05. Recomputed from the written likelihoods, 5,271 of the 5,434 SNP records
+> at positions with no true variant fall below the default threshold of 1, and so do 38 real SNPs,
+> almost all singletons in samples at 5× or less. The two-sample fixture of
+> `cli::cross_platform_digests` moved by exactly `10·log₁₀ 2` = 3.0 at each of its three records.
+>
+> **What the 2026-08-25 correction in §5.1 measured was this double count.** The marginal "grew
+> faster" with thin samples because each added sample multiplied the high totals by more ways to
+> reach them. Under one arrangement's prior a sample whose reads say nothing marginalises out
+> exactly, and nearly flat ones move the quality only by what their reads say.
 
 ### 5.3 Three traps, all of them load-bearing
 

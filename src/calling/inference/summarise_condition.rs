@@ -7141,8 +7141,10 @@ mod tests {
                 "sample {sample}'s confidence: {got} against {want}"
             );
         }
+        // 117.716 until 2026-11-06, when the site quality stopped counting each arrangement of
+        // the cohort's copies twice (`calling_quality.md` §5.2).
         assert!(
-            (inference.site_quality.get() - 117.716_15_f32).abs() < 1e-3,
+            (inference.site_quality.get() - 107.793_93_f32).abs() < 1e-3,
             "the site quality: {}",
             inference.site_quality.get()
         );
@@ -7168,7 +7170,8 @@ mod tests {
         );
         assert!(!capped.converged, "one pass is not enough for this locus");
         assert!(
-            (capped.site_quality.get() - 117.714_85_f32).abs() < 1e-4,
+            // 117.715 until 2026-11-06, as above.
+            (capped.site_quality.get() - 107.792_63_f32).abs() < 1e-4,
             "the capped run's site quality: {}",
             capped.site_quality.get()
         );

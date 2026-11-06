@@ -233,7 +233,8 @@ pub struct SiteQualityBuffers<'a> {
     /// `samples × ploidy + 1`: the fold's result back in the log domain, then the
     /// unnormalised log-posterior once the prior has been applied.
     pub(crate) log_allele_count_distribution: &'a mut [f64],
-    /// The Beta-Binomial count prior of step 3, and the run it was built for.
+    /// The count prior of step 3 — one arrangement's probability at each total — and the run it
+    /// was built for.
     ///
     /// **It is the same vector at every locus of a run**, because every term of it is built
     /// from the fitted spectrum and the cohort's chromosome count and from nothing the locus
@@ -248,7 +249,7 @@ pub struct SiteQualityBuffers<'a> {
     pub(crate) count_prior: &'a mut CountPriorMemo,
 }
 
-/// The Beta-Binomial count prior of [`score_uncorrected_site_quality`]'s step 3, kept between
+/// The count prior of [`score_uncorrected_site_quality`]'s step 3, kept between
 /// loci.
 ///
 /// **The key is the whole of what the terms are built from** — the cohort's chromosome count
@@ -356,10 +357,27 @@ impl From<SpectrumSeed> for SiteQualityPrior {
 ///
 /// 1. **Collapse** each sample's row over genotypes into a row over *how many non-reference
 ///    copies that genotype carries* — `ploidy + 1` entries, by log-sum-exp over the genotypes
-///    that share a count. The only step that reads the whole table.
-/// 2. **Fold** the samples one at a time into a running distribution over the cohort's total.
-/// 3. **Apply the prior** on that total (§5.4).
+///    that share a count, each entry times its `C(ploidy, copies)` orderings of the sample's
+///    chromosomes. The only step that reads the whole table.
+/// 2. **Fold** the samples one at a time into a running distribution over the cohort's total:
+///    at each total, the sum over every arrangement of copies that reaches it.
+/// 3. **Apply the prior** of one arrangement with that total (§5.4).
 /// 4. **Normalise** over every possible total and read off the entry at zero.
+///
+/// # The fold sums arrangements, so the prior is one arrangement's
+///
+/// **The Beta-Binomial probability of a total already counts the `C(n, k)` ways to place `k`
+/// copies on `n` chromosomes, and so does the fold.** Using the two together counted every
+/// arrangement twice. At one sample the two forms agree; in a cohort the extra factor rewards
+/// totals that many weakly covered samples cannot rule out — `n / 2` at one copy, far more at
+/// twenty. Measured on a simulated outbred cohort of 400 samples at 2× to 30×: one sample with two
+/// sequencing errors at a base, where nothing varies, got a `QUAL` of about 110 with the factor
+/// and about 0.05 without it, and 5,271 of 5,434 such records fall below the default threshold of
+/// 1 (`doc/devel/ng/spec/calling_quality.md` §5.2).
+///
+/// **A sample whose reads said nothing now marginalises out exactly**: its entry is the prior's
+/// alone, `Σ_c C(ploidy, c) × (one arrangement)`, which sums to the model without it. It is
+/// still left out of the fold, which changes no answer and saves its share of the work.
 ///
 /// # The prior is the run's own fitted spectrum, and that is where ng differs
 ///
@@ -508,6 +526,16 @@ pub fn score_uncorrected_site_quality(
     // model a sample with flat likelihoods marginalises out of the cohort exactly, so leaving
     // it out is that model's answer, not an approximation (`calling_quality.md` §3.2).
     copy_count_log_likelihoods.fill(f64::NEG_INFINITY);
+    // **How many orderings of a sample's chromosomes carry `c` non-reference copies**,
+    // `C(ploidy, c)`, in logs. The fold sums over which samples carry the cohort's copies; the
+    // prior below is the probability of one arrangement of copies over chromosomes, so each
+    // sample's entry counts its own orderings — two for a diploid heterozygote.
+    let mut log_orderings = [0.0f64; crate::calling::likelihood::MAX_PLOIDY_COPIES + 1];
+    for (copies, slot) in log_orderings[..copy_counts_per_sample].iter_mut().enumerate() {
+        *slot = lgamma(ploidy as f64 + 1.0)
+            - lgamma(copies as f64 + 1.0)
+            - lgamma((ploidy - copies) as f64 + 1.0);
+    }
     let copies_per_genotype = genotypes.genotype_allele_counts();
     let informative_rows = genotype_likelihoods
         .chunks_exact(genotype_count)
@@ -525,6 +553,9 @@ pub fn score_uncorrected_site_quality(
             let slot = &mut copy_counts[non_reference_copies];
             *slot = log_sum_exp_2(*slot, likelihood.get());
         }
+        for (slot, orderings) in copy_counts.iter_mut().zip(&log_orderings) {
+            *slot += orderings;
+        }
         // **A sample with no possible genotype is caught here, where its cause has a name.**
         // Every entry of its collapsed row is then `−∞`, and the fold turns that into a
         // `−∞ − −∞` — a `NaN` that reaches the end of this function and fails
@@ -540,7 +571,7 @@ pub fn score_uncorrected_site_quality(
         );
     }
 
-    // The Beta-Binomial prior on the cohort's count, from the run's fitted spectrum — step 3,
+    // The prior on one arrangement of the cohort's copies, from the run's fitted spectrum — step 3,
     // built here because the fold reads how far apart its terms are.
     //
     // **Built once a run at ordinary loci, and again at each repeat tract whose prior differs
@@ -577,21 +608,20 @@ pub fn score_uncorrected_site_quality(
         let chromosomes = largest_count as f64;
         let log_beta_normaliser = lgamma(alpha_alternative) + lgamma(alpha_reference)
             - lgamma(alpha_alternative + alpha_reference);
-        let log_chromosomes_factorial = lgamma(chromosomes + 1.0);
         let log_denominator = lgamma(alpha_alternative + alpha_reference + chromosomes);
         count_prior.terms.clear();
         count_prior.terms.reserve(largest_count + 1);
         for count in 0..=largest_count {
             let count = count as f64;
-            // How many ways a total of `count` can be dealt across the chromosomes, and the
-            // Beta term for that split — the two halves of the Beta-Binomial.
-            let log_ways =
-                log_chromosomes_factorial - lgamma(count + 1.0) - lgamma(chromosomes - count + 1.0);
+            // The probability of one arrangement of `count` non-reference copies over the
+            // chromosomes: the Beta-Binomial without its `C(chromosomes, count)`. The fold has
+            // already summed over the arrangements, each sample's orderings included, so
+            // counting the ways here as well would count them twice.
             let log_split =
                 lgamma(alpha_alternative + count) + lgamma(alpha_reference + chromosomes - count);
             count_prior
                 .terms
-                .push(log_ways + log_split - log_denominator - log_beta_normaliser);
+                .push(log_split - log_denominator - log_beta_normaliser);
         }
         let (lowest, highest) = count_prior
             .terms
@@ -1100,6 +1130,60 @@ mod tests {
         );
     }
 
+    /// **In a cohort the quality is the plain model's, checked by enumerating every
+    /// chromosome.** The model: the non-reference frequency `p` follows the seed's Beta, and
+    /// each chromosome carries the variant with probability `p`, independently. So one
+    /// assignment of reference or alternative to every chromosome, `k` of them alternative, has
+    /// prior `B(α_alt + k, α_ref + n − k) / B(α_alt, α_ref)`, and a sample's reads score it by
+    /// how many of its own two chromosomes carry the variant. This sums that over all `2^10`
+    /// assignments of five diploid samples — no collapse, no fold, no count axis.
+    ///
+    /// **The fixture is the shape that exposed the double count**: one sample with two reads of
+    /// the alternative among six, beside four with one to three reads of the reference, at a
+    /// seed fitted on a simulated outbred cohort. Measured: 0.58 Phred here, where the Beta-
+    /// Binomial over the count, applied to a fold that had already summed the arrangements, gave
+    /// 2.99 — above the default threshold of 1, where the model puts it below.
+    #[test]
+    fn in_a_cohort_the_site_quality_is_the_model_over_every_chromosome() {
+        let seed = SpectrumSeed::new(1.108, 1.06e-4, SeedRegime::NeutralShape);
+        let rows = vec![
+            vec![-8.5, 0.0, -25.0],
+            vec![0.0, -0.69, -9.0],
+            vec![0.0, -1.39, -18.0],
+            vec![0.0, -0.69, -9.0],
+            vec![0.0, -2.08, -27.0],
+        ];
+        let got = site_quality_of(&rows, seed);
+
+        let (alpha_alternative, alpha_reference) = (seed.alpha_alt_total(), seed.alpha_ref());
+        let log_beta = |a: f64, b: f64| lgamma(a) + lgamma(b) - lgamma(a + b);
+        let chromosomes = 2 * rows.len();
+        let mut log_none = f64::NEG_INFINITY;
+        let mut log_all = f64::NEG_INFINITY;
+        for assignment in 0u32..(1 << chromosomes) {
+            let carrying = f64::from(assignment.count_ones());
+            let mut log = log_beta(
+                alpha_alternative + carrying,
+                alpha_reference + chromosomes as f64 - carrying,
+            ) - log_beta(alpha_alternative, alpha_reference);
+            for (sample, row) in rows.iter().enumerate() {
+                let copies = ((assignment >> (2 * sample)) & 0b11).count_ones() as usize;
+                log += row[copies];
+            }
+            log_all = log_sum_exp_2(log_all, log);
+            if assignment == 0 {
+                log_none = log;
+            }
+        }
+        let want = -10.0 * (log_none - log_all) / std::f64::consts::LN_10;
+
+        assert!(
+            (f64::from(got.get()) - want).abs() < 1e-3,
+            "site quality {} against {want} summed over every chromosome",
+            got.get()
+        );
+    }
+
     /// **The largest ploidy the caller accepts is scored, not refused.** The fold keeps a
     /// sample's copy-count weights in a fixed array sized for that ploidy, so this is the case
     /// that would find it a slot short. Two samples of sixteen copies each: reads that say every
@@ -1275,7 +1359,7 @@ mod tests {
     ///
     /// Three alleles at ploidy 2 separates them: measured, reading the row at
     /// `genotype × ploidy` instead of `genotype × allele_count` moves this locus's quality
-    /// from 4.843 to 0.274 Phred, and at ploidy 8 it indexes out of range.
+    /// from 10.736 to 11.928 Phred, and at ploidy 8 it indexes out of range.
     #[test]
     fn the_collapse_strides_by_the_allele_count_and_not_by_the_ploidy() {
         let (alleles, table) = generic_locus(2);
@@ -1304,9 +1388,9 @@ mod tests {
             human_like_seed(),
         );
         assert!(
-            (f64::from(quality.get()) - 19.471_59).abs() < 1e-3,
-            "a triallelic locus's quality came out at 19.472 Phred when this was written; \
-             a collapse that strides by the ploidy gives 19.991. Got {}",
+            (f64::from(quality.get()) - 10.736_49).abs() < 1e-3,
+            "a triallelic locus's quality came out at 10.736 Phred when this was written; \
+             a collapse that strides by the ploidy gives 11.928. Got {}",
             quality.get()
         );
     }
