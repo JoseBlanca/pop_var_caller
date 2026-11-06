@@ -345,18 +345,26 @@ Between records `d` bases apart:
   `src/neighbour_evidence/model.rs`; the weights from `ChosenTemplate::landing_weight`,
   `templates.rs`).
 
-**The parameters, per sample.** `F` starts at the sample's fitted inbreeding coefficient from the
-parameters file, clamped to [0.01, 0.99], and is re-estimated as the mean autozygous posterior,
-clamped the same, over every site the fitting windows walked; it is frozen with `S` and `R`. A
-per-window `F` would turn the long-run share into a local one, which is the autozygous state's job. `S` and `R` are chosen by likelihood from small grids — `S` ∈ {30, 300} kb,
+**The parameters, per sample.** `F` is the sample's fitted inbreeding coefficient from the
+parameters file, clamped to [0.01, 0.99], and the walk keeps it (changed 2026-11-06). It was
+re-estimated as the mean autozygous posterior over the sites the fitting windows walked, and that
+ran away where every sample is shallow: at 2×, one soft template explains both of a sample's copies
+about as well as two do, and in a 40-sample outbred cohort all at 2× the re-estimate reached 0.83 on
+average, up to 0.99, against a run-level estimate of 0 to 0.4 and a truth of 0. The pass then
+called heterozygotes homozygous — 3,344 true heterozygotes right against 7,521 with refinement off;
+keeping the run-level `F` gave 5,007. On every other cohort measured (inbreeding 0, 0.5, 0.8 and
+0.9, 2× to 30×, and the F2) keeping it changed no genotype class by more than 10 in 17,000, and
+even a selfed cohort (F 0.9) walked at `F` 0.01 moved by at most 7: the walk sees autozygosity
+through its templates (`doc/devel/reports/implementations/fixed_f_2026-11-06.md`).
+
+`S` and `R` are chosen by likelihood from small grids — `S` ∈ {30, 300} kb,
 `R` ∈ {10, 30, 100, 300, 1,000, 3,000} kb — **on the first windows of the run that hold at least
 5,000 of the sample's informative records, and then frozen** for the rest of the run. Until then
 each window adds its twelve walks' log-likelihoods to a running total a grid point, walks with the
-point whose total is largest (ties to the smaller `S`, then the smaller `R`), and re-estimates `F` from
-that point's walk — so a second fitting window refines the first one's choice rather than replacing
-it. A fitting window costs thirteen walks: the grid's twelve and the one that gives its posteriors.
+point whose total is largest (ties to the smaller `S`, then the smaller `R`) — so a second fitting
+window refines the first one's choice rather than replacing it. A fitting window costs thirteen walks: the grid's twelve and the one that gives its posteriors.
 *Settled in code 2026-11-01 (`src/neighbour_evidence/fit.rs`); the sentence before left open how
-several windows combine and whether `F` freezes.* Refitting every
+several windows combine.* Refitting every
 window would multiply the pass's cost by the grid's twelve walks (§6); whether a frozen fit loses
 accuracy is a measurement (§8).
 

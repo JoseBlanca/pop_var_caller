@@ -100,11 +100,11 @@ fn the_fit_freezes_after_enough_informative_records() {
     assert_eq!(frozen, after);
 }
 
-/// **An inbred sample's `F` is re-estimated high, and an outbred one's low**, from the same
-/// starting value: on a drawn cohort of 20 samples at 3 reads a record, wholly inbred against
-/// wholly outbred.
+/// **`F` stays the parameters file's while `S` and `R` are fitted**: the walk's own autozygous
+/// probabilities do not move it, whether the sample is wholly inbred or wholly outbred — on a drawn
+/// cohort of 20 samples at 2 reads a record, where re-estimating it from the walk ran away (§3.5).
 #[test]
-fn the_autozygous_share_follows_the_sample() {
+fn the_autozygous_share_is_the_run_level_one() {
     let shape = CohortShape {
         samples: 20,
         founders: 4,
@@ -112,27 +112,25 @@ fn the_autozygous_share_follows_the_sample() {
         spacing: 500,
         segment_bases: 300_000.0,
         inbred: true,
-        depth: 3.0,
+        depth: 2.0,
         read_error: 0.01,
         seed: 11,
         silent_from: None,
     };
-    let share = |inbred: bool| {
+    for inbred in [true, false] {
         let cohort = test_cohort(CohortShape { inbred, ..shape });
         let (owned, templates) = sample_sites(&cohort, 0);
-        let mut fit = SampleFit::new(0.5);
-        fit.fit_window(
-            &walk_sites(&owned),
-            templates,
-            None,
-            owned.len(),
-            MISMATCH,
-            None,
-        )
-        .autozygous_share
-    };
-    let inbred = share(true);
-    let outbred = share(false);
-    assert!(inbred > 0.9, "inbred sample: F {inbred}");
-    assert!(outbred < 0.2, "outbred sample: F {outbred}");
+        let mut fit = SampleFit::new(0.3);
+        let fitted = fit
+            .fit_window(
+                &walk_sites(&owned),
+                templates,
+                None,
+                owned.len(),
+                MISMATCH,
+                None,
+            )
+            .autozygous_share;
+        assert_eq!(fitted, 0.3, "inbred {inbred}");
+    }
 }
