@@ -518,7 +518,7 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
 }
 
 /// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
-const RECORDED_POSTERIOR_BITS: u64 = 0x6d50_9478_8744_6fdc;
+const RECORDED_POSTERIOR_BITS: u64 = 0x427a_ae99_a19e_d4ee;
 
 /// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
 /// round went unnoticed): two rounds and five leave every sample's fit in the same state, since
@@ -790,8 +790,8 @@ fn a_phased_windows_phase_is_the_same_bits_everywhere() {
 }
 
 /// The hash and the count [`a_phased_windows_phase_is_the_same_bits_everywhere`] expects.
-const RECORDED_PHASE_BITS: u64 = 0x85cd_eb9d_2a0d_f9d4;
-const RECORDED_PHASED_COLUMNS: usize = 2_871;
+const RECORDED_PHASE_BITS: u64 = 0xe17c_cb65_40be_9453;
+const RECORDED_PHASED_COLUMNS: usize = 2_782;
 
 /// **More rounds than the link test's masks hold are refused when the phasing is set up**, not in
 /// the middle of a window: 9 rounds would draw 8 × 9 = 72 paths, more than 64; 8 rounds draw 63.

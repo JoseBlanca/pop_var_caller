@@ -1,13 +1,15 @@
 //! **Each sample's walk parameters, fitted on the run's first windows and then frozen**
 //! (`doc/devel/ng/spec/neighbour_evidence_pass.md` §3.5).
 //!
-//! Three numbers are the sample's own. The share of its genome in autozygous runs, `F`, starts at
-//! its inbreeding coefficient from the parameters file and is re-estimated as the mean probability,
-//! over the sites walked, that the sample is autozygous there. The mean length of a stretch one copy
-//! copies from one template, `S`, and the mean autozygous run, `R`, are picked from small grids by
-//! the likelihood of the sample's evidence. The grid costs twelve walks a window, so it runs only
-//! until the windows fitted hold [`FIT_RECORDS`] of the sample's informative records; from then on
-//! all three are fixed for the rest of the run. Until then, each window adds its walks'
+//! Three numbers are the sample's own. The share of its genome in autozygous runs, `F`, is its
+//! inbreeding coefficient from the parameters file, fitted over the whole run, and the walk keeps it:
+//! re-estimated from the walk's own autozygous probabilities, it ran away to 0.83 on average in an
+//! outbred cohort whose samples were all at 2×, where one soft template explains both copies about
+//! as well as two, and the pass called heterozygotes homozygous (§3.5). The mean length of a
+//! stretch one copy copies from one template, `S`, and the mean autozygous run, `R`, are picked from
+//! small grids by the likelihood of the sample's evidence. The grid costs twelve walks a window, so
+//! it runs only until the windows fitted hold [`FIT_RECORDS`] of the sample's informative records;
+//! from then on `S` and `R` are fixed for the rest of the run. Until then, each window adds its walks'
 //! log-likelihoods to a running total a grid point, and the point with the largest total is the
 //! one walked with — so the second fitting window refines the first window's choice rather than
 //! replacing it.
@@ -39,14 +41,11 @@ const GRID_POINTS: usize = SEGMENT_GRID.len() * RUN_GRID.len();
 /// **One sample's walk parameters**, fitting or frozen.
 #[derive(Clone, Debug)]
 pub struct SampleFit {
-    /// `F`, the long-run autozygous share, clamped to [`AUTOZYGOUS_SHARE_BOUNDS`].
+    /// `F`, the long-run autozygous share: the parameters file's, clamped to
+    /// [`AUTOZYGOUS_SHARE_BOUNDS`].
     autozygous_share: f64,
     /// Each grid point's log-likelihood, summed over the windows fitted so far; segment-major.
     summed_log_likelihood: [f64; GRID_POINTS],
-    /// The autozygous probabilities of every site walked at the chosen grid point in the fitting
-    /// windows, summed, and how many sites that is — `F`'s re-estimate is their ratio.
-    autozygous_probability_sum: f64,
-    autozygous_sites: usize,
     /// The sample's informative records in the windows fitted so far.
     informative_records_fitted: usize,
     /// The grid point walked with: the one with the largest summed log-likelihood.
@@ -61,8 +60,6 @@ impl SampleFit {
         Self {
             autozygous_share: clamp_share(inbreeding_coefficient),
             summed_log_likelihood: [0.0; GRID_POINTS],
-            autozygous_probability_sum: 0.0,
-            autozygous_sites: 0,
             informative_records_fitted: 0,
             chosen: 0,
             frozen: false,
@@ -94,8 +91,8 @@ impl SampleFit {
     }
 
     /// **The parameters to walk this window with**, fitting on it first if the sample is not yet
-    /// frozen: the twelve grid walks at the current `F`, their log-likelihoods added to the running
-    /// totals, the best total chosen, and `F` re-estimated from that grid point's walk.
+    /// frozen: the twelve grid walks at the sample's `F`, their log-likelihoods added to the running
+    /// totals, and the best total chosen.
     /// `informative_records` is how many of the window's sites are informative records of the
     /// sample. `template_weights` is the walk's, as [`walk`] takes it.
     pub fn fit_window(
@@ -110,13 +107,7 @@ impl SampleFit {
         if self.frozen || sites.is_empty() {
             return self.parameters(mismatch, background_landing_share);
         }
-        let mut autozygous_sums = [0.0; GRID_POINTS];
-        for (point, (summed, autozygous_sum)) in self
-            .summed_log_likelihood
-            .iter_mut()
-            .zip(&mut autozygous_sums)
-            .enumerate()
-        {
+        for (point, summed) in self.summed_log_likelihood.iter_mut().enumerate() {
             let result = walk(
                 sites,
                 templates,
@@ -130,7 +121,6 @@ impl SampleFit {
                 },
             );
             *summed += result.log_likelihood;
-            *autozygous_sum = result.autozygous.iter().sum();
         }
         // The largest total; on a tie, the earlier grid point.
         self.chosen = (0..GRID_POINTS).fold(0, |best, point| {
@@ -140,10 +130,6 @@ impl SampleFit {
                 best
             }
         });
-        self.autozygous_probability_sum += autozygous_sums[self.chosen];
-        self.autozygous_sites += sites.len();
-        self.autozygous_share =
-            clamp_share(self.autozygous_probability_sum / self.autozygous_sites as f64);
         self.informative_records_fitted += informative_records;
         self.frozen = self.informative_records_fitted >= FIT_RECORDS;
         self.parameters(mismatch, background_landing_share)
