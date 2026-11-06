@@ -176,9 +176,8 @@ which some candidate is informative; what is left after the last such record joi
 before it, so no stretch is judged on less, and a window holding less than `I` is one stretch. One
 unit is about two SNPs at frequency ½ where the sample is certain, or about twenty at 5%.
 
-**`I` grows with the cohort (owner, 2026-11-06):** `I = max(1, ln(N / 7))`, `N` the other samples —
-one unit up to 19 of them, 1.1 at 21 (the 22-sample F2), 1.7 at 39, 4.0 at 399, 5.0 at 999, 6.6
-at 4,999 (`templates::stretch_information`). `N` counts samples in every round, also from round 2,
+**`I` grows with the cohort (owner, 2026-11-06):** `I = max(1, ln(N / 8))`, `N` the other samples —
+one unit up to 21 of them (the 22-sample F2), 1.6 at 39, 3.9 at 399, 4.8 at 999, 6.4 at 4,999 (`templates::stretch_information`). `N` counts samples in every round, also from round 2,
 where each offers two haplotypes but takes at most one of a stretch's places. In each stretch every candidate gets a score from its own `d`
 and `e` there:
 
@@ -223,9 +222,10 @@ siblings; stretch wins raised the heterozygous offspring genotypes called right 
   benchmark's dense crossovers; why the F2 wants short stretches is not traced. At 40 samples
   (outbred) and 400 (selfing) lengths 1 to 6 measured level, within 1 in 100 of every genotype class.
   The form follows a crude count — if an unrelated candidate matches `I` units with chance about
-  `e^−I`, the cohort's chance matches are `N·e^−I`, and `I = ln(N / 7)` holds them to about seven —
-  and the 7 is measured, the value that keeps the 22-sample F2 near one unit (1.1) and gives 400
-  samples four
+  `e^−I`, the cohort's chance matches are `N·e^−I`, and `I = ln(N / 8)` holds them to about eight —
+  and the 8 is measured, the value that keeps the 22-sample F2 at one unit, its best length (3,087
+  heterozygotes phased right there, 2,837 to 3,043 at the other lengths from 0.8 to 1.5), and gives
+  400 samples 3.9
   (`doc/devel/reports/implementations/stretch_scale_2026-11-06.md`).
 - *Why land by wins:* on the F2, landing every template alike kept 74 heterozygotes in 100 right
   against 81; in the natural cohorts it made no difference.

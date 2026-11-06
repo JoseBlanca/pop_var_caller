@@ -234,14 +234,14 @@ fn a_stretch_ends_once_it_holds_enough_to_judge_by() {
     assert_eq!(stretches(&[], &[], 1.0), Vec::<Range<usize>>::new());
 }
 
-/// **Stretches lengthen with the cohort, as the log of its other samples**: one unit up to 19 of
-/// them, then `ln(candidates / 7)`.
+/// **Stretches lengthen with the cohort, as the log of its other samples**: one unit up to 21 of
+/// them, then `ln(other_samples / 8)`.
 #[test]
 fn stretches_lengthen_with_the_log_of_the_cohort() {
     assert_eq!(stretch_information(1), MIN_STRETCH_INFORMATION);
-    assert_eq!(stretch_information(19), MIN_STRETCH_INFORMATION);
-    assert!(stretch_information(20) > MIN_STRETCH_INFORMATION);
-    for (other_samples, units) in [(39, 1.72), (399, 4.04), (999, 4.96), (4_999, 6.57)] {
+    assert_eq!(stretch_information(21), MIN_STRETCH_INFORMATION);
+    assert!(stretch_information(22) > MIN_STRETCH_INFORMATION);
+    for (other_samples, units) in [(39, 1.58), (399, 3.91), (999, 4.83), (4_999, 6.44)] {
         assert!(
             (stretch_information(other_samples) - units).abs() < 0.01,
             "{other_samples} other samples: {}",

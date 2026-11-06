@@ -66,11 +66,13 @@ pub const MIN_STRETCH_INFORMATION: f64 = 1.0;
 /// **How many chance matches a stretch may draw** (§3.3), the scale of [`stretch_information`]: a
 /// stretch holds `ln(other samples / this)` units, so that — if an unrelated sample matches a
 /// stretch of `I` units as well as a relative with chance about `e^-I` — about this many of the
-/// cohort's samples do. Measured, not derived: the model is crude, and 7 is the value that keeps
-/// the 22-sample F2 near one unit (1.1) while a 400-sample outbred cohort gets four, which recovered
-/// the phase that one unit lost there (98,871 → 108,600 heterozygotes phased right, of 145,951)
-/// and called 570 fewer true variants wrong (`stretch_scale_2026-11-06.md`).
-pub const TOLERATED_CHANCE_MATCHES: f64 = 7.0;
+/// cohort's samples do. Measured, not derived: the model is crude, and 8 is the value that keeps
+/// the 22-sample F2 at one unit — its best length: 3,087 heterozygotes phased right there, against
+/// 2,837 to 3,043 at the other lengths tried from 0.8 to 1.5 — while a 400-sample outbred cohort
+/// gets 3.9, near the four units that recovered the phase one unit lost there (98,871 → 108,600
+/// heterozygotes phased right, of 145,951) and called 570 fewer true variants wrong
+/// (`stretch_scale_2026-11-06.md`).
+pub const TOLERATED_CHANCE_MATCHES: f64 = 8.0;
 
 /// **How many samples win each stretch**, besides any tied with the last of them (§3.3): one a copy.
 /// Four measured worse than two on the cohorts of the 2026-11-05 report.
@@ -308,8 +310,8 @@ fn judged_records(records: &[SiteRecord], sample: usize, compared: &[usize]) -> 
 
 /// **How much a stretch holds when `other_samples` samples compete for it** (§3.3):
 /// `ln(other_samples / TOLERATED_CHANCE_MATCHES)` units, never less than
-/// [`MIN_STRETCH_INFORMATION`] — one unit up to 19 other samples, 1.7 at 39, 4.0 at 399, 5.0 at
-/// 999 and 6.6 at 4,999. It counts samples in every round, also from round 2 where each sample
+/// [`MIN_STRETCH_INFORMATION`] — one unit up to 21 other samples, 1.6 at 39, 3.9 at 399, 4.8 at
+/// 999 and 6.4 at 4,999. It counts samples in every round, also from round 2 where each sample
 /// offers two haplotypes: the scale was measured that way, and a sample takes at most one of a
 /// stretch's places. Short stretches see a copy's change of source where it happens, but among
 /// many candidates some unrelated one matches a short stretch by chance; at 400 samples one unit
