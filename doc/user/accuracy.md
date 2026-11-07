@@ -214,6 +214,133 @@ heterozygous and 3,900 homozygous. At 5× every caller misses about half of the 
 STR variants are heterozygotes. Most of these are called homozygous for the reference allele.
 At 10× the callers miss 17% to 34% of the heterozygotes and 4% to 7% of the homozygotes.
 
+## Imputation: genotype refinement and filling
+
+pvc can take into account the other samples' haplotypes at the surrounding loci, as priors, to refine each sample's genotypes or to fill missing data: it works out which samples' haplotypes the sample's two copies resemble
+along the genome, and calls the sample from its own reads together with theirs. Where the sample
+has no read at all, this fills a genotype the reads alone could not give. This approach is similar to that of Beagle and STITCH.
+
+Three cohorts are simulated over one 4 Mb genome, with reads mapped by minimap2:
+
+- **an F2**: two inbred parents at 30× and 20 F2 plants at 1×, with one crossover a contig in each
+  meiosis, so crossovers are about 80 times denser than on a real tomato chromosome;
+- **an outbred population** of 400 samples, drawn with a coalescent simulation (msprime), 100
+  samples each at 30×, 10×, 5× and 2×;
+- **a selfing population**, the same design with the samples selfed to F = 0.9.
+
+The tools:
+
+- **pvc** eb5a9367, with refinement forced on (`--refine-genotypes on`);
+- **GATK** 4.6.0.0, joint calling, as elsewhere on this page;
+- **GATK + Beagle**: Beagle 4.1 (27Jan18.7e1) run on GATK's calls, first to call genotypes from
+  GATK's genotype likelihoods, then to phase them;
+- **STITCH** 1.8.5, which calls genotypes from the reads at GATK's SNP sites.
+
+Beagle and STITCH were given the simulation's true recombination rate and, in the two
+populations, its true effective size. STITCH calls only SNPs, so the tables count SNPs only.
+
+![False positives against false negatives on SNPs for pvc with the refinement on and off, GATK + Beagle and STITCH, in the F2 at 1× and in the outbred and selfing populations at 2× to 30×; the size of each mark is the genotypes left missing](figures/errors_refine_sim_snps.svg)
+
+*SNPs only, because STITCH calls only SNPs; genotypes with and without reads summed. GATK alone,
+which fills no genotype, is in the tables below; pvc with the refinement off is the paler blue
+line. In the F2
+each caller is one point, its 20 plants at 1×. In the two populations each line is one caller,
+joining its groups of 100 samples from 2× to 30×. The size of each mark is the number of
+genotypes the caller left missing (`./.`); a missing genotype is counted only there, not as a
+false positive or a false negative. The bottom-left corner is the best. The axes are on a log
+scale. pvc version eb5a9367.*
+
+Each table cell gives three counts of one sample's genotype at one SNP, in this order:
+
+- **missed**: the truth has a variant and the call does not give its genotype;
+- **false**: a variant called where the truth is reference;
+- **no call**: the genotype left missing (`./.`).
+
+Genotypes are split by whether the sample had any mapped read over the SNP. In the 30× groups
+every tool makes at most 9 errors of the first two kinds, so those rows are left out.
+
+**F2**, the 20 plants at 1× (7,107 true heterozygous genotypes):
+
+| reads | pvc | GATK | GATK + Beagle | STITCH |
+|---|---|---|---|---|
+| with reads | 187 · 32 · 1 | 1,902 · 40 · 6,021 | 4,144 · 149 · 0 | 471 · 385 · 1,235 |
+| without reads | 40 · 7 · 734 | 0 · 0 · 7,895 | 2,850 · 177 · 0 | 293 · 235 · 930 |
+
+**Outbred population**, 100 samples a group (about 36,500 true heterozygous genotypes a group):
+
+| depth | reads | pvc | GATK | GATK + Beagle | STITCH |
+|---|---|---|---|---|---|
+| 10× | with reads | 193 · 39 · 0 | 722 · 65 · 3,360 | 190 · 73 · 0 | 265 · 8 · 3,906 |
+| 5× | with reads | 624 · 146 · 1 | 5,488 · 209 · 11,144 | 1,786 · 278 · 0 | 946 · 56 · 11,522 |
+| 5× | without reads | 7 · 1 · 165 | 1 · 0 · 2,297 | 47 · 6 · 0 | 21 · 1 · 475 |
+| 2× | with reads | 1,413 · 333 · 7 | 11,874 · 142 · 24,547 | 7,917 · 498 · 0 | 1,878 · 123 · 28,997 |
+| 2× | without reads | 114 · 5 · 3,494 | 18 · 0 · 41,191 | 1,723 · 163 · 0 | 453 · 23 · 10,889 |
+
+**Selfing population, F = 0.9**, 100 samples a group (about 3,500 true heterozygous genotypes a
+group):
+
+| depth | reads | pvc | GATK | GATK + Beagle | STITCH |
+|---|---|---|---|---|---|
+| 10× | with reads | 28 · 19 · 0 | 159 · 59 · 2,057 | 107 · 75 · 0 | 147 · 10 · 1,225 |
+| 5× | with reads | 165 · 85 · 0 | 595 · 205 · 4,855 | 584 · 274 · 0 | 538 · 110 · 4,790 |
+| 5× | without reads | 3 · 3 · 41 | 1 · 0 · 2,028 | 12 · 7 · 0 | 8 · 5 · 185 |
+| 2× | with reads | 391 · 174 · 2 | 1,134 · 152 · 15,866 | 1,815 · 466 · 0 | 959 · 254 · 12,105 |
+| 2× | without reads | 86 · 21 · 724 | 13 · 0 · 38,737 | 345 · 130 · 0 | 182 · 36 · 4,422 |
+
+**pvc with the refinement off and on**, the same SNP genotypes, with and without reads summed;
+each cell gives the count with the refinement off, then on:
+
+| cohort, depth | missed | false | no call |
+|---|---|---|---|
+| F2, 1× | 2,614 → 227 | 268 → 39 | 7,688 → 735 |
+| outbred, 2× | 12,219 → 1,527 | 797 → 338 | 34,899 → 3,501 |
+| outbred, 5× | 5,006 → 631 | 313 → 147 | 1,972 → 166 |
+| outbred, 10× | 727 → 196 | 82 → 39 | 59 → 4 |
+| selfing, 2× | 1,710 → 477 | 73 → 195 | 32,687 → 726 |
+| selfing, 5× | 730 → 168 | 70 → 88 | 1,727 → 41 |
+
+At 30× the refinement changes no count by more than 4.
+
+![pvc's missed, false and missing SNP genotypes with the refinement off and on, in the F2 at 1× and in the outbred and selfing populations at 2×](figures/errors_refine_on_off.svg)
+
+*The table's counts as bars, at each cohort's lowest depth: one panel per kind of error, each with
+its own scale, starting at 0. The paler bar is the refinement off, the darker one on. For
+reference, the counts are out of 20,420 SNP genotypes in the F2 (20 plants), 266,400 in the
+outbred group and 245,200 in the selfing group (100 samples each).*
+
+**Phase**, over all the samples of each cohort. A heterozygote is phased right when its two alleles
+are written in the truth's order. A wrong link is a switch between two consecutive phased
+heterozygotes of one sample: one copy's alleles cross over to the other. STITCH, as run here,
+writes no phase, and GATK phases a few hundred heterozygotes at most.
+
+| cohort | true heterozygotes | phased right, pvc | phased right, Beagle | wrong links, pvc | wrong links, Beagle |
+|---|---|---|---|---|---|
+| F2 | 7,107 | 5,718 | 1,891 | 5 of 5,409 | 527 of 1,816 |
+| outbred | 145,951 | 121,602 | 135,247 | 9 of 95,171 | 5,443 of 133,654 |
+| selfing | 14,206 | 10,989 | 13,667 | 3 of 9,497 | 236 of 13,006 |
+
+- **With reads at 2× and 1×, pvc misses the fewest variants and leaves almost none uncalled.** In
+  the outbred 2× group pvc misses 1,413 variant genotypes, STITCH 1,878, Beagle 7,917 and GATK
+  11,874; pvc leaves 7 uncalled, against about 25,000 for GATK and 29,000 for STITCH. In the F2,
+  pvc misses 187, STITCH 471 and Beagle 4,144.
+- **Without reads, pvc fills most genotypes and gets few of them wrong; Beagle fills all of them
+  and gets more wrong.** In the outbred 2× group pvc leaves 3,494 uncalled and gets 119 wrong,
+  Beagle leaves none and gets 1,886 wrong, and STITCH leaves 10,889 and gets 476 wrong. GATK
+  fills nothing.
+- **In the outbred population pvc calls more false variants than STITCH, but fewer than
+  Beagle.** With reads, pvc calls 333 false variants at 2×, 146 at 5× and 39 at 10×; STITCH 123,
+  56 and 8; Beagle 498, 278 and 73. The refinement halves pvc's false variants: with it off, pvc
+  calls 797, 313 and 82. In the selfing population pvc calls fewer than STITCH at 2× and 5×, 174
+  and 85 against 254 and 110.
+- **Beagle phases more heterozygotes; pvc's phase almost never switches.** In the outbred
+  population Beagle phases 135,247 of the 145,951 heterozygotes right and pvc 121,602, but Beagle
+  switches copies at about 4 links in 100 and pvc at about 1 in 10,000 (9 of 95,171). In the F2
+  pvc phases 5,718 of the 7,107 heterozygotes right and Beagle 1,891, and Beagle switches at more
+  than one link in four.
+
+These results come from 22 and 400 samples at 1× to 30×. They do not show how the refinement
+behaves in a cohort of a few samples.
+
 ## Simulated inbreeding: does a wrong F cost genotypes?
 
 A caller that assumes every sample is outbred expects heterozygotes in proportions an inbred
@@ -319,103 +446,3 @@ fewer. Every error in the group's 10 samples, wrong and missing together:
   F = 0.75), and DeepVariant calls a variant where nothing was planted 144 and 152 times; pvc
   never does.
 
-## Simulated cohorts: genotypes refined from the other samples
-
-pvc can take into account the other samples' haplotypes at the surrounding loci, as priors, to refine each sample's genotypes: it works out which samples' haplotypes the sample's two copies resemble
-along the genome, and calls the sample from its own reads together with theirs. Where the sample
-has no read at all, this fills a genotype the reads alone could not give. This approach is similar to that of Beagle and STITCH.
-
-Three cohorts are simulated over one 4 Mb genome, with reads mapped by minimap2:
-
-- **an F2**: two inbred parents at 30× and 20 F2 plants at 1×, with one crossover a contig in each
-  meiosis, so crossovers are about 80 times denser than on a real tomato chromosome;
-- **an outbred population** of 400 samples, drawn with a coalescent simulation (msprime), 100
-  samples each at 30×, 10×, 5× and 2×;
-- **a selfing population**, the same design with the samples selfed to F = 0.9.
-
-The tools:
-
-- **pvc** 7120e12d, with refinement forced on (`--refine-genotypes on`);
-- **GATK** 4.6.0.0, joint calling, as elsewhere on this page;
-- **GATK + Beagle**: Beagle 4.1 (27Jan18.7e1) run on GATK's calls, first to call genotypes from
-  GATK's genotype likelihoods, then to phase them;
-- **STITCH** 1.8.5, which calls genotypes from the reads at GATK's SNP sites.
-
-Beagle and STITCH were given the simulation's true recombination rate and, in the two
-populations, its true effective size. STITCH calls only SNPs, so the tables count SNPs only.
-
-![Errors of pvc, GATK, GATK + Beagle and STITCH on SNPs, in the F2 at 1× and in the outbred and selfing populations at 5×](figures/errors_refine_sim_snps.svg)
-
-*The errors in the F2's 20 plants at 1× and in the 100 samples at 5× of each population, SNPs
-only because STITCH calls only SNPs; genotypes with and without reads summed. pvc version
-7120e12d.*
-
-Each table cell gives three counts of one sample's genotype at one SNP, in this order:
-
-- **missed**: the truth has a variant and the call does not give its genotype;
-- **false**: a variant called where the truth is reference;
-- **no call**: the genotype left missing (`./.`).
-
-Genotypes are split by whether the sample had any mapped read over the SNP. In the 30× groups
-every tool makes at most 9 errors of the first two kinds, so those rows are left out.
-
-**F2**, the 20 plants at 1× (7,107 true heterozygous genotypes):
-
-| reads | pvc | GATK | GATK + Beagle | STITCH |
-|---|---|---|---|---|
-| with reads | 266 · 61 · 2 | 1,902 · 40 · 6,021 | 4,144 · 149 · 0 | 471 · 385 · 1,235 |
-| without reads | 45 · 2 · 966 | 0 · 0 · 7,895 | 2,850 · 177 · 0 | 293 · 235 · 930 |
-
-**Outbred population**, 100 samples a group (about 36,500 true heterozygous genotypes a group):
-
-| depth | reads | pvc | GATK | GATK + Beagle | STITCH |
-|---|---|---|---|---|---|
-| 10× | with reads | 198 · 2,175 · 0 | 722 · 65 · 3,360 | 190 · 73 · 0 | 265 · 8 · 3,906 |
-| 5× | with reads | 734 · 2,947 · 6 | 5,488 · 209 · 11,144 | 1,786 · 278 · 0 | 946 · 56 · 11,522 |
-| 5× | without reads | 9 · 0 · 223 | 1 · 0 · 2,297 | 47 · 6 · 0 | 21 · 1 · 475 |
-| 2× | with reads | 1,838 · 1,549 · 27 | 11,874 · 142 · 24,547 | 7,917 · 498 · 0 | 1,878 · 123 · 28,997 |
-| 2× | without reads | 132 · 9 · 4,407 | 18 · 0 · 41,191 | 1,723 · 163 · 0 | 453 · 23 · 10,889 |
-
-**Selfing population, F = 0.9**, 100 samples a group (about 3,500 true heterozygous genotypes a
-group):
-
-| depth | reads | pvc | GATK | GATK + Beagle | STITCH |
-|---|---|---|---|---|---|
-| 10× | with reads | 34 · 43 · 0 | 159 · 59 · 2,057 | 107 · 75 · 0 | 147 · 10 · 1,225 |
-| 5× | with reads | 171 · 233 · 0 | 595 · 205 · 4,855 | 584 · 274 · 0 | 538 · 110 · 4,790 |
-| 5× | without reads | 2 · 4 · 56 | 1 · 0 · 2,028 | 12 · 7 · 0 | 8 · 5 · 185 |
-| 2× | with reads | 383 · 398 · 2 | 1,134 · 152 · 15,866 | 1,815 · 466 · 0 | 959 · 254 · 12,105 |
-| 2× | without reads | 116 · 23 · 840 | 13 · 0 · 38,737 | 345 · 130 · 0 | 182 · 36 · 4,422 |
-
-**Phase**, over all the samples of each cohort. A heterozygote is phased right when its two alleles
-are written in the truth's order. A wrong link is a switch between two consecutive phased
-heterozygotes of one sample: one copy's alleles cross over to the other. STITCH, as run here,
-writes no phase, and GATK phases a few hundred heterozygotes at most.
-
-| cohort | true heterozygotes | phased right, pvc | phased right, Beagle | wrong links, pvc | wrong links, Beagle |
-|---|---|---|---|---|---|
-| F2 | 7,107 | 3,087 | 1,891 | 0 of 2,488 | 527 of 1,816 |
-| outbred | 145,951 | 98,871 | 135,247 | 1 of 60,231 | 5,443 of 133,654 |
-| selfing | 14,206 | 10,059 | 13,667 | 1 of 8,120 | 236 of 13,006 |
-
-- **With reads at 2× and 1×, pvc misses the fewest variants and leaves almost none uncalled.** In
-  the outbred 2× group pvc misses 1,838 variant genotypes, STITCH 1,878, Beagle 7,917 and GATK
-  11,874; pvc leaves 27 uncalled, against about 25,000 for GATK and 29,000 for STITCH. In the F2,
-  pvc misses 266, STITCH 471 and Beagle 4,144.
-- **Without reads, pvc fills most genotypes and gets few of them wrong; Beagle fills all of them
-  and gets more wrong.** In the outbred 2× group pvc leaves 4,407 uncalled and gets 141 wrong,
-  Beagle leaves none and gets 1,886 wrong, and STITCH leaves 10,889 and gets 476 wrong. GATK
-  fills nothing.
-- **pvc calls far more false variants in the outbred 5× and 10× groups: 2,947 and 2,175, against
-  278 or fewer for every other tool.** They appear with refinement off as well, so the refinement
-  does not cause them. Almost all are a heterozygote in one sample only, at a position where two
-  of that sample's reads carry the same sequencing error. They come from a defect in how pvc
-  scores a site's quality in a large cohort, which will be corrected in a later version. Their
-  genotype quality (GQ) is low, 3 to 10, so a filter on GQ removes them.
-- **Beagle phases more heterozygotes; pvc's phase almost never switches.** In the outbred
-  population Beagle phases 135,247 of the 145,951 heterozygotes right and pvc 98,871, but Beagle
-  switches copies at about 4 links in 100 and pvc at 1 in 60,231. In the F2 Beagle switches at
-  more than one link in four.
-
-These results come from 22 and 400 samples at 1× to 30×. They do not show how the refinement
-behaves in a cohort of a few samples.

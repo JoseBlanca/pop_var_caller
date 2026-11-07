@@ -56,7 +56,7 @@ STYLE = {
                                    label="HipSTR, fixed stutter"),
 }
 CALLERS = list(STYLE)
-DEPTH_ORDER = ["5x", "10x", "15x", "20x", "30x", "50x", "60x", "full", "300x"]
+DEPTH_ORDER = ["1x", "2x", "3x", "5x", "10x", "15x", "20x", "30x", "50x", "60x", "full", "300x"]
 
 
 def read_rows(path):
@@ -246,14 +246,10 @@ def dot_panel(ax, counts, layout, show_labels, label=error_label):
                     markeredgecolor=SURFACE if mark["fill"] else colour,
                     markeredgewidth=mark["edge"], alpha=mark["alpha"], zorder=mark["z"])
     ax.set_facecolor(SURFACE)
-    values = [v for c in counts.values() for v in c.values()] or [1]
-    if min(values) == 0:
-        # A zero has no place on a log axis: a short linear stretch from 0 to 1 holds it.
-        ax.set_xscale("symlog", linthresh=1, linscale=0.4)
-        ax.set_xlim(left=-0.3)
-    else:
-        ax.set_xscale("log")
-        ax.set_xlim(left=10 ** math.floor(math.log10(min(values))))
+    # Every axis starts at 0 (owner, 7 November 2026). A zero has no place on a log axis: a short
+    # linear stretch from 0 to 1 holds it.
+    ax.set_xscale("symlog", linthresh=1, linscale=0.4)
+    ax.set_xlim(left=-0.3)
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}" if v >= 1 else "0"))
     ax.xaxis.set_minor_formatter(NullFormatter())
     ax.set_ylim(bottom + 0.5, -0.7)
@@ -344,56 +340,127 @@ def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggreg
 # refinement matters most, genotypes with and without reads summed. SNPs only, because STITCH calls
 # only SNPs; the figure with every class of variant and no STITCH told the same story (owner,
 # 6 November 2026).
-# No fourth hue separates from the three for every reader, so GATK + Beagle, which refines GATK's
-# calls, takes GATK's colour, and STITCH the light neutral HipSTR has in the repeat benchmarks,
-# where STITCH never appears.
+# GATK alone fills nothing and is in the page's tables, not the figure, which it crowded (owner,
+# 7 November 2026). GATK + Beagle, which refines GATK's calls, takes GATK's colour and mark, and
+# STITCH the light neutral HipSTR has in the repeat benchmarks, where STITCH never appears.
 REFINE_PANELS = [
-    ("F2, 20 plants at 1×", "simulated F2", "F2 1x"),
-    ("outbred, 100 samples at 5×", "simulated natural population, outbred", "5x"),
-    ("selfing F = 0.9, 100 samples at 5×", "simulated natural population, selfing F = 0.9", "5x"),
+    # (panel, dataset, {the benchmark's depth group: the depth it is drawn as})
+    ("F2, 20 plants at 1×", "simulated F2", {"F2 1x": "1x"}),
+    ("outbred, 100 samples a depth", "simulated natural population, outbred",
+     {d: d for d in ("2x", "5x", "10x", "30x")}),
+    ("selfing F = 0.9, 100 samples a depth", "simulated natural population, selfing F = 0.9",
+     {d: d for d in ("2x", "5x", "10x", "30x")}),
 ]
 REFINE_STYLE = {"pvc (refinement on)": dict(STYLE["pvc (fitted)"], label="pvc"),
-                "GATK": STYLE["GATK"],
                 "GATK + Beagle 4.1": dict(STYLE["GATK"], label="GATK + Beagle"),
                 "STITCH": dict(STYLE["HipSTR"], label="STITCH")}
-REFINE_FIGURES = [
-    ("errors_refine_sim_snps", "Errors — refined genotypes, simulated cohorts: SNPs",
-     "SNPs only, with and without reads summed", ("SNP",),
-     ["pvc (refinement on)", "GATK", "GATK + Beagle 4.1", "STITCH"]),
-]
+REFINE_CALLERS = ["pvc (refinement on)", "pvc (refinement off)", "GATK + Beagle 4.1", "STITCH"]
 
 
 def refine_figures(rows, out):
+    """`errors_refine_sim_snps`: false positives against false negatives in each cohort, SNPs only
+    (STITCH calls only SNPs), genotypes with and without reads summed, a mark's area the genotypes
+    left missing (owner, 7 November 2026)."""
     wanted = {metric for metric, _, _ in ERROR_MARKS}
-    made = []
-    saved = {c: STYLE.get(c) for c in REFINE_STYLE}
-    STYLE.update(REFINE_STYLE)  # dot_panel colours rows by STYLE
+    classes = {"SNP, with reads", "SNP, without reads"}
+    panels = []
+    for panel, dataset, groups in REFINE_PANELS:
+        acc = collections.defaultdict(lambda: collections.defaultdict(float))
+        for r in rows:
+            if (r["benchmark"] == "refine_sim" and r["dataset"] == dataset
+                    and r["depth"] in groups and r["stage"] == "error type"
+                    and r["variant_class"] in classes and r["caller"] in REFINE_CALLERS):
+                # Every scored point is kept, a caller with no error at all included.
+                counts = acc[(groups[r["depth"]], r["caller"])]
+                if r["metric"] in wanted:
+                    counts[r["metric"]] += float(r["value"])
+        # A count the table has no row for is a zero (Beagle leaves no genotype missing).
+        panels.append((panel, {k: {m: v.get(m, 0.0) for m in wanted} for k, v in acc.items()}))
+    if not all(c for _, c in panels):
+        return []
+    # pvc with the refinement off, the baseline the refinement is judged against (owner,
+    # 7 November 2026): pvc's blue, paler, and a mark of its own.
+    style = dict(REFINE_STYLE, **{"pvc (refinement off)": dict(
+        STYLE["pvc (fitted)"], color=tint(STYLE["pvc (fitted)"]["color"], 0.45), marker="o",
+        label="pvc, refinement off")})
+    saved = {c: STYLE.get(c) for c in style}
+    STYLE.update(style)  # scatter_figure styles its callers by STYLE
     try:
-        for name, title, subtitle, kinds, callers in REFINE_FIGURES:
-            classes = {f"{k}, {reads}" for k in kinds for reads in ("with reads", "without reads")}
-            panels = []
-            for panel, dataset, group in REFINE_PANELS:
-                acc = collections.defaultdict(lambda: collections.defaultdict(float))
-                for r in rows:
-                    if (r["benchmark"] == "refine_sim" and r["dataset"] == dataset
-                            and r["depth"] == group and r["stage"] == "error type"
-                            and r["variant_class"] in classes and r["caller"] in callers
-                            and r["metric"] in wanted):
-                        # One depth group for every panel, so the callers' rows line up across them.
-                        acc[("", r["caller"])][r["metric"]] += float(r["value"])
-                # A count the table has no row for is a zero (Beagle leaves no genotype missing); it
-                # must be in the counts so the panel's axis makes room for zero.
-                panels.append((panel, {k: {m: v.get(m, 0.0) for m in wanted}
-                                       for k, v in acc.items()}))
-            made.append(error_figure(panels, title, subtitle, out, name, ncols=1, callers=callers,
-                                     label=lambda c: REFINE_STYLE[c]["label"]))
+        return [scatter_figure(panels, "Errors — refined genotypes, simulated cohorts: SNPs", None,
+                               out, "errors_refine_sim_snps", callers=REFINE_CALLERS,
+                               size_by_missing=True)]
     finally:
         for c, st in saved.items():
             if st is None:
                 STYLE.pop(c, None)
             else:
                 STYLE[c] = st
-    return made
+
+
+# pvc with the refinement off and on, each kind of error in a panel of its own (owner, 7 November
+# 2026): the counts run from tens to tens of thousands, so each panel has its own linear scale from
+# 0, and the cohorts sit side by side within it.
+# The lowest depth of each cohort only, where the refinement matters most (owner, 7 November 2026).
+REFINE_BAR_GROUPS = [
+    ("F2, 1×", "simulated F2", "F2 1x"),
+    ("outbred, 2×", "simulated natural population, outbred", "2x"),
+    ("selfing, 2×", "simulated natural population, selfing F = 0.9", "2x"),
+]
+REFINE_BAR_PANELS = [
+    ("wrong_gt_truth_var", "missed: the truth has a variant and the call is not its genotype"),
+    ("wrong_gt_truth_ref", "false: a variant called where the truth is reference"),
+    ("no_call", "no call: the genotype left missing (./.)"),
+]
+
+
+def refine_on_off_figure(rows, out):
+    """`errors_refine_on_off`: pvc's SNP errors with the refinement off and on, genotypes with and
+    without reads summed; one panel per kind of error, two bars per cohort and depth."""
+    callers = [("pvc (refinement off)", "refinement off"), ("pvc (refinement on)", "refinement on")]
+    counts = collections.defaultdict(float)
+    for r in rows:
+        if (r["benchmark"] == "refine_sim" and r["stage"] == "error type"
+                and r["variant_class"] in ("SNP, with reads", "SNP, without reads")
+                and r["caller"] in dict(callers) and r["value"] != ""):
+            counts[(r["dataset"], r["depth"], r["caller"], r["metric"])] += float(r["value"])
+    if not counts:
+        return None
+    blue = STYLE["pvc (fitted)"]["color"]
+    colours = {"pvc (refinement off)": tint(blue, 0.45), "pvc (refinement on)": blue}
+    fig, axes = plt.subplots(len(REFINE_BAR_PANELS), 1, figsize=(5.2, 2.8 * len(REFINE_BAR_PANELS)),
+                             facecolor=SURFACE)
+    width = 0.38
+    for ax, (metric, panel) in zip(axes, REFINE_BAR_PANELS):
+        ax.set_facecolor(SURFACE)
+        top = max(counts[(ds, d, c, metric)] for _, ds, d in REFINE_BAR_GROUPS for c, _ in callers)
+        for i, (caller, _) in enumerate(callers):
+            xs = [g + (i - 0.5) * (width + 0.02) for g in range(len(REFINE_BAR_GROUPS))]
+            ys = [counts[(ds, d, caller, metric)] for _, ds, d in REFINE_BAR_GROUPS]
+            ax.bar(xs, ys, width=width, color=colours[caller], zorder=2)
+            for x, y in zip(xs, ys):
+                ax.annotate(f"{y:,.0f}", (x, y), xytext=(0, 2), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=7, color=TEXT_2)
+        ax.set_ylim(0, top * 1.15)
+        ax.set_xticks(range(len(REFINE_BAR_GROUPS)))
+        ax.set_xticklabels([g for g, _, _ in REFINE_BAR_GROUPS], fontsize=9, color=TEXT)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.grid(True, axis="y", color=GRID, linewidth=0.8, zorder=0)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(TEXT_2)
+        ax.tick_params(colors=TEXT_2, labelsize=9)
+        ax.set_title(panel, color=TEXT, fontsize=10, loc="left")
+        ax.set_ylabel("SNP genotypes", color=TEXT_2, fontsize=9)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.97))
+    handles = [Line2D([], [], linestyle="none", marker="s", markersize=10,
+                      markerfacecolor=colours[c], markeredgecolor=colours[c], label=label)
+               for c, label in callers]
+    fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False, fontsize=9,
+               bbox_to_anchor=(0.5, 0), labelcolor=TEXT)
+    fig.text(0.01, 0.985, "pvc, refinement off and on — SNPs",
+             ha="left", va="top", color=TEXT, fontsize=13)
+    return save(fig, out, "errors_refine_on_off")
 
 
 # The simulated inbreeding benchmark (bench/inbreeding_sim.py) counts each sample's genotype against
@@ -642,12 +709,9 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
         for i, (setter, limits) in enumerate(((ax.set_xscale, ax.set_xlim),
                                               (ax.set_yscale, ax.set_ylim))):
             values = [p[i] for p in points]
-            if min(values) == 0:
-                # The zero stretch only where some caller has a zero.
-                setter("symlog", linthresh=1, linscale=0.4)
-                limits(-0.3, max(values) * 1.6)
-            else:
-                limits(min(values) / 1.6, max(values) * 1.6)
+            # Every axis starts at 0 (owner, 7 November 2026), through the zero stretch.
+            setter("symlog", linthresh=1, linscale=0.4)
+            limits(-0.3, max(values) * 1.6)
         fmt = FuncFormatter(lambda v, _: f"{v:,.0f}" if v >= 1 else "0")
         minor = FuncFormatter(lambda v, _: f"{v:,.0f}" if is_two_or_five(v) else "")
         for axis, (low, high) in ((ax.xaxis, ax.get_xlim()), (ax.yaxis, ax.get_ylim())):
@@ -665,7 +729,8 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
         most = max(c.get("no_call", 0) for _, cs in panels for c in cs.values()) or 1
         # None, then the three largest round counts the figure reaches that are visibly bigger
         # than none (a twentieth of its most, or more).
-        rounds = [v for v in (10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)
+        rounds = [v for v in (10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000,
+                              100000)
                   if most / 20 <= v <= most]
         steps = [0] + rounds[-3:]
         handles = [Line2D([], [], linestyle="none", marker="o", markersize=missing_size(v, most),
@@ -854,6 +919,7 @@ def main():
                                  exclude=("HipSTR",)),
         *stutter_figures(rows, out),
         *refine_figures(rows, out),
+        refine_on_off_figure(rows, out),
         stutter_homopolymer_figure(rows, out),
         *inbreeding_figures(rows, out),
         inbreeding_scatter_figure(rows, out),
