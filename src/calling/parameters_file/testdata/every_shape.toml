@@ -266,6 +266,7 @@ settled = false
 period = 5
 reference_repeats = 9
 fitted = 50
+interrupted = 3
 over_guard_threshold = 1
 too_deep = 7
 in_stutter_tail = 2

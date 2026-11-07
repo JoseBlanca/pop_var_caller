@@ -233,7 +233,14 @@ fn main() {
                     "gather_strata, {samples} samples x {} tracts",
                     strata_count as usize * tracts_a_stratum
                 ),
-                || ssr_fit::gather_strata(&mut cohort, &strata, &groups).expect("resident"),
+                || {
+                    let kept: Vec<ssr_fit::KeptTract> = strata
+                        .iter()
+                        .copied()
+                        .map(ssr_fit::KeptTract::pure)
+                        .collect();
+                    ssr_fit::gather_strata(&mut cohort, &kept, &groups).expect("resident")
+                },
             );
             // **Rows, not tracts, is the unit the footprint is linear in**: one
             // row is one (tract, sample-with-reads), and a sample with no read

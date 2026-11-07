@@ -162,6 +162,22 @@ impl ParametersFile {
             ));
         }
         let at = "repeat_tracts_left_out";
+        if self.format_version < FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT
+            && let Some(row) = left_out.by_stratum.iter().find(|row| row.interrupted > 0)
+        {
+            return Err(refuse(
+                format!(
+                    "{at}.by_stratum[period = {}, reference_repeats = {}].interrupted",
+                    row.period, row.reference_repeats
+                ),
+                format!(
+                    "is a format-{FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT} count in a file whose \
+                     `format_version` says {}, so it is not clear which format the file was \
+                     written in; set `format_version` to the format the file was written in",
+                    self.format_version
+                ),
+            ));
+        }
         if let Some(depth) = left_out.typical_depth {
             finite(format!("{at}.typical_depth"), depth)?;
         }
@@ -1465,6 +1481,8 @@ const FORMAT_THAT_ADDED_THE_MISREAD_TABLE: u32 = 8;
 const FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT: u32 = 7;
 /// The format that added `repeat_tracts.stutter_multiplier_by_read_group`.
 const FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS: u32 = 9;
+/// Format 9 also added `[repeat_tracts_left_out].by_stratum.interrupted` (`str_interrupted_tracts.md` §4).
+const FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT: u32 = 9;
 
 /// The format that gave the tract ladder's second rung its own stated between-locus share,
 /// `repeat_tracts.fallback_between_locus_share_with_own_shares`.
@@ -2373,10 +2391,12 @@ mod tests {
             file.format_version = 7;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            without_the_interrupted_counts(file);
         });
         accepted(|file| {
             file.format_version = 8;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            without_the_interrupted_counts(file);
         });
         accepted(|file| file.format_version = 9);
         let (field, _) = refused(|file| file.format_version = 10);
@@ -2511,6 +2531,33 @@ mod tests {
             file.stated_constants.repeat_tract_outlier_weight.value =
                 OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
         });
+    }
+
+    /// **A format-9 file's `[repeat_tracts_left_out]` with its interrupted counts at zero**, as a
+    /// file from before format 9 reads them.
+    fn without_the_interrupted_counts(file: &mut ParametersFile) {
+        if let Some(left_out) = file.repeat_tracts_left_out.as_mut() {
+            for row in &mut left_out.by_stratum {
+                row.interrupted = 0;
+            }
+        }
+    }
+
+    /// **The interrupted count is a format-9 key** (`str_interrupted_tracts.md` §4): a file
+    /// stamped 8 with a class's count above zero is refused naming that row's key; at zero, as an
+    /// older file reads it, the same file is accepted.
+    #[test]
+    fn an_interrupted_count_in_a_version_eight_file_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.format_version = 8;
+            file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+        });
+        assert_eq!(
+            field,
+            "repeat_tracts_left_out.by_stratum[period = 5, reference_repeats = 9].interrupted"
+        );
+        assert!(problem.contains("format-9 count"), "{problem}");
+        assert!(problem.contains("says 8"), "{problem}");
     }
 
     /// **`[repeat_tracts_left_out]` is a format-7 table**: a file stamped 6 that holds it is refused
@@ -2805,12 +2852,16 @@ mod tests {
         assert_eq!(field, format!("{at}[read_group = 0, period = 5]"));
         // A format-9 table in a file that says 8 cannot say which format it was written in; the
         // same file without it is a format-8 file, read with every multiplier one.
-        let (field, problem) = refused(|file| file.format_version = 8);
+        let (field, problem) = refused(|file| {
+            file.format_version = 8;
+            without_the_interrupted_counts(file);
+        });
         assert_eq!(field, at);
         assert!(problem.contains("format-9 table"), "{problem}");
         accepted(|file| {
             file.format_version = 8;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            without_the_interrupted_counts(file);
         });
     }
 

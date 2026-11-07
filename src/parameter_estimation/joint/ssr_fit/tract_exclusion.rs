@@ -129,6 +129,9 @@ pub struct StratumTractsLeftOut {
     pub stratum: Stratum,
     /// Tracts the last fit read.
     pub fitted: u64,
+    /// Left out first, as interrupted: not recorded as perfect by the catalog (spec
+    /// `str_interrupted_tracts.md` §2).
+    pub interrupted: u64,
     /// Left out before the fit by the guard: more than one read in ten of those differing from the
     /// reference by a non-whole number of repeats.
     pub over_guard_threshold: u64,
@@ -143,6 +146,7 @@ impl StratumTractsLeftOut {
         Self {
             stratum: evidence.stratum,
             fitted: evidence.tracts.len() as u64,
+            interrupted: evidence.tracts_interrupted,
             over_guard_threshold: evidence.tracts_over_guard_threshold,
             too_deep: evidence.tracts_too_deep,
             in_stutter_tail: evidence.tracts_in_stutter_tail,
@@ -162,7 +166,8 @@ pub struct DeepTractsLeftOut {
 }
 
 /// **Of the reads that reached a stratum's tracts, the share that crossed one**, over every tract
-/// the stratum holds, those the guard left out included; `None` when no read reached any.
+/// the stratum holds, those the guard left out and the interrupted ones included; `None` when no
+/// read reached any.
 ///
 /// Every tract of a stratum is the same length, so one share serves all of them, and a
 /// duplicated tract adds reads to both counts, so it barely moves the share. Reads the guard
@@ -173,7 +178,8 @@ fn crossing_share(evidence: &StratumEvidence) -> Option<f64> {
         .iter()
         .map(TractReads::crossing_reads)
         .sum::<u64>()
-        + evidence.reads_crossing_tracts_over_guard_threshold;
+        + evidence.reads_crossing_tracts_over_guard_threshold
+        + evidence.reads_crossing_interrupted_tracts;
     let reaching = crossing + evidence.guard_reads + evidence.reads_reaching_not_crossing;
     (crossing > 0).then(|| crossing as f64 / reaching as f64)
 }
@@ -425,6 +431,8 @@ mod tests {
             reads_crossing_tracts_over_guard_threshold: 0,
             tracts_too_deep: 0,
             tracts_in_stutter_tail: 0,
+            tracts_interrupted: 0,
+            reads_crossing_interrupted_tracts: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
             bases_compared: 0,

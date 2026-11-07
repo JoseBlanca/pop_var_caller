@@ -156,11 +156,14 @@ pub(super) fn heavy_exclusion_lines(classes: &[&StratumEvidence]) -> Vec<String>
             "motif length {} at {} repeats",
             evidence.stratum.period, evidence.stratum.reference_repeats
         );
-        if removed > 0 && evidence.tracts.is_empty() {
+        if removed + evidence.tracts_interrupted > 0 && evidence.tracts.is_empty() {
             lines.push(format!(
-                "WARNING: {name}: every one of its {before} tract(s) was left out ({} by depth, \
-                 {} by the stutter tail), so it has no fit of its own",
-                evidence.tracts_too_deep, evidence.tracts_in_stutter_tail
+                "WARNING: {name}: every one of its {} tract(s) was left out ({} as interrupted, \
+                 {} by depth, {} by the stutter tail), so it has no fit of its own",
+                before + evidence.tracts_interrupted,
+                evidence.tracts_interrupted,
+                evidence.tracts_too_deep,
+                evidence.tracts_in_stutter_tail
             ));
             continue;
         }
