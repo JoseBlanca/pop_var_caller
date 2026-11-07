@@ -32,7 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import FuncFormatter, NullFormatter  # noqa: E402
+from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter  # noqa: E402
 
 # The reference palette's first three categorical slots (validated all-pairs, light mode). pvc's
 # two ways of running share its hue and differ in line style and marker.
@@ -557,23 +557,44 @@ SCATTER_LABEL = {"pvc (fitted)": "pvc"}
 SCATTER_SIZES = [5, 8.5, 12, 15.5, 19]
 
 
-def error_scatter_figure(rows, benchmark, title, subtitle, out, name):
-    """Two figures, `<name>_scatter_snps_indels` and `<name>_scatter_strs_complex`."""
-    made = []
-    for suffix, kinds_title, kinds in KIND_FIGURES:
-        panels = [(t, error_counts(rows, benchmark, kind)) for t, kind in kinds]
-        panels = [(t, c) for t, c in panels if c]
-        if panels:
-            made.append(scatter_figure(panels, f"{title}: {kinds_title}", subtitle, out,
-                                       f"{name}_scatter_{suffix}"))
-    return made
+# SNPs, and every other class summed: the split most readers expect (owner, 7 November 2026), used
+# by doc/user/accuracy.md's chromosome 20 and trio figures. The STRs alone are on its STR section.
+SNPS_OTHER_PANELS = [("SNPs", ("SNP",)), ("indels, STRs and complex variants", ("indel", "STR", "complex"))]
+
+
+def snps_other_panels(rows, benchmark, aggregate=False):
+    """[(panel title, {(depth, caller): error counts})]: SNPs, then the other classes summed."""
+    panels = []
+    for panel, kinds in SNPS_OTHER_PANELS:
+        summed = collections.defaultdict(lambda: collections.defaultdict(float))
+        for kind in kinds:
+            for key, counts in error_counts(rows, benchmark, kind, aggregate).items():
+                for metric, value in counts.items():
+                    summed[key][metric] += value
+        if summed:
+            panels.append((panel, {k: dict(c) for k, c in summed.items()}))
+    return panels
+
+
+def snps_other_scatter_figure(rows, benchmark, title, out, name, aggregate=False,
+                              size_by_missing=False):
+    """`<name>_scatter_snps_other`: false positives against false negatives, two panels."""
+    return scatter_figure(snps_other_panels(rows, benchmark, aggregate), title, None, out,
+                          f"{name}_scatter_snps_other", size_by_missing=size_by_missing)
+
+
+def missing_size(count, most):
+    """A marker's diameter in points for `count` missing genotypes: its area grows with the count,
+    from a small marker at none to 30 points across at the figure's most."""
+    return 5 + 25 * (count / most) ** 0.5
 
 
 def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALLERS,
-                   shared_axes=False):
+                   shared_axes=False, size_by_missing=False):
     """One panel a row, false positives against false negatives, one line a caller through its
     depths. `panels`: (panel title, {(depth, caller): error counts}). With `shared_axes`, every
-    panel has the same scales, so the panels compare at a glance."""
+    panel has the same scales, so the panels compare at a glance. With `size_by_missing`, a
+    marker's area is the genotypes left missing, not the depth, and each line names its end depths."""
     styles = {c: dict(STYLE[c], label=SCATTER_LABEL.get(c, STYLE[c]["label"]),
                       linestyle="-") for c in callers}
     depths = sorted({d for _, c in panels for d, _ in c}, key=depth_key)
@@ -590,6 +611,8 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
                    "false negatives: the truth has a variant and the call\n"
                    "is not its genotype", panel)
         size = {d: SCATTER_SIZES[i] for i, d in enumerate(depths)}
+        missing = {(d, c): v.get("no_call", 0) for _, cs in panels for (d, c), v in cs.items()}
+        most = max(missing.values()) or 1
         for caller in callers:
             pts = series.get(caller)
             if not pts:
@@ -598,10 +621,17 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
             xs, ys = [p[0] for p in pts], [p[1] for p in pts]
             ax.plot(xs, ys, color=st["color"], linewidth=1.6, alpha=0.7, zorder=2)
             # Hollow, so markers that overlap where the callers crowd still show.
-            for x, y, depth in pts:
+            for i, (x, y, depth) in enumerate(pts):
+                ms = (missing_size(missing[(depth, caller)], most) if size_by_missing
+                      else size[depth])
                 ax.plot(x, y, linestyle="none", marker=st["marker"],
-                        markersize=size[depth], markerfacecolor="none",
+                        markersize=ms, markerfacecolor="none",
                         markeredgecolor=st["color"], markeredgewidth=1.8, zorder=3)
+                # Only the line's two ends name their depth; the line gives the order between.
+                if size_by_missing and i in (0, len(pts) - 1):
+                    ax.annotate(depth_label(depth), (x, y), xytext=(0, -ms / 2 - 1),
+                                textcoords="offset points", fontsize=6.5, color=TEXT_2,
+                                ha="center", va="top", zorder=4)
             ax.annotate(st["label"], (xs[-1], ys[-1]), xytext=(10, 0),
                         textcoords="offset points", fontsize=8.5, color=TEXT, va="center",
                         zorder=4, gid="caller")
@@ -623,16 +653,33 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
         for axis, (low, high) in ((ax.xaxis, ax.get_xlim()), (ax.yaxis, ax.get_ylim())):
             axis.set_major_formatter(fmt)
             # Over more than three decades the 2s and 5s crowd the decades' own labels.
-            crowded = low > 0 and high / low > 1e3
-            axis.set_minor_formatter(minor if axis.get_scale() == "log" and not crowded
+            crowded = high / max(low, 1) > 1e3
+            if axis.get_scale() == "symlog" and not crowded:
+                # The zero stretch's axis has no ticks between decades of its own.
+                axis.set_minor_locator(FixedLocator(
+                    [m * 10 ** k for k in range(4) for m in (2, 5) if m * 10 ** k < high]))
+            axis.set_minor_formatter(minor if axis.get_scale() in ("log", "symlog") and not crowded
                                      else NullFormatter())
     fig.tight_layout(rect=(0, 0.03, 1, 1))
-    handles = [Line2D([], [], linestyle="none", marker="o", markersize=SCATTER_SIZES[i],
-                      markerfacecolor="none", markeredgecolor=TEXT_2, markeredgewidth=1.8,
-                      label=depth_label(d)) for i, d in enumerate(depths)]
+    if size_by_missing:
+        most = max(c.get("no_call", 0) for _, cs in panels for c in cs.values()) or 1
+        # None, then the three largest round counts the figure reaches that are visibly bigger
+        # than none (a twentieth of its most, or more).
+        rounds = [v for v in (10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)
+                  if most / 20 <= v <= most]
+        steps = [0] + rounds[-3:]
+        handles = [Line2D([], [], linestyle="none", marker="o", markersize=missing_size(v, most),
+                          markerfacecolor="none", markeredgecolor=TEXT_2, markeredgewidth=1.8,
+                          label=f"{v:,}") for v in steps]
+        legend_title = "genotypes left missing (./.)"
+    else:
+        handles = [Line2D([], [], linestyle="none", marker="o", markersize=SCATTER_SIZES[i],
+                          markerfacecolor="none", markeredgecolor=TEXT_2, markeredgewidth=1.8,
+                          label=depth_label(d)) for i, d in enumerate(depths)]
+        legend_title = "read depth"
     fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
                fontsize=9, bbox_to_anchor=(0.5, -0.01), labelcolor=TEXT,
-               title="read depth", title_fontsize=9)
+               title=legend_title, title_fontsize=9)
     pt = 1 / 72 / fig.get_figheight()
     y = 4
     for text, size, colour in ((subtitle, 9, TEXT_2), (title, 13, TEXT)):
@@ -690,7 +737,9 @@ def stutter_figures(rows, out):
 
 
 # The homopolymer figure: the 50-sample cohort, one panel per library, drawn like the chromosome 20
-# scatter. A genotype left missing counts as a false negative.
+# scatter, with a marker's area the genotypes left missing instead of the depth (owner, 7 November
+# 2026): folded into the false negatives, DeepVariant's empty genotypes at reference homopolymers
+# read as missed variants, and the trio's dot plot drew a caller with none as a long line.
 HOMOPOLYMER_CALLERS = ["pvc (fitted)", "GATK", "freebayes", "DeepVariant", "HipSTR"]
 
 
@@ -699,14 +748,12 @@ def stutter_homopolymer_figure(rows, out, samples="50"):
     for title, dataset in (("PCR stutter", "simulated 4 Mb, pcr stutter"),
                            ("PCR-free", "simulated 4 Mb, pcr-free stutter")):
         counts = stutter_counts(rows, dataset, samples, ["STR segment, motif length 1"])
-        panels.append((title, {key: dict(c, wrong_gt_truth_var=c["wrong_gt_truth_var"]
-                                         + c["no_call"])
-                               for key, c in counts.items() if key[1] in HOMOPOLYMER_CALLERS}))
+        panels.append((title, {key: c for key, c in counts.items() if key[1] in HOMOPOLYMER_CALLERS}))
     if not all(c for _, c in panels):
         return None
     return scatter_figure(panels, f"Errors — simulated homopolymers, {samples} samples", None,
                           out, f"errors_stutter_homopolymers_{samples}s",
-                          callers=HOMOPOLYMER_CALLERS, shared_axes=True)
+                          callers=HOMOPOLYMER_CALLERS, shared_axes=True, size_by_missing=True)
 
 
 # The performance figures' lines: (line, caller in the table, its stages in order of preference).
@@ -787,16 +834,15 @@ def main():
                                  "GIAB v4.2.1 confident regions; scored by pvc_eval; depths from "
                                  "5× to ~60×", out, "errors_giab_chr20"),
         # No subtitle: doc/user/accuracy.md explains the figure in its caption.
-        *error_scatter_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20", None,
-                              out, "errors_giab_chr20"),
+        snps_other_scatter_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20", out,
+                                  "errors_giab_chr20"),
         *vcfeval_benchmark_figure(rows, "giab_panel", "Errors — GIAB HG002, HG003, HG004 panel",
                                  "100 confident regions per sample, each sample called alone, "
                                  "summed over the three; scored by pvc_eval", out,
                                  "errors_giab_panel", aggregate=True),
-        *vcfeval_benchmark_figure(rows, "giab_trio", "Errors — GIAB trio, called jointly",
-                                 "HG002, HG003 and HG004 called together over 100 common regions, "
-                                 "summed over the three; scored by pvc_eval", out,
-                                 "errors_giab_trio", aggregate=True),
+        # The trio's empty genotypes in the marks' size, as the homopolymer figure's.
+        snps_other_scatter_figure(rows, "giab_trio", "Errors — GIAB trio, called jointly", out,
+                                  "errors_giab_trio", aggregate=True, size_by_missing=True),
         *vcfeval_benchmark_figure(rows, "hg002_5mb", "Errors — HG002 over 5 Mb",
                                  "1,000 confident intervals (5.08 Mb); scored by pvc_eval", out,
                                  "errors_hg002_5mb"),

@@ -33,7 +33,7 @@ at one STR segment (or bundle): `right` means both called sequences over the seg
 each side are the truth's; `false_call` is a variant called where the truth has none. pvc (fitted)
 fits its stutter from the run's own reads with `estimate-parameters`; pvc (true stutter) is given
 the simulator's rates and is a reference row, not a user's result. freebayes is kept at QUAL ≥ 20.
-DeepVariant calls each sample alone and GLnexus joins them.
+DeepVariant calls each sample alone and GLnexus joins them; one sample is called without GLnexus.
 HipSTR is given the segments only, not the bundles, once at its defaults and once with a fixed
 stutter model and no read floor (its defaults call nothing below about 100 reads a locus).
 """

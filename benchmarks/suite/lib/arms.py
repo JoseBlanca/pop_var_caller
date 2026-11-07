@@ -186,6 +186,10 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
                             os.path.join(ctx.results_root, "competitors"), name)
     calls = os.path.join(step_dir, "calls.vcf.gz")
     samples = list(alignments_by_sample)
+    # One sample is called alone even where the benchmark calls its cohorts jointly: nobody runs
+    # GLnexus or GenotypeGVCFs over a single sample, and GLnexus drops the sites the sample's own
+    # call leaves empty, so the result would not be the caller's.
+    joint = joint and len(samples) > 1
     files = _files(alignments_by_sample)
     flat = [f for s in samples for f in files[s]]
     row_base = dict(base, caller=ARM_LABELS[arm], caller_version=ctx.version(ARM_TOOL[arm]))
