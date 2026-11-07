@@ -3079,6 +3079,8 @@ fn maximise(
     let mut last_fraction = 0.5_f64;
     // EXPERIMENT (fit-finish): where the last accepted try put the best length along its step.
     let mut next_first: Option<f64> = None;
+    // EXPERIMENT (fit-finish): the last accepted step's direction, for `PVC_NEWTON_CG`.
+    let mut conjugate: Option<Conjugate> = None;
     // A cycle needs three passes in hand — its first, the second plain one, the jump's — but one
     // that begins with an accepted try's pass has run its first already, and judging that pass
     // costs none: it is always judged, and the guard before the SQUAREM cycle ends the start
@@ -3165,7 +3167,13 @@ fn maximise(
         if let Some(judgement) = &judged_here
             && alternation.passes < config.max_passes
         {
-            let target = parameters.newton_target(&judgement.distances);
+            // EXPERIMENT (fit-finish): with `PVC_NEWTON_CG`, the step is the Newton step blended
+            // with the last accepted one's direction (preconditioned nonlinear conjugate gradients).
+            let distances = match conjugate.as_ref().filter(|_| newton_cg()) {
+                Some(previous) => previous.blended(&judgement.distances, &judgement.slopes),
+                None => judgement.distances.clone(),
+            };
+            let target = parameters.newton_target(&distances);
             // EXPERIMENT (fit-finish): the log-likelihood's slope along the step, per unit of the
             // whole step, when `PVC_NEWTON_LINE` asks for the length to be chosen from it.
             let slope_along = newton_line().then(|| {
@@ -3222,6 +3230,11 @@ fn maximise(
                     let gain = pass.1.log_likelihood - entering.log_likelihood;
                     last_fraction = fraction;
                     next_first = best;
+                    conjugate = Some(Conjugate::of(
+                        &distances,
+                        &judgement.distances,
+                        &judgement.slopes,
+                    ));
                     parameters = candidate;
                     accepted_pass = Some(pass);
                     print_the_cycle(
@@ -3243,7 +3256,10 @@ fn maximise(
                     );
                     continue;
                 }
-                NewtonOutcome::Rejected { tries } => newton_rejected = Some(tries),
+                NewtonOutcome::Rejected { tries } => {
+                    newton_rejected = Some(tries);
+                    conjugate = None;
+                }
             }
         }
         // The SQUAREM cycle needs two passes more; refused tries that spent them, or a cycle that
@@ -3512,7 +3528,68 @@ fn try_the_newton_step<Pass>(
 /// EXPERIMENT (fit-finish): whether `PVC_NEWTON_LINE` asks the Newton tries to choose their length
 /// from the log-likelihood's curvature along the step rather than by halving.
 fn newton_line() -> bool {
-    std::env::var_os("PVC_NEWTON_LINE").is_some()
+    std::env::var_os("PVC_NEWTON_LINE").is_some() || newton_cg()
+}
+
+/// EXPERIMENT (fit-finish): whether `PVC_NEWTON_CG` asks each Newton step to be blended with the
+/// last accepted one's direction; it implies `PVC_NEWTON_LINE`.
+fn newton_cg() -> bool {
+    std::env::var_os("PVC_NEWTON_CG").is_some()
+}
+
+/// EXPERIMENT (fit-finish): **the last accepted step, for preconditioned nonlinear conjugate
+/// gradients** (Polak–Ribière, the information as the preconditioner): its direction `p`, the Newton
+/// step `d` it was built from and `g·d`, the slope times that step.
+struct Conjugate {
+    direction: Vec<f64>,
+    newton: Vec<f64>,
+    slope_times_newton: f64,
+}
+
+impl Conjugate {
+    fn of(direction: &[Option<f64>], newton: &[Option<f64>], slopes: &[Option<f64>]) -> Self {
+        let flat = |values: &[Option<f64>]| -> Vec<f64> {
+            values.iter().map(|value| value.unwrap_or(0.0)).collect()
+        };
+        let newton = flat(newton);
+        let slope_times_newton = flat(slopes).iter().zip(&newton).map(|(g, d)| g * d).sum();
+        Self {
+            direction: flat(direction),
+            newton,
+            slope_times_newton,
+        }
+    }
+
+    /// `p = d + β p_prev`, `β = max(0, g·(d − d_prev) / (g_prev·d_prev))`; the plain Newton step
+    /// when the blend would not point uphill or the vectors do not line up.
+    fn blended(&self, newton: &[Option<f64>], slopes: &[Option<f64>]) -> Vec<Option<f64>> {
+        if newton.len() != self.newton.len() || !(self.slope_times_newton > 0.0) {
+            return newton.to_vec();
+        }
+        let d: Vec<f64> = newton.iter().map(|value| value.unwrap_or(0.0)).collect();
+        let g: Vec<f64> = slopes.iter().map(|value| value.unwrap_or(0.0)).collect();
+        let numerator: f64 = g
+            .iter()
+            .zip(d.iter().zip(&self.newton))
+            .map(|(g, (d, previous))| g * (d - previous))
+            .sum();
+        let beta = (numerator / self.slope_times_newton).max(0.0);
+        let blended: Vec<Option<f64>> = newton
+            .iter()
+            .zip(&self.direction)
+            .map(|(value, previous)| value.map(|value| value + beta * previous))
+            .collect();
+        let uphill: f64 = blended
+            .iter()
+            .zip(&g)
+            .map(|(value, g)| value.unwrap_or(0.0) * g)
+            .sum();
+        if beta > 0.0 && uphill > 0.0 && beta.is_finite() {
+            blended
+        } else {
+            newton.to_vec()
+        }
+    }
 }
 
 /// EXPERIMENT (fit-finish): **the fraction of the step where the log-likelihood peaks**, from a
