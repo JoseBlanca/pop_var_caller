@@ -158,6 +158,14 @@ pub struct EstimateParametersArgs {
     /// holding them. Hidden, for the same measurement as `--fit-cohort-on`.
     #[arg(long, hide = true)]
     pub fit_cohort_freed: bool,
+
+    /// Experiment only: start the SNP/indel fit from a fit trace of this cohort.
+    #[arg(long, value_name = "TRACE", hide = true)]
+    pub start_from_trace: Option<PathBuf>,
+
+    /// Experiment only: with --start-from-trace, treat every k-th sample as new (0: none).
+    #[arg(long, value_name = "K", hide = true, default_value_t = 0)]
+    pub start_from_trace_new_every: usize,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -439,6 +447,10 @@ fn ordinary_position_config(args: &EstimateParametersArgs, ploidy: Ploidy) -> Jo
             .fit_cohort_on
             .unwrap_or(crate::parameter_estimation::joint::fit::COHORT_ON_SAMPLES),
         cohort_freed_on_every_sample: args.fit_cohort_freed,
+        earlier_fit_trace: args
+            .start_from_trace
+            .clone()
+            .map(|path| (path, args.start_from_trace_new_every)),
         ..JointFitConfig::default()
     }
 }

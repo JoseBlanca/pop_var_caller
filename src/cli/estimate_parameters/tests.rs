@@ -125,6 +125,8 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         str_param_estimates_at_once: None,
         fit_cohort_on: None,
         fit_cohort_freed: false,
+        start_from_trace: None,
+        start_from_trace_new_every: 0,
         skip_contamination: false,
         threads: 0,
     }

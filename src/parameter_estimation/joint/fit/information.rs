@@ -3846,6 +3846,7 @@ mod tests {
             of: config.starting_points.len(),
             stride: 1,
             finishing: false,
+            continuing: false,
             earlier,
             sample_names: &sample_names,
             stage: &stage,
