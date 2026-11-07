@@ -518,7 +518,7 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
 }
 
 /// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
-const RECORDED_POSTERIOR_BITS: u64 = 0x427a_ae99_a19e_d4ee;
+const RECORDED_POSTERIOR_BITS: u64 = 0x517a_406f_f350_f366;
 
 /// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
 /// round went unnoticed): two rounds and five leave every sample's fit in the same state, since
@@ -790,8 +790,8 @@ fn a_phased_windows_phase_is_the_same_bits_everywhere() {
 }
 
 /// The hash and the count [`a_phased_windows_phase_is_the_same_bits_everywhere`] expects.
-const RECORDED_PHASE_BITS: u64 = 0xe17c_cb65_40be_9453;
-const RECORDED_PHASED_COLUMNS: usize = 2_782;
+const RECORDED_PHASE_BITS: u64 = 0x877b_d070_d59b_9d79;
+const RECORDED_PHASED_COLUMNS: usize = 2_834;
 
 /// **More rounds than the link test's masks hold are refused when the phasing is set up**, not in
 /// the middle of a window: 9 rounds would draw 8 × 9 = 72 paths, more than 64; 8 rounds draw 63.
@@ -899,4 +899,106 @@ fn read_check_records_are_one_in_twenty_and_never_hidden() {
             "another window draws other records"
         );
     }
+}
+
+/// **A sample does not read its own reads back through a copy that followed it** (phasing spec
+/// §2.3): sample 1's copy 0 followed sample 0 and its copy 1 followed sample 2. Sample 0 reads copy
+/// 0 with the template replaced by the cohort's frequencies where its reads leave its genotype
+/// unsure, and whole where they settle it; copy 1, and anything sample 2 reads, comes back whole;
+/// where both copies followed sample 0, it reads `p(a) · L({a, a})`.
+#[test]
+fn a_copy_that_followed_the_reader_is_read_without_it() {
+    let shape = CohortShape {
+        samples: 3,
+        records: 200,
+        depth: 3.0,
+        inbred: false,
+        ..SHAPE
+    };
+    let cohort = test_cohort(shape);
+    let records = &cohort.records;
+    let core = 0..records.len();
+    let layout = WindowLayout::new(records, &core);
+    let mut store = HaplotypeStore::new(records, &layout, shape.samples);
+    let mut genotype_pairs = GenotypePairs::default();
+    let pairs = genotype_pairs.of(2).to_vec();
+    store.sources[1] = vec![0, 2];
+    let hidden = vec![Vec::new(); shape.samples];
+    let read = |store: &HaplotypeStore, reader: usize, copy: usize, record: usize| {
+        let mut out = Vec::new();
+        store.template_into(
+            reader,
+            1,
+            copy,
+            layout.site(record),
+            &records[record],
+            &hidden,
+            record,
+            &genotype_pairs,
+            &mut out,
+        );
+        out
+    };
+    let stored = |store: &HaplotypeStore, copy: usize, record: usize| {
+        let mut out = Vec::new();
+        store.haplotype_into(1, copy, layout.site(record), &mut out);
+        out
+    };
+    let by_alleles = |record: usize| {
+        let mut matrix = [0.0; 4];
+        for (&(a, b), likelihood) in pairs.iter().zip(records[record].likelihoods(1)) {
+            matrix[a * 2 + b] = likelihood;
+            matrix[b * 2 + a] = likelihood;
+        }
+        matrix
+    };
+    let normalised = |values: Vec<f64>| {
+        let total: f64 = values.iter().sum();
+        values
+            .into_iter()
+            .map(|value| value / total)
+            .collect::<Vec<f64>>()
+    };
+    let close =
+        |one: &[f64], other: &[f64]| one.iter().zip(other).all(|(a, b)| (a - b).abs() < 1e-12);
+    let (mut unsure, mut settled) = (0, 0);
+    for (record, at) in records.iter().enumerate() {
+        let site = layout.site(record);
+        store.followed[1][site] = [0, 1];
+        assert_eq!(read(&store, 0, 1, record), stored(&store, 1, record));
+        assert_eq!(read(&store, 2, 0, record), stored(&store, 0, record));
+        let matrix = by_alleles(record);
+        let frequencies: Vec<f64> = at.background_shares().collect();
+        if reads_settle(at, 0) {
+            settled += 1;
+            assert_eq!(read(&store, 0, 0, record), stored(&store, 0, record));
+            continue;
+        }
+        unsure += 1;
+        let other_copy = stored(&store, 1, record);
+        let expected = normalised(
+            (0..2)
+                .map(|a| {
+                    frequencies[a]
+                        * (0..2)
+                            .map(|b| other_copy[b] * matrix[a * 2 + b])
+                            .sum::<f64>()
+                })
+                .collect(),
+        );
+        assert!(
+            close(&read(&store, 0, 0, record), &expected),
+            "record {record}"
+        );
+        store.followed[1][site] = [0, 0];
+        let expected = normalised((0..2).map(|a| frequencies[a] * matrix[a * 2 + a]).collect());
+        assert!(
+            close(&read(&store, 0, 0, record), &expected),
+            "record {record}, both copies"
+        );
+    }
+    assert!(
+        unsure > 20 && settled > 20,
+        "unsure {unsure}, settled {settled}"
+    );
 }

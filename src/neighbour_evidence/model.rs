@@ -151,6 +151,11 @@ impl GenotypePairs {
                 .collect()
         })
     }
+
+    /// The pairs of an allele count [`Self::of`] has already been asked for; `None` otherwise.
+    pub(crate) fn known(&self, allele_count: usize) -> Option<&[(usize, usize)]> {
+        self.by_allele_count.get(&allele_count).map(Vec::as_slice)
+    }
 }
 
 /// **One site's blurred shares and likelihoods**, kept from the forward walk for the backward one
@@ -339,6 +344,17 @@ pub(crate) struct DrawReads<'a> {
 /// numbers a copy.
 pub(crate) type HaplotypePair = [Vec<f64>; 2];
 
+/// **A round's own drawn path**: the two haplotypes along it, and at each site the walk template
+/// each copy follows there — copy one's, then copy two's; the same template twice in an
+/// autozygous state. The last template is the background. The next round reads which templates
+/// were followed to keep a sample from copying its own reads back (`neighbour_evidence_phasing.md`
+/// §2.3).
+#[derive(Debug, PartialEq)]
+pub(crate) struct DrawnPath {
+    pub haplotypes: Vec<HaplotypePair>,
+    pub followed: Vec<[usize; 2]>,
+}
+
 /// **The walk, and one state path drawn from it with the two haplotypes along it**
 /// (`neighbour_evidence_phasing.md` §2.1). The walk is [`walk`]'s, unchanged. The path is drawn
 /// backwards from the last site, each state given the one after it and the forward probabilities,
@@ -359,7 +375,7 @@ pub(crate) fn walk_and_draw(
     parameters: WalkParameters,
     uniforms: &mut Uniforms,
     reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, Vec<HaplotypePair>) {
+) -> (WalkResult, DrawnPath) {
     let (result, drawn, _) = walk_with_draw(
         sites,
         templates,
@@ -396,7 +412,7 @@ pub(crate) fn walk_and_draw_paths(
     extra_uniforms: &mut Uniforms,
     extra: usize,
     reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, Vec<HaplotypePair>, Vec<Vec<HaplotypePair>>) {
+) -> (WalkResult, DrawnPath, Vec<Vec<HaplotypePair>>) {
     let (result, drawn, extra_paths) = walk_with_draw(
         sites,
         templates,
@@ -524,11 +540,7 @@ fn walk_with_draw(
     uniforms: Option<&mut Uniforms>,
     extra: Option<(&mut Uniforms, usize)>,
     mut reads: Option<&mut DrawReads<'_>>,
-) -> (
-    WalkResult,
-    Option<Vec<HaplotypePair>>,
-    Vec<Vec<HaplotypePair>>,
-) {
+) -> (WalkResult, Option<DrawnPath>, Vec<Vec<HaplotypePair>>) {
     assert!(
         sites
             .windows(2)
@@ -648,12 +660,21 @@ fn walk_with_draw(
             );
         }
     }
-    let mut paths: Vec<Vec<HaplotypePair>> =
-        draw_state_paths(sites, &forward, &parameters, &landing, &streams)
+    let state_paths = draw_state_paths(sites, &forward, &parameters, &landing, &streams);
+    let mut paths: Vec<Vec<HaplotypePair>> = state_paths
+        .iter()
+        .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
+        .collect();
+    let drawn = draws_own.then(|| DrawnPath {
+        haplotypes: paths.remove(0),
+        followed: state_paths[0]
             .iter()
-            .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
-            .collect();
-    let drawn = draws_own.then(|| paths.remove(0));
+            .map(|&state| match state {
+                State::Autozygous(template) => [template, template],
+                State::Pair(first, second) => [first, second],
+            })
+            .collect(),
+    });
     let extra_paths = paths;
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
