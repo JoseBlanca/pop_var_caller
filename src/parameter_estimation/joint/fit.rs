@@ -796,6 +796,11 @@ pub struct JointFitConfig {
     /// Spec: `parameter_prepass_joint_fit.md` §7 and §11 question 8, which leans to a few hundred
     /// samples being enough. **What this costs in accuracy is not yet measured.**
     pub cohort_on_samples: usize,
+    /// **Whether the run over every sample after a subset's fit frees the cohort's numbers** rather
+    /// than holding them: the subset's answer is then only where the whole cohort's fit starts, and
+    /// the fit ends at the whole cohort's maximum, as without a subset. What it can save is the
+    /// starts' passes over every sample; whether it does is not yet measured. Off by default.
+    pub cohort_freed_on_every_sample: bool,
 }
 
 impl Default for JointFitConfig {
@@ -823,6 +828,7 @@ impl Default for JointFitConfig {
             depth_as_a_range: true,
             explore_on: 250_000,
             cohort_on_samples: COHORT_ON_SAMPLES,
+            cohort_freed_on_every_sample: false,
         }
     }
 }
@@ -2368,15 +2374,16 @@ pub fn fit_jointly(
             None => (winner, None),
             Some(subset) => {
                 let initial = subset.widened(&winner.parameters, groups.len(), lent.len());
+                let holding = !config.cohort_freed_on_every_sample;
                 let which = WhichStart {
                     number: winning_start,
                     of: config.starting_points.len(),
                     stride: 1,
-                    finishing: false,
+                    finishing: !holding,
                     earlier: None,
                     sample_names: &names,
                     stage: &stage,
-                    holding_the_cohort: true,
+                    holding_the_cohort: holding,
                 };
                 let began = std::time::Instant::now();
                 let mut every_sample = maximise(
@@ -2416,7 +2423,10 @@ pub fn fit_jointly(
                 let mut trace = winner.trace;
                 trace.append(&mut every_sample.trace);
                 every_sample.trace = trace;
-                (every_sample, Some(winner.information))
+                // Freed, the cohort's numbers were fitted on every sample, and their errors are the
+                // last pass's like every other's.
+                let cohort_information = holding.then_some(winner.information);
+                (every_sample, cohort_information)
             }
         };
         let StartOutcome {

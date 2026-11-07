@@ -153,6 +153,11 @@ pub struct EstimateParametersArgs {
     /// [`COHORT_ON_SAMPLES`](crate::parameter_estimation::joint::fit::COHORT_ON_SAMPLES).
     #[arg(long, value_name = "N", hide = true)]
     pub fit_cohort_on: Option<usize>,
+
+    /// **After the subset's fit, fit the cohort-wide numbers again on every sample** rather than
+    /// holding them. Hidden, for the same measurement as `--fit-cohort-on`.
+    #[arg(long, hide = true)]
+    pub fit_cohort_freed: bool,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -433,6 +438,7 @@ fn ordinary_position_config(args: &EstimateParametersArgs, ploidy: Ploidy) -> Jo
         cohort_on_samples: args
             .fit_cohort_on
             .unwrap_or(crate::parameter_estimation::joint::fit::COHORT_ON_SAMPLES),
+        cohort_freed_on_every_sample: args.fit_cohort_freed,
         ..JointFitConfig::default()
     }
 }
