@@ -228,7 +228,10 @@ fn a_stretch_ends_once_it_holds_enough_to_judge_by() {
     let mut gap = everywhere;
     gap[1] = false;
     assert_eq!(stretches(&expected, &gap, 1.0), vec![0..4, 4..8]);
-    assert_eq!(stretches(&expected, &everywhere, 0.8), vec![0..2, 2..5, 5..8]);
+    assert_eq!(
+        stretches(&expected, &everywhere, 0.8),
+        vec![0..2, 2..5, 5..8]
+    );
     assert_eq!(stretches(&expected, &everywhere, 1.5), vec![0..8]);
     assert_eq!(stretches(&[0.3, 0.3], &[true; 2], 1.0), vec![0..2]);
     assert_eq!(stretches(&[], &[], 1.0), Vec::<Range<usize>>::new());
@@ -272,7 +275,10 @@ fn ties_with_the_last_winner_win_too() {
         source: 0,
         stretches_won: 3,
     };
-    assert!((template.landing_weight() - (3.0 + LANDING_WEIGHT_BASE).powi(4)).abs() < 1e-12);
+    assert!(
+        (template.landing_weight() - crate::float::powi(3.0 + LANDING_WEIGHT_BASE, 4)).abs()
+            < 1e-12
+    );
     let weight = |won: usize| {
         ChosenTemplate {
             source: 0,

@@ -112,7 +112,10 @@ impl<T> ChosenTemplate<T> {
     /// [`LANDING_WEIGHT_POWER`].
     #[must_use]
     pub fn landing_weight(&self) -> f64 {
-        (self.stretches_won as f64 + LANDING_WEIGHT_BASE).powi(LANDING_WEIGHT_POWER)
+        crate::float::powi(
+            self.stretches_won as f64 + LANDING_WEIGHT_BASE,
+            LANDING_WEIGHT_POWER,
+        )
     }
 }
 
@@ -332,9 +335,7 @@ fn judged_records(records: &[SiteRecord], sample: usize, compared: &[usize]) -> 
 /// gave a stretch 6.5 winners where two were asked for.
 #[must_use]
 pub fn stretch_information(other_samples: usize) -> f64 {
-    (other_samples as f64 / TOLERATED_CHANCE_MATCHES)
-        .ln()
-        .max(MIN_STRETCH_INFORMATION)
+    crate::float::ln(other_samples as f64 / TOLERATED_CHANCE_MATCHES).max(MIN_STRETCH_INFORMATION)
 }
 
 /// **The stretches the compared records are cut into**, in order (§3.3): each ends at the record
