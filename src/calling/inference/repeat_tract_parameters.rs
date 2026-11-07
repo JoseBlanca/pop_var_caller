@@ -365,6 +365,18 @@ impl TractScoringFits {
         self.substitution_defaulted = 0;
 
         let period = motif.ssr_period();
+        // **An interrupted tract slips as its longest pure run** (spec `str_interrupted_tracts.md`
+        // §3): a candidate of `c` repeats is looked up at `P + c − R`, with `R` the reference
+        // tract's count and `P` its longest pure run. For a pure tract `P = R`.
+        // PROTOTYPE: PROBE_OLD_CALLING looks every candidate up at its own count, as before.
+        let shorter_by = if std::env::var_os("PROBE_OLD_CALLING").is_some() {
+            0
+        } else {
+            u64::from(reference_repeats.get()).saturating_sub(u64::from(longest_pure_run(
+                candidates[0].bases,
+                usize::from(period.get()),
+            )))
+        };
         for group in 0..read_groups {
             // `ReadGroupId` is the run's own index over the same axis `read_group_count`
             // counts, so this is the identity rather than a mapping. Checked rather than cast:
@@ -375,10 +387,14 @@ impl TractScoringFits {
             );
             for candidate in candidates {
                 let repeats = candidate.repeat_count.get();
-                let slippage =
-                    parameters
-                        .ssr_slippage_fits()
-                        .at(read_group, period.get(), u64::from(repeats));
+                let slippage = match u64::from(repeats).checked_sub(shorter_by) {
+                    Some(class) if class >= 1 => {
+                        parameters
+                            .ssr_slippage_fits()
+                            .at(read_group, period.get(), class)
+                    }
+                    _ => Err(NoSlippage::NoSuchStratum),
+                };
                 let (stutter, fitted_slippage, slippage_warrant) = match &slippage {
                     Ok(fitted) => (
                         stutter_model_for(&fitted.slippage),
@@ -1128,6 +1144,26 @@ pub struct TractPrior<'a> {
     /// How that stratum's chromosomes are spread over tract lengths, and how strongly the fit
     /// holds them — with the rung of the tract ladder it came from on it.
     pub allele_length_variation: AlleleLengthVariation<'a>,
+}
+
+/// **How many whole copies the longest pure stretch of a tract holds**: the longest run of bases in
+/// which every base equals the one `period` further on, plus that period, divided by it (spec
+/// `str_interrupted_tracts.md` §3). Independent of where the motif's phase starts, so an
+/// interruption that shifts it leaves two runs of one motif. A pure tract's is its own count.
+pub(crate) fn longest_pure_run(bases: &[u8], period: usize) -> u32 {
+    if period == 0 || bases.len() < period {
+        return 0;
+    }
+    let (mut longest, mut current) = (0_usize, 0_usize);
+    for index in period..bases.len() {
+        if bases[index].eq_ignore_ascii_case(&bases[index - period]) {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    u32::try_from((longest + period) / period).unwrap_or(u32::MAX)
 }
 
 /// **What one cell's slippage numbers are entitled to claim**, from where the fit says they
@@ -3332,5 +3368,21 @@ mod tests {
         assert_eq!(built[0].bases, tract(6).as_slice());
         assert_eq!(built[1].repeat_count.get(), 11);
         assert_eq!(built[1].bases, tract(11).as_slice());
+    }
+}
+
+#[cfg(test)]
+mod longest_pure_run_tests {
+    use super::longest_pure_run;
+
+    /// **A pure tract's run is its own count; an interrupted one's is its longest stretch; an
+    /// interruption that shifts the phase leaves two runs of one motif.**
+    #[test]
+    fn the_longest_pure_run_of_pure_interrupted_and_phase_shifted_tracts() {
+        assert_eq!(longest_pure_run(b"TTTTTTTTTTTTTTTTTTT", 1), 19);
+        assert_eq!(longest_pure_run(b"TTTTTTTAAATTTTTTTTT", 1), 9);
+        assert_eq!(longest_pure_run(b"CACACACACA", 2), 5);
+        assert_eq!(longest_pure_run(b"CACACATACACACAC", 2), 4);
+        assert_eq!(longest_pure_run(b"CACAGCACACACA", 2), 4);
     }
 }

@@ -1665,7 +1665,11 @@ impl<'a> TractEvidence<'a> {
     /// # Panics
     ///
     /// At an STR bundle, whose prior is [`bundle_prior_of`]'s.
-    fn prior(&self, parameters: &'a FrozenParameters<'a>) -> TractPrior<'a> {
+    fn prior(
+        &self,
+        parameters: &'a FrozenParameters<'a>,
+        reference_bases: &[u8],
+    ) -> TractPrior<'a> {
         let SsrLocusShape::Segment {
             detail,
             candidate_repeat_counts,
@@ -1674,10 +1678,27 @@ impl<'a> TractEvidence<'a> {
             unreachable!("an STR bundle's prior is read per run, by `bundle_prior_of`")
         };
         let reference_repeats = RepeatCount(candidate_repeat_counts[0].get());
+        // PROTOTYPE: PROBE_PRIOR_PURE_RUN takes an interrupted tract's prior from the class of its
+        // longest pure run; the spectrum stays centred on the tract's own reference length.
+        static PURE_RUN_PRIOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let class = if *PURE_RUN_PRIOR
+            .get_or_init(|| std::env::var("PROBE_PRIOR_PURE_RUN").is_ok())
+        {
+            let period = usize::from(detail.motif.ssr_period().get());
+            RepeatCount(
+                crate::calling::inference::repeat_tract_parameters::longest_pure_run(
+                    reference_bases,
+                    period,
+                )
+                .clamp(1, reference_repeats.0),
+            )
+        } else {
+            reference_repeats
+        };
         TractPrior {
             reference_repeats,
             allele_length_variation: parameters
-                .ssr_allele_length_variation_at(detail.motif.ssr_period(), reference_repeats),
+                .ssr_allele_length_variation_at(detail.motif.ssr_period(), class),
         }
     }
 }
@@ -1930,7 +1951,7 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
             scratch.tract_fits_mut().gather_for_locus(
                 &detail.motif,
                 &scored,
-                tract.prior(parameters),
+                tract.prior(parameters, scored[0].bases),
                 parameters,
             );
             scored
@@ -2576,10 +2597,20 @@ where
                 // distinguishable from one resting on a measurement without re-running
                 // anything. §5 and §6 of that spec carry the ruling.
                 let reference_repeats = candidate_repeat_counts[0].get();
-                let allele_length_variation = parameters.ssr_allele_length_variation_at(
-                    detail.motif.ssr_period(),
-                    RepeatCount(reference_repeats),
-                );
+                // PROTOTYPE: PROBE_PRIOR_PURE_RUN looks an interrupted tract's seed up at the class
+                // of its longest pure run; it stays centred on the tract's reference length.
+                let class = if std::env::var_os("PROBE_PRIOR_PURE_RUN").is_some() {
+                    let reference_bases = candidates.iter().next().expect("the reference allele");
+                    crate::calling::inference::repeat_tract_parameters::longest_pure_run(
+                        reference_bases,
+                        usize::from(detail.motif.ssr_period().get()),
+                    )
+                    .clamp(1, reference_repeats)
+                } else {
+                    reference_repeats
+                };
+                let allele_length_variation = parameters
+                    .ssr_allele_length_variation_at(detail.motif.ssr_period(), RepeatCount(class));
                 // **One vector of `candidates` counts per tract**, and the third the repeat
                 // path allocates — `fill_tract_likelihood_table` names the other two. It is a
                 // type conversion: the seed builder takes plain counts, and the evidence

@@ -201,7 +201,10 @@ impl SegmentationInputs {
                 return Some("set of repeat-tract criteria");
             }
         }
-        if self.analysed_regions != other.analysed_regions {
+        // PROBE ONLY: PROBE_CALL_REGIONS calls inside a BED narrower than the psps' ground.
+        if self.analysed_regions != other.analysed_regions
+            && std::env::var_os("PROBE_CALL_REGIONS").is_none()
+        {
             return Some(Self::ANALYSED_REGIONS);
         }
         None

@@ -550,6 +550,22 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let cohort =
         OpenPspCohort::open(&paths).map_err(|source| CallFromPspsCliError::Run { source })?;
     let analysed = cohort.analysed_regions().clone();
+    // PROBE ONLY: PROBE_CALL_REGIONS calls only inside the BED it names.
+    let analysed = match std::env::var_os("PROBE_CALL_REGIONS") {
+        Some(bed) => {
+            let bounds: Vec<crate::regions::ContigBounds> = contigs
+                .entries
+                .iter()
+                .map(|entry| crate::regions::ContigBounds {
+                    name: &entry.name,
+                    length: u32::try_from(entry.length).expect("contig fits u32"),
+                })
+                .collect();
+            GenomeRegions::from_bed_path(std::path::Path::new(&bed), &bounds)
+                .expect("PROBE_CALL_REGIONS reads")
+        }
+        None => analysed,
+    };
     // **What counts as a repeat is the psps' own**, recorded by the walk that wrote them: a run
     // over stored loci has to cut the genome the way that walk did, so it has no option that
     // could say otherwise (`doc/devel/ng/spec/command_line.md` §4.4).
