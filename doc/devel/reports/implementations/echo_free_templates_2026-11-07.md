@@ -44,6 +44,12 @@ mixed cohort at 2×, and its phase.
 | a sample never copies one that copied it the round before | 6,836 | 4,276 | 12,531, 4 |
 | **a copy that followed the reader is read without it** (adopted, §3) | 7,042 | 4,383 | 14,750, 8 |
 
+Also tried on the adopted rule, not kept: **removing two-step echoes too** — a copy that followed a
+haplotype whose own copy followed the reader the round before, which needs a third buffer of the
+templates followed. All 2×: heterozygotes right 7,042 → 7,433, but homozygotes 24,336 → 24,139, so
+all classes gain 194 of about 31,400; wrong links rose from 8 to 12 on the mixed cohort and from 7
+to 12 on the 12-sample subset, and the F2 phased 70 fewer heterozygotes.
+
 Hardening the haplotypes does not help: softness is not the cause. Freezing the panel after round 1
 removes the chain and most of the loss, but costs the mixed cohort its phase. Barring whole samples
 removes the echo but also a deep sample's best relatives, which are often mutual. Reading only the
