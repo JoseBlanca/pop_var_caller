@@ -267,8 +267,8 @@ fn a_drawn_path_follows_the_only_template_that_fits() {
     };
     for seed in 0..20 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
-        let (_, haplotypes) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
-        for pair in &haplotypes {
+        let (_, drawn) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
+        for pair in &drawn.haplotypes {
             for copy in pair {
                 assert!((copy[1] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
             }
@@ -323,8 +323,8 @@ fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
     };
     for seed in 0..10 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
-        let (_, haplotypes) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
-        for pair in &haplotypes {
+        let (_, drawn) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
+        for pair in &drawn.haplotypes {
             for copy in pair {
                 assert_eq!(copy.len(), 3);
                 assert!((copy[2] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
@@ -406,7 +406,7 @@ fn extra_paths_leave_the_round_unchanged() {
     );
     assert_eq!(paths, paths_again);
     assert!(
-        paths.iter().any(|path| *path != own),
+        paths.iter().any(|path| *path != own.haplotypes),
         "an extra path is a draw of its own"
     );
 }
@@ -714,6 +714,7 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
     let mut path = Uniforms::new(StreamPurpose::Path, 9, 0, 2);
     let (walked_again, with) =
         walk_and_draw(&sites, 3, None, parameters, &mut path, Some(&mut reads));
+    let (without, with) = (without.haplotypes, with.haplotypes);
     assert_eq!(walked, walked_again);
     // Templates even between the alleles: without reads both copies are the same margin.
     assert!(without.iter().all(|[one, two]| one == two));

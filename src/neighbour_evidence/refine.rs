@@ -92,6 +92,19 @@ pub const NO_READ_MAX_BACKGROUND_COPY: f64 = 0.1;
 /// (`doc/devel/reports/implementations/reads_in_draw_2026-11-04.md`).
 pub const HET_MASS_MIN: f64 = 0.5;
 
+/// **When a sample's reads settle its genotype at a record well enough that its own alleles may
+/// come back to it** (phasing spec §2.3): every other genotype's likelihood is at most this share of
+/// the best's. Where its reads do not settle it, a template copy that followed one of the sample's
+/// own haplotypes in the round before is read without them ([`HaplotypeStore::template_into`]).
+/// Where they do, an echo of them adds little, and the copy is read whole: removing the echo there
+/// too phased about 2 in 100 fewer of the 22-sample F2's offspring heterozygotes, and was within a
+/// run's noise elsewhere (`doc/devel/reports/implementations/echo_free_templates_2026-11-07.md`).
+pub const ECHO_SETTLED_LIKELIHOOD: f64 = 0.01;
+
+/// In [`HaplotypeStore`]'s followed templates: the copy followed no other sample — the background,
+/// or no copy at all where the sample has no column or was not walked.
+const FOLLOWED_NO_SAMPLE: u8 = u8::MAX;
+
 /// **When a sample without reads at a record is written with a genotype** (§4.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoReadRule {
@@ -427,6 +440,15 @@ struct HaplotypeStore {
     offsets: Vec<usize>,
     current: Vec<Vec<f32>>,
     next: Vec<Vec<f32>>,
+    /// Per sample and site, the template each copy followed on the path that made the haplotypes,
+    /// as an index into the sample's `sources`, or [`FOLLOWED_NO_SAMPLE`]; the round being read and
+    /// the round being written, as for the haplotypes. Two bytes a sample-site a buffer.
+    followed: Vec<Vec<[u8; 2]>>,
+    followed_next: Vec<Vec<[u8; 2]>>,
+    /// Per sample, the sample each of its templates came from in the round that made its
+    /// haplotypes; empty for a sample not walked.
+    sources: Vec<Vec<u32>>,
+    sources_next: Vec<Vec<u32>>,
 }
 
 impl HaplotypeStore {
@@ -455,10 +477,15 @@ impl HaplotypeStore {
                 row
             })
             .collect();
+        let followed = vec![vec![[FOLLOWED_NO_SAMPLE; 2]; layout.sites()]; samples];
         Self {
             offsets,
             next: rows.clone(),
             current: rows,
+            followed_next: followed.clone(),
+            followed,
+            sources: vec![Vec::new(); samples],
+            sources_next: vec![Vec::new(); samples],
         }
     }
 
@@ -475,6 +502,82 @@ impl HaplotypeStore {
         }
         // f32 rounding can take the stored ones a hair past one.
         out.push(rest.max(0.0));
+    }
+
+    /// **What `reader` copies of copy `copy` of `other`'s haplotype at `site`** (phasing spec §2.3),
+    /// appended to `out`: the haplotype, except where that copy followed one of `reader`'s own
+    /// haplotypes and `reader`'s reads do not settle its genotype there ([`ECHO_SETTLED_LIKELIHOOD`]).
+    /// There the copy is read with the followed template replaced
+    /// by the cohort's frequencies `p`: `p(a) · Σ_b h(b) · L({a, b})`, normalised, `h` the other
+    /// copy and `L` `other`'s likelihood — or `p(a) · L({a, a})` where both copies followed
+    /// `reader`. `L` is flat at `other`'s hidden records. So the reader's own reads do not come back
+    /// to it as a relative's, while `other`'s reads still count. `other`'s reads enter `h` too:
+    /// recomputing the copy with its template replaced, which needs a second stored haplotype, gave
+    /// the same genotypes within a run's noise.
+    #[allow(clippy::too_many_arguments)] // whose copy, for whom, and what decides the echo
+    fn template_into(
+        &self,
+        reader: usize,
+        other: usize,
+        copy: usize,
+        site: usize,
+        record: &SiteRecord,
+        hidden: &[Vec<usize>],
+        record_index: usize,
+        genotype_pairs: &GenotypePairs,
+        out: &mut Vec<f64>,
+    ) {
+        let followed = self.followed[other][site].map(|template| {
+            self.sources[other]
+                .get(usize::from(template))
+                .map(|&source| source as usize)
+        });
+        let echoes = followed[copy] == Some(reader) && !reads_settle(record, reader);
+        if !echoes {
+            self.haplotype_into(other, copy, site, out);
+            return;
+        }
+        let alleles = record.allele_count;
+        // PANIC-FREE: the window's allele counts are asked for before the rounds.
+        let pairs = genotype_pairs
+            .known(alleles)
+            .expect("every allele count of the window is known");
+        let other_hidden = is_hidden(hidden, other, record_index);
+        let mut by_alleles = vec![1.0; alleles * alleles];
+        if !other_hidden {
+            for (&(a, b), likelihood) in pairs.iter().zip(record.likelihoods(other)) {
+                by_alleles[a * alleles + b] = likelihood;
+                by_alleles[b * alleles + a] = likelihood;
+            }
+        }
+        let start = out.len();
+        if followed[1 - copy] == Some(reader) {
+            out.extend(
+                record
+                    .background_shares()
+                    .enumerate()
+                    .map(|(a, share)| share * by_alleles[a * alleles + a]),
+            );
+        } else {
+            self.haplotype_into(other, 1 - copy, site, out);
+            let kept: Vec<f64> = out.drain(start..).collect();
+            out.extend(record.background_shares().enumerate().map(|(a, share)| {
+                share
+                    * kept
+                        .iter()
+                        .enumerate()
+                        .map(|(b, &h)| h * by_alleles[a * alleles + b])
+                        .sum::<f64>()
+            }));
+        }
+        let total: f64 = out[start..].iter().sum();
+        for value in &mut out[start..] {
+            *value = if total > 0.0 {
+                *value / total
+            } else {
+                1.0 / alleles as f64
+            };
+        }
     }
 
     /// Writes one sample's drawn haplotypes into its row of the round being written; `absent(site)`
@@ -505,7 +608,36 @@ impl HaplotypeStore {
     /// The round's end: the rows written become the rows read.
     fn finish_round(&mut self) {
         std::mem::swap(&mut self.current, &mut self.next);
+        std::mem::swap(&mut self.followed, &mut self.followed_next);
+        std::mem::swap(&mut self.sources, &mut self.sources_next);
     }
+}
+
+/// Whether `sample`'s reads at `record` settle its genotype ([`ECHO_SETTLED_LIKELIHOOD`]): every
+/// genotype but the most likely is at most that share of it. A record without reads does not
+/// settle it. A record hidden from the sample is judged by its reads all the same: judged as
+/// unsettled, a 30× parent's hidden records read their offspring's copies without its reads, its
+/// haplotypes there went soft, and the 22-sample F2 lost 2 in 100 of its heterozygotes phased.
+fn reads_settle(record: &SiteRecord, sample: usize) -> bool {
+    if record.row(sample) != SampleRow::Informative {
+        return false;
+    }
+    let (mut best, mut second) = (0.0_f64, 0.0_f64);
+    for likelihood in record.likelihoods(sample) {
+        if likelihood > best {
+            second = best;
+            best = likelihood;
+        } else if likelihood > second {
+            second = likelihood;
+        }
+    }
+    second <= ECHO_SETTLED_LIKELIHOOD * best
+}
+
+/// Whether `record` is hidden from `sample` (phasing spec §4.1); `hidden` holds every sample's
+/// hidden records, ascending.
+fn is_hidden(hidden: &[Vec<usize>], sample: usize, record: usize) -> bool {
+    hidden[sample].binary_search(&record).is_ok()
 }
 
 /// **One core site's quantities from one round, or their sums over the averaged rounds.**
@@ -664,6 +796,10 @@ pub fn refine_window_with_reads(
         .map(|&index| records[index].allele_count)
         .collect();
     let pairs = PairLayout::new(allele_counts.iter().copied());
+    let mut genotype_pairs = GenotypePairs::default();
+    for &alleles in &allele_counts {
+        genotype_pairs.of(alleles);
+    }
     let draws_with_reads = phasing.draws_with_reads(fragments);
 
     let mut states: Vec<SampleRounds> = (0..samples)
@@ -701,34 +837,46 @@ pub fn refine_window_with_reads(
         })
         .collect();
 
+    // Every sample's hidden records, for reading another sample's haplotype without the reader's
+    // own reads (`HaplotypeStore::template_into`).
+    let hidden: Vec<Vec<usize>> = states.iter().map(|state| state.hidden.clone()).collect();
     let mut store = HaplotypeStore::new(records, &layout, samples);
     for round in 1..=phasing.rounds {
         let mut next = std::mem::take(&mut store.next);
-        let store_view = &store;
+        let mut followed_next = std::mem::take(&mut store.followed_next);
+        let mut sources_next = std::mem::take(&mut store.sources_next);
+        let shared = RoundShared {
+            records,
+            fragments,
+            layout: &layout,
+            pairs: &pairs,
+            genotype_pairs: &genotype_pairs,
+            hidden: &hidden,
+            store: &store,
+            max_templates,
+            round,
+            phasing,
+        };
         // Each sample solves its round and writes its own row of the round being written; it reads
         // only the round before, so the order samples are solved in changes nothing.
         states
             .par_iter_mut()
             .zip(fits.par_iter_mut())
             .zip(next.par_iter_mut())
+            .zip(followed_next.par_iter_mut())
+            .zip(sources_next.par_iter_mut())
             .enumerate()
-            .for_each(|(sample, ((state, fit), row))| {
-                solve_round(
-                    records,
-                    fragments,
-                    &layout,
-                    &pairs,
-                    store_view,
-                    row,
-                    sample,
-                    state,
-                    fit,
-                    max_templates,
-                    round,
-                    phasing,
-                );
+            .for_each(|(sample, ((((state, fit), row), followed), sources))| {
+                let written = WrittenRow {
+                    haplotypes: row,
+                    followed,
+                    sources,
+                };
+                solve_round(&shared, written, sample, state, fit);
             });
         store.next = next;
+        store.followed_next = followed_next;
+        store.sources_next = sources_next;
         store.finish_round();
     }
 
@@ -894,27 +1042,69 @@ fn keeps_reads_out(hidden: &[usize], read_check: &[usize], index: usize) -> bool
     hidden.binary_search(&index).is_ok() || read_check.binary_search(&index).is_ok()
 }
 
-/// **One sample's walk in one round**: its posteriors at its compared records and, in averaged
-/// rounds, its core sites' quantities go into `state`; with phasing its drawn haplotypes go into
-/// `row`, its row of the round being written. Nothing happens for a sample not walked in the
-/// window, whose row keeps its `GP` shares.
-#[allow(clippy::too_many_arguments)] // the window's data, one sample's state, and the round
-fn solve_round(
-    records: &[SiteRecord],
-    fragments: &[RecordFragments],
-    layout: &WindowLayout,
-    pairs: &PairLayout,
-    store: &HaplotypeStore,
-    row: &mut [f32],
-    sample: usize,
-    state: &mut SampleRounds,
-    fit: &mut SampleFit,
+/// **What every sample's solve in a round reads**: the window, the haplotypes of the round before,
+/// and the round.
+struct RoundShared<'a> {
+    records: &'a [SiteRecord],
+    fragments: &'a [RecordFragments],
+    layout: &'a WindowLayout,
+    pairs: &'a PairLayout,
+    genotype_pairs: &'a GenotypePairs,
+    /// Every sample's records hidden from the rounds, ascending.
+    hidden: &'a [Vec<usize>],
+    store: &'a HaplotypeStore,
     max_templates: usize,
     round: usize,
     phasing: Phasing,
+}
+
+/// **One sample's rows of the round being written**: its haplotypes, the template each copy
+/// followed at each site, and the samples its templates came from.
+struct WrittenRow<'a> {
+    haplotypes: &'a mut [f32],
+    followed: &'a mut [[u8; 2]],
+    sources: &'a mut Vec<u32>,
+}
+
+/// **One sample's walk in one round**: its posteriors at its compared records and, in averaged
+/// rounds, its core sites' quantities go into `state`; with phasing its drawn haplotypes, and the
+/// templates its path followed, go into `written`, its rows of the round being written. Nothing
+/// happens for a sample not walked in the window, whose row keeps its `GP` shares.
+fn solve_round(
+    shared: &RoundShared<'_>,
+    written: WrittenRow<'_>,
+    sample: usize,
+    state: &mut SampleRounds,
+    fit: &mut SampleFit,
 ) {
+    let &RoundShared {
+        records,
+        fragments,
+        layout,
+        pairs,
+        genotype_pairs,
+        hidden,
+        store,
+        max_templates,
+        round,
+        phasing,
+    } = shared;
     let Some(round_one) = state.templates.as_ref() else {
         return;
+    };
+    // A template's haplotype as this sample reads it: without its own reads echoed back.
+    let template = |other: usize, copy: usize, record: usize, out: &mut Vec<f64>| {
+        store.template_into(
+            sample,
+            other,
+            copy,
+            layout.site(record),
+            &records[record],
+            hidden,
+            record,
+            genotype_pairs,
+            out,
+        );
     };
     // Round 1: template samples' GP shares; later rounds: other samples' haplotypes.
     let haplotype_templates: Vec<ChosenTemplate<(usize, usize)>> = if round == 1 {
@@ -922,7 +1112,7 @@ fn solve_round(
     } else {
         let haplotype = |other: usize, copy: usize, record: usize, out: &mut Vec<f64>| {
             out.clear();
-            store.haplotype_into(other, copy, layout.site(record), out);
+            template(other, copy, record, out);
         };
         choose_haplotypes(
             records,
@@ -965,7 +1155,7 @@ fn solve_round(
         )
     });
     let mut spans = Vec::with_capacity(layout.sites());
-    for (site, &index) in layout.record_of_site.iter().enumerate() {
+    for &index in &layout.record_of_site {
         let record = &records[index];
         let likelihood_start = likelihoods.len();
         if state.hidden.binary_search(&index).is_ok() {
@@ -984,7 +1174,7 @@ fn solve_round(
                 ..
             } in &haplotype_templates
             {
-                store.haplotype_into(other, copy, site, &mut shares);
+                template(other, copy, index, &mut shares);
             }
         }
         shares.extend(record.background_shares());
@@ -1057,13 +1247,13 @@ fn solve_round(
                 round,
             ),
         });
-        let (result, haplotypes) = match state.phase.as_mut().filter(|_| phasing.averages(round)) {
+        let (result, drawn) = match state.phase.as_mut().filter(|_| phasing.averages(round)) {
             // An averaged round also draws the link test's extra paths, from a stream of their own,
             // and adds its own path to the consensus (phase output spec §2.1, §2.3).
             Some(phase) => {
                 let mut extra_uniforms =
                     Uniforms::new(StreamPurpose::ExtraPaths, phasing.window_key, sample, round);
-                let (result, haplotypes, extra) = walk_and_draw_paths(
+                let (result, drawn, extra) = walk_and_draw_paths(
                     &sites,
                     walk_templates,
                     Some(&template_weights),
@@ -1073,12 +1263,12 @@ fn solve_round(
                     phasing.extra_paths,
                     draw_reads.as_mut(),
                 );
-                phase.record_path(pairs, &haplotypes);
+                phase.record_path(pairs, &drawn.haplotypes);
                 for path in &extra {
                     phase.record_path(pairs, path);
                 }
-                phase.add_round(&haplotypes);
-                (result, haplotypes)
+                phase.add_round(&drawn.haplotypes);
+                (result, drawn)
             }
             None => walk_and_draw(
                 &sites,
@@ -1089,9 +1279,42 @@ fn solve_round(
                 draw_reads.as_mut(),
             ),
         };
-        HaplotypeStore::write(&store.offsets, row, &haplotypes, |site| {
-            records[layout.record_of_site[site]].row(sample) == SampleRow::Absent
-        });
+        let absent =
+            |site: usize| records[layout.record_of_site[site]].row(sample) == SampleRow::Absent;
+        HaplotypeStore::write(
+            &store.offsets,
+            written.haplotypes,
+            &drawn.haplotypes,
+            absent,
+        );
+        // The samples its templates came from, and the one each copy followed at each site.
+        written.sources.clear();
+        if round == 1 {
+            written
+                .sources
+                .extend(round_one.iter().map(|template| template.source as u32));
+        } else {
+            written.sources.extend(
+                haplotype_templates
+                    .iter()
+                    .map(|template| template.source.0 as u32),
+            );
+        }
+        let templates_followed = written.sources.len();
+        for (site, (out, path)) in written.followed.iter_mut().zip(&drawn.followed).enumerate() {
+            *out = if absent(site) {
+                [FOLLOWED_NO_SAMPLE; 2]
+            } else {
+                // The background is the last walk template, past the sampled ones.
+                path.map(|template| {
+                    if template < templates_followed {
+                        template as u8
+                    } else {
+                        FOLLOWED_NO_SAMPLE
+                    }
+                })
+            };
+        }
         result
     } else {
         walk(&sites, walk_templates, Some(&template_weights), parameters)
