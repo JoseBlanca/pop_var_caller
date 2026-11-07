@@ -700,6 +700,11 @@ pub fn parameters_file_of(
 
 /// **The SNP/indel fit's own numbers, unconverted** (`[snp_indel_fit]`): what a later fit of the
 /// same cohort grown by a few samples starts from (`parameter_prepass_joint_fit.md` §3.3.3).
+///
+/// **Only the rows the data fitted are written.** A read group with no reads, or a sample whose
+/// excess the fit could not move, is reported at a stated default rather than at a fitted number;
+/// written here, it would count as held by a later fit and pull the median its new samples start
+/// from towards that default. Left out, it starts at that median like any new one.
 fn the_fit_as_returned(fit: &JointFit) -> SnpIndelFitAsReturned {
     let density = &fit.density.value;
     SnpIndelFitAsReturned {
@@ -711,6 +716,7 @@ fn the_fit_as_returned(fit: &JointFit) -> SnpIndelFitAsReturned {
         by_read_group: fit
             .noise
             .iter()
+            .filter(|(_, rates)| rates.provenance == Provenance::FittedHere)
             .map(|(group, rates)| SnpIndelFitReadGroupRow {
                 read_group: group.get(),
                 ordinary_error_rate: rates.value.clean,
@@ -720,6 +726,7 @@ fn the_fit_as_returned(fit: &JointFit) -> SnpIndelFitAsReturned {
         by_sample: fit
             .hom_excess
             .iter()
+            .filter(|(_, excess)| excess.provenance == Provenance::FittedHere)
             .map(|(sample, excess)| SnpIndelFitSampleRow {
                 sample: sample.clone(),
                 homozygote_excess: excess.value.get(),

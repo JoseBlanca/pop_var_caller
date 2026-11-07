@@ -786,8 +786,9 @@ pub struct JointFitConfig {
     pub explore_on: usize,
     /// **The numbers an earlier run fitted, to start from instead of the starting points** —
     /// `None`, the default, fits from [`Self::starting_points`]. Used only when they cover at
-    /// least half of this run's samples ([`EarlierFit::covers`]); otherwise the fit says so and
-    /// starts as it would without them.
+    /// least half of this run's samples and read groups ([`EarlierFit::coverage`]); otherwise the
+    /// fit says so and starts as it would without them. A run from them that does not converge,
+    /// or that finds fewer than two samples with reads, is set aside for the starting points too.
     pub earlier_fit: Option<EarlierFit>,
 }
 
@@ -814,16 +815,38 @@ pub struct EarlierFit {
 }
 
 impl EarlierFit {
-    /// **Whether the earlier numbers describe enough of this cohort to start from**: at least
-    /// half of its samples. Below that the cohort is mostly new, and the starting points' search
-    /// for the best of several maxima is worth its passes.
-    pub fn covers(&self, samples: &[String]) -> bool {
-        let held = samples
+    /// **How much of this cohort the earlier numbers describe, and whether it is enough to start
+    /// from**: at least half of its samples and at least half of its read groups. Below that the
+    /// cohort is mostly new — or its libraries were renamed, so the rates would all start at the
+    /// first starting point's — and the starting points' search for the best of several maxima is
+    /// worth its passes.
+    pub fn coverage(&self, samples: &[String], groups: &[ReadGroupId]) -> EarlierFitCoverage {
+        let held_samples = samples
             .iter()
             .filter(|name| self.hom_excess.contains_key(*name))
             .count();
-        held > 0 && 2 * held >= samples.len()
+        let held_groups = groups
+            .iter()
+            .filter(|group| self.noise.contains_key(group))
+            .count();
+        EarlierFitCoverage {
+            held_samples,
+            held_groups,
+            enough: held_samples > 0
+                && 2 * held_samples >= samples.len()
+                && held_groups > 0
+                && 2 * held_groups >= groups.len(),
+        }
     }
+}
+
+/// **How many of this run's samples and read groups an [`EarlierFit`] holds**, and whether that is
+/// enough to start from ([`EarlierFit::coverage`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EarlierFitCoverage {
+    pub held_samples: usize,
+    pub held_groups: usize,
+    pub enough: bool,
 }
 
 impl Default for JointFitConfig {
@@ -2146,34 +2169,30 @@ pub fn fit_jointly(
         // **Or one run, on every position, from an earlier run's numbers**, when they describe most
         // of this cohort.
         let continuing = config.earlier_fit.as_ref().filter(|earlier| {
-            let held_groups = groups
-                .iter()
-                .filter(|group| earlier.noise.contains_key(group))
-                .count();
-            let held_samples = names
-                .iter()
-                .filter(|name| earlier.hom_excess.contains_key(*name))
-                .count();
-            let covers = earlier.covers(&names);
+            let EarlierFitCoverage {
+                held_samples,
+                held_groups,
+                enough,
+            } = earlier.coverage(&names, &groups);
             stage.always(|into| {
                 format!(
                     "SNP/indel fit: an earlier run's numbers hold {held_samples} of the {} \
                      sample(s) and {held_groups} of the {} read group(s); {}; {into}",
                     names.len(),
                     groups.len(),
-                    if covers {
+                    if enough {
                         "the fit starts from them, the rest at their median, on every position"
                     } else {
                         "too few to start from, so the fit starts from its usual starting points"
                     }
                 )
             });
-            covers
+            enough
         });
-        let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
-            [StartRun::Continuing].into()
-        } else {
-            config
+        // The starts on the thinned census and, when it was thinned, the winner's finish: every run
+        // of a fit without earlier numbers, and what a run from them falls back on.
+        let usual_runs = || {
+            let mut runs: Vec<StartRun> = config
                 .starting_points
                 .iter()
                 .enumerate()
@@ -2181,11 +2200,17 @@ pub fn fit_jointly(
                     number: index + 1,
                     stride,
                 })
-                .collect()
+                .collect();
+            if stride > 1 {
+                runs.push(StartRun::Finish);
+            }
+            runs
         };
-        if stride > 1 && continuing.is_none() {
-            runs.push_back(StartRun::Finish);
-        }
+        let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
+            [StartRun::Continuing].into()
+        } else {
+            usual_runs().into()
+        };
         while let Some(run) = runs.pop_front() {
             let finishing = run == StartRun::Finish;
             let (number, initial, which_earlier, run_stride) = match run {
@@ -2306,6 +2331,28 @@ pub fn fit_jointly(
                     number,
                     config.starting_points.len(),
                 ));
+            }
+            // **A run from earlier numbers is set aside for the starting points** when it did not
+            // converge — they exist for a maximum that one start does not reach — or when fewer
+            // than two samples have reads: the fit then holds each excess where it starts, and a
+            // run from the starting points holds it at no excess, not at the earlier run's number.
+            if run == StartRun::Continuing
+                && (outcome.ended != StartEnding::Converged
+                    || !fits_homozygote_excess(samples_with_reads(&outcome.statistics)))
+            {
+                stage.always(|into| {
+                    format!(
+                        "SNP/indel fit: the run from the earlier run's numbers is set aside ({}), \
+                         so the fit starts from its usual starting points; {into}",
+                        if outcome.ended == StartEnding::Converged {
+                            "fewer than two samples have reads, so no excess is fitted"
+                        } else {
+                            "it did not converge"
+                        }
+                    )
+                });
+                runs.extend(usual_runs());
+                continue;
             }
             if is_the_new_yardstick(
                 outcome.ended,
@@ -6716,6 +6763,48 @@ mod whole_fit_tests {
         .expect("the cohort pools");
         assert_eq!(mostly_new.starts.len(), config.starting_points.len());
         assert_eq!(mostly_new.log_likelihood, cold.log_likelihood);
+    }
+
+    /// **At one sample a run from an earlier fit's numbers is set aside**, and the fit gives a run
+    /// without them exactly: one sample's excess is held where it starts, so a run from an earlier
+    /// cohort's excess of 0.97 would fit every other number under it.
+    #[test]
+    fn at_one_sample_a_fit_from_an_earlier_fits_numbers_is_set_aside() {
+        let cohort = draw_cohort(
+            1,
+            3_000,
+            8.0,
+            (0.002, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0C4A_4C5E_0003,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let cold = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+        let mut earlier = earlier_fit_of(&cold, &[]);
+        for excess in earlier.hom_excess.values_mut() {
+            *excess = 0.97;
+        }
+        let warm = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                earlier_fit: Some(earlier),
+                ..config.clone()
+            },
+        )
+        .expect("the cohort pools");
+        assert_eq!(warm.log_likelihood, cold.log_likelihood);
+        assert_eq!(warm.starts.len(), cold.starts.len());
     }
 
     /// **A census cut into several chunks fits to the same bits at one thread as at four and

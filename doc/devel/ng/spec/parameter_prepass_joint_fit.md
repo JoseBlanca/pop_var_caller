@@ -1225,10 +1225,19 @@ value safe for the answer, so it trades only time.
 command wrote to its `[snp_indel_fit]` table ([`parameters_file.md`](parameters_file.md), format 10).
 A read group is matched on its sample, `@RG ID` and library together, a sample on its name, and the
 file must have been fitted against the same reference. When the earlier numbers hold at least half of
-this run's samples, the fit makes **one run, on every position, from them**, in place of the starts
-and the thinned census of §3.3.2. A read group or sample the earlier run did not hold starts at the
-median of those it did; the cohort's numbers start at the earlier run's. Below half, the log says so
-and the fit starts from its starting points as it would without the option.
+this run's samples and at least half of its read groups, the fit makes **one run, on every position,
+from them**, in place of the starts and the thinned census of §3.3.2. A read group or sample the
+earlier run did not hold starts at the median of those it did; the cohort's numbers start at the
+earlier run's. Below half, the log says so and the fit starts from its starting points as it would
+without the option.
+
+The table holds only the rows the earlier run fitted: a read group with no reads and a sample whose
+excess was not fitted are written at a default, and as held rows they would pull the median toward
+it. *Added after review, 2026-11-07:* the run from the earlier numbers is **set aside for the
+starting points** when it does not converge — the starts exist for a maximum one run misses — and
+when fewer than two samples have reads, where the fit holds each excess where it starts: a
+run from the starting points holds it at no excess, so one from an earlier cohort's excess would fit
+every other number under a different one.
 
 **Why.** A cohort is usually fitted again because a few samples were added, and the whole fit is
 paid again for each addition. Measured on 400 tomato samples on kimura (2026-11-07), the fit took 66

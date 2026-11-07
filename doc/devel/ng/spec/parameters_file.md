@@ -288,9 +288,12 @@ calling run reads it, and a calling run carries it into the file it writes back.
 the rest of the file holds these numbers only as calling reads them — the ordinary rate as a
 calibration multiplier, the excess as an inbreeding coefficient `--inbreeding` may replace, the
 density only on the fitted-curve rung — and the mismapped share and mismapped rates not at all,
-while `estimate-parameters --start-from` needs them unconverted. Its numbers must be finite; the
-table in a file stamped below 10 is refused naming it, and a file stamped 9 or below is read
-without it.
+while `estimate-parameters --start-from` needs them unconverted. Only rows the fit fitted are
+written; a read group or sample reported at a default is left out. Its shares and excesses must lie
+between 0 and 1, the two position shares sum to at most 1, its error rates lie strictly between 0
+and 1, its shapes are positive, and it holds one row a sample and one a read group that
+`fitted_from.read_groups` lists; the table in a file stamped below 10 is refused naming it, and a
+file stamped 9 or below is read without it.
 
 **An alternative total of exactly zero is a real answer** — a fully invariant cohort — and is not
 floored on the way in or out; the flooring belongs to the per-locus expansion.

@@ -391,12 +391,11 @@ impl ParametersFile {
     ) -> Result<(), ParametersFileError> {
         let bound = &self.fitted_from;
 
-        let this_runs_reference = hex_digest(&reference.0);
-        if bound.reference_digest != this_runs_reference {
+        if !self.was_fitted_against(reference) {
             return Err(fitted_from_other_inputs(
                 "fitted_from.reference_digest",
                 &bound.reference_digest,
-                &this_runs_reference,
+                hex_digest(&reference.0),
             ));
         }
 

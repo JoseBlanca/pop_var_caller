@@ -144,9 +144,12 @@ impl ParametersFile {
         Ok(())
     }
 
-    /// **`[snp_indel_fit]` holds finite numbers, and is not in a file stamped before format 10**,
-    /// which had no such table. Nothing else is checked: no calling run reads it, and a fit that
-    /// starts from it starts from wherever it says.
+    /// **`[snp_indel_fit]` holds numbers a fit can start from, and is not in a file stamped before
+    /// format 10**, which had no such table: shares and excesses between 0 and 1, the two position
+    /// shares together at most 1, error rates strictly between 0 and 1, positive shapes, and one
+    /// row a read group the file lists and a sample. No calling run reads it, but a fit that starts
+    /// from a rate of 0 or an excess above 1 scores a log of zero or panics on its first pass, and a
+    /// doubled row would silently move the median a new sample starts from.
     fn the_snp_indel_fit_holds_numbers(&self) -> Result<(), ParametersFileError> {
         let Some(fit) = &self.snp_indel_fit else {
             return Ok(());
@@ -163,31 +166,70 @@ impl ParametersFile {
             ));
         }
         let at = "snp_indel_fit";
-        for (key, value) in [
-            ("mismapped_share", fit.mismapped_share),
-            ("invariant_share", fit.invariant_share),
-            ("fixed_non_reference_share", fit.fixed_non_reference_share),
-            ("segregating_shape_a", fit.segregating_shape_a),
-            ("segregating_shape_b", fit.segregating_shape_b),
+        let a_share: fn(f64) -> bool = |value| (0.0..=1.0).contains(&value);
+        let a_rate = |value: f64| value > 0.0 && value < 1.0;
+        let a_shape: fn(f64) -> bool = |value| value.is_finite() && value > 0.0;
+        let (share, shape) = ((a_share, "a share"), (a_shape, "a positive number"));
+        for (key, value, (holds, what)) in [
+            ("mismapped_share", fit.mismapped_share, share),
+            ("invariant_share", fit.invariant_share, share),
+            (
+                "fixed_non_reference_share",
+                fit.fixed_non_reference_share,
+                share,
+            ),
+            ("segregating_shape_a", fit.segregating_shape_a, shape),
+            ("segregating_shape_b", fit.segregating_shape_b, shape),
         ] {
-            if !value.is_finite() {
-                return Err(refuse(format!("{at}.{key}"), "is not a finite number"));
+            if !holds(value) {
+                return Err(refuse(
+                    format!("{at}.{key}"),
+                    format!("is {value}, which is not {what}"),
+                ));
             }
         }
+        if fit.invariant_share + fit.fixed_non_reference_share > 1.0 {
+            return Err(refuse(
+                format!("{at}.fixed_non_reference_share"),
+                format!(
+                    "is {}, which with invariant_share {} is more than every position",
+                    fit.fixed_non_reference_share, fit.invariant_share
+                ),
+            ));
+        }
+        let listed: BTreeSet<u32> = self
+            .fitted_from
+            .read_groups
+            .iter()
+            .map(|row| row.read_group)
+            .collect();
+        let mut seen_groups = BTreeSet::new();
         for row in &fit.by_read_group {
-            if !row.ordinary_error_rate.is_finite() || !row.mismapped_error_rate.is_finite() {
+            let field = format!("{at}.by_read_group[read_group = {}]", row.read_group);
+            if !a_rate(row.ordinary_error_rate) || !a_rate(row.mismapped_error_rate) {
+                return Err(refuse(field, "holds a rate that is not between 0 and 1"));
+            }
+            if !listed.contains(&row.read_group) {
                 return Err(refuse(
-                    format!("{at}.by_read_group[read_group = {}]", row.read_group),
-                    "holds a rate that is not a finite number",
+                    field,
+                    "names a read group `fitted_from.read_groups` does not list",
                 ));
             }
+            if !seen_groups.insert(row.read_group) {
+                return Err(refuse(field, "is given twice"));
+            }
         }
+        let mut seen_samples = BTreeSet::new();
         for row in &fit.by_sample {
-            if !row.homozygote_excess.is_finite() {
+            let field = format!("{at}.by_sample[sample = {}]", row.sample);
+            if !a_share(row.homozygote_excess) {
                 return Err(refuse(
-                    format!("{at}.by_sample[sample = {}].homozygote_excess", row.sample),
-                    "is not a finite number",
+                    format!("{field}.homozygote_excess"),
+                    format!("is {}, which is not between 0 and 1", row.homozygote_excess),
                 ));
+            }
+            if !seen_samples.insert(row.sample.as_str()) {
+                return Err(refuse(field, "is given twice"));
             }
         }
         Ok(())
@@ -2055,7 +2097,7 @@ mod tests {
     };
     use super::super::{
         ContaminationFittedFrom, ContaminationMeasurement, EvidenceCount, LevelSmoothing, SeedRung,
-        ShareSmoothing, Warrant, WarrantedValue,
+        ShareSmoothing, SnpIndelFitAsReturned, Warrant, WarrantedValue,
     };
     use super::*;
     use crate::float;
@@ -2468,6 +2510,38 @@ mod tests {
         assert!(problem.contains("format-10 table"), "{problem}");
         let (field, _) = refused(|file| file.format_version = 11);
         assert_eq!(field, "format_version");
+    }
+
+    /// **`[snp_indel_fit]` refuses a number a fit cannot start from, a doubled row, and a read
+    /// group the file does not list** — each of which the fit would otherwise take as it stands.
+    #[test]
+    fn the_snp_indel_fit_refuses_what_a_fit_cannot_start_from() {
+        fn table(file: &mut ParametersFile) -> &mut SnpIndelFitAsReturned {
+            file.snp_indel_fit.as_mut().expect("in the fixture")
+        }
+        let at = "snp_indel_fit";
+        let (field, _) = refused(|file| table(file).by_sample[0].homozygote_excess = 1.2);
+        assert_eq!(
+            field,
+            format!("{at}.by_sample[sample = S1].homozygote_excess")
+        );
+        let (field, _) = refused(|file| table(file).by_read_group[0].ordinary_error_rate = 0.0);
+        assert_eq!(field, format!("{at}.by_read_group[read_group = 0]"));
+        let (field, _) = refused(|file| table(file).mismapped_share = -0.1);
+        assert_eq!(field, format!("{at}.mismapped_share"));
+        let (field, _) = refused(|file| table(file).segregating_shape_b = 0.0);
+        assert_eq!(field, format!("{at}.segregating_shape_b"));
+        let (field, _) = refused(|file| table(file).fixed_non_reference_share = 0.5);
+        assert_eq!(field, format!("{at}.fixed_non_reference_share"));
+        let (field, problem) = refused(|file| {
+            let row = table(file).by_sample[0].clone();
+            table(file).by_sample.push(row);
+        });
+        assert_eq!(field, format!("{at}.by_sample[sample = S1]"));
+        assert!(problem.contains("twice"), "{problem}");
+        let (field, problem) = refused(|file| table(file).by_read_group[0].read_group = 7);
+        assert_eq!(field, format!("{at}.by_read_group[read_group = 7]"));
+        assert!(problem.contains("does not list"), "{problem}");
     }
 
     /// **A `defaulted` outlier weight is the built-in of the format the file says it was written

@@ -149,7 +149,8 @@ pub struct EstimateParametersArgs {
     /// group the earlier run did not have starts at the median of those it did. Every number is
     /// still fitted, so the answer is the one a run without this option reaches, to within the
     /// fit's stopping rule — about a tenth of a standard error. A file holding fewer than half of
-    /// these samples is not used, and the log says so.
+    /// these samples or of their read groups is not used, and the log says so; nor is it when the
+    /// fit from it does not converge, or when fewer than two samples have reads.
     #[arg(long, value_name = "FILE", help_heading = "Advanced")]
     pub start_from: Option<PathBuf>,
 
