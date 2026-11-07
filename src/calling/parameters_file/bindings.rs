@@ -243,6 +243,14 @@ impl RepeatRouting {
 }
 
 impl ParametersFile {
+    /// **Whether this file was fitted against `reference`** — the first of the checks
+    /// [`Self::refuse_if_not_this_runs_inputs`] makes, alone, for a reader that does not need the
+    /// samples to match: a fit starting from an earlier run's numbers.
+    #[must_use]
+    pub fn was_fitted_against(&self, reference: &ReferenceDigest) -> bool {
+        self.fitted_from.reference_digest == hex_digest(&reference.0)
+    }
+
     /// **Which routing threshold this file's run and `asked` first differ on** — `None` where
     /// they routed the same ground, and `None` where the file does not say.
     ///
@@ -708,6 +716,8 @@ impl ParametersFile {
             ordinary_site_prior: _,
             // Informational, and carries no warrant: a calling run reads none of it.
             duplicated_positions: _,
+            // Informational too: what a later fit starts from, and nothing a calling run reads.
+            snp_indel_fit: _,
             // Informational too: which tracts the fit left out, and nothing a run reads.
             repeat_tracts_left_out: _,
             misread_after_runs,

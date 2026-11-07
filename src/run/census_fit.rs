@@ -33,7 +33,8 @@ use crate::calling::likelihood::run_context::MisreadTable;
 use crate::calling::parameters_file::{
     CensusIdentity, DepthRuleSettings, FittedDensity, FittedDuplicatedPositions,
     InformationalNumber, PairedNumber, ParametersFile, ReadsBehindEachCalibration,
-    RepeatTractsLeftOut, SeedRung, SnpIndelFitStart, StartOutcome, StutterTailPeriodRow,
+    RepeatTractsLeftOut, SeedRung, SnpIndelFitAsReturned, SnpIndelFitReadGroupRow,
+    SnpIndelFitSampleRow, SnpIndelFitStart, StartOutcome, StutterTailPeriodRow,
     StutterTailRuleSettings, TractsLeftOutRow,
 };
 use crate::calling::run_parameters::RunParameters;
@@ -694,6 +695,37 @@ pub fn parameters_file_of(
     );
     file.with_what_the_data_determine(fitted_density, duplicated_positions)
         .with_repeat_tracts_left_out(Some(the_tracts_left_out_as_written(tracts_left_out)))
+        .with_snp_indel_fit(Some(the_fit_as_returned(snp_indel_fit)))
+}
+
+/// **The SNP/indel fit's own numbers, unconverted** (`[snp_indel_fit]`): what a later fit of the
+/// same cohort grown by a few samples starts from (`parameter_prepass_joint_fit.md` §3.3.3).
+fn the_fit_as_returned(fit: &JointFit) -> SnpIndelFitAsReturned {
+    let density = &fit.density.value;
+    SnpIndelFitAsReturned {
+        mismapped_share: fit.noisy_share,
+        invariant_share: density.p_invariant,
+        fixed_non_reference_share: density.p_fixed_alt,
+        segregating_shape_a: density.a,
+        segregating_shape_b: density.b,
+        by_read_group: fit
+            .noise
+            .iter()
+            .map(|(group, rates)| SnpIndelFitReadGroupRow {
+                read_group: group.get(),
+                ordinary_error_rate: rates.value.clean,
+                mismapped_error_rate: rates.value.noisy,
+            })
+            .collect(),
+        by_sample: fit
+            .hom_excess
+            .iter()
+            .map(|(sample, excess)| SnpIndelFitSampleRow {
+                sample: sample.clone(),
+                homozygote_excess: excess.value.get(),
+            })
+            .collect(),
+    }
 }
 
 /// **What the rules that leave tracts out of the stutter fit did, in the file's words**

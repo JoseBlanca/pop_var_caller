@@ -280,6 +280,18 @@ every motif length with a slip rate, `defaulted` at one where the fit did not fi
 apart; a missing, doubled or non-positive row is refused, as is the table in a file stamped below 9.
 A file stamped 8 or below is read with every multiplier one.
 
+*Amended 2026-11-07, format 10:* `[snp_indel_fit]`, the SNP/indel fit's own numbers exactly as it
+returned them — the mismapped share, the density's four numbers, each read group's ordinary and
+mismapped error rates, each sample's homozygote excess
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3.3). Informational: no
+calling run reads it, and a calling run carries it into the file it writes back. It exists because
+the rest of the file holds these numbers only as calling reads them — the ordinary rate as a
+calibration multiplier, the excess as an inbreeding coefficient `--inbreeding` may replace, the
+density only on the fitted-curve rung — and the mismapped share and mismapped rates not at all,
+while `estimate-parameters --start-from` needs them unconverted. Its numbers must be finite; the
+table in a file stamped below 10 is refused naming it, and a file stamped 9 or below is read
+without it.
+
 **An alternative total of exactly zero is a real answer** — a fully invariant cohort — and is not
 floored on the way in or out; the flooring belongs to the per-locus expansion.
 

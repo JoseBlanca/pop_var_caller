@@ -124,6 +124,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         inbreeding: None,
         str_param_estimates_at_once: None,
         skip_contamination: false,
+        start_from: None,
         threads: 0,
     }
 }
@@ -302,6 +303,62 @@ fn one_cohort_fitted_twice_writes_the_same_file() {
         first.to_toml(),
         again.to_toml(),
         "one cohort's parameters are one file",
+    );
+}
+
+/// **`--start-from` fits from the file it names**: a run given its own cohort's file starts from
+/// those numbers, runs one start, and writes the same SNP/indel numbers to within the fit's stopping
+/// rule; a file without the `[snp_indel_fit]` table is refused, naming the table.
+#[test]
+fn a_run_started_from_an_earlier_file_fits_from_its_numbers() {
+    let (cohort, psps) = a_walked_cohort();
+    let earlier_path = cohort.directory.path().join("earlier.parameters.toml");
+    let (earlier, _) = fit_and_assemble(&args_over(&cohort, &psps, earlier_path.clone()))
+        .expect("the cohort fits");
+    std::fs::write(&earlier_path, earlier.to_toml()).expect("the file is writable");
+
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let (again, _) = fit_and_assemble(&EstimateParametersArgs {
+        start_from: Some(earlier_path.clone()),
+        ..args_over(&cohort, &psps, output.clone())
+    })
+    .expect("the cohort fits from the earlier file");
+    // **What this pins is that the file's numbers reach the fit**: one run, fewer passes than the
+    // fit from the starting points took. That it reaches the same maximum is the fit's own test
+    // (`a_fit_from_an_earlier_fits_numbers_reaches_the_same_maximum`), which can compare
+    // log-likelihoods; at two samples the mismapped share is too loosely determined for its value
+    // to say anything, and moved by 1% between the two runs here.
+    let passes = |file: &ParametersFile| -> Vec<(u32, String)> {
+        file.fitted_from
+            .snp_indel_fit_starts
+            .as_ref()
+            .expect("a fit records its starts")
+            .iter()
+            .map(|start| (start.passes, format!("{:?}", start.ended)))
+            .collect()
+    };
+    let (before, after) = (passes(&earlier), passes(&again));
+    assert_eq!(
+        after.len(),
+        1,
+        "one run, from the earlier numbers: {after:?}"
+    );
+    assert!(after[0].1.contains("Converged"), "{after:?}");
+    let before_total: u32 = before.iter().map(|(passes, _)| passes).sum();
+    assert!(after[0].0 < before_total, "{after:?} against {before:?}");
+
+    let mut without = earlier;
+    without.snp_indel_fit = None;
+    std::fs::write(&earlier_path, without.to_toml()).expect("the file is writable");
+    let error = fit_and_assemble(&EstimateParametersArgs {
+        start_from: Some(earlier_path),
+        force: true,
+        ..args_over(&cohort, &psps, output)
+    })
+    .expect_err("a file without the table is refused");
+    assert!(
+        matches!(&error, EstimateParametersCliError::StartFrom { why, .. } if why.contains("[snp_indel_fit]")),
+        "{error}"
     );
 }
 

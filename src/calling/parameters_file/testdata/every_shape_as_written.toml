@@ -77,7 +77,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 9
+format_version = 10
 ploidy = 2
 
 [fitted_from]
@@ -285,6 +285,31 @@ duplicated_share = { value = 0.026, standard_error = 0.0023, separately_determin
 carrier_shape_a = { value = 2.22, standard_error = 0.439, separately_determined = true }
 carrier_shape_b = { value = 3.51, standard_error = 0.522 }
 share_with_carriers_above_stated_frequency = { value = 0.026 }
+
+[snp_indel_fit]
+# The SNP/indel fit's own numbers, exactly as it returned them. Informational: a
+# calling run reads none of it, and editing it changes no call. A later
+# `estimate-parameters` run given this file with `--start-from` starts its fit
+# from these numbers rather than from its usual starting points.
+#
+# Elsewhere this file holds them only as calling reads them: each read group's
+# error rate at an ordinary position as a multiplier on the library's own
+# qualities, each sample's homozygote excess as an inbreeding coefficient that
+# `--inbreeding` may have replaced. `mismapped_share` is the share of kept
+# positions taken to be mismapped — two stretches of genome piling their reads
+# up on one place — and `mismapped_error_rate` how often a read disagrees with
+# the reference there; neither is written anywhere else.
+mismapped_share = 0.058412
+invariant_share = 0.8416
+fixed_non_reference_share = 2.96e-5
+segregating_shape_a = 0.02885
+segregating_shape_b = 8.7365
+by_read_group = [
+    { read_group = 0, ordinary_error_rate = 0.00125, mismapped_error_rate = 0.041 },
+]
+by_sample = [
+    { sample = "S1", homozygote_excess = 0.97 },
+]
 
 [repeat_tracts_left_out]
 # The repeat tracts the stutter fit did not learn from, and why. Informational:

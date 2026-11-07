@@ -46,6 +46,7 @@
 //!   run lands here even though the fit ran**, because one genome's totals cannot identify an
 //!   excess and it comes out zero whatever the truth.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -56,10 +57,13 @@ use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
 use crate::parameter_estimation::joint::census::{CohortCensusEvidence, SampleCensusEvidence};
-use crate::parameter_estimation::joint::fit::JointFitConfig;
+use crate::parameter_estimation::joint::fit::{
+    DuplicatedPositions, EarlierFit, FrequencyDensity, JointFitConfig, SiteClassNoise,
+};
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::PenalisedFitConfig;
 use crate::parameter_estimation::progress::StageProgress;
+use crate::read::input::read_groups::ReadGroups;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfo, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
@@ -72,7 +76,7 @@ use crate::run::{
     what_the_heads_say_about_every_census_in_a_cohort,
     what_the_run_says_about_every_census_in_a_cohort,
 };
-use crate::types::{ContigId, InbreedingF, Ploidy};
+use crate::types::{ContigId, InbreedingF, Ploidy, ReadGroupId};
 
 #[cfg(test)]
 mod tests;
@@ -138,6 +142,17 @@ pub struct EstimateParametersArgs {
     #[arg(long, help_heading = "Advanced")]
     pub skip_contamination: bool,
 
+    /// A parameters file an earlier run of this command wrote, to start the SNP/indel fit from.
+    ///
+    /// For a cohort that has grown by a few samples since that run: the fit starts from the earlier
+    /// run's numbers rather than searching from its usual starting points, and a sample or read
+    /// group the earlier run did not have starts at the median of those it did. Every number is
+    /// still fitted, so the answer is the one a run without this option reaches, to within the
+    /// fit's stopping rule — about a tenth of a standard error. A file holding fewer than half of
+    /// these samples is not used, and the log says so.
+    #[arg(long, value_name = "FILE", help_heading = "Advanced")]
+    pub start_from: Option<PathBuf>,
+
     /// **Removed; a run that gives it is refused** with
     /// [`EstimateParametersCliError::RemovedOption`]. It chose how many repeat-tract strata the
     /// earlier fit held a per-stratum likelihood table for at once. The penalised fit builds a
@@ -156,6 +171,15 @@ pub enum EstimateParametersCliError {
     /// The run's log could not be opened.
     #[error(transparent)]
     Log(#[from] crate::cli::run_output::LogFileError),
+
+    /// The `--start-from` file could not be used.
+    #[error("--start-from {}: {why}", path.display())]
+    StartFrom {
+        /// The file.
+        path: PathBuf,
+        /// Why not.
+        why: String,
+    },
 
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
@@ -484,12 +508,26 @@ fn fit_and_assemble(
     } = open_the_censuses(args)?;
     let contig_of = contig_id_of(&plan);
     let pooled = every_read_group_pooled(&evidence);
+    let read_groups = read_groups_of(&evidence, cohort.paths());
+    let reference = ReferenceDigest::of(&with_checksums).map_err(|source| {
+        EstimateParametersCliError::CensusNotPlanned {
+            source: Box::new(RunError::CensusNotPlanned {
+                source: Box::new(source),
+            }),
+        }
+    })?;
+    let mut generic = ordinary_position_config(args, ploidy);
+    generic.earlier_fit = args
+        .start_from
+        .as_deref()
+        .map(|path| the_earlier_fit(path, &read_groups, &reference))
+        .transpose()?;
     let fit = fit_a_cohort(
         &mut evidence,
         &plan.loci,
         &contig_of,
         &pooled,
-        &ordinary_position_config(args, ploidy),
+        &generic,
         &repeat_tract_config(),
     )
     .map_err(|source| EstimateParametersCliError::Fit {
@@ -497,7 +535,6 @@ fn fit_and_assemble(
     })?;
 
     let samples = evidence.len();
-    let read_groups = read_groups_of(&evidence, cohort.paths());
     // **One list, resolved once, handed to both the run and the file.** The ladder is
     // `DeclaredInbreeding`'s: what the operator stated, else what this fit measured, else the
     // default — joined to the run's samples by name, and carrying which of the three it was.
@@ -508,13 +545,6 @@ fn fit_and_assemble(
         .terms()
         .expect("a cohort of one or more samples records terms")
         .clone();
-    let reference = ReferenceDigest::of(&with_checksums).map_err(|source| {
-        EstimateParametersCliError::CensusNotPlanned {
-            source: Box::new(RunError::CensusNotPlanned {
-                source: Box::new(source),
-            }),
-        }
-    })?;
     let file = parameters_file_of(
         &parameters,
         &read_groups,
@@ -526,6 +556,103 @@ fn fit_and_assemble(
         &fit.tracts_left_out,
     );
     Ok((a_file_the_next_run_can_read(file)?, samples))
+}
+
+/// **The SNP/indel fit's numbers from an earlier run's file, matched to this run** — what
+/// `--start-from` hands the fit ([`EarlierFit`]).
+///
+/// A read group is matched on its sample, its `@RG ID` and its library together — the key a
+/// calling run joins a file on, with the library added because a rate fitted under another
+/// library's name is another library's — and a sample on its name. What does not match is left
+/// out, and starts at the median of what did.
+///
+/// # Errors
+///
+/// [`EstimateParametersCliError::StartFrom`] for a file that cannot be read, is not a parameters
+/// file this build reads, was fitted against another reference, or holds no `[snp_indel_fit]`
+/// table — which a file written before format 10 does not.
+fn the_earlier_fit(
+    path: &Path,
+    read_groups: &ReadGroups,
+    reference: &ReferenceDigest,
+) -> Result<EarlierFit, EstimateParametersCliError> {
+    let refused = |why: String| EstimateParametersCliError::StartFrom {
+        path: path.to_owned(),
+        why,
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|source| refused(format!("could not be read: {source}")))?;
+    let file = ParametersFile::from_toml(&text)
+        .and_then(|file| file.validate().map(|()| file))
+        .map_err(|source| {
+            refused(format!(
+                "is not a parameters file this build reads: {source}"
+            ))
+        })?;
+    if !file.was_fitted_against(reference) {
+        return Err(refused(
+            "was fitted against another reference, whose positions are not this run's".to_owned(),
+        ));
+    }
+    let Some(fit) = &file.snp_indel_fit else {
+        return Err(refused(
+            "holds no `[snp_indel_fit]` table, which a file written before format 10 does not; \
+             run without --start-from"
+                .to_owned(),
+        ));
+    };
+    let lanes: BTreeMap<(&str, &str, &str), ReadGroupId> = read_groups
+        .iter()
+        .map(|(id, group)| ((&*group.sample, &*group.id, &*group.library.value), id))
+        .collect();
+    let this_runs: BTreeMap<u32, ReadGroupId> = file
+        .fitted_from
+        .read_groups
+        .iter()
+        .filter_map(|row| {
+            let key = (
+                row.sample.as_str(),
+                row.declared_id.as_str(),
+                row.library.as_str(),
+            );
+            Some((row.read_group, *lanes.get(&key)?))
+        })
+        .collect();
+    Ok(EarlierFit {
+        noisy_share: Some(fit.mismapped_share),
+        density: Some(FrequencyDensity {
+            p_invariant: fit.invariant_share,
+            p_fixed_alt: fit.fixed_non_reference_share,
+            a: fit.segregating_shape_a,
+            b: fit.segregating_shape_b,
+        }),
+        duplicated: file
+            .duplicated_positions
+            .as_ref()
+            .map(|duplicated| DuplicatedPositions {
+                share: duplicated.duplicated_share.value,
+                carrier_a: duplicated.carrier_shape_a.value,
+                carrier_b: duplicated.carrier_shape_b.value,
+            }),
+        noise: fit
+            .by_read_group
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    *this_runs.get(&row.read_group)?,
+                    SiteClassNoise {
+                        clean: row.ordinary_error_rate,
+                        noisy: row.mismapped_error_rate,
+                    },
+                ))
+            })
+            .collect(),
+        hom_excess: fit
+            .by_sample
+            .iter()
+            .map(|row| (row.sample.clone(), row.homozygote_excess))
+            .collect(),
+    })
 }
 
 /// **The file a fit built, refused here if a calling run would refuse it** — so the run stops

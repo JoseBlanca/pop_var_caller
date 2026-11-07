@@ -23,9 +23,9 @@ use super::{
     PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting, RepeatTracts,
     RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
     ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
-    SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow, StutterMultiplierRow,
-    SubstitutionRateRow, Warrant, WarrantedValue, between_locus_share_error_of,
-    between_locus_share_of, concentration_error_of,
+    SnpIndelFitAsReturned, SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow,
+    StutterMultiplierRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    between_locus_share_error_of, between_locus_share_of, concentration_error_of,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -449,6 +449,7 @@ impl ParametersFile {
                 fitted_density: None,
             },
             duplicated_positions: None,
+            snp_indel_fit: None,
             repeat_tracts_left_out: None,
             misread_after_runs: misread_after_runs_of(run),
             repeat_routing: repeat_routing.map(RepeatRouting::of),
@@ -515,6 +516,18 @@ impl ParametersFile {
         repeat_tracts_left_out: Option<RepeatTractsLeftOut>,
     ) -> Self {
         self.repeat_tracts_left_out = repeat_tracts_left_out;
+        self
+    }
+
+    /// **Record the SNP/indel fit's own numbers as it returned them** — format 10's informational
+    /// table `[snp_indel_fit]`, what a later fit starts from; `None` where the file was not written
+    /// by a fit, or the file it carries over had none.
+    ///
+    /// A builder for the same reason as [`Self::with_what_the_data_determine`]: no calling run
+    /// reads it.
+    #[must_use]
+    pub fn with_snp_indel_fit(mut self, snp_indel_fit: Option<SnpIndelFitAsReturned>) -> Self {
+        self.snp_indel_fit = snp_indel_fit;
         self
     }
 }
@@ -3913,7 +3926,8 @@ mod one_writer_three_sources {
             supplied.ordinary_site_prior.fitted_density.clone(),
             supplied.duplicated_positions.clone(),
         )
-        .with_repeat_tracts_left_out(supplied.repeat_tracts_left_out.clone());
+        .with_repeat_tracts_left_out(supplied.repeat_tracts_left_out.clone())
+        .with_snp_indel_fit(supplied.snp_indel_fit.clone());
 
         assert_eq!(written, supplied);
     }
@@ -4118,7 +4132,8 @@ mod one_writer_three_sources {
             supplied.ordinary_site_prior.fitted_density.clone(),
             supplied.duplicated_positions.clone(),
         )
-        .with_repeat_tracts_left_out(supplied.repeat_tracts_left_out.clone());
+        .with_repeat_tracts_left_out(supplied.repeat_tracts_left_out.clone())
+        .with_snp_indel_fit(supplied.snp_indel_fit.clone());
 
         assert_eq!(
             written.base_quality_calibration.by_read_group[0].error_probability_multiplier,

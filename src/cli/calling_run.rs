@@ -33,7 +33,8 @@ use crate::calling::inference::{CallingLoopConfig, DiscoveryMode, RunnableCallin
 use crate::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, FittedDensity, FittedDuplicatedPositions, ParametersFile,
-    ParametersFileError, ReadsBehindEachCalibration, RepeatTractsLeftOut, SnpIndelFitStart,
+    ParametersFileError, ReadsBehindEachCalibration, RepeatTractsLeftOut, SnpIndelFitAsReturned,
+    SnpIndelFitStart,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
@@ -929,6 +930,9 @@ pub struct TheRunsNumbers {
     /// **Which tracts the fit behind the file left out of its stutter fit** — format 7's
     /// informational table; carried, like the two above, so a calling run does not drop it.
     pub repeat_tracts_left_out: Option<RepeatTractsLeftOut>,
+    /// **The SNP/indel fit's own numbers as the fit behind the file returned them** — format 10's
+    /// informational table; carried, like the three above, so a calling run does not drop it.
+    pub snp_indel_fit: Option<SnpIndelFitAsReturned>,
 }
 
 impl TheRunsNumbers {
@@ -963,6 +967,7 @@ impl TheRunsNumbers {
             self.duplicated_positions.clone(),
         )
         .with_repeat_tracts_left_out(self.repeat_tracts_left_out.clone())
+        .with_snp_indel_fit(self.snp_indel_fit.clone())
     }
 }
 
@@ -1004,6 +1009,7 @@ pub fn run_parameters(
             fitted_density: None,
             duplicated_positions: None,
             repeat_tracts_left_out: None,
+            snp_indel_fit: None,
         });
     };
     let text =
@@ -1066,6 +1072,7 @@ pub fn run_parameters(
         fitted_density: file.ordinary_site_prior.fitted_density.clone(),
         duplicated_positions: file.duplicated_positions.clone(),
         repeat_tracts_left_out: file.repeat_tracts_left_out.clone(),
+        snp_indel_fit: file.snp_indel_fit.clone(),
     })
 }
 

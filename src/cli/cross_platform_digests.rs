@@ -311,7 +311,11 @@ mod tests {
     /// (`str_interrupted_tracts.md` §2): this cohort has none, so the fit is unchanged and the
     /// file moves only by the `[repeat_tracts_left_out]` note and each class's `interrupted = 0`.
     /// It was `af874257c25115d294282a8720c6a3b9`. Recorded on the macOS host (arm64).
-    const FITTED_PARAMETERS_MD5: &str = "b15b5e62860021c3d8e8471d1a225115";
+    /// **Re-recorded 2026-11-07** when the parameters file reached format 10 and began writing the
+    /// SNP/indel fit's own numbers in `[snp_indel_fit]`: the file moves by `format_version` and the
+    /// new table only — taking both out reproduces the old checksum, `b15b5e62860021c3d8e8471d1a225115`, exactly — and the
+    /// VCF by its `##pvcParameters` line. Recorded on the macOS host (arm64).
+    const FITTED_PARAMETERS_MD5: &str = "973817a050c13e7071087a05e0ad117d";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -524,7 +528,7 @@ mod tests {
     /// **Re-recorded 2026-11-07** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was
     /// `8a037a8542205d42116a3ff52b92c5bc`. Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "249f655d30e5f411f12edf642eeede52";
+    const CALLS_MD5: &str = "f1ace6b25648ec2e1cb5aef52ebb1e8d";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -678,7 +682,11 @@ mod tests {
     /// (`str_interrupted_tracts.md` §2): this cohort has none, so the fit is unchanged and the
     /// file moves only by the `[repeat_tracts_left_out]` note and each class's `interrupted = 0`.
     /// It was `846e1849bada1d77f30d131b03e4068c`. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "33367da030ee1715da78e807590990a0";
+    /// **Re-recorded 2026-11-07** when the parameters file reached format 10 and began writing the
+    /// SNP/indel fit's own numbers in `[snp_indel_fit]`: the file moves by `format_version` and the
+    /// new table only — taking both out reproduces the old checksum, `33367da030ee1715da78e807590990a0`, exactly — and the
+    /// VCF by its `##pvcParameters` line. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "f84b1cc515d7734befab55cc9a13a192";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -867,7 +875,7 @@ mod tests {
     /// **Re-recorded 2026-11-07** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was
     /// `55175fcd3d222db39b21ffeb9994ae1e`. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "93b24485a82ec3066fbee766aa39c9ad";
+    const WITH_ERRORS_CALLS_MD5: &str = "240d77a0915e50c8ead10cae152e4da1";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -1034,7 +1042,11 @@ mod tests {
     /// (`str_interrupted_tracts.md` §2): this cohort has none, so the fit is unchanged and the
     /// file moves only by the `[repeat_tracts_left_out]` note and each class's `interrupted = 0`.
     /// It was `09db8d0e6ed8653a7f3c410c4837f351`. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "6e530103f02863b91403e1439c31f235";
+    /// **Re-recorded 2026-11-07** when the parameters file reached format 10 and began writing the
+    /// SNP/indel fit's own numbers in `[snp_indel_fit]`: the file moves by `format_version` and the
+    /// new table only — taking both out reproduces the old checksum, `6e530103f02863b91403e1439c31f235`, exactly — and the
+    /// VCF by its `##pvcParameters` line. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "e16b29242babebdc03b366f82a780913";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1239,7 +1251,7 @@ mod tests {
     /// **Re-recorded 2026-11-07** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was
     /// `2c1f1ceeec780ecd5ed4e6f3da251411`. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "96c15d2e981402052a02d1f5151802bd";
+    const OF_21_SAMPLES_CALLS_MD5: &str = "8e6bfdaa782ce9bf6c8facafec4d8aa2";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -1350,6 +1362,7 @@ mod tests {
             inbreeding: None,
             str_param_estimates_at_once: None,
             skip_contamination: false,
+            start_from: None,
             threads: 0,
         })
         .expect("the cohort fits");
