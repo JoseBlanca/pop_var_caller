@@ -311,7 +311,7 @@ mod tests {
     /// (`str_interrupted_tracts.md` §2): this cohort has none, so the fit is unchanged and the
     /// file moves only by the `[repeat_tracts_left_out]` note and each class's `interrupted = 0`.
     /// It was `af874257c25115d294282a8720c6a3b9`. Recorded on the macOS host (arm64).
-    const FITTED_PARAMETERS_MD5: &str = "1ec5d86a86f81762bd7fde74a1acd06d";
+    const FITTED_PARAMETERS_MD5: &str = "b15b5e62860021c3d8e8471d1a225115";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -518,7 +518,7 @@ mod tests {
     /// **Re-recorded 2026-11-06** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was `3edb3436d3c8ae418d75385c2d289dd2`. Recorded on
     /// the macOS host (arm64).
-    const CALLS_MD5: &str = "8695209c45344e7ea92e02604caaf2a1";
+    const CALLS_MD5: &str = "5fc0b46d93f8310d6c577f07a12f24ed";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -672,7 +672,7 @@ mod tests {
     /// (`str_interrupted_tracts.md` §2): this cohort has none, so the fit is unchanged and the
     /// file moves only by the `[repeat_tracts_left_out]` note and each class's `interrupted = 0`.
     /// It was `846e1849bada1d77f30d131b03e4068c`. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "7bffeb44520ab65a28bc0a506e65aaa6";
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "33367da030ee1715da78e807590990a0";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -857,7 +857,7 @@ mod tests {
     /// **Re-recorded 2026-11-06** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was `54454ccd4b0515cc172b90f3db41dc63`. Recorded on
     /// the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "53df037076159a331d1c0a9faf7e1212";
+    const WITH_ERRORS_CALLS_MD5: &str = "a9ef77ac17f2018d46be4a336d5839c5";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -1024,7 +1024,7 @@ mod tests {
     /// (`str_interrupted_tracts.md` §2): this cohort has none, so the fit is unchanged and the
     /// file moves only by the `[repeat_tracts_left_out]` note and each class's `interrupted = 0`.
     /// It was `09db8d0e6ed8653a7f3c410c4837f351`. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "91f56ea91536e4a2bd8f74c1d2dedbf8";
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "6e530103f02863b91403e1439c31f235";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1225,7 +1225,7 @@ mod tests {
     /// **Re-recorded 2026-11-06** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was `9da65303da1580f10e2380b945a0e583`. Recorded on
     /// the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "bd6fbbb22b7269de25d149443ba6fd15";
+    const OF_21_SAMPLES_CALLS_MD5: &str = "1984c77a36503ef262976c0dbc2205a3";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

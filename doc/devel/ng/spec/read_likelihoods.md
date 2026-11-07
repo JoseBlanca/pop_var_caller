@@ -1673,10 +1673,11 @@ the walk emits does not contain it
 stratum's, unadjusted for that candidate's own purity**, and the adjustment production applies has no
 fitted source here. Recorded as deferred (§10) rather than invented.
 
-> **AMENDED 2026-11-06.** An interrupted segment's candidates are now looked up at the class of the
-> segment's longest pure run, moved by the candidate's length
-> ([`str_interrupted_tracts.md`](str_interrupted_tracts.md) §3). That is the adjustment, made by
-> choosing the class rather than by a factor on its level.
+> **NOTE 2026-11-07.** Looking an interrupted segment's candidates up at the class of its longest
+> pure run was built and measured, changed no genotypes beyond noise on tomato2 or HG002, and was
+> not adopted ([`str_interrupted_tracts.md`](str_interrupted_tracts.md) §3). The fit now learns each
+> class from pure segments only (§2 there), so the level an interrupted candidate gets is a pure
+> segment's of its length.
 
 ### 4.7 What this model gives up at three reads, and at three hundred
 
@@ -2480,7 +2481,8 @@ anything.
   the two parameters separate in the model so the estimator has somewhere to land.
 - **A purity adjustment on the slippage level** for an interrupted candidate (§4.6). **Home:** the
   interrupted-repeat work, which has to say what an interruption is for genotyping before it can say
-  what it does to slippage. *Taken up 2026-11-06 by [`str_interrupted_tracts.md`](str_interrupted_tracts.md).*
+  what it does to slippage. *One form of it measured and not adopted, 2026-11-07:
+  [`str_interrupted_tracts.md`](str_interrupted_tracts.md) §3.*
 - **Alleles longer than a read**, by counting reads that fall entirely inside a tract — GangSTR's
   approach. **Home:** already claimed, and **deferred rather than rejected** on our data
   ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §7); §5's censored term is the cheaper half

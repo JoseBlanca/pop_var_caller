@@ -1,19 +1,20 @@
-# Interrupted STR segments: left out of the stutter fit, scored by their longest pure run
+# Interrupted STR segments: left out of the stutter fit
 
-*Status: proposal, 2026-11-06. Owner's ruling of the same day: "leave interrupted tracts out of the
-stutter fit; at calling, score each interrupted tract with the rate of its longest pure run". The
-measurements behind it are §1; what this document changes is §2 to §5; how we know it works is §7.*
+*Status: settled, 2026-11-07. The owner's ruling of 2026-11-06 was "leave interrupted tracts out of
+the stutter fit; at calling, score each interrupted tract with the rate of its longest pure run". The
+calling half was then built as a prototype and measured on genotypes (§3), changed nothing that
+could be told from noise, and on 2026-11-07 the owner ruled: "we keep the fit change, but we leave
+calling as in main". The measurements behind the fit change are §1; what this document changes is
+§2 and §4; how we know it works is §7.*
 
 **What this does, in words.** The repeat catalog accepts an STR segment with a few bases that break
 the repeat, such as `TTTTTTTAAATTTTTTTTT`, and gives it the repeat count of its whole length: a
 homopolymer of 19. Such an *interrupted* segment slips much less than a pure run of 19 bases,
 because a polymerase slips along the uninterrupted stretch it is copying, and here the longest one is
-9 bases. Today the repeat-tract fit puts pure and interrupted segments of one length into the same
-class and fits one slip rate between them, and calling scores both with it. From this change:
-
-- **the fit learns slippage from pure segments only** (§2);
-- **calling scores an interrupted segment's reads at the slip rate of a pure segment as long as its
-  longest uninterrupted run** — for `TTTTTTTAAATTTTTTTTT`, a homopolymer of 9 (§3).
+9 bases. Until this change the repeat-tract fit put pure and interrupted segments of one length into
+the same class and fitted one slip rate between them. From this change **the fit learns slippage
+from pure segments only** (§2). Calling is unchanged: every segment, pure or interrupted, is scored
+with its own class's fit (§3).
 
 Nothing changes in the catalog, the census or the psp files, and pure segments are fitted and
 called exactly as before.
@@ -100,54 +101,43 @@ does today (`str_fit_to_calling.md` §3).
 counts, and no digest moves: the kept-loci digest covers the generic path's positions only, and the
 selection digest covers the catalog's settings, not how the fit groups segments.
 
-## 3. Calling: an interrupted segment is scored as its longest pure run
+## 3. Calling is unchanged, and why
 
-**The longest pure run** of a segment is its longest stretch of bases in which every base equals the
-one a motif length further on, counted in whole copies: a stretch of `L` such bases holds `⌊L / k⌋`
-copies of a motif of `k` bases. It is read off the reference bases of the segment, which calling
-already holds as allele 0 (`candidate_alleles_ssr.md`). Written this way it does not depend on where
-the motif's phase starts, so an interruption that shifts the phase (`CACACAT` then `ACACAC`) leaves
-two runs of the same motif rather than one run and a mismatch. For a perfect segment the stretch is
-the whole segment and the run is the segment's own repeat count.
+**Calling scores every segment with the fit of its own class `(period, R)`**, as before this
+document: an interrupted homopolymer of 19 gets the 19-repeat class's stutter and allele-length
+prior, now fitted from pure segments only.
 
-**The stutter of each candidate is looked up at the pure-run class, moved by the candidate's
-length.** Today a candidate of `c` repeats at a segment is scored with the slippage of class
-`(period, c)` (`read_likelihoods.md` §4.4). At a segment of reference count `R` whose longest pure
-run is `P`, the candidate is scored with the slippage of class `(period, P + c − R)`:
+**The alternative, built and measured.** A prototype looked each candidate's stutter up at the class
+of the segment's *longest pure run* `P`, moved by the candidate's length (`P + c − R`), and,
+separately, the allele-length prior at `(period, P)`. The longest pure run is the longest stretch in
+which every base equals the one a motif length further on, in whole copies; for
+`TTTTTTTAAATTTTTTTTT` it is 9. Measured on genotypes, against main and against the fit change alone:
 
-- the reference allele itself, `c = R`, slips as a pure run of `P`;
-- a candidate one repeat longer, `c = R + 1`, slips as a pure run of `P + 1`: the extra copy is taken
-  to sit in the longest run, which is where slippage most likely put it.
+- **Tomato2**, 59 inbred accessions at about 5 reads a position, calling restricted to the 309
+  single-base segments of 15 to 26 repeats in its regions. Heterozygous calls, which in inbred lines
+  are mostly errors:
 
-**Why the candidate's length and not its own longest run.** A candidate's bases are the reference's
-with whole copies added or removed, so its longest run is `P + c − R` exactly when the change sits in
-the longest run, and calling does not know where a length change sits. The formula takes the most
-likely place, and it needs no new sequence work per candidate.
+  | build | pure segments, 17–26 repeats (5,251 genotypes) | interrupted, 17–25 (3,304 genotypes) |
+  |---|---:|---:|
+  | main | 71 | 20 |
+  | fit change (§2) | 63 | 20 |
+  | + stutter at the pure-run class | 64 | 20 |
+  | + allele-length prior at the pure-run class | 64 | 22 |
 
-**When `P + c − R` is below one**, or names a class with no fit, the candidate falls back as a
-missing class does today: the shipped stutter, marked `defaulted` (`str_fit_to_calling.md` §3).
-At tomato's interrupted homopolymers, `P` is 7 to 10 copies shorter than `R`, so only a candidate
-that has lost most of the segment reaches below the fitted classes.
+  The 15- and 16-repeat segments, which none of the changes should touch, stay at 75 heterozygous
+  calls in every build. The fit change removes 8 heterozygous calls, all at pure segments; the
+  stutter lookup changes nothing at interrupted segments, and the prior adds 2.
+- **HG002**, GIAB tandem-repeat benchmark at 5×, 15× and 30×, 20,183 segments of which 1,954
+  interrupted: every build is within 3 right genotypes and 3 false calls of main at each depth.
 
-**What else the candidate's class sets is unchanged.** The substitution rate is still looked up at
-`(period, c)`, because it was fitted over interrupted and pure segments alike (§2). The allele-length
-prior is still the segment's own class `(period, R)` (§6). A
-segment's read-group multipliers are the read group's at the motif length, so they apply as before.
+**So the calling change is not made.** It adds a second notion of a segment's class to calling for no
+effect that the two data sets can tell from noise. The caveat is size: tomato2 holds only 56
+interrupted segments of 17 repeats or more, and a cohort with many more could show an effect these
+cannot. Reopen it with such a cohort's measurement, not on the argument above. The prototype is
+`tmp/calling_proto_final.patch` on branch `pure-run-stutter`'s worktree, not committed.
 
-**Bundles are not touched.** A bundle locus already looks each of its pure reference runs up at its
-own run's class (`str_bundle_loci.md` §7.1).
-
-**Where it goes in the code.** One place: the slippage lookup in `TractScoringFits::gather_for_locus`
-(`calling/inference/repeat_tract_parameters.rs`), which today asks `StratumFits::at(read_group,
-period, candidate.repeat_count)`. It asks with `P + c − R` instead, `P` computed once a locus from
-the reference allele's bases. Candidates' repeat counts, the prior's centring and every other use of
-`c` stay as they are.
-
-**This fills the purity adjustment `read_likelihoods.md` §4.6 left open** ("the level a candidate
-gets is the stratum's, unadjusted for that candidate's own purity"), deferred there to "the
-interrupted-repeat work" (§10). It is narrower than that work: it says nothing about alleles that
-differ by an interruption rather than by length, which `doc/devel/specs/ssr_interrupted_repeat_recall.md`
-addresses for the older caller.
+**What this leaves open.** `read_likelihoods.md` §4.6's purity adjustment on the slippage level stays
+deferred (§10 there): an interrupted segment's candidates are still scored at their own class.
 
 ## 4. The parameters file
 
@@ -156,47 +146,37 @@ segments §2 left out. It goes into format 9, which is not yet on any pushed mai
 been written by a released build; a format-8 or older file has no such count and is read as having
 left none out. Nothing at calling reads it, like the rest of the section.
 
-**The file's note says** that interrupted segments are left out of the fit and that calling scores
-them at their longest pure run.
+**The file's note says** that interrupted segments are left out of the fit, because they slip along
+their longest pure run rather than as a segment of their length.
 
 ## 5. What each end of the range gets
 
-The change depends on the reference and not on the reads, so it acts the same at every depth and
-cohort size: an interrupted segment is scored as its longest run whether one sample covers it at 3
-reads or 2,000 at 15.
+The change depends on the reference and not on the reads, so which segments it leaves out is the
+same at every depth and cohort size.
 
 - **One sample, few reads.** The fit has fewer segments to learn from at long homopolymers, where
   segments were already few (30 at 19 repeats in tomato's selection); the curves across classes
   carry those classes, as they carry any thin class (`str_penalised_fit.md` §2.11).
 - **Thousands of samples.** The stutter-tail rule now meets classes of one kind of segment, so its
-  rounds have no second population to strip away (§7 measures it).
+  rounds have no second population to strip away. Measured on kimura's 2,176 accessions (§7).
 - **Genomes with few interrupted segments** (human at the lengths the catalog keeps): the fit loses
-  few segments, and calling changes only at the segments that are interrupted.
+  few segments, and its rates barely move; HG002's 19-repeat rate went from 6.3 to 6.7 slipped reads
+  in 100 at 30×.
 
 ## 6. The allele-length prior stays at the segment's own class
 
-**Settled with the owner, 2026-11-06: an interrupted segment keeps the prior of its own class
-`(period, R)`.** The prior says how a class's chromosomes spread over lengths around the reference
-(`str_fit_to_calling.md` §3). After §2 the 19-repeat class's prior is fitted from pure segments only,
-and pure segments may vary in length more than interrupted ones, so an interrupted segment could get a
-prior somewhat wider than its own. That is an expectation, not a measurement, and moving the prior to
-the pure-run class `(period, P)` would give it the spread of much shorter segments, which need not
-suit it better. The stutter difference is measured and large (§1); the prior weighs most at a few
-reads a sample and little at depth. So the prior is left alone, and §7's first check measures what
-§2 does to it: if the 19- and 20-repeat classes' spread widens materially once interrupted segments
-are out, this is reopened with that number.
+**Settled with the owner, 2026-11-06, and confirmed by measurement on 2026-11-07**: an interrupted
+segment keeps the prior of its own class `(period, R)`. Moving it to the pure-run class changed 2 of
+3,304 genotypes at tomato2's interrupted segments (§3).
 
 ## 7. How we know it works
 
-1. **The kimura probe again**, with §2 in place: the homopolymer slip rates at 17 to 22 repeats lie
-   between their neighbours', with no fall at 19 and 20, and the stutter-tail rule leaves out at
-   those lengths about as few segments as at 14 to 16 repeats (0 to 1 in 1,000 there). **And the
-   allele-length prior's spread at 19 and 20 repeats**, against today's fit of the mixed classes
-   (§6).
-2. **Tomato2's fit**: the 19-repeat class's rate moves from 6.3 slipped reads in 100 toward the 16-
-   to 18-repeat classes' 18 to 26.
-3. **Calls, HG002 chr20 at 30× and 5×**: no loss of true calls at interrupted segments, and the
-   counts of false calls and wrong genotypes at STR segments reported against the current main.
-4. **Unit tests**: the longest pure run of perfect, interrupted and phase-shifted segments; the
-   class a candidate is looked up at, including below one; a perfect segment's lookup unchanged; the
-   fit skipping a segment that is not perfect and counting it.
+1. **Kimura's fit with §2 in place** (2,176 accessions, every read group at one stutter): the
+   homopolymer slip rates rise steadily with length, 17.1, 18.4, 20.3, 21.9, 23.4, 23.9 and 25.5
+   slipped reads in 100 from 16 to 22 repeats, with no fall at 19 and 20, and the stutter-tail rule
+   keeps all 299 pure segments at 19 repeats, which it had cut to 44.
+2. **Tomato2's fit**: the 19-repeat class's rate moves from 6.3 slipped reads in 100 to 22.7.
+3. **Genotypes** (§3): tomato2's heterozygous calls at pure homopolymers of 17 to 26 repeats fall from
+   71 to 63; HG002 within ±3 of main.
+4. **Unit tests**: the fit skipping a segment that is not perfect and counting it, while its reads
+   still count toward the crossing share; a format-8 file with an interrupted count refused.

@@ -298,16 +298,15 @@ share_with_carriers_above_stated_frequency = { value = 0.026 }
 # ten of those differing from the reference differs by a non-whole number of
 # repeats). Before all three, the fit leaves out every interrupted tract
 # (`interrupted`): one whose bases are not the motif tiled end to end, which
-# slips along its longest pure run rather than as a tract of its length; calling
-# scores such a tract at the class of that run. **The depth rule** (`too_deep`)
-# leaves out a tract whose crossing reads, summed over samples, exceed
-# `depth_rule.times_expected` times what one copy gives, or the count one copy
-# reaches by chance less than `depth_rule.chance` of the time where that is
-# larger. What one copy gives is `typical_depth` — the reads the typical tract
-# would have if every read reaching it crossed it — times the share of reaching
-# reads that cross a tract of that class. **The stutter-tail rule**
-# (`in_stutter_tail`) leaves out a tract where the reads off both alleles of the
-# genotype each sample's reads favour, summed over samples, are at least
+# slips along its longest pure run rather than as a tract of its length. **The
+# depth rule** (`too_deep`) leaves out a tract whose crossing reads, summed over
+# samples, exceed `depth_rule.times_expected` times what one copy gives, or the
+# count one copy reaches by chance less than `depth_rule.chance` of the time
+# where that is larger. What one copy gives is `typical_depth` — the reads the
+# typical tract would have if every read reaching it crossed it — times the
+# share of reaching reads that cross a tract of that class. **The stutter-tail
+# rule** (`in_stutter_tail`) leaves out a tract where the reads off both alleles
+# of the genotype each sample's reads favour, summed over samples, are at least
 # `stutter_tail_rule.times_rate` times what the class's slip rate predicts and
 # that many would occur by slippage less than `stutter_tail_rule.chance` of the
 # time. It runs in rounds, refitting each motif length after each, until a round
