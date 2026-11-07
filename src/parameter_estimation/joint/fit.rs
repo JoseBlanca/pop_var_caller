@@ -2884,6 +2884,8 @@ fn earlier_fit_from_trace(
         }),
         noise: (0..groups.len())
             .filter(|group| !new_groups.contains(group))
+            // A read group the earlier fit did not hold is new too.
+            .filter(|group| values.contains_key(&format!("clean_error_{group}")))
             .map(|group| {
                 (
                     groups[group],
@@ -2896,6 +2898,7 @@ fn earlier_fit_from_trace(
             .collect(),
         hom_excess: (0..names.len())
             .filter(|sample| !new.contains(sample))
+            .filter(|sample| values.contains_key(&format!("hom_excess_{sample}")))
             .map(|sample| (names[sample].clone(), values[&format!("hom_excess_{sample}")]))
             .collect(),
     }
