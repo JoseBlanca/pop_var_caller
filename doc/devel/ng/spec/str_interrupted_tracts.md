@@ -134,7 +134,7 @@ which every base equals the one a motif length further on, in whole copies; for
 effect that the two data sets can tell from noise. The caveat is size: tomato2 holds only 56
 interrupted segments of 17 repeats or more, and a cohort with many more could show an effect these
 cannot. Reopen it with such a cohort's measurement, not on the argument above. The prototype is
-`tmp/calling_proto_final.patch` on branch `pure-run-stutter`'s worktree, not committed.
+commit `6b061a4c` on branch `tail-rule-probe`, measurement code switched by `PROBE_` variables.
 
 **What this leaves open.** `read_likelihoods.md` §4.6's purity adjustment on the slippage level stays
 deferred (§10 there): an interrupted segment's candidates are still scored at their own class.
