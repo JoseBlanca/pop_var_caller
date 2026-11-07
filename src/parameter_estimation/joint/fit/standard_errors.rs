@@ -788,17 +788,33 @@ pub(super) fn newton_step(
     group_index: &[Vec<usize>],
 ) -> NewtonStep {
     let round_limit = box_solve_round_limit(Layout::of(sums).side);
-    newton_step_within(sums, errors, parameters, group_index, round_limit)
+    newton_step_within(sums, errors, parameters, group_index, round_limit, false)
+}
+
+/// [`newton_step`] over **each sample's own parameters alone, the cohort's eight held where they
+/// are**: the step of the fit that, once the cohort's numbers were fitted on a subset of the
+/// samples, fits every sample's own against them. The cohort's distances are `None`, and its
+/// parameters count in neither part of the decrement — they are not free to move, so a step that
+/// cannot move them is worth what it gains on the samples'.
+pub(super) fn newton_step_of_the_samples(
+    sums: &InformationSums,
+    errors: &StandardErrors,
+    parameters: &Parameters,
+    group_index: &[Vec<usize>],
+) -> NewtonStep {
+    let round_limit = box_solve_round_limit(Layout::of(sums).side);
+    newton_step_within(sums, errors, parameters, group_index, round_limit, true)
 }
 
 /// [`newton_step`] with the box solve given `round_limit` rounds ([`bounded_step`]), so a test can
-/// make it run out.
+/// make it run out, and the cohort's parameters held where they are when `hold_the_cohort`.
 fn newton_step_within(
     sums: &InformationSums,
     errors: &StandardErrors,
     parameters: &Parameters,
     group_index: &[Vec<usize>],
     round_limit: usize,
+    hold_the_cohort: bool,
 ) -> NewtonStep {
     // The errors say which parameters the data determine, so they must be the ones these sums
     // give; the two are handed over separately only because the caller needs the errors too.
@@ -810,12 +826,16 @@ fn newton_step_within(
     let layout = Layout::of(sums);
     let values = layout.values_of(parameters, group_index);
     let bounds = layout.bounds();
-    let step = bounded_step(sums, &layout, &values, &bounds, round_limit);
+    let frozen: Vec<bool> = (0..layout.side)
+        .map(|at| hold_the_cohort && at < COHORT_PARAMETERS)
+        .collect();
+    let step = bounded_step_holding(sums, &layout, &values, &bounds, round_limit, &frozen);
     let has_error: Vec<bool> = errors
         .cohort
         .iter()
         .chain(errors.samples.iter().flatten())
-        .map(|error| error.value().is_some())
+        .zip(&frozen)
+        .map(|(error, frozen)| !frozen && error.value().is_some())
         .collect();
     assert_eq!(
         has_error.len(),
@@ -1058,12 +1078,27 @@ fn determined_decrement(
 /// is the whole step. It gives up after `round_limit` rounds ([`box_solve_round_limit`]), which a
 /// test can set below what it needs, with the point it has reached, still inside the box, and says
 /// so.
+#[cfg(test)]
 fn bounded_step(
     sums: &InformationSums,
     layout: &Layout,
     values: &[f64],
     bounds: &[(f64, f64)],
     round_limit: usize,
+) -> BoundedStep {
+    let frozen = vec![false; layout.side];
+    bounded_step_holding(sums, layout, values, bounds, round_limit, &frozen)
+}
+
+/// [`bounded_step`] with the parameters `frozen` held where they are throughout: never solved for,
+/// never moved, never freed.
+fn bounded_step_holding(
+    sums: &InformationSums,
+    layout: &Layout,
+    values: &[f64],
+    bounds: &[(f64, f64)],
+    round_limit: usize,
+    frozen: &[bool],
 ) -> BoundedStep {
     let slope = layout.slope_of(sums);
     let mut moved = vec![0.0; layout.side];
@@ -1079,7 +1114,11 @@ fn bounded_step(
         // Newton step from there.
         let curved = information_times(sums, layout, &moved);
         let slope_here: Vec<f64> = slope.iter().zip(&curved).map(|(g, c)| g - c).collect();
-        let held: Vec<bool> = fixed_at.iter().map(Option::is_some).collect();
+        let held: Vec<bool> = fixed_at
+            .iter()
+            .zip(frozen)
+            .map(|(fixed, frozen)| fixed.is_some() || *frozen)
+            .collect();
         let towards = match &sums.full {
             Some(full) => whole_matrix_solve(full, &slope_here, &held),
             None => arrow_solve(sums, layout, &slope_here, &held),
@@ -3931,13 +3970,13 @@ mod tests {
             let mut parameters = parameters_inside(&libraries);
             set_at(&mut parameters, row, end - 0.25 * free);
             let errors = StandardErrors::of(&sums);
-            let short = newton_step_within(&sums, &errors, &parameters, &group_index, 1);
+            let short = newton_step_within(&sums, &errors, &parameters, &group_index, 1, false);
             assert!(short.decrement.is_nan(), "{label}: {}", short.decrement);
             assert!(
                 !has_converged(short.decrement, DECREMENT_THRESHOLD),
                 "{label}"
             );
-            let enough = newton_step_within(&sums, &errors, &parameters, &group_index, 2);
+            let enough = newton_step_within(&sums, &errors, &parameters, &group_index, 2, false);
             let full = newton_step(&sums, &errors, &parameters, &group_index);
             assert!(enough.decrement > 0.0, "{label}: {}", enough.decrement);
             assert_eq!(

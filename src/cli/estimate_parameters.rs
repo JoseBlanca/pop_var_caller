@@ -146,6 +146,13 @@ pub struct EstimateParametersArgs {
     /// passing it is told why rather than told the option does not exist.
     #[arg(long, value_name = "N", hide = true)]
     pub str_param_estimates_at_once: Option<String>,
+
+    /// **How many samples the SNP/indel fit's cohort-wide numbers are fitted on**, in a cohort
+    /// larger than that; zero fits them on every sample. Hidden: it exists to measure what the
+    /// subset costs against the whole cohort, and its default is
+    /// [`COHORT_ON_SAMPLES`](crate::parameter_estimation::joint::fit::COHORT_ON_SAMPLES).
+    #[arg(long, value_name = "N", hide = true)]
+    pub fit_cohort_on: Option<usize>,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -423,6 +430,9 @@ fn ordinary_position_config(args: &EstimateParametersArgs, ploidy: Ploidy) -> Jo
     JointFitConfig {
         ploidy,
         estimate_contamination: !args.skip_contamination,
+        cohort_on_samples: args
+            .fit_cohort_on
+            .unwrap_or(crate::parameter_estimation::joint::fit::COHORT_ON_SAMPLES),
         ..JointFitConfig::default()
     }
 }

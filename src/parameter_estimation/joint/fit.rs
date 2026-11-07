@@ -78,7 +78,9 @@ use settled::{
     not_settled,
 };
 pub use settled::{FurthestFromSettled, StartEnding};
-use standard_errors::{StandardError, StandardErrors, cohort_covariance, newton_step};
+use standard_errors::{
+    StandardError, StandardErrors, cohort_covariance, newton_step, newton_step_of_the_samples,
+};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -345,8 +347,8 @@ pub struct JointFit {
     ///
     /// **These are sums and not the finished moments, and that is deliberate**: the heterozygosity
     /// needs the panel's inbreeding coefficient, which is not this fit's to choose.
-    /// [`CensusMomentSums::finish`] takes it, and
-    /// [`CensusMomentsReport::of`](super::census_moments::CensusMomentsReport::of) is where the two
+    /// `CensusMomentSums::finish` takes it, and
+    /// `CensusMomentsReport::of` is where the two
     /// meet.
     ///
     /// **Where that coefficient comes from is settled and is not this route's problem.** §4.1
@@ -699,7 +701,7 @@ pub struct JointFitConfig {
     /// §3.5). What stops a start is `decrement_threshold`.
     pub settled_fraction: f64,
     /// **A start converges once the remaining Newton step is worth less than this much
-    /// log-likelihood** — the Newton decrement's threshold, 0.001 units by default ([`settled`]'s
+    /// log-likelihood** — the Newton decrement's threshold, 0.01 units by default ([`settled`]'s
     /// `DECREMENT_THRESHOLD`, `fit_precision.md` §2). A field so a test can run a fit further, to
     /// 10⁻⁴, the way the measurement that chose the default ran its references. **Zero or below,
     /// no start ever converges** — a decrement is never below zero — so none is a yardstick for
@@ -725,7 +727,7 @@ pub struct JointFitConfig {
     /// ([`contamination`](super::contamination)), which the fit runs once it has converged.
     pub contamination: ContaminationConfig,
     /// **Whether contamination is estimated at all.** Off, every read group is returned as
-    /// [`NotIdentifiedReason::NotAsked`](super::contamination::NotIdentifiedReason::NotAsked):
+    /// `NotIdentifiedReason::NotAsked`:
     /// no fraction anywhere, which the parameters file writes as no contamination table and a
     /// calling run reads as uncontaminated. On by default.
     ///
@@ -775,6 +777,25 @@ pub struct JointFitConfig {
     /// on a drawn cohort at thirty reads a position it returns heterozygosity 4 to 7% above
     /// what the cohort was drawn with, where the range returns it within 2%.
     pub depth_as_a_range: bool,
+    /// **How many positions the starts explore on**, when the census holds at least twice as many:
+    /// every start runs on every `k`-th position, `k` the census over this, and only the winner then
+    /// continues on every position until it converges there. The answer is the full census's
+    /// maximum either way; what changes is how many of the passes read every position. Zero, or a
+    /// census smaller than twice this, explores on every position.
+    ///
+    /// Spec: `parameter_prepass_joint_fit.md` §3.3.2. At 62 tomato samples it halved the fit
+    /// (2,223 s to 1,069 s) and moved no fitted number by more than 0.015 of its standard error.
+    pub explore_on: usize,
+    /// **How many samples the cohort's numbers are fitted on** — the noisy share, the frequency
+    /// density and the duplicated class — when the cohort holds more than this many: those chosen
+    /// by a fixed hash of their names ([`SubsetOfTheCohort`]). Every start runs on them alone; one
+    /// run on every sample then fits each sample's own numbers, its libraries' error rates and its
+    /// homozygote excess, with the cohort's held. A cohort of at most this many — and any cohort at
+    /// zero — is fitted whole, as before.
+    ///
+    /// Spec: `parameter_prepass_joint_fit.md` §7 and §11 question 8, which leans to a few hundred
+    /// samples being enough. **What this costs in accuracy is not yet measured.**
+    pub cohort_on_samples: usize,
 }
 
 impl Default for JointFitConfig {
@@ -800,7 +821,129 @@ impl Default for JointFitConfig {
             genotype_posteriors: false,
             pass_trace: false,
             depth_as_a_range: true,
+            explore_on: 250_000,
+            cohort_on_samples: COHORT_ON_SAMPLES,
         }
+    }
+}
+
+/// The default of [`JointFitConfig::cohort_on_samples`]: the subset the repeat-tract fit's strata
+/// begin with (`fit_precision.md` §4.4), not yet measured for this fit.
+pub const COHORT_ON_SAMPLES: usize = 256;
+
+/// The seed of the hash that orders the samples for [`SubsetOfTheCohort`]. Any fixed number: what
+/// matters is that it never changes, so a cohort is cut the same way on every machine.
+const SUBSET_SEED: u64 = 0x5eed_c0_4057;
+
+/// **Which samples the cohort's numbers are fitted on**, by their index in the fit's order: the
+/// `size` whose names hash lowest under [`SUBSET_SEED`], listed in the fit's order. The hash reads
+/// the name and nothing else, so the subset does not depend on the order the samples were listed
+/// in, nor on anything in their reads.
+struct SubsetOfTheCohort {
+    chosen: Vec<usize>,
+}
+
+impl SubsetOfTheCohort {
+    /// The subset of a cohort named `names`, or `None` when `size` is zero or the cohort is no
+    /// larger than it.
+    fn chosen(names: &[String], size: usize) -> Option<Self> {
+        if size == 0 || names.len() <= size {
+            return None;
+        }
+        let hash = |name: &str| {
+            let mut hasher = xxhash_rust::xxh3::Xxh3::with_seed(SUBSET_SEED);
+            std::hash::Hash::hash(name, &mut hasher);
+            std::hash::Hasher::finish(&hasher)
+        };
+        let mut order: Vec<usize> = (0..names.len()).collect();
+        // Two names hashing alike fall back to the names themselves, then the index.
+        order.sort_by(|&x, &y| {
+            hash(&names[x])
+                .cmp(&hash(&names[y]))
+                .then_with(|| names[x].cmp(&names[y]))
+                .then(x.cmp(&y))
+        });
+        order.truncate(size);
+        order.sort_unstable();
+        Some(Self { chosen: order })
+    }
+
+    /// The subset's evidence and what it means, with its read groups numbered among themselves.
+    fn lend<'a, 'b>(
+        &self,
+        lent: &'a [SampleGenericSections<'b>],
+        group_index: &[Vec<usize>],
+        coverage: &[f64],
+        names: &[String],
+    ) -> LentSubset<'b> {
+        let mut groups: Vec<usize> = Vec::new();
+        let subset_group_index = self
+            .chosen
+            .iter()
+            .map(|&s| {
+                group_index[s]
+                    .iter()
+                    .map(|&group| {
+                        groups.iter().position(|&g| g == group).unwrap_or_else(|| {
+                            groups.push(group);
+                            groups.len() - 1
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        LentSubset {
+            lent: self.chosen.iter().map(|&s| lent[s].clone()).collect(),
+            group_index: subset_group_index,
+            coverage: groups.iter().map(|&g| coverage[g]).collect(),
+            names: self.chosen.iter().map(|&s| names[s].clone()).collect(),
+            groups,
+            samples: self.chosen.clone(),
+        }
+    }
+}
+
+/// A subset's evidence, lent as the whole cohort's is, and how it maps back.
+struct LentSubset<'b> {
+    lent: Vec<SampleGenericSections<'b>>,
+    /// Per subset sample, its read groups numbered among the subset's.
+    group_index: Vec<Vec<usize>>,
+    /// Each subset read group's mean depth.
+    coverage: Vec<f64>,
+    names: Vec<String>,
+    /// Each subset read group's number in the whole cohort.
+    groups: Vec<usize>,
+    /// Each subset sample's index in the whole cohort.
+    samples: Vec<usize>,
+}
+
+impl LentSubset<'_> {
+    /// **Where the run over every sample begins**: the cohort's numbers the subset's fit returned,
+    /// each subset library and sample at its own fitted numbers, and every other at the subset's
+    /// median — a library's two rates, a sample's excess. A subset that read no library leaves the
+    /// others at the default rate.
+    fn widened(&self, fitted: &Parameters, groups: usize, samples: usize) -> Parameters {
+        let median = |values: &[f64], otherwise: f64| {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            sorted.get(sorted.len() / 2).copied().unwrap_or(otherwise)
+        };
+        let mut widened = Parameters {
+            clean: vec![median(&fitted.clean, DEFAULT_ERROR_RATE); groups],
+            noisy: vec![median(&fitted.noisy, DEFAULT_ERROR_RATE); groups],
+            noisy_share: fitted.noisy_share,
+            density: fitted.density,
+            hom_excess: vec![median(&fitted.hom_excess, 0.0); samples],
+            duplicated: fitted.duplicated,
+        };
+        for (local, &group) in self.groups.iter().enumerate() {
+            widened.clean[group] = fitted.clean[local];
+            widened.noisy[group] = fitted.noisy[local];
+        }
+        for (local, &sample) in self.samples.iter().enumerate() {
+            widened.hom_excess[sample] = fitted.hom_excess[local];
+        }
+        widened
     }
 }
 
@@ -975,6 +1118,9 @@ struct EvidenceCursor<'a> {
     at: Vec<Vec<usize>>,
     positions: usize,
     next: usize,
+    /// How far each step moves: one visits every position, `k` only those whose index is a
+    /// multiple of `k` ([`Self::every`]).
+    stride: usize,
 }
 
 impl<'a> EvidenceCursor<'a> {
@@ -1113,7 +1259,17 @@ impl<'a> EvidenceCursor<'a> {
             at,
             positions: end,
             next: first,
+            stride: 1,
         }
+    }
+
+    /// The same cursor visiting only the positions whose index is a multiple of `stride` — the
+    /// thinned census the starts explore on ([`JointFitConfig::explore_on`]). A position's index
+    /// does not depend on where the chunks are cut, so every pool width visits the same ones.
+    fn every(mut self, stride: usize) -> Self {
+        self.stride = stride.max(1);
+        self.next = self.next.next_multiple_of(self.stride);
+        self
     }
 
     fn next_position(&mut self, into: &mut PositionEvidence) -> bool {
@@ -1121,7 +1277,7 @@ impl<'a> EvidenceCursor<'a> {
             return false;
         }
         let index = self.next;
-        self.next += 1;
+        self.next += self.stride;
         into.observed_alternatives.clear();
         let mut seen = [false; 5];
         for (s, sections) in self.samples.iter().enumerate() {
@@ -1522,6 +1678,33 @@ struct Parameters {
 }
 
 impl Parameters {
+    /// Where a start begins: every read group at the start's two rates, no sample's homozygote
+    /// excess, and the duplicated class where the run fits one.
+    fn at_start(
+        start: &StartingPoint,
+        groups: usize,
+        samples: usize,
+        config: &JointFitConfig,
+    ) -> Self {
+        Self {
+            clean: vec![start.clean; groups],
+            noisy: vec![start.noisy; groups],
+            noisy_share: start.noisy_share,
+            density: FrequencyDensity {
+                p_invariant: start.p_invariant,
+                p_fixed_alt: start.p_fixed_alt,
+                a: start.a,
+                b: start.b,
+            },
+            hom_excess: vec![0.0; samples],
+            duplicated: config.duplicated_positions.then_some(DuplicatedPositions {
+                share: start.duplicated_share,
+                carrier_a: start.carrier_a,
+                carrier_b: start.carrier_b,
+            }),
+        }
+    }
+
     /// **Every fitted number's name as the run's log gives it**, in the order
     /// [`coordinates`](Self::coordinates) lists them: the cohort's in the words the standard-error
     /// line uses, a sample's by its name, a library's rates by its sample and, where the sample has
@@ -1550,6 +1733,14 @@ impl Parameters {
             names.push(format!("homozygote excess of {name}"));
         }
         names
+    }
+
+    /// **These parameters with the cohort's numbers put back to `held`'s**: the noisy share, the
+    /// density and the duplicated class. Each read group's rates and each sample's excess stay.
+    fn hold_the_cohort_of(&mut self, held: &Self) {
+        self.noisy_share = held.noisy_share;
+        self.density = held.density;
+        self.duplicated = held.duplicated;
     }
 
     /// Every fitted number with a name saying which it is — what
@@ -1991,31 +2182,101 @@ pub fn fit_jointly(
                 config.max_passes
             )
         });
+        // **The cohort's numbers from a subset of the samples, when the cohort is larger than it**
+        // ([`JointFitConfig::cohort_on_samples`]): every start runs on the subset alone, and then one
+        // run on every sample fits each sample's own numbers with the cohort's held where the
+        // subset left them. Without a subset the starts run on every sample, as they always did.
+        let subset = SubsetOfTheCohort::chosen(&names, config.cohort_on_samples)
+            .map(|chosen| chosen.lend(lent, &group_index, &coverage, &names));
+        let (starts_lent, starts_group_index, starts_groups, starts_coverage, starts_names) =
+            match &subset {
+                Some(subset) => {
+                    stage.always(|into| {
+                        format!(
+                            "SNP/indel fit: the cohort's numbers are fitted on {} of the {} \
+                             samples, chosen by a hash of their names; {into}",
+                            subset.names.len(),
+                            names.len()
+                        )
+                    });
+                    (
+                        &subset.lent[..],
+                        &subset.group_index[..],
+                        subset.groups.len(),
+                        &subset.coverage[..],
+                        &subset.names[..],
+                    )
+                }
+                None => (lent, &group_index[..], groups.len(), &coverage[..], &names[..]),
+            };
         let mut best: Option<(usize, StartOutcome)> = None;
         let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
         // The best-scoring converged start so far.
         let mut earlier: Option<EarlierAnswer> = None;
-        for (index, start) in config.starting_points.iter().enumerate() {
-            // Counted from one. `which` borrows `earlier`, which this start may replace below, so
-            // what follows reads the number from here and not from `which`.
-            let number = index + 1;
+        // **The starts explore on a thinned census** when the census is large enough to thin
+        // ([`JointFitConfig::explore_on`]); the winner then finishes on every position, below.
+        let census = EvidenceCursor::position_count(starts_lent);
+        let stride = census
+            .checked_div(config.explore_on)
+            .map_or(1, |stride| stride.max(1));
+        // The runs: each start on the thinned census, then, when it was thinned, the winner's
+        // finish on every position, which continues from where that start stood.
+        let mut runs: std::collections::VecDeque<StartRun> = config
+            .starting_points
+            .iter()
+            .enumerate()
+            .map(|(index, _)| StartRun::Start {
+                number: index + 1,
+                stride,
+            })
+            .collect();
+        if stride > 1 {
+            runs.push_back(StartRun::Finish);
+        }
+        while let Some(run) = runs.pop_front() {
+            let finishing = run == StartRun::Finish;
+            let (number, initial, which_earlier, run_stride) = match run {
+                StartRun::Start { number, stride } => (
+                    number,
+                    Parameters::at_start(
+                        &config.starting_points[number - 1],
+                        starts_groups,
+                        starts_lent.len(),
+                        config,
+                    ),
+                    earlier.as_ref(),
+                    stride,
+                ),
+                StartRun::Finish => {
+                    // PANIC-FREE: the first start has no earlier answer to agree with, so it
+                    // always competes.
+                    let (winner, outcome) = best.take().expect("the first start always competes");
+                    // The finish replaces the winner: its answer is the full census's, and the
+                    // thinned census's statistics are not comparable with it.
+                    earlier = None;
+                    (winner, outcome.parameters, None, 1)
+                }
+            };
             let which = WhichStart {
                 number,
                 of: config.starting_points.len(),
-                point: start,
-                earlier: earlier.as_ref(),
-                sample_names: &names,
+                stride: run_stride,
+                finishing,
+                earlier: which_earlier,
+                sample_names: starts_names,
                 stage: &stage,
+                holding_the_cohort: false,
             };
             let began = std::time::Instant::now();
             let outcome = maximise(
-                lent,
+                starts_lent,
                 depth_cap,
                 config,
-                &groups,
-                &group_index,
-                &coverage,
+                starts_group_index,
+                starts_coverage,
                 &which,
+                initial,
+                run_stride,
             );
             let score = outcome.statistics.log_likelihood;
             stage.always(|into| {
@@ -2050,25 +2311,44 @@ pub fn fit_jointly(
                     config.settled_fraction,
                 );
                 format!(
-                    "SNP/indel fit, start {} of {}: {how} after {} pass(es), log-likelihood \
+                    "SNP/indel fit, {}: {how} after {} pass(es), log-likelihood \
                          {score:.6e}{short_of_settled}; {last_pass}; {into}",
-                    which.number, which.of, outcome.passes,
+                    which.label(),
+                    outcome.passes,
                 )
             });
-            starts.push(StartRecord {
+            let record = StartRecord {
                 number,
                 ended: outcome.ended,
                 passes: outcome.passes,
                 judging_passes: outcome.judging_passes,
                 log_likelihood: score,
                 furthest_from_settled: outcome.furthest_from_settled.clone(),
-            });
+            };
+            // The finish is the winning start continued, and a start run again on every position is
+            // that start, so each takes its start's place in the record rather than adding one.
+            if number <= starts.len() {
+                starts[number - 1] = record;
+            } else {
+                starts.push(record);
+            }
+            // **A finish that does not converge leaves no answer to have agreed with**, so the
+            // other starts run again on every position, as every start did before the census was
+            // thinned when none converged: each to its own end, or until it heads where a later
+            // one of them converged.
+            if finishing {
+                runs.extend(runs_after_the_finish(
+                    outcome.ended,
+                    number,
+                    config.starting_points.len(),
+                ));
+            }
             if is_the_new_yardstick(
                 outcome.ended,
                 score,
                 earlier.as_ref().map(|answer| answer.log_likelihood),
             ) {
-                earlier = Some(EarlierAnswer::of(number, &outcome, &group_index));
+                earlier = Some(EarlierAnswer::of(number, &outcome, starts_group_index));
             }
             if is_the_new_best(
                 outcome.ended,
@@ -2080,21 +2360,77 @@ pub fn fit_jointly(
             }
         }
         // PANIC-FREE: the first start has no earlier answer to agree with, so it always competes.
-        let (
-            winning_start,
-            StartOutcome {
-                parameters,
-                statistics,
-                information,
-                passes,
-                ended,
-                furthest_from_settled: _,
-                trace,
-                last_pass_took: _,
-                judging_passes: _,
-                judging_took: _,
-            },
-        ) = best.expect("the first start always competes");
+        let (winning_start, winner) = best.expect("the first start always competes");
+        // On a subset, the run that fits every sample's own numbers against the cohort's; its
+        // final pass is the one the fit returns. The subset's information is kept for the cohort's
+        // errors.
+        let (winner, cohort_information) = match &subset {
+            None => (winner, None),
+            Some(subset) => {
+                let initial = subset.widened(&winner.parameters, groups.len(), lent.len());
+                let which = WhichStart {
+                    number: winning_start,
+                    of: config.starting_points.len(),
+                    stride: 1,
+                    finishing: false,
+                    earlier: None,
+                    sample_names: &names,
+                    stage: &stage,
+                    holding_the_cohort: true,
+                };
+                let began = std::time::Instant::now();
+                let mut every_sample = maximise(
+                    lent,
+                    depth_cap,
+                    config,
+                    &group_index,
+                    &coverage,
+                    &which,
+                    initial,
+                    1,
+                );
+                stage.always(|into| {
+                    format!(
+                        "SNP/indel fit, {}: {} after {} pass(es), log-likelihood {:.6e}; its \
+                         last pass {}; {into}",
+                        which.label(),
+                        if every_sample.ended == StartEnding::Converged {
+                            "converged"
+                        } else {
+                            "stopped at the pass limit"
+                        },
+                        every_sample.passes,
+                        every_sample.statistics.log_likelihood,
+                        cost_of_the_last_pass(
+                            began.elapsed().saturating_sub(every_sample.judging_took),
+                            every_sample.last_pass_took,
+                            every_sample.passes - every_sample.judging_passes,
+                        )
+                    )
+                });
+                // One fit in the record: the passes of both runs, converged only if both did.
+                every_sample.passes += winner.passes;
+                if winner.ended != StartEnding::Converged {
+                    every_sample.ended = winner.ended;
+                }
+                let mut trace = winner.trace;
+                trace.append(&mut every_sample.trace);
+                every_sample.trace = trace;
+                (every_sample, Some(winner.information))
+            }
+        };
+        let StartOutcome {
+            parameters,
+            statistics,
+            information,
+            passes,
+            ended,
+            furthest_from_settled: _,
+            trace,
+            last_pass_took: _,
+            judging_passes: _,
+            judging_took: _,
+        } = winner;
         // The winner's statistics come from a final pass, the only pass that keeps each position's
         // posteriors, which contamination and the returned fit read; a start that agreed has none
         // and never competes.
@@ -2105,12 +2441,16 @@ pub fn fit_jointly(
 
         // **Every parameter's standard error, at the parameters the fit returns**, from the
         // information the winning start's final pass summed (spec §3.3).
-        let standard_errors = StandardErrors::of(&information);
+        // **Fitted on a subset, the cohort's numbers carry the subset's errors**: the information
+        // every sample's pass summed would credit them with samples they were not fitted on.
+        let mut standard_errors = StandardErrors::of(&information);
+        let cohort_information = cohort_information.as_ref().unwrap_or(&information);
+        standard_errors.cohort = StandardErrors::of(cohort_information).cohort;
         // **What the data determine about the density and the duplicated class** (spec §2.1.3),
         // from the cohort's covariance over the same information: the errors' diagonal is not
         // enough, since the verdicts and the derived shares' errors need how the numbers move
         // together.
-        let covariance = cohort_covariance(&information);
+        let covariance = cohort_covariance(cohort_information);
         let cohort_errors = standard_errors.cohort.map(StandardError::value);
         let density_report = DensityReport::of(&parameters.density, &cohort_errors, &covariance);
         let duplicated_report = parameters
@@ -2348,20 +2688,71 @@ pub fn fit_jointly(
     })
 }
 
+/// One run of [`maximise`] in [`fit_jointly`]: a start from its starting point on every `stride`-th
+/// position, or the finish — the winning start continued on every position.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum StartRun {
+    Start { number: usize, stride: usize },
+    Finish,
+}
+
+/// **What runs after the finish** of start `winner`, of `starts`, that ended so: nothing when it
+/// converged; otherwise every other start again, on every position, in order — a start that agreed
+/// on the thinned census agreed with an answer the full census did not reach, and the parameters
+/// file holds no start as agreeing with one that did not converge.
+fn runs_after_the_finish(ended: StartEnding, winner: usize, starts: usize) -> Vec<StartRun> {
+    if ended == StartEnding::Converged {
+        return Vec::new();
+    }
+    (1..=starts)
+        .filter(|&other| other != winner)
+        .map(|other| StartRun::Start {
+            number: other,
+            stride: 1,
+        })
+        .collect()
+}
+
 /// Which of the fit's starting points a run of the alternation is, the earlier answer it is judged
 /// against, and the stage clock its progress lines are printed against.
 struct WhichStart<'a> {
     /// Counted from one, as the progress line prints it.
     number: usize,
     of: usize,
-    /// The point the run starts from.
-    point: &'a StartingPoint,
+    /// Every how many positions this run reads, and whether it is the winner's finish on every
+    /// position after the starts explored on a thinned census.
+    stride: usize,
+    finishing: bool,
     /// The best-scoring earlier start that converged, which this one stops on heading towards
     /// ([`agrees`]); `None` for the first start, and for any start before one has converged.
     earlier: Option<&'a EarlierAnswer>,
     /// The cohort's sample names, in the fit's order, which the log names parameters by.
     sample_names: &'a [String],
     stage: &'a StageProgress,
+    /// **Whether this run fits each sample's own numbers alone**, the cohort's eight held where a
+    /// fit on a subset of the samples left them ([`JointFitConfig::cohort_on_samples`]).
+    holding_the_cohort: bool,
+}
+
+impl WhichStart<'_> {
+    /// What the log calls this run: `start 2 of 3`, with the thinned census or the finish named.
+    fn label(&self) -> String {
+        if self.holding_the_cohort {
+            "every sample's own numbers, the cohort's held".to_owned()
+        } else if self.finishing {
+            format!(
+                "start {} of {}, finished on every position",
+                self.number, self.of
+            )
+        } else if self.stride > 1 {
+            format!(
+                "start {} of {}, on every {}th position",
+                self.number, self.of, self.stride
+            )
+        } else {
+            format!("start {} of {}", self.number, self.of)
+        }
+    }
 }
 
 /// One run of the alternation, from one starting point, **accelerated by SQUAREM**.
@@ -2419,33 +2810,21 @@ struct WhichStart<'a> {
 /// before. Expectation–maximisation crawls along the ridge where the invariant share and the
 /// density's first shape trade against each other; the Newton step crosses it. Every pass before a
 /// start's first judging pass is the same as without the step.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lent evidence and what it means, the start, where it begins and the stride"
+)]
 fn maximise(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
     config: &JointFitConfig,
-    groups: &[ReadGroupId],
     group_index: &[Vec<usize>],
     coverage: &[f64],
     which: &WhichStart<'_>,
+    initial: Parameters,
+    stride: usize,
 ) -> StartOutcome {
-    let start = which.point;
-    let mut parameters = Parameters {
-        clean: vec![start.clean; groups.len()],
-        noisy: vec![start.noisy; groups.len()],
-        noisy_share: start.noisy_share,
-        density: FrequencyDensity {
-            p_invariant: start.p_invariant,
-            p_fixed_alt: start.p_fixed_alt,
-            a: start.a,
-            b: start.b,
-        },
-        hom_excess: vec![0.0; samples.len()],
-        duplicated: config.duplicated_positions.then_some(DuplicatedPositions {
-            share: start.duplicated_share,
-            carrier_a: start.carrier_a,
-            carrier_b: start.carrier_b,
-        }),
-    };
+    let mut parameters = initial;
     let mut alternation = Alternation {
         samples,
         depth_cap,
@@ -2453,6 +2832,7 @@ fn maximise(
         group_index,
         coverage,
         which,
+        stride,
         passes: 0,
         judging_passes: 0,
         judging_took: std::time::Duration::ZERO,
@@ -2488,7 +2868,11 @@ fn maximise(
         let judged_here = entering.information.as_ref().map(|information| {
             let standard_errors = StandardErrors::of(information);
             let errors = standard_errors.by_coordinate(&parameters, group_index);
-            let step = newton_step(information, &standard_errors, &parameters, group_index);
+            let step = if which.holding_the_cohort {
+                newton_step_of_the_samples(information, &standard_errors, &parameters, group_index)
+            } else {
+                newton_step(information, &standard_errors, &parameters, group_index)
+            };
             let converged = has_converged(step.decrement, config.decrement_threshold);
             // A start that has converged is never stopped by agreement: it competes to be the
             // fit's answer. Agreement stops only a start still on its way.
@@ -2690,7 +3074,7 @@ fn maximise(
     // it returns — and no use for the posteriors, since it does not compete to be the answer.
     let last_pass_began = std::time::Instant::now();
     let mut statistics = agreed_at.unwrap_or_else(|| {
-        expectation_pass(
+        expectation_pass_every(
             samples,
             depth_cap,
             config,
@@ -2701,6 +3085,7 @@ fn maximise(
                 per_position_posteriors: true,
                 information: true,
             },
+            stride,
         )
     });
     let last_pass_took = last_pass_began.elapsed();
@@ -2891,10 +3276,9 @@ fn print_the_cycle(
 ) {
     which.stage.now_and_then(|into| {
         format!(
-            "SNP/indel fit, start {} of {}, pass {passes} of at most {}: log-likelihood {}{}; {}; \
+            "SNP/indel fit, {}, pass {passes} of at most {}: log-likelihood {}{}; {}; \
              {} a cycle, {into}",
-            which.number,
-            which.of,
+            which.label(),
             config.max_passes,
             how_the_log_likelihood_moved(gain),
             way.map_or_else(String::new, |way| format!("; {way}")),
@@ -3088,6 +3472,8 @@ struct Alternation<'a, 'b> {
     group_index: &'a [Vec<usize>],
     coverage: &'a [f64],
     which: &'a WhichStart<'a>,
+    /// Every how many positions a pass reads: one, or the thinned census's stride.
+    stride: usize,
     /// Passes over the data so far — what `max_passes` bounds.
     passes: u32,
     /// How many of those also summed the information for the stop rule, and how long they took: left
@@ -3110,7 +3496,7 @@ impl Alternation<'_, '_> {
         self.passes += 1;
         let pass = self.passes;
         let began = std::time::Instant::now();
-        let statistics = expectation_pass(
+        let statistics = expectation_pass_every(
             self.samples,
             self.depth_cap,
             self.config,
@@ -3121,6 +3507,7 @@ impl Alternation<'_, '_> {
                 per_position_posteriors: false,
                 information: keeps_information,
             },
+            self.stride,
         );
         if keeps_information {
             self.judging_passes += 1;
@@ -3128,6 +3515,9 @@ impl Alternation<'_, '_> {
         }
         let mut next = parameters.clone();
         let moved = maximisation(&mut next, &statistics, self.config);
+        if self.which.holding_the_cohort {
+            next.hold_the_cohort_of(parameters);
+        }
         if super::fit_trace::is_on() {
             super::fit_trace::write_the_pass(
                 self.which.number,
@@ -3584,6 +3974,7 @@ impl PassKeeps {
 ///
 /// Every pass joins its chunks' totals in an order fixed by the number of positions, so the
 /// totals do not depend on the pool's width.
+#[cfg(test)]
 fn expectation_pass(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -3592,6 +3983,34 @@ fn expectation_pass(
     coverage: &[f64],
     parameters: &Parameters,
     keeps: PassKeeps,
+) -> Statistics {
+    expectation_pass_every(
+        samples,
+        depth_cap,
+        config,
+        group_index,
+        coverage,
+        parameters,
+        keeps,
+        1,
+    )
+}
+
+/// The same pass over only every `stride`-th position ([`EvidenceCursor::every`]); one is every
+/// position.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "expectation_pass's arguments and the stride"
+)]
+fn expectation_pass_every(
+    samples: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    coverage: &[f64],
+    parameters: &Parameters,
+    keeps: PassKeeps,
+    stride: usize,
 ) -> Statistics {
     let collect_noisy_posterior = keeps.per_position_posteriors;
     let model = PassModel::new(parameters, config, group_index);
@@ -3648,7 +4067,8 @@ fn expectation_pass(
             config.depth_as_a_range,
             first,
             end,
-        );
+        )
+        .every(stride);
         let mut scratch = Scratch::new(
             samples.len(),
             parameters.clean.len(),
@@ -3669,7 +4089,7 @@ fn expectation_pass(
                 PositionScores::new(group_index, parameters.clean.len()),
             )
         });
-        let mut index = first;
+        let mut index = first.next_multiple_of(stride);
         while cursor.next_position(&mut scratch.evidence) {
             for (slot, sample) in odds.iter_mut().enumerate() {
                 *sample = float::exp(f64::from(
@@ -3688,7 +4108,7 @@ fn expectation_pass(
                     .expect("a pass that scores its positions keeps their sums")
                     .add_position(scores);
             }
-            index += 1;
+            index += stride;
         }
         statistics
     };
@@ -5721,7 +6141,11 @@ mod tests {
             b: 0.0,
         };
         assert!(degenerate.expected_alternative_frequency().is_nan());
-        let fit = a_fit_carrying(degenerate, 0.01);
+        // **The fit is built around a real density and the degenerate one put in afterwards**,
+        // because building its density report evaluates the Beta, whose shapes must be above
+        // zero — a debug assertion stops there, before the method under test is reached.
+        let mut fit = a_fit_carrying(a_lopsided_density(), 0.01);
+        fit.density.value = degenerate;
         assert!(fit.fitted_alternative_frequency().is_none());
     }
 
@@ -6285,10 +6709,6 @@ mod whole_fit_tests {
     };
     use super::*;
     use crate::parameter_estimation::joint::census::DepthCap;
-    use crate::parameter_estimation::joint::census_moments::{
-        CensusMoments, CensusMomentsReport, InbreedingSource, PanelInbreeding,
-    };
-    use crate::types::InbreedingF;
 
     /// The mean of one of the two rates over every library the fit produced.
     ///
@@ -6387,214 +6807,6 @@ mod whole_fit_tests {
         }
     }
 
-    /// **The whole chain, on a cohort drawn from the fit's own family: the census average and the
-    /// integrated curve are two independent routes to one heterozygosity, and they land together.**
-    ///
-    /// This is the join `ordinary_site_prior_moments.md` §8's fifth question is about, exercised
-    /// end to end — the fit converges, the expectation step's running sums accumulate over every
-    /// position, the panel's coefficient is applied, and the report puts the census average beside
-    /// the number read off the fitted curve.
-    ///
-    /// **Why the two agreeing here is a check and not a tautology.** They share the converged fit
-    /// and nothing else: one averages `2k(2N − k)/(2N(2N − 1))` over the per-position posteriors
-    /// with a curvature term and an inbreeding correction, the other evaluates
-    /// `p_segregating · 2ab/((a + b)(a + b + 1))` on four fitted numbers. A defect in either
-    /// separates them.
-    ///
-    /// **The cohort is drawn from a single Beta with two point masses — inside the fit's own
-    /// family — which is the case where they *should* agree.** On populations outside it the
-    /// curve settles 5 to 7% off and stays there at every depth, which is the whole reason the
-    /// census average exists (report §9.1). So this test says the machinery works, not that the
-    /// curve is adequate; the report prints both numbers precisely because the gap is a
-    /// diagnostic.
-    ///
-    /// **Measured on this cohort: the curve reads 2.260e-2 and the census average 2.226e-2, a
-    /// ratio of 1.0155** — well inside the 1.1% below to 10.7% above the design measured across
-    /// three populations and four depths. The band asserted is 0.85 to 1.15, loose against that on
-    /// purpose: it is bounding *the machinery being connected*, and a band tight enough to pin the
-    /// ratio would be pinning the fit's own convergence on one seed.
-    #[test]
-    fn the_report_puts_the_census_average_beside_the_curves_own_number() {
-        let density = FrequencyDensity {
-            p_invariant: 0.90,
-            p_fixed_alt: 0.01,
-            a: 0.7,
-            b: 2.5,
-        };
-        let samples = 10;
-        let cohort = draw_cohort(
-            samples,
-            3_000,
-            20.0,
-            (0.002, 0.06, 0.02),
-            density,
-            0.2,
-            0xB7E1_5162_8AED_2A6B,
-        );
-        let config = JointFitConfig {
-            quadrature_nodes: 12,
-            max_passes: 20,
-            duplicated_positions: false,
-            ..JointFitConfig::default()
-        };
-        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
-
-        // The panel was drawn at F = 0.2 and this is what a user supplying it would give.
-        let supplied = [InbreedingF::try_new(0.2).expect("a legal coefficient"); 10];
-        let report = CensusMomentsReport::of(&fit, PanelInbreeding::Supplied(&supplied));
-
-        assert_eq!(report.samples, samples);
-        assert_eq!(report.measured.positions, 3_000);
-        assert_eq!(report.inbreeding_source, InbreedingSource::User);
-        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
-
-        // **The coefficient the caller supplied is the one the report carried and the one the
-        // arithmetic used.** Measured before these three lines existed: `of` could pass a literal
-        // zero to `finish` *and* store a literal zero as the panel coefficient, and the whole suite
-        // stayed green — the ratio band below is wide enough to swallow a 1% shift.
-        // (Averaged over the ten supplied values, so it arrives as 0.19999999999999998.)
-        assert!(
-            (report.panel_inbreeding - 0.2).abs() < 1e-12,
-            "got {}",
-            report.panel_inbreeding
-        );
-        let outbred = fit
-            .census_moments
-            .finish(InbreedingF::try_new(0.0).expect("zero is a legal coefficient"));
-        let correction = report.measured.heterozygosity / outbred.heterozygosity;
-        // An inbred panel shows fewer differences than its population has, so the census average is
-        // **divided** by `1 − F/(2N − 1)` to recover the population's number — a lift, not a cut.
-        // 2N = 20 chromosomes here, so it is exactly `1 / (1 − 0.2/19)`.
-        let expected = 1.0 / (1.0 - 0.2 / 19.0);
-        assert!(
-            (correction - expected).abs() < 1e-12,
-            "the supplied coefficient moved the heterozygosity by {correction}, not by {expected}"
-        );
-
-        // **The curve's number is the curve's, not a second copy of the census average** — the
-        // point of putting them side by side. `of` could set this field from the census and the
-        // ratio would then be exactly 1, inside the band.
-        assert_eq!(report.curve_heterozygosity, fit.expected_heterozygosity);
-
-        let ratio = report
-            .curve_over_census()
-            .expect("a cohort drawn at this density segregates");
-        assert!(
-            (0.85..1.15).contains(&ratio),
-            "the two routes to one heterozygosity should agree inside the fit's own family; the \
-             curve reads {:.4e} and the census average {:.4e}, a ratio of {ratio:.4}",
-            report.curve_heterozygosity,
-            report.measured.heterozygosity
-        );
-
-        // **Both are near the diversity the cohort was actually drawn with**, which is what stops
-        // the agreement above being two matching wrong numbers.
-        let drawn: f64 =
-            cohort.heterozygous.iter().sum::<f64>() / cohort.heterozygous.len() as f64 / 0.8;
-        assert!(
-            (0.7..1.4).contains(&(report.measured.heterozygosity / drawn)),
-            "the census average is {:.4e} against a drawn diversity of {drawn:.4e}",
-            report.measured.heterozygosity
-        );
-
-        // And a run that had no runs coefficient says so, with the circularity warning.
-        let excess = [InbreedingF::try_new(0.2).expect("legal"); 10];
-        let fallback = CensusMomentsReport::of(&fit, PanelInbreeding::HomozygoteExcess(&excess));
-        assert_eq!(
-            fallback.inbreeding_source,
-            InbreedingSource::JointFitHomozygoteExcess
-        );
-        assert_eq!(fallback.warnings().len(), 1);
-        assert_eq!(fallback.measured, report.measured, "the same coefficient");
-    }
-
-    /// **The two routes to the two population moments agree on a real fit** — the running sums the
-    /// expectation step keeps, and the reduction over the stored per-position array.
-    ///
-    /// This is what makes the memory decision safe. `JointFitConfig::genotype_posteriors` is off by
-    /// default because the array weighs twelve bytes a position a sample — 1.2 GB for fifty samples
-    /// over the shipped two-million-position census — so the moments are summed as the fit walks
-    /// and nothing is stored (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5). **The stored
-    /// array stays as the harnesses' input and as this oracle**, and if the two ever part company
-    /// the sums are wrong, because the array is what every measurement behind the design was made
-    /// on.
-    ///
-    /// **They agree to `f32` and not to the last bit**, and the difference is where the array goes
-    /// through `f32` on the way out while the sums stay in `f64` throughout. Measured on this
-    /// cohort: **2.9e-11 on the frequency and 8.2e-10 on the heterozygosity** — four to five
-    /// orders inside the `1e-6` asserted, which is the `f32` significand itself. The tolerance is
-    /// deliberately loose against that measurement, because it bounds the rounding rather than the
-    /// arithmetic, and a rounding figure that tight would fail on a different cohort.
-    ///
-    /// It also pins the **position count**: both routes must divide by the same number, which is
-    /// the thing an early return on an underflowed position could quietly break.
-    ///
-    /// **What it does not pin is the formula.** Both routes call the same
-    /// [`alternative_copies_in`] and the same `nei_heterozygosity`, so a defect inside either — the
-    /// variance term dropped, `2N − 1` written as `2N` — moves both sides by the same factor and
-    /// this test stays green. Measured: gutting the variance term leaves it passing. It pins the
-    /// **plumbing** — that the sums saw the census the array saw — and the formula is pinned by the
-    /// hand-arithmetic fixtures in [`census_moments`](super::census_moments), which is where a
-    /// change to it should break something.
-    ///
-    /// [`alternative_copies_in`]: super::census_moments
-    #[test]
-    fn the_summed_moments_and_the_stored_array_agree() {
-        let density = FrequencyDensity {
-            p_invariant: 0.90,
-            p_fixed_alt: 0.01,
-            a: 0.7,
-            b: 2.5,
-        };
-        let positions = 2_000;
-        let samples = 6;
-        let cohort = draw_cohort(
-            samples,
-            positions,
-            8.0,
-            (0.002, 0.06, 0.02),
-            density,
-            0.2,
-            0x243F_6A88_85A3_08D3,
-        );
-        let config = JointFitConfig {
-            quadrature_nodes: 12,
-            max_passes: 12,
-            duplicated_positions: false,
-            genotype_posteriors: true,
-            ..JointFitConfig::default()
-        };
-        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
-
-        assert_eq!(
-            fit.genotype_posterior.len(),
-            fit.census_moments.positions() as usize * samples * 3,
-            "the stored array and the running sums must have seen the same census"
-        );
-
-        let selfing = InbreedingF::try_new(0.2).expect("a legal coefficient");
-        let summed = fit.census_moments.finish(selfing);
-        let stored = CensusMoments::from_posteriors(
-            &fit.genotype_posterior,
-            samples,
-            fit.census_moments.positions() as usize,
-            selfing,
-        );
-        let frequency_gap =
-            (summed.mean_alternative_frequency / stored.mean_alternative_frequency - 1.0).abs();
-        let heterozygosity_gap = (summed.heterozygosity / stored.heterozygosity - 1.0).abs();
-        assert!(
-            frequency_gap < 1e-6 && heterozygosity_gap < 1e-6,
-            "the two routes disagree by {frequency_gap:e} on the frequency and \
-             {heterozygosity_gap:e} on the heterozygosity, which is more than the f32 the stored \
-             array passes through: summed {summed:?}, stored {stored:?}"
-        );
-        // **And both are measuring something**, so the agreement above is not two zeros matching.
-        assert!(
-            summed.mean_alternative_frequency > 1e-4 && summed.heterozygosity > 1e-4,
-            "this cohort segregates at 9 positions in 100; got {summed:?}"
-        );
-    }
     /// **The test that says whether any of this works.** A cohort drawn at known parameters
     /// must come back at them.
     #[test]
@@ -6716,6 +6928,154 @@ mod whole_fit_tests {
             cohort.noisy_share
         );
         assert!(fit.converged, "the alternation ran out of passes");
+    }
+
+    /// **Exploring on a thinned census returns the full census's answer** (spec §3.3.2): the same
+    /// drawn cohort fitted with every start on every position, and with the starts on every 10th
+    /// and the winner finished on all, comes back at the same maximum — the same log-likelihood to
+    /// a hundredth of a unit, and every library's rate and every sample's excess within a tenth of
+    /// its own standard error. The thinned run's winner records the finish's passes in its own
+    /// place, so the starts are still numbered one to three.
+    #[test]
+    fn starts_explored_on_a_thinned_census_finish_at_the_full_censuss_answer() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let cohort = draw_cohort(
+            10,
+            3_000,
+            8.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0x9E37_79B9_7F4A_7C15,
+        );
+        let fit_with = |explore_on| {
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                duplicated_positions: false,
+                explore_on,
+                ..JointFitConfig::default()
+            };
+            fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools")
+        };
+        let full = fit_with(0);
+        let thinned = fit_with(300);
+        assert!(full.converged && thinned.converged, "both fits converge");
+        assert_eq!(
+            thinned
+                .starts
+                .iter()
+                .map(|start| start.number)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the finish takes its start's place in the record"
+        );
+        assert!(
+            (full.log_likelihood - thinned.log_likelihood).abs() < 0.01,
+            "log-likelihood {} on every position against {} thinned",
+            full.log_likelihood,
+            thinned.log_likelihood
+        );
+        for (group, error) in &full.clean_rate_standard_error {
+            let error = error.expect("every library has reads");
+            let gap = (full.noise[group].value.clean - thinned.noise[group].value.clean).abs();
+            assert!(
+                gap < 0.1 * error,
+                "library {group:?}: rates {gap:e} apart, error {error:e}"
+            );
+        }
+        for (sample, excess) in &full.hom_excess {
+            let error = excess
+                .standard_error
+                .expect("ten samples give every excess an error");
+            let gap = (excess.value.get() - thinned.hom_excess[sample].value.get()).abs();
+            assert!(
+                gap < 0.1 * error,
+                "{sample}: excesses {gap:e} apart, error {error:e}"
+            );
+        }
+    }
+
+    /// After a finish that converged nothing runs; after one that did not, every other start runs
+    /// again on every position, in order, so none is left agreeing with the unconverged winner.
+    #[test]
+    fn a_finish_that_did_not_converge_runs_the_other_starts_again_on_every_position() {
+        assert!(runs_after_the_finish(StartEnding::Converged, 1, 3).is_empty());
+        assert_eq!(
+            runs_after_the_finish(StartEnding::AtTheLimit, 2, 3),
+            vec![
+                StartRun::Start {
+                    number: 1,
+                    stride: 1
+                },
+                StartRun::Start {
+                    number: 3,
+                    stride: 1
+                },
+            ]
+        );
+        assert!(runs_after_the_finish(StartEnding::AtTheLimit, 1, 1).is_empty());
+    }
+
+    /// **Every start recorded as agreeing names one recorded as converged** — the rule the
+    /// parameters file holds a fit to — across pass limits and thresholds that leave the thinned
+    /// starts and the finish converged or not in every combination this cohort reaches. (The
+    /// combination the rerun exists for, thinned starts agreeing and the finish out of passes, is
+    /// not among them on this cohort; `runs_after_the_finish` is tested on its own above.)
+    #[test]
+    fn a_finish_out_of_passes_leaves_no_agreement_with_an_unconverged_start() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let cohort = draw_cohort(
+            10,
+            3_000,
+            8.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0x9E37_79B9_7F4A_7C15,
+        );
+        for (max_passes, decrement_threshold) in [20, 30, 40, 60]
+            .into_iter()
+            .flat_map(|passes| [1e-5, 1e-7, 1e-9].map(|threshold| (passes, threshold)))
+        {
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                duplicated_positions: false,
+                explore_on: 300,
+                max_passes,
+                decrement_threshold,
+                ..JointFitConfig::default()
+            };
+            let fit =
+                fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+            let numbers: Vec<usize> = fit.starts.iter().map(|start| start.number).collect();
+            assert_eq!(
+                numbers,
+                vec![1, 2, 3],
+                "one record a start, at {max_passes} passes"
+            );
+            for start in &fit.starts {
+                if let StartEnding::Agreed { with_start } = start.ended {
+                    assert_eq!(
+                        fit.starts[with_start - 1].ended,
+                        StartEnding::Converged,
+                        "at {max_passes} passes start {} agreed with start {with_start}, which \
+                         did not converge: {:?}",
+                        start.number,
+                        fit.starts
+                    );
+                }
+            }
+        }
     }
 
     /// **A stretch some samples carry twice must not be read as heterozygosity.**

@@ -1001,6 +1001,7 @@ mod tests {
             ploidy: 2,
             inbreeding: None,
             str_param_estimates_at_once: None,
+            fit_cohort_on: None,
             skip_contamination: false,
             threads: 0,
         })
