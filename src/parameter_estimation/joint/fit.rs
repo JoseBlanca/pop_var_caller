@@ -3077,6 +3077,8 @@ fn maximise(
     // The fraction of its Newton step this start last accepted; before any, a half, so the first
     // try is the whole step.
     let mut last_fraction = 0.5_f64;
+    // EXPERIMENT (fit-finish): where the last accepted try put the best length along its step.
+    let mut next_first: Option<f64> = None;
     // A cycle needs three passes in hand — its first, the second plain one, the jump's — but one
     // that begins with an accepted try's pass has run its first already, and judging that pass
     // costs none: it is always judged, and the guard before the SQUAREM cycle ends the start
@@ -3120,6 +3122,7 @@ fn maximise(
                 furthest: furthest(&errors, &step.distances),
                 heading_to,
                 distances: step.distances,
+                slopes: step.slopes,
             }
         });
         // The traced pass that judged records its verdict.
@@ -3163,12 +3166,29 @@ fn maximise(
             && alternation.passes < config.max_passes
         {
             let target = parameters.newton_target(&judgement.distances);
-            let first_fraction = first_newton_fraction(last_fraction);
+            // EXPERIMENT (fit-finish): the log-likelihood's slope along the step, per unit of the
+            // whole step, when `PVC_NEWTON_LINE` asks for the length to be chosen from it.
+            let slope_along = newton_line().then(|| {
+                parameters
+                    .coordinates()
+                    .iter()
+                    .zip(&target)
+                    .zip(&judgement.slopes)
+                    .map(|((coordinate, full), slope)| {
+                        slope.map_or(0.0, |slope| slope * (full - coordinate.value))
+                    })
+                    .sum::<f64>()
+            });
+            let first_fraction = match (slope_along, next_first) {
+                (Some(_), Some(best)) => best,
+                _ => first_newton_fraction(last_fraction),
+            };
             let outcome = try_the_newton_step(
                 &parameters,
                 &target,
                 first_fraction,
                 entering.log_likelihood,
+                slope_along,
                 |candidate| {
                     (alternation.passes < config.max_passes).then(|| {
                         let (next, at_candidate) = alternation.step(candidate, true);
@@ -3197,9 +3217,11 @@ fn maximise(
                     fraction,
                     parameters: candidate,
                     pass,
+                    best,
                 } => {
                     let gain = pass.1.log_likelihood - entering.log_likelihood;
                     last_fraction = fraction;
+                    next_first = best;
                     parameters = candidate;
                     accepted_pass = Some(pass);
                     print_the_cycle(
@@ -3371,6 +3393,8 @@ struct Judgement {
     /// Each parameter's distance to the maximum, in the order the fit's vector lists them: what
     /// the Newton step moves by.
     distances: Vec<Option<f64>>,
+    /// EXPERIMENT (fit-finish): each parameter's slope at the judged point, in the same order.
+    slopes: Vec<Option<f64>>,
 }
 
 impl Judgement {
@@ -3403,6 +3427,8 @@ enum NewtonOutcome<Pass> {
         fraction: f64,
         parameters: Parameters,
         pass: Pass,
+        /// EXPERIMENT (fit-finish): where this try put the peak along the step, as a fraction of it.
+        best: Option<f64>,
     },
     /// No try rose: `tries` were made, a try halved at the shares' bound without a pass included.
     /// Fewer than [`NEWTON_TRIES`] when the passes ran out first.
@@ -3428,6 +3454,7 @@ fn try_the_newton_step<Pass>(
     target: &[f64],
     first_fraction: f64,
     judged_log_likelihood: f64,
+    slope_along: Option<f64>,
     mut pass_at: impl FnMut(&Parameters) -> Option<(f64, Pass)>,
 ) -> NewtonOutcome<Pass> {
     let coordinates = judged.coordinates();
@@ -3457,14 +3484,23 @@ fn try_the_newton_step<Pass>(
         let Some((log_likelihood, pass)) = pass_at(&candidate) else {
             return NewtonOutcome::Rejected { tries: tried - 1 };
         };
+        // EXPERIMENT (fit-finish): the length where a parabola through the judged point, its slope
+        // along the step and this try peaks — the log-likelihood's own curvature along the step.
+        let best = slope_along.and_then(|slope| {
+            best_fraction_along(slope, fraction, log_likelihood - judged_log_likelihood)
+        });
         if log_likelihood > judged_log_likelihood {
             return NewtonOutcome::Accepted {
                 fraction,
                 parameters: candidate,
                 pass,
+                best: best.map(|best| best.clamp(1.0 / 1024.0, 1.0)),
             };
         }
-        fraction /= 2.0;
+        fraction = match best {
+            Some(best) => best.clamp(fraction / 16.0, fraction / 2.0),
+            None => fraction / 2.0,
+        };
     }
     NewtonOutcome::Rejected {
         tries: NEWTON_TRIES,
@@ -3473,6 +3509,29 @@ fn try_the_newton_step<Pass>(
 
 /// **The fraction of its Newton step a start tries first**: twice the fraction it last accepted, at
 /// most the whole step (§3.3.1). A start begins at a half, so its first try is the whole step.
+/// EXPERIMENT (fit-finish): whether `PVC_NEWTON_LINE` asks the Newton tries to choose their length
+/// from the log-likelihood's curvature along the step rather than by halving.
+fn newton_line() -> bool {
+    std::env::var_os("PVC_NEWTON_LINE").is_some()
+}
+
+/// EXPERIMENT (fit-finish): **the fraction of the step where the log-likelihood peaks**, from a
+/// parabola through the judged point (gain 0, slope `slope` per whole step) and a try at `fraction`
+/// that gained `gain`: `f(t) = slope·t − ½ c t²`, so `c = 2 (slope·t − gain) / t²` and the peak is at
+/// `slope / c`. `None` when the slope does not point uphill; twice the try when the try gained at
+/// least as much as the slope alone promised, the parabola then bending the wrong way.
+fn best_fraction_along(slope: f64, fraction: f64, gain: f64) -> Option<f64> {
+    if !(slope > 0.0) || !gain.is_finite() {
+        return None;
+    }
+    let curvature = 2.0 * (slope * fraction - gain) / (fraction * fraction);
+    Some(if curvature > 0.0 {
+        slope / curvature
+    } else {
+        2.0 * fraction
+    })
+}
+
 fn first_newton_fraction(last_accepted: f64) -> f64 {
     (2.0 * last_accepted).min(1.0)
 }
@@ -5729,7 +5788,7 @@ mod tests {
         log_likelihoods: &[f64],
     ) -> (NewtonOutcome<usize>, Vec<f64>) {
         let mut run_at = Vec::new();
-        let outcome = try_the_newton_step(judged, target, first_fraction, -100.0, |candidate| {
+        let outcome = try_the_newton_step(judged, target, first_fraction, -100.0, None, |candidate| {
             let pass = run_at.len();
             run_at.push(candidate.density.a);
             log_likelihoods.get(pass).map(|&ll| (ll, pass))
@@ -5754,6 +5813,7 @@ mod tests {
             fraction,
             parameters,
             pass,
+            ..
         } = outcome
         else {
             panic!("the quarter step rose and is kept");
@@ -5808,7 +5868,7 @@ mod tests {
         let mut target = judged.values();
         target[1] = P_INVARIANT_BOUNDS.1;
         let mut run_at = Vec::new();
-        let outcome = try_the_newton_step(&judged, &target, 1.0, -100.0, |candidate| {
+        let outcome = try_the_newton_step(&judged, &target, 1.0, -100.0, None, |candidate| {
             run_at.push(candidate.density.p_invariant);
             Some((-101.0, ()))
         });
@@ -5838,7 +5898,7 @@ mod tests {
             let mut target = judged.values();
             target[3] = lower;
             let mut run_at = Vec::new();
-            try_the_newton_step(&judged, &target, 1.0, -100.0, |candidate| {
+            try_the_newton_step(&judged, &target, 1.0, -100.0, None, |candidate| {
                 run_at.push(candidate.density.a);
                 Some((-99.0, ()))
             });
