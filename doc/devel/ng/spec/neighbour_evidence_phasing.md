@@ -142,6 +142,19 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
   allele too matters: left soft, it was the one template never plainly wrong, the walk copied it
   more, and the no-read calls it withholds (pass §4.2) rose from 8 to 21 in 100 of the outbred 1×
   homozygous-reference genotypes (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
+- **A sample does not read its own reads back — decided 2026-11-07, measured.** A sample that
+  copies another lends it its reads: the second sample's haplotype there carries the first's
+  alleles. Read back whole in the next round, it comes back to the first as a relative's haplotype —
+  and the template choice prefers it, since it resembles the sample — so the sample's one or two
+  reads count again as a second witness. With no deep sample to hold the panel, both copies settled
+  on whichever allele the reads showed, round after round: in a 40-sample outbred cohort all at 2×,
+  heterozygotes right fell from 7,111 averaged over rounds 2 alone to 4,636 over rounds 2–3 and
+  5,007 over 2–5, split evenly between the two homozygotes at every allele frequency. So each round
+  stores which template each copy followed, and a copy that followed the reader is read without it
+  (§2.3). Rounds 2–5 then gave 7,042 there, and the other cohorts measured moved within a run's
+  noise (`doc/devel/reports/implementations/echo_free_templates_2026-11-07.md`). Making the stored
+  haplotypes hard or sharper did not help (4,204 to 5,124), nor did freezing the panel after
+  round 1 (7,215, but the mixed-depth cohort's wrong links rose from 9 to 82).
 - **Average the posterior over rounds 2 to `R`, not take the last — decided, measured.** Samples
   phase each other, so an error can reinforce itself round to round: on the first cohort the last
   round's fills drifted from 1.4% wrong (round 3) to 2.8% (round 8), while the average stayed at
@@ -186,6 +199,22 @@ stream `StreamPurpose::DefiniteAlleles`, keyed by the window, the sample and the
 uniform a template a site in template order. The genotype prediction and the re-estimation of the
 sample's own haplotypes read the shares (§2.2). Round 1 reads the shares for both: its templates are
 genotypes, not haplotypes, and it is the pass without phasing.
+
+**A copy that followed the reader is read without it** (§2.2). Each round's path records, per site,
+the template each copy followed, and the sample that template came from. When sample `s` reads copy
+`c` of sample `t` — to choose its haplotypes or in its walk — and that copy followed one of `s`'s
+haplotypes (round 1: `s`'s `GP` shares), `s` reads in its place `p(a) · Σ_b h(b) · L_t({a, b})`,
+normalised, `p` the cohort's frequencies, `h` `t`'s other copy and `L_t` `t`'s likelihood (flat at
+`t`'s hidden records, §4.1); or `p(a) · L_t({a, a})` where both copies followed `s`. That is the
+copy with `s`'s template replaced by the background, `t`'s own reads kept; `t`'s reads also enter
+`h`, an approximation measured equal, within noise, to recomputing the copy from the background
+(`refine::HaplotypeStore::template_into`). **Only where `s`'s own reads leave its genotype unsure**
+— its second most likely genotype above 1/100 of the most likely (`ECHO_SETTLED_LIKELIHOOD`),
+judged on its reads even at its hidden records. Where they settle it an echo adds little, and the
+copy, a relative's true haplotype, is read whole: removing the echo there too phased about 2 in 100
+fewer offspring heterozygotes on the F2. Judging a sample's hidden records unsettled cost the F2
+as much: a 30× parent then read its offspring's copies without its reads there, and its haplotypes
+went soft for every offspring copying it.
 
 **A sample not walked in the window** — no informative record there, so no templates and no path
 (`templates.rs:46`, `refine.rs:243`) — **carries its `GP` allele shares as both haplotypes in every
@@ -353,6 +382,10 @@ about 500 core-hours at 3,000 samples; the searches are now table lookups, not y
   of the round being written from its own thread, so no second copy of every sample's haplotypes is
   held at a round's end (the first build held one, about 80–110 bytes a sample-record; code review
   2026-11-02).
+- *The templates followed*: per sample-site, one byte for each copy — the index of the template it
+  followed in the sample's round list, or none (the background, an absent row, a sample not walked)
+  — and per sample its round's template samples; two buffers, as for the haplotypes, so 4 bytes a
+  sample-record, about 0.5 GB at 3,000 samples (§2.3).
 - *The round accumulators*: running sums, per sample and core record, of the posterior, the
   prediction and the background-copy probability — 7 numbers biallelic, as `f32` 28 bytes a core
   sample-record. The previous round's posterior is kept **only at each sample's at most 500
