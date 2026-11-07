@@ -128,7 +128,19 @@ cohorts were already wrong 3.7 to 5.5 times in 100 links (`phase_background_gate
 **Time** on the 40-sample inbreeding-0 cohort, 6 threads: 9.4 and 9.8 s on main, 9.8 and 9.9 s on
 the branch. **Memory:** 4 bytes a sample-record more (§5 of the spec), about 0.5 GB at 3,000 samples.
 
-**refine_sim on rick, 400 samples:** pending — rick was running the benchmark suite.
+**refine_sim on rick** (the suite's cohorts, refinement on, main f1097328 against the branch;
+SNPs; genotypes right summed over all depths; phased right, links, wrong links):
+
+| cohort | SNPs with reads right | SNPs without reads right | phase |
+|---|---|---|---|
+| F2, 22 (2 parents at 30×, offspring at 1×) | 14,542 → 14,544 | 6,865 → 6,947 (no call 770 → 686) | 5,628, 5,309, 4 → 5,787, 5,476, 5 |
+| inbreeding 0, 400 (100 each at 30×, 10×, 5×, 2×) | 1,023,346 → 1,023,302 | 35,535 → 35,517 | 120,818, 93,947, 14 → 120,784, 93,979, 17 |
+| inbreeding 0.9, 400 | 943,941 → 943,941 | 35,136 → 35,116 | 10,943, 9,438, 2 → 10,958, 9,421, 1 |
+
+The F2 gains: 82 more SNPs right without reads, 159 more heterozygotes phased right, and STRs without
+reads 7,264 → 7,354 right. The 400-sample cohorts, whose deep samples fill the panel, move by under
+1 in 20,000 genotypes and under 1 in 3,000 phased heterozygotes. Wall time 693 and 690 s on main, 690
+and 691 s on the branch (rick, 30 threads, sharing the machine with the suite).
 
 ## 5. Tests
 
