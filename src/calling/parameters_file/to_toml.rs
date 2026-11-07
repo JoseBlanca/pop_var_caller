@@ -424,6 +424,65 @@ impl ParametersFile {
             );
         }
         // **A section of its own, since calling reads none of it**; absent where no fit wrote it.
+        if let Some(fit) = &self.snp_indel_fit {
+            section(&mut out, "snp_indel_fit");
+            note(
+                &mut out,
+                &[
+                    "The SNP/indel fit's own numbers, exactly as it returned them. Informational: a calling run reads none of it, and editing it changes no call. A later `estimate-parameters` run given this file with `--start-from` starts its fit from these numbers rather than from its usual starting points.",
+                    "",
+                    "Elsewhere this file holds them only as calling reads them: each read group's error rate at an ordinary position as a multiplier on the library's own qualities, each sample's homozygote excess as an inbreeding coefficient that `--inbreeding` may have replaced. `mismapped_share` is the share of kept positions taken to be mismapped — two stretches of genome piling their reads up on one place — and `mismapped_error_rate` how often a read disagrees with the reference there; neither is written anywhere else.",
+                ],
+            );
+            scalar(
+                &mut out,
+                "mismapped_share",
+                &a_toml_float(fit.mismapped_share),
+            );
+            scalar(
+                &mut out,
+                "invariant_share",
+                &a_toml_float(fit.invariant_share),
+            );
+            scalar(
+                &mut out,
+                "fixed_non_reference_share",
+                &a_toml_float(fit.fixed_non_reference_share),
+            );
+            scalar(
+                &mut out,
+                "segregating_shape_a",
+                &a_toml_float(fit.segregating_shape_a),
+            );
+            scalar(
+                &mut out,
+                "segregating_shape_b",
+                &a_toml_float(fit.segregating_shape_b),
+            );
+            one_a_line(
+                &mut out,
+                "by_read_group",
+                fit.by_read_group.iter().map(|row| {
+                    format!(
+                        "{{ read_group = {}, ordinary_error_rate = {}, mismapped_error_rate = {} }}",
+                        row.read_group,
+                        a_toml_float(row.ordinary_error_rate),
+                        a_toml_float(row.mismapped_error_rate)
+                    )
+                }),
+            );
+            one_a_line(
+                &mut out,
+                "by_sample",
+                fit.by_sample.iter().map(|row| {
+                    format!(
+                        "{{ sample = {}, homozygote_excess = {} }}",
+                        a_toml_string(&row.sample),
+                        a_toml_float(row.homozygote_excess)
+                    )
+                }),
+            );
+        }
         if let Some(left_out) = &self.repeat_tracts_left_out {
             section(&mut out, "repeat_tracts_left_out");
             note(

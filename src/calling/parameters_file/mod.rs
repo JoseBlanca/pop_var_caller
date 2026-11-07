@@ -103,6 +103,11 @@
 //! duplicated_share = { value = 1.543e-2, separately_determined = false }
 //! …
 //!
+//! [snp_indel_fit]                  # informational: the SNP/indel fit's numbers as it returned them
+//! mismapped_share = 5.84e-2
+//! by_read_group = [ { read_group = 0, ordinary_error_rate = 1.2e-3, mismapped_error_rate = 4.1e-2 } ]
+//! by_sample = [ { sample = "S1", homozygote_excess = 0.97 } ]
+//!
 //! [repeat_tracts_left_out]         # informational: the tracts the stutter fit did not learn from
 //! typical_depth = 40.6
 //! by_stratum = [ … one row a class: fitted, interrupted, over_guard_threshold, too_deep, in_stutter_tail … ]
@@ -264,7 +269,14 @@ use serde::{Deserialize, Serialize};
 /// relative to its slippage group's class rates, one row a read group and motif length
 /// (`doc/devel/ng/spec/str_library_stutter.md` §7). Calling reads it. A version-8 build refuses a
 /// version-9 file; this build reads a version-8 or older file with every multiplier one.
-pub const FORMAT_VERSION: u32 = 9;
+///
+/// **Version 10** adds a fourth informational table, `[snp_indel_fit]`: the SNP/indel fit's own
+/// numbers exactly as it returned them — the mismapped share, the allele-frequency density, each
+/// read group's two error rates and each sample's homozygote excess — which is what a later
+/// `estimate-parameters` run starts its fit from (`parameter_prepass_joint_fit.md` §3.3.3). No
+/// calling run reads it. A version-9 build refuses a version-10 file that carries it; this build
+/// reads a version-9 file with the table absent.
+pub const FORMAT_VERSION: u32 = 10;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -608,6 +620,11 @@ pub struct ParametersFile {
     /// of it (`parameter_prepass_joint_fit.md` §2.1.3). Absent where the run did not fit the class,
     /// and in a file written before version 4.
     pub duplicated_positions: Option<FittedDuplicatedPositions>,
+    /// **The SNP/indel fit's own numbers, as it returned them** — informational: a calling run
+    /// reads none of it; a later `estimate-parameters` run starts its fit from it. Absent where the
+    /// file was not written by a fit, and in a file written before version 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snp_indel_fit: Option<SnpIndelFitAsReturned>,
     /// **The tracts the repeat-tract fit left out, and why** — informational: a calling run reads
     /// none of it (`parameter_prepass_ssr.md` §4.6.1). Absent where the file was not written by a
     /// fit, and in a file written before version 7.
@@ -1143,6 +1160,52 @@ pub struct FittedDuplicatedPositions {
     pub carrier_shape_a: PairedNumber,
     pub carrier_shape_b: InformationalNumber,
     pub share_with_carriers_above_stated_frequency: InformationalNumber,
+}
+
+/// **`[snp_indel_fit]`: the SNP/indel fit's own numbers, exactly as it returned them**
+/// (`parameter_prepass_joint_fit.md` §3.3.3). Informational: no calling run reads it.
+///
+/// **Why the numbers are here a second time.** Elsewhere the file holds them only as calling reads
+/// them: an ordinary-position error rate as a multiplier on the library's own qualities, a
+/// homozygote excess as an inbreeding coefficient that `--inbreeding` may have replaced, the density
+/// only where the prior was seeded from its curve — and the mismapped share and each read group's
+/// mismapped error rate not at all. A later fit of the same cohort grown by a few samples starts
+/// from these, and needs them unconverted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnpIndelFitAsReturned {
+    /// The share of kept positions the fit took to be mismapped.
+    pub mismapped_share: f64,
+    /// The share of positions where the population carries only the reference base.
+    pub invariant_share: f64,
+    /// The share where it carries only a non-reference base.
+    pub fixed_non_reference_share: f64,
+    /// The two shapes of the Beta over the positions that segregate.
+    pub segregating_shape_a: f64,
+    pub segregating_shape_b: f64,
+    /// One row a read group the fit scored.
+    pub by_read_group: Vec<SnpIndelFitReadGroupRow>,
+    /// One row a sample the fit scored.
+    pub by_sample: Vec<SnpIndelFitSampleRow>,
+}
+
+/// One read group's two error rates in `[snp_indel_fit]`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnpIndelFitReadGroupRow {
+    pub read_group: u32,
+    /// How often a read misreads a base at an ordinary position.
+    pub ordinary_error_rate: f64,
+    /// How often a read disagrees with the reference at a mismapped position.
+    pub mismapped_error_rate: f64,
+}
+
+/// One sample's homozygote excess in `[snp_indel_fit]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnpIndelFitSampleRow {
+    pub sample: String,
+    pub homozygote_excess: f64,
 }
 
 /// **`[repeat_tracts_left_out]`: the tracts the repeat-tract fit did not learn stutter from**, and
@@ -2162,6 +2225,22 @@ mod tests {
                     value: 2.6e-2,
                     standard_error: None,
                 },
+            }),
+            snp_indel_fit: Some(SnpIndelFitAsReturned {
+                mismapped_share: 5.8412e-2,
+                invariant_share: 0.8416,
+                fixed_non_reference_share: 2.96e-5,
+                segregating_shape_a: 2.885e-2,
+                segregating_shape_b: 8.7365,
+                by_read_group: vec![SnpIndelFitReadGroupRow {
+                    read_group: 0,
+                    ordinary_error_rate: 1.25e-3,
+                    mismapped_error_rate: 4.1e-2,
+                }],
+                by_sample: vec![SnpIndelFitSampleRow {
+                    sample: "S1".to_owned(),
+                    homozygote_excess: 0.97,
+                }],
             }),
             // One motif length settled and one stopped by the rounds, so both values of
             // `settled` are written.
@@ -3416,26 +3495,27 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_nine() {
-        assert_eq!(FORMAT_VERSION, 9);
-        assert_eq!(a_file_using_every_shape().format_version, 9);
+    fn the_format_version_this_build_writes_is_ten() {
+        assert_eq!(FORMAT_VERSION, 10);
+        assert_eq!(a_file_using_every_shape().format_version, 10);
     }
 
     /// **A version-3 file reads, with both informational tables absent** — the fixture with its
     /// version set back, the two tables and format 5's key taken out of its text, and the outlier
     /// weight at the 0.20 a build before format 6 recorded — and passes a run's checks; **a
-    /// version-10 file is refused**; and a version-3 build's reader, which knows neither table,
+    /// version-11 file is refused**; and a version-3 build's reader, which knows neither table,
     /// would refuse a version-4 file rather than misread it: every table refuses a key it does not
     /// know, so the written text of either table, put in a file whose shape lacks it, is refused
     /// naming the key.
     #[test]
-    fn a_version_three_file_reads_without_the_tables_and_a_version_ten_file_is_refused() {
+    fn a_version_three_file_reads_without_the_tables_and_a_version_eleven_file_is_refused() {
         let mut version_three = a_file_using_every_shape();
         version_three.format_version = 3;
         version_three.ordinary_site_prior.fitted_density = None;
         version_three.duplicated_positions = None;
         version_three.repeat_tracts_left_out = None;
         version_three.misread_after_runs = None;
+        version_three.snp_indel_fit = None;
         version_three
             .repeat_tracts
             .stutter_multiplier_by_read_group
@@ -3455,10 +3535,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         read.validate()
             .expect("a version-3 file passes the checks a run applies");
 
-        let mut version_ten = a_file_using_every_shape();
-        version_ten.format_version = 10;
-        let read = ParametersFile::from_toml(&version_ten.to_toml())
-            .expect("a version-10 file with this build's keys parses");
+        let mut version_eleven = a_file_using_every_shape();
+        version_eleven.format_version = 11;
+        let read = ParametersFile::from_toml(&version_eleven.to_toml())
+            .expect("a version-11 file with this build's keys parses");
         assert!(matches!(
             read.validate(),
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"

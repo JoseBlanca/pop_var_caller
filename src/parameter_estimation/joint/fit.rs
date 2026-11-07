@@ -784,6 +784,46 @@ pub struct JointFitConfig {
     /// Spec: `parameter_prepass_joint_fit.md` §3.3.2. At 62 tomato samples it halved the fit
     /// (2,223 s to 1,069 s) and moved no fitted number by more than 0.015 of its standard error.
     pub explore_on: usize,
+    /// **The numbers an earlier run fitted, to start from instead of the starting points** —
+    /// `None`, the default, fits from [`Self::starting_points`]. Used only when they cover at
+    /// least half of this run's samples ([`EarlierFit::covers`]); otherwise the fit says so and
+    /// starts as it would without them.
+    pub earlier_fit: Option<EarlierFit>,
+}
+
+/// **The numbers an earlier run of this fit returned, matched to this run's read groups and
+/// samples** — what a fit of a cohort that has grown by a few samples starts from.
+///
+/// **Only where the fit starts changes, not what it maximises**: every number stays free, so a
+/// fit that converges from here converges to the maximum a fit from the starting points reaches,
+/// to within the stopping rule. What it skips is the search from several starting points and the
+/// distance from them, which on a cohort that changed little is most of the passes.
+///
+/// A read group or sample the earlier run did not hold starts at the median of those it did.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct EarlierFit {
+    /// The cohort's numbers; `None` where the earlier run did not fit them, which starts them at the
+    /// first starting point's.
+    pub noisy_share: Option<f64>,
+    pub density: Option<FrequencyDensity>,
+    pub duplicated: Option<DuplicatedPositions>,
+    /// Keyed by this run's read groups; the earlier run's that this run does not hold are left out.
+    pub noise: BTreeMap<ReadGroupId, SiteClassNoise>,
+    /// Keyed by sample name.
+    pub hom_excess: BTreeMap<String, f64>,
+}
+
+impl EarlierFit {
+    /// **Whether the earlier numbers describe enough of this cohort to start from**: at least
+    /// half of its samples. Below that the cohort is mostly new, and the starting points' search
+    /// for the best of several maxima is worth its passes.
+    pub fn covers(&self, samples: &[String]) -> bool {
+        let held = samples
+            .iter()
+            .filter(|name| self.hom_excess.contains_key(*name))
+            .count();
+        held > 0 && 2 * held >= samples.len()
+    }
 }
 
 impl Default for JointFitConfig {
@@ -810,6 +850,7 @@ impl Default for JointFitConfig {
             pass_trace: false,
             depth_as_a_range: true,
             explore_on: 250_000,
+            earlier_fit: None,
         }
     }
 }
@@ -1572,6 +1613,55 @@ impl Parameters {
         }
     }
 
+    /// **Where a fit continuing an earlier run's begins**: each read group and sample the earlier
+    /// run held at its own numbers, the rest at the median of those, and the cohort's numbers at the
+    /// earlier run's — the first starting point's where the earlier run did not fit them.
+    fn continuing(
+        earlier: &EarlierFit,
+        groups: &[ReadGroupId],
+        names: &[String],
+        config: &JointFitConfig,
+    ) -> Self {
+        let first = Self::at_start(
+            &config.starting_points[0],
+            groups.len(),
+            names.len(),
+            config,
+        );
+        let median = |mut values: Vec<f64>, otherwise: f64| {
+            values.sort_by(f64::total_cmp);
+            values.get(values.len() / 2).copied().unwrap_or(otherwise)
+        };
+        let clean = median(
+            earlier.noise.values().map(|rates| rates.clean).collect(),
+            first.clean.first().copied().unwrap_or(DEFAULT_ERROR_RATE),
+        );
+        let noisy = median(
+            earlier.noise.values().map(|rates| rates.noisy).collect(),
+            first.noisy.first().copied().unwrap_or(DEFAULT_ERROR_RATE),
+        );
+        let hom_excess = median(earlier.hom_excess.values().copied().collect(), 0.0);
+        Self {
+            clean: groups
+                .iter()
+                .map(|group| earlier.noise.get(group).map_or(clean, |rates| rates.clean))
+                .collect(),
+            noisy: groups
+                .iter()
+                .map(|group| earlier.noise.get(group).map_or(noisy, |rates| rates.noisy))
+                .collect(),
+            noisy_share: earlier.noisy_share.unwrap_or(first.noisy_share),
+            density: earlier.density.unwrap_or(first.density),
+            hom_excess: names
+                .iter()
+                .map(|name| earlier.hom_excess.get(name).copied().unwrap_or(hom_excess))
+                .collect(),
+            duplicated: first
+                .duplicated
+                .map(|start| earlier.duplicated.unwrap_or(start)),
+        }
+    }
+
     /// **Every fitted number's name as the run's log gives it**, in the order
     /// [`coordinates`](Self::coordinates) lists them: the cohort's in the words the standard-error
     /// line uses, a sample's by its name, a library's rates by its sample and, where the sample has
@@ -2053,16 +2143,47 @@ pub fn fit_jointly(
             .map_or(1, |stride| stride.max(1));
         // The runs: each start on the thinned census, then, when it was thinned, the winner's
         // finish on every position, which continues from where that start stood.
-        let mut runs: std::collections::VecDeque<StartRun> = config
-            .starting_points
-            .iter()
-            .enumerate()
-            .map(|(index, _)| StartRun::Start {
-                number: index + 1,
-                stride,
-            })
-            .collect();
-        if stride > 1 {
+        // **Or one run, on every position, from an earlier run's numbers**, when they describe most
+        // of this cohort.
+        let continuing = config.earlier_fit.as_ref().filter(|earlier| {
+            let held_groups = groups
+                .iter()
+                .filter(|group| earlier.noise.contains_key(group))
+                .count();
+            let held_samples = names
+                .iter()
+                .filter(|name| earlier.hom_excess.contains_key(*name))
+                .count();
+            let covers = earlier.covers(&names);
+            stage.always(|into| {
+                format!(
+                    "SNP/indel fit: an earlier run's numbers hold {held_samples} of the {} \
+                     sample(s) and {held_groups} of the {} read group(s); {}; {into}",
+                    names.len(),
+                    groups.len(),
+                    if covers {
+                        "the fit starts from them, the rest at their median, on every position"
+                    } else {
+                        "too few to start from, so the fit starts from its usual starting points"
+                    }
+                )
+            });
+            covers
+        });
+        let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
+            [StartRun::Continuing].into()
+        } else {
+            config
+                .starting_points
+                .iter()
+                .enumerate()
+                .map(|(index, _)| StartRun::Start {
+                    number: index + 1,
+                    stride,
+                })
+                .collect()
+        };
+        if stride > 1 && continuing.is_none() {
             runs.push_back(StartRun::Finish);
         }
         while let Some(run) = runs.pop_front() {
@@ -2088,12 +2209,24 @@ pub fn fit_jointly(
                     earlier = None;
                     (winner, outcome.parameters, None, 1)
                 }
+                StartRun::Continuing => (
+                    1,
+                    Parameters::continuing(
+                        continuing.expect("only queued with an earlier fit"),
+                        &groups,
+                        &names,
+                        config,
+                    ),
+                    None,
+                    1,
+                ),
             };
             let which = WhichStart {
                 number,
                 of: config.starting_points.len(),
                 stride: run_stride,
                 finishing,
+                continuing: run == StartRun::Continuing,
                 earlier: which_earlier,
                 sample_names: &names,
                 stage: &stage,
@@ -2463,8 +2596,13 @@ pub fn fit_jointly(
 /// position, or the finish — the winning start continued on every position.
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum StartRun {
-    Start { number: usize, stride: usize },
+    Start {
+        number: usize,
+        stride: usize,
+    },
     Finish,
+    /// The one run from an earlier run's numbers, on every position, in place of the starts.
+    Continuing,
 }
 
 /// **What runs after the finish** of start `winner`, of `starts`, that ended so: nothing when it
@@ -2494,6 +2632,8 @@ struct WhichStart<'a> {
     /// position after the starts explored on a thinned census.
     stride: usize,
     finishing: bool,
+    /// Whether this is the one run from an earlier run's numbers ([`JointFitConfig::earlier_fit`]).
+    continuing: bool,
     /// The best-scoring earlier start that converged, which this one stops on heading towards
     /// ([`agrees`]); `None` for the first start, and for any start before one has converged.
     earlier: Option<&'a EarlierAnswer>,
@@ -2505,7 +2645,9 @@ struct WhichStart<'a> {
 impl WhichStart<'_> {
     /// What the log calls this run: `start 2 of 3`, with the thinned census or the finish named.
     fn label(&self) -> String {
-        if self.finishing {
+        if self.continuing {
+            "from the earlier run's numbers, on every position".to_owned()
+        } else if self.finishing {
             format!(
                 "start {} of {}, finished on every position",
                 self.number, self.of
@@ -6480,6 +6622,100 @@ mod whole_fit_tests {
             .map(|noise| of(&noise.value))
             .sum::<f64>()
             / fit.noise.len() as f64
+    }
+
+    /// **The numbers a fit returned, as an earlier run hands them to the next** — every read group
+    /// and sample but those `leaving_out` names.
+    fn earlier_fit_of(fit: &JointFit, leaving_out: &[&str]) -> EarlierFit {
+        EarlierFit {
+            noisy_share: Some(fit.noisy_share),
+            density: Some(fit.density.value),
+            duplicated: fit.duplicated.as_ref().map(|duplicated| duplicated.value),
+            noise: fit
+                .noise
+                .iter()
+                .map(|(group, rates)| (*group, rates.value))
+                .collect(),
+            hom_excess: fit
+                .hom_excess
+                .iter()
+                .filter(|(name, _)| !leaving_out.contains(&name.as_str()))
+                .map(|(name, excess)| (name.clone(), excess.value.get()))
+                .collect(),
+        }
+    }
+
+    /// **A fit started from an earlier fit's numbers reaches the same maximum in fewer passes, and
+    /// one whose earlier fit holds under half of the samples starts from the starting points.**
+    ///
+    /// Three cases on one drawn cohort of four samples: started from its own answer, it runs once
+    /// and converges to the same log-likelihood within the stopping rule; with one sample new to it,
+    /// that sample starting at the others' median, the same; with only one of the four known, the
+    /// earlier numbers are not used and every starting point runs.
+    #[test]
+    fn a_fit_from_an_earlier_fits_numbers_reaches_the_same_maximum() {
+        let cohort = draw_cohort(
+            4,
+            3_000,
+            8.0,
+            (0.002, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0C4A_4C5E_0002,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            duplicated_positions: false,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        let cold = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+        assert!(cold.converged, "the reference fit converges");
+        let cold_passes: u32 = cold.starts.iter().map(|start| start.passes).sum();
+        let names: Vec<String> = cold.hom_excess.keys().cloned().collect();
+
+        for leaving_out in [Vec::new(), vec![names[0].as_str()]] {
+            let warm = fit_jointly(
+                &mut as_cohort(&cohort.samples),
+                &JointFitConfig {
+                    earlier_fit: Some(earlier_fit_of(&cold, &leaving_out)),
+                    ..config.clone()
+                },
+            )
+            .expect("the cohort pools");
+            assert!(warm.converged, "leaving out {leaving_out:?}");
+            assert_eq!(warm.starts.len(), 1, "one run, from the earlier numbers");
+            assert!(
+                warm.passes < cold_passes,
+                "leaving out {leaving_out:?}: {} passes against {cold_passes}",
+                warm.passes
+            );
+            assert!(
+                (warm.log_likelihood - cold.log_likelihood).abs() < 0.1,
+                "leaving out {leaving_out:?}: {} against {}",
+                warm.log_likelihood,
+                cold.log_likelihood
+            );
+        }
+
+        let mostly_new = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                earlier_fit: Some(earlier_fit_of(
+                    &cold,
+                    &names[1..].iter().map(String::as_str).collect::<Vec<_>>(),
+                )),
+                ..config.clone()
+            },
+        )
+        .expect("the cohort pools");
+        assert_eq!(mostly_new.starts.len(), config.starting_points.len());
+        assert_eq!(mostly_new.log_likelihood, cold.log_likelihood);
     }
 
     /// **A census cut into several chunks fits to the same bits at one thread as at four and

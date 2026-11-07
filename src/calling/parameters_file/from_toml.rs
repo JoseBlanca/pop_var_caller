@@ -714,6 +714,7 @@ mod tests {
         file.format_version = 3;
         file.ordinary_site_prior.fitted_density = None;
         file.repeat_tracts_left_out = None;
+        file.snp_indel_fit = None;
         file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.misread_after_runs = None;
         file.duplicated_positions = None;

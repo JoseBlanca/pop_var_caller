@@ -118,6 +118,7 @@ impl ParametersFile {
         self.the_informational_tables_hold_numbers()?;
         self.the_tracts_left_out_hold_numbers()?;
         self.the_misread_table_is_not_older_than_its_format()?;
+        self.the_snp_indel_fit_holds_numbers()?;
         self.the_repeat_tract_numbers_are_what_they_claim()?;
         self.every_read_group_has_a_stutter_multiplier()?;
         self.every_stated_constant_is_in_range()?;
@@ -139,6 +140,55 @@ impl ParametersFile {
                     self.format_version
                 ),
             ));
+        }
+        Ok(())
+    }
+
+    /// **`[snp_indel_fit]` holds finite numbers, and is not in a file stamped before format 10**,
+    /// which had no such table. Nothing else is checked: no calling run reads it, and a fit that
+    /// starts from it starts from wherever it says.
+    fn the_snp_indel_fit_holds_numbers(&self) -> Result<(), ParametersFileError> {
+        let Some(fit) = &self.snp_indel_fit else {
+            return Ok(());
+        };
+        if self.format_version < FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT {
+            return Err(refuse(
+                "snp_indel_fit",
+                format!(
+                    "is a format-{FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT} table in a file whose \
+                     `format_version` says {}, so it is not clear which format the file was \
+                     written in; set `format_version` to the format the file was written in",
+                    self.format_version
+                ),
+            ));
+        }
+        let at = "snp_indel_fit";
+        for (key, value) in [
+            ("mismapped_share", fit.mismapped_share),
+            ("invariant_share", fit.invariant_share),
+            ("fixed_non_reference_share", fit.fixed_non_reference_share),
+            ("segregating_shape_a", fit.segregating_shape_a),
+            ("segregating_shape_b", fit.segregating_shape_b),
+        ] {
+            if !value.is_finite() {
+                return Err(refuse(format!("{at}.{key}"), "is not a finite number"));
+            }
+        }
+        for row in &fit.by_read_group {
+            if !row.ordinary_error_rate.is_finite() || !row.mismapped_error_rate.is_finite() {
+                return Err(refuse(
+                    format!("{at}.by_read_group[read_group = {}]", row.read_group),
+                    "holds a rate that is not a finite number",
+                ));
+            }
+        }
+        for row in &fit.by_sample {
+            if !row.homozygote_excess.is_finite() {
+                return Err(refuse(
+                    format!("{at}.by_sample[sample = {}].homozygote_excess", row.sample),
+                    "is not a finite number",
+                ));
+            }
         }
         Ok(())
     }
@@ -1484,6 +1534,9 @@ const FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS: u32 = 9;
 /// Format 9 also added `[repeat_tracts_left_out].by_stratum.interrupted` (`str_interrupted_tracts.md` §4).
 const FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT: u32 = 9;
 
+/// **The format that added `[snp_indel_fit]`**: 10. A file stamped earlier and holding it is refused.
+const FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT: u32 = 10;
+
 /// The format that gave the tract ladder's second rung its own stated between-locus share,
 /// `repeat_tracts.fallback_between_locus_share_with_own_shares`.
 const FORMAT_THAT_SPLIT_THE_STATED_SHARE: u32 = 5;
@@ -2359,6 +2412,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2370,6 +2424,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             as_written_before_format_6(file);
@@ -2379,6 +2434,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             as_written_before_format_6(file);
         });
         accepted(|file| {
@@ -2386,20 +2442,31 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
         });
         accepted(|file| {
             file.format_version = 7;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             without_the_interrupted_counts(file);
         });
         accepted(|file| {
             file.format_version = 8;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.snp_indel_fit = None;
             without_the_interrupted_counts(file);
         });
-        accepted(|file| file.format_version = 9);
-        let (field, _) = refused(|file| file.format_version = 10);
+        accepted(|file| {
+            file.format_version = 9;
+            file.snp_indel_fit = None;
+        });
+        accepted(|file| file.format_version = 10);
+        // A format-10 table in a file that says 9 cannot say which format it was written in.
+        let (field, problem) = refused(|file| file.format_version = 9);
+        assert_eq!(field, "snp_indel_fit");
+        assert!(problem.contains("format-10 table"), "{problem}");
+        let (field, _) = refused(|file| file.format_version = 11);
         assert_eq!(field, "format_version");
     }
 
@@ -2419,6 +2486,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
         });
         assert_eq!(field, "stated_constants.repeat_tract_outlier_weight");
     }
@@ -2496,6 +2564,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             file.duplicated_positions = None;
         });
         assert_eq!(field, "ordinary_site_prior.fitted_density");
@@ -2506,6 +2575,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             file.ordinary_site_prior.fitted_density = None;
         });
         assert_eq!(field, "duplicated_positions");
@@ -2514,6 +2584,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
@@ -2526,6 +2597,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
             file.stated_constants.repeat_tract_outlier_weight.value =
@@ -2573,6 +2645,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
         });
     }
 
@@ -2586,6 +2659,7 @@ mod tests {
             file.repeat_tracts_left_out = None;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
             file.misread_after_runs = None;
+            file.snp_indel_fit = None;
         });
         assert_eq!(
             field,
@@ -2761,6 +2835,7 @@ mod tests {
         file.repeat_tracts_left_out = None;
         file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.misread_after_runs = None;
+        file.snp_indel_fit = None;
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;
@@ -2854,6 +2929,7 @@ mod tests {
         // same file without it is a format-8 file, read with every multiplier one.
         let (field, problem) = refused(|file| {
             file.format_version = 8;
+            file.snp_indel_fit = None;
             without_the_interrupted_counts(file);
         });
         assert_eq!(field, at);
@@ -2861,6 +2937,7 @@ mod tests {
         accepted(|file| {
             file.format_version = 8;
             file.repeat_tracts.stutter_multiplier_by_read_group.clear();
+            file.snp_indel_fit = None;
             without_the_interrupted_counts(file);
         });
     }
@@ -3676,7 +3753,13 @@ mod tests {
             refused(|file| file.ordinary_site_prior.reference_concentration = 0.0),
             refused(|file| file.repeat_tracts.fallback_between_locus_share.value = 0.0),
             refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = 2.0),
-            refused(|file| file.format_version = 10),
+            refused(|file| file.format_version = 11),
+            refused(|file| {
+                file.snp_indel_fit
+                    .as_mut()
+                    .expect("in the fixture")
+                    .mismapped_share = f64::NAN
+            }),
             // **The nested paths, which are what an earlier version of this test could not
             // see.** It compared only the last segment, so a refusal that named the row's
             // `shorter_share` where the key is `shorter_share_smoothing` passed on the strength

@@ -1,4 +1,4 @@
-format_version = 9
+format_version = 10
 ploidy = 2
 
 [fitted_from]
@@ -239,6 +239,22 @@ standard_error = 0.522
 
 [duplicated_positions.share_with_carriers_above_stated_frequency]
 value = 0.026
+
+[snp_indel_fit]
+mismapped_share = 0.058412
+invariant_share = 0.8416
+fixed_non_reference_share = 0.0000296
+segregating_shape_a = 0.02885
+segregating_shape_b = 8.7365
+
+[[snp_indel_fit.by_read_group]]
+read_group = 0
+ordinary_error_rate = 0.00125
+mismapped_error_rate = 0.041
+
+[[snp_indel_fit.by_sample]]
+sample = "S1"
+homozygote_excess = 0.97
 
 [repeat_tracts_left_out]
 typical_depth = 40.625

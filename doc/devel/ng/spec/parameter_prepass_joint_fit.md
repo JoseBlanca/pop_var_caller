@@ -1219,6 +1219,35 @@ the winner's start number with its passes counted from one again, after that sta
 **Soft:** `explore_on` = 250,000 was chosen from §4.3's 320,000 without a sweep; the finish makes any
 value safe for the answer, so it trades only time.
 
+#### 3.3.3 A fit can start from an earlier run's numbers — added 2026-11-07
+
+**Rule.** `estimate-parameters --start-from <file>` hands the fit the numbers an earlier run of the
+command wrote to its `[snp_indel_fit]` table ([`parameters_file.md`](parameters_file.md), format 10).
+A read group is matched on its sample, `@RG ID` and library together, a sample on its name, and the
+file must have been fitted against the same reference. When the earlier numbers hold at least half of
+this run's samples, the fit makes **one run, on every position, from them**, in place of the starts
+and the thinned census of §3.3.2. A read group or sample the earlier run did not hold starts at the
+median of those it did; the cohort's numbers start at the earlier run's. Below half, the log says so
+and the fit starts from its starting points as it would without the option.
+
+**Why.** A cohort is usually fitted again because a few samples were added, and the whole fit is
+paid again for each addition. Measured on 400 tomato samples on kimura (2026-11-07), the fit took 66
+minutes, about 60 of them the finish on every position (132 passes); the starts took about 4.
+
+**What it does not change: what is maximised.** Every number stays free, so a run that converges
+reaches the maximum a run from the starting points reaches, to within the stopping rule. *This is
+the difference from fitting the cohort's numbers on a fixed subset of samples*, tried the same day
+and not adopted: there the mismapped share fitted on 100, 200 and 400 of those samples came back
+2.4%, 4.3% and 5.8%, so the answer depended on the subset's size.
+
+**What it gives up.** The search over starting points exists to find which of several maxima is the
+best (§3.3). A cohort mostly fitted before has a maximum near the earlier one, and
+the half-the-samples floor keeps a mostly new cohort on the search. Two runs over the same samples —
+one with the option, one without — agree only to within the stopping rule, so a call at a threshold
+can differ between them.
+
+**Soft:** the half-the-samples floor was chosen, not measured.
+
 ### 3.4 Contamination — a per-sample number this path fits, and only this path can
 
 **`α` is the fraction of a sample's reads that come from another individual** — a second plant in the

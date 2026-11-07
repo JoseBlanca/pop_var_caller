@@ -100,6 +100,7 @@ fn a_calling_run_writes_back_the_fit_starts_it_read() {
         fitted_density: None,
         duplicated_positions: None,
         repeat_tracts_left_out: None,
+        snp_indel_fit: None,
     };
     let written = numbers.parameters_file(
         &read_groups,
@@ -169,6 +170,7 @@ fn a_calling_run_writes_back_the_informational_tables_it_read() {
         fitted_density: Some(density.clone()),
         duplicated_positions: Some(duplicated.clone()),
         repeat_tracts_left_out: None,
+        snp_indel_fit: None,
     };
     let written = numbers.parameters_file(
         &read_groups,
