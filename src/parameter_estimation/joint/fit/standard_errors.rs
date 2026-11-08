@@ -828,10 +828,13 @@ fn newton_step_within(
     } else {
         f64::NAN
     };
+    let slope: Vec<Option<f64>> = layout.slope_of(sums).into_iter().map(Some).collect();
+    let (slope_cohort, slope_samples) = layout.split(&slope);
     let (cohort, samples) = layout.split(&step.moves);
     NewtonStep {
         distances: in_coordinate_order(&cohort, &samples, parameters, group_index, None),
         decrement,
+        slopes: in_coordinate_order(&slope_cohort, &slope_samples, parameters, group_index, None),
     }
 }
 
@@ -851,6 +854,9 @@ pub(super) struct NewtonStep {
     /// either way; **not a number when the box solve reached its round limit**, so that no start
     /// stops on a step that is not the box's maximum.
     pub(super) decrement: f64,
+    /// Each parameter's slope of the log-likelihood at the judged point, in
+    /// the same order as `distances`; `None` where the parameter is not in the sums.
+    pub(super) slopes: Vec<Option<f64>>,
 }
 
 /// The cohort's eight parameters' covariance, by slot ([`cohort`]), row by row; `None` for an entry whose row or column was not solved for.

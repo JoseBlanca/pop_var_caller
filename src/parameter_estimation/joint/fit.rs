@@ -1845,8 +1845,8 @@ pub struct PassSummary {
 /// per-pass trace records it.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct NewtonTrial {
-    /// The fraction of the step tried first: twice the fraction the start last accepted, at most
-    /// the whole step.
+    /// The fraction of the step tried first: the whole step for a start's first, then where the
+    /// last kept try put the log-likelihood's peak along its step.
     pub first_fraction: f64,
     /// The fraction kept, when a try rose; `None` when every try was refused.
     pub accepted: Option<f64>,
@@ -2758,11 +2758,11 @@ impl WhichStart<'_> {
 /// agreement**: it converges, and so competes to be the fit's answer.
 ///
 /// **A judging pass that stops nothing tries its Newton step** (`parameter_prepass_joint_fit.md`
-/// §3.3.1, [`try_the_newton_step`]): towards where its distances put the maximum, first at twice
-/// the fraction this start last accepted, at most the whole step, halved up to [`NEWTON_TRIES`]
-/// times, each try a pass that sums the information. A try that rises is kept, and its pass is the
-/// next cycle's judging pass; when none rises the SQUAREM cycle runs from the judged point as
-/// before. Expectation–maximisation crawls along the ridge where the invariant share and the
+/// §3.3.1, [`try_the_newton_step`]): towards where its distances put the maximum, blended with the
+/// last kept step's direction ([`PreviousStep`]); first at the whole step, later where the last kept
+/// try put the log-likelihood's peak along its step, and shortened up to [`NEWTON_TRIES`] times,
+/// each try a pass that sums the information. A try that rises is kept, and its pass is the next
+/// cycle's judging pass; when none rises the SQUAREM cycle runs from the judged point as before. Expectation–maximisation crawls along the ridge where the invariant share and the
 /// density's first shape trade against each other; the Newton step crosses it. Every pass before a
 /// start's first judging pass is the same as without the step.
 #[allow(
@@ -2804,9 +2804,12 @@ fn maximise(
     // A pass an accepted Newton step already ran at `parameters`, with the information, and the
     // maximisation step from it: the next cycle's judging pass and first step.
     let mut accepted_pass: Option<(Parameters, Statistics)> = None;
-    // The fraction of its Newton step this start last accepted; before any, a half, so the first
-    // try is the whole step.
-    let mut last_fraction = 0.5_f64;
+    // The fraction of its Newton step this start tries first: the whole step before any is kept,
+    // then where the last kept try put the log-likelihood's peak along its step (§3.3.1 point 2).
+    let mut first_fraction = 1.0_f64;
+    // The last kept step, which the next step is blended with (§3.3.1 point 1); `None` before any
+    // and after a step no try kept.
+    let mut previous_step: Option<PreviousStep> = None;
     // A cycle needs three passes in hand — its first, the second plain one, the jump's — but one
     // that begins with an accepted try's pass has run its first already, and judging that pass
     // costs none: it is always judged, and the guard before the SQUAREM cycle ends the start
@@ -2846,6 +2849,7 @@ fn maximise(
                 furthest: furthest(&errors, &step.distances),
                 heading_to,
                 distances: step.distances,
+                slopes: step.slopes,
             }
         });
         // The traced pass that judged records its verdict.
@@ -2881,20 +2885,35 @@ fn maximise(
             break;
         }
         // **The Newton step** (`parameter_prepass_joint_fit.md` §3.3.1): from the parameters this
-        // pass judged, towards where its distances put the maximum, kept only if the
-        // log-likelihood rises and halved when it does not. A kept try's pass is the next cycle's
-        // judging pass, so an accepted step costs one pass in all.
+        // pass judged, towards where its distances put the maximum, blended with the last kept
+        // step, kept only if the log-likelihood rises and shortened when it does not. A kept try's
+        // pass is the next cycle's judging pass, so an accepted step costs one pass in all.
         let mut newton_rejected = None;
         if let Some(judgement) = &judged_here
             && alternation.passes < config.max_passes
         {
-            let target = parameters.newton_target(&judgement.distances);
-            let first_fraction = first_newton_fraction(last_fraction);
+            let distances = match &previous_step {
+                Some(previous) => previous.blended(&judgement.distances, &judgement.slopes),
+                None => judgement.distances.clone(),
+            };
+            let target = parameters.newton_target(&distances);
+            // The log-likelihood's slope along the whole step, clamped as the target is: what the
+            // tries fit their parabola from (§3.3.1 point 4).
+            let slope_along: f64 = parameters
+                .coordinates()
+                .iter()
+                .zip(&target)
+                .zip(&judgement.slopes)
+                .map(|((coordinate, full), slope)| {
+                    slope.map_or(0.0, |slope| slope * (full - coordinate.value))
+                })
+                .sum();
             let outcome = try_the_newton_step(
                 &parameters,
                 &target,
                 first_fraction,
                 entering.log_likelihood,
+                slope_along,
                 |candidate| {
                     (alternation.passes < config.max_passes).then(|| {
                         let (next, at_candidate) = alternation.step(candidate, true);
@@ -2923,9 +2942,19 @@ fn maximise(
                     fraction,
                     parameters: candidate,
                     pass,
+                    best,
                 } => {
                     let gain = pass.1.log_likelihood - entering.log_likelihood;
-                    last_fraction = fraction;
+                    // Where the kept try put the peak, but at most twice the fraction kept: a peak
+                    // read from a short try sees too little of the curvature to be trusted further
+                    // (§3.3.1 point 2).
+                    let doubled = first_newton_fraction(fraction);
+                    first_fraction = best.map_or(doubled, |best| best.min(doubled));
+                    previous_step = Some(PreviousStep::of(
+                        &distances,
+                        &judgement.distances,
+                        &judgement.slopes,
+                    ));
                     parameters = candidate;
                     accepted_pass = Some(pass);
                     print_the_cycle(
@@ -2947,7 +2976,10 @@ fn maximise(
                     );
                     continue;
                 }
-                NewtonOutcome::Rejected { tries } => newton_rejected = Some(tries),
+                NewtonOutcome::Rejected { tries } => {
+                    newton_rejected = Some(tries);
+                    previous_step = None;
+                }
             }
         }
         // The SQUAREM cycle needs two passes more; refused tries that spent them, or a cycle that
@@ -3097,6 +3129,8 @@ struct Judgement {
     /// Each parameter's distance to the maximum, in the order the fit's vector lists them: what
     /// the Newton step moves by.
     distances: Vec<Option<f64>>,
+    /// Each parameter's slope of the log-likelihood at the judged point, in the same order.
+    slopes: Vec<Option<f64>>,
 }
 
 impl Judgement {
@@ -3129,6 +3163,10 @@ enum NewtonOutcome<Pass> {
         fraction: f64,
         parameters: Parameters,
         pass: Pass,
+        /// Where this try put the log-likelihood's peak along the step, as a fraction of the whole
+        /// step between 1/1024 and 1 ([`peak_along_the_step`]); `None` when the step's slope does
+        /// not point uphill.
+        best: Option<f64>,
     },
     /// No try rose: `tries` were made, a try halved at the shares' bound without a pass included.
     /// Fewer than [`NEWTON_TRIES`] when the passes ran out first.
@@ -3138,8 +3176,10 @@ enum NewtonOutcome<Pass> {
 /// **Try the Newton step from `judged` towards `target`**, one value a coordinate in
 /// [`Parameters::coordinates`]' order (§3.3.1): first at `first_fraction` of the way, each try at
 /// `judged + fraction · (target − judged)` coordinate by coordinate, and kept as soon as its
-/// log-likelihood is strictly above `judged_log_likelihood`; one that is not is halved, up to
-/// [`NEWTON_TRIES`] tries. A try whose invariant and fixed non-reference shares together reach
+/// log-likelihood is strictly above `judged_log_likelihood`; one that is not is shortened to where
+/// a parabola through the judged point, its slope `slope_along` per whole step and the try peaks
+/// ([`peak_along_the_step`]), kept between a quarter and a half of the try, and halved when the
+/// slope does not point uphill — up to [`NEWTON_TRIES`] tries. A try whose invariant and fixed non-reference shares together reach
 /// their upper bound is halved without a pass, as SQUAREM's jump refuses such a point, and counts as
 /// a try. `pass_at` runs one pass at a try and hands back its log-likelihood and whatever else the
 /// caller keeps of it, or `None` once the passes are spent, which ends the tries.
@@ -3154,6 +3194,7 @@ fn try_the_newton_step<Pass>(
     target: &[f64],
     first_fraction: f64,
     judged_log_likelihood: f64,
+    slope_along: f64,
     mut pass_at: impl FnMut(&Parameters) -> Option<(f64, Pass)>,
 ) -> NewtonOutcome<Pass> {
     let coordinates = judged.coordinates();
@@ -3183,32 +3224,126 @@ fn try_the_newton_step<Pass>(
         let Some((log_likelihood, pass)) = pass_at(&candidate) else {
             return NewtonOutcome::Rejected { tries: tried - 1 };
         };
+        let best = peak_along_the_step(
+            slope_along,
+            fraction,
+            log_likelihood - judged_log_likelihood,
+        );
         if log_likelihood > judged_log_likelihood {
             return NewtonOutcome::Accepted {
                 fraction,
                 parameters: candidate,
                 pass,
+                best: best.map(|best| best.clamp(1.0 / 1024.0, 1.0)),
             };
         }
-        fraction /= 2.0;
+        fraction = match best {
+            Some(best) => best.clamp(fraction / 4.0, fraction / 2.0),
+            None => fraction / 2.0,
+        };
     }
     NewtonOutcome::Rejected {
         tries: NEWTON_TRIES,
     }
 }
 
-/// **The fraction of its Newton step a start tries first**: twice the fraction it last accepted, at
-/// most the whole step (§3.3.1). A start begins at a half, so its first try is the whole step.
+/// **The last kept Newton step, which the next one is blended with** (§3.3.1 point 1): its
+/// direction `p`, the plain Newton step `d` it was built from, and `g·d`, the log-likelihood's
+/// slope at its judged point times that step. Preconditioned nonlinear conjugate gradients
+/// (Polak–Ribière), the information as the preconditioner.
+struct PreviousStep {
+    direction: Vec<f64>,
+    newton: Vec<f64>,
+    slope_times_newton: f64,
+}
+
+impl PreviousStep {
+    /// The step kept: `direction` as tried, built from the plain Newton step `newton` with the
+    /// judged point's `slopes`; a parameter not solved for counts as 0.
+    fn of(direction: &[Option<f64>], newton: &[Option<f64>], slopes: &[Option<f64>]) -> Self {
+        let flat = |values: &[Option<f64>]| -> Vec<f64> {
+            values.iter().map(|value| value.unwrap_or(0.0)).collect()
+        };
+        let newton = flat(newton);
+        let slope_times_newton = flat(slopes).iter().zip(&newton).map(|(g, d)| g * d).sum();
+        Self {
+            direction: flat(direction),
+            newton,
+            slope_times_newton,
+        }
+    }
+
+    /// **The step to take from the Newton step `newton` and the slopes at its judged point**:
+    /// `p = d + β·p_prev`, with `β = max(0, g·(d − d_prev) / (g_prev·d_prev))`; the plain Newton
+    /// step when `β` is 0 or not finite, when the blend would not point uphill (`g·p ≤ 0`), or when
+    /// the two steps do not have the same parameters.
+    fn blended(&self, newton: &[Option<f64>], slopes: &[Option<f64>]) -> Vec<Option<f64>> {
+        if newton.len() != self.newton.len()
+            || self.slope_times_newton.is_nan()
+            || self.slope_times_newton <= 0.0
+        {
+            return newton.to_vec();
+        }
+        let d: Vec<f64> = newton.iter().map(|value| value.unwrap_or(0.0)).collect();
+        let g: Vec<f64> = slopes.iter().map(|value| value.unwrap_or(0.0)).collect();
+        let numerator: f64 = g
+            .iter()
+            .zip(d.iter().zip(&self.newton))
+            .map(|(g, (d, previous))| g * (d - previous))
+            .sum();
+        let beta = (numerator / self.slope_times_newton).max(0.0);
+        let blended: Vec<Option<f64>> = newton
+            .iter()
+            .zip(&self.direction)
+            .map(|(value, previous)| value.map(|value| value + beta * previous))
+            .collect();
+        let uphill: f64 = blended
+            .iter()
+            .zip(&g)
+            .map(|(value, g)| value.unwrap_or(0.0) * g)
+            .sum();
+        if beta > 0.0 && uphill > 0.0 && beta.is_finite() {
+            blended
+        } else {
+            newton.to_vec()
+        }
+    }
+}
+
+/// **The fraction of the step where the log-likelihood peaks** (§3.3.1 point 4), from a parabola
+/// through the judged point (gain 0, slope `slope` per whole step) and a try at `fraction` that
+/// gained `gain`: `f(t) = slope·t − ½ c t²`, so `c = 2 (slope·t − gain) / t²` and the peak is at
+/// `slope / c`. `None` when the slope does not point uphill or the gain is not a number; twice the
+/// try when the try gained at least as much as the slope alone promised, the parabola then bending
+/// the wrong way.
+fn peak_along_the_step(slope: f64, fraction: f64, gain: f64) -> Option<f64> {
+    if slope.is_nan() || slope <= 0.0 || !gain.is_finite() {
+        return None;
+    }
+    let curvature = 2.0 * (slope * fraction - gain) / (fraction * fraction);
+    Some(if curvature > 0.0 {
+        slope / curvature
+    } else {
+        2.0 * fraction
+    })
+}
+
+/// **Twice the fraction a start kept, at most the whole step** (§3.3.1 point 2): the furthest its
+/// next first try may go, and that try itself when the kept try gave no peak.
 fn first_newton_fraction(last_accepted: f64) -> f64 {
     (2.0 * last_accepted).min(1.0)
 }
 
-/// A fraction of the Newton step as the progress line prints it: `1`, `1/2`, `1/4` and so on.
+/// A fraction of the Newton step as the progress line prints it: `1`, `1/2`, `1/4` and so on for
+/// a whole number's reciprocal, otherwise to three decimals (`0.372`).
 fn as_a_fraction(fraction: f64) -> String {
+    let inverse = (1.0 / fraction).round();
     if fraction >= 1.0 {
         "1".to_owned()
+    } else if fraction == 1.0 / inverse {
+        format!("1/{inverse}")
     } else {
-        format!("1/{}", (1.0 / fraction).round())
+        format!("{fraction:.3}")
     }
 }
 
@@ -3724,10 +3859,10 @@ impl Parameters {
 const JUMP_SLACK: f64 = 1.0;
 
 /// **How many fractions of its Newton step a judging pass tries** before it gives up and runs the
-/// SQUAREM cycle from the judged point: `f`, `f/2`, `f/4`, `f/8` (`parameter_prepass_joint_fit.md`
+/// SQUAREM cycle from the judged point, each shorter than the last (`parameter_prepass_joint_fit.md`
 /// §3.3.1). The prototype's value, not tuned. **No slack**, unlike [`JUMP_SLACK`]: a try is kept
 /// only if it rises, since a step that lost a unit could be retried from the same point forever.
-/// The halving is not optional: the information from per-position slopes describes the curved ridge
+/// The shortening is not optional: the information from per-position slopes describes the curved ridge
 /// between the invariant share and the density's first shape as straight, so the whole step
 /// overshoots it — on 59 samples the first whole steps lost 2,299 to 3,556 units where a quarter of
 /// the step gained 4 to 29.
@@ -5452,11 +5587,12 @@ mod tests {
         log_likelihoods: &[f64],
     ) -> (NewtonOutcome<usize>, Vec<f64>) {
         let mut run_at = Vec::new();
-        let outcome = try_the_newton_step(judged, target, first_fraction, -100.0, |candidate| {
-            let pass = run_at.len();
-            run_at.push(candidate.density.a);
-            log_likelihoods.get(pass).map(|&ll| (ll, pass))
-        });
+        let outcome =
+            try_the_newton_step(judged, target, first_fraction, -100.0, 0.0, |candidate| {
+                let pass = run_at.len();
+                run_at.push(candidate.density.a);
+                log_likelihoods.get(pass).map(|&ll| (ll, pass))
+            });
         (outcome, run_at)
     }
 
@@ -5477,6 +5613,7 @@ mod tests {
             fraction,
             parameters,
             pass,
+            ..
         } = outcome
         else {
             panic!("the quarter step rose and is kept");
@@ -5489,6 +5626,95 @@ mod tests {
             }
         }
         assert_eq!(parameters.hom_excess[0].to_bits(), 0.0_f64.to_bits());
+    }
+
+    /// **The peak along the step is where the parabola through the judged point, its slope and the
+    /// try peaks** (§3.3.1 point 4): on `f(t) = 10t − 20t²`, which peaks at a quarter, a try at the
+    /// whole step (−10) and one at a tenth (+0.8) both find the quarter. A try that gained at least
+    /// what the slope alone promised gives twice the try; a slope that does not point uphill, or a
+    /// gain that is not a number, gives none.
+    #[test]
+    fn the_peak_along_the_step_is_where_the_parabola_peaks() {
+        let parabola = |t: f64| 10.0 * t - 20.0 * t * t;
+        for fraction in [1.0, 0.1] {
+            let peak = peak_along_the_step(10.0, fraction, parabola(fraction)).unwrap();
+            assert!((peak - 0.25).abs() < 1e-12, "{fraction}: {peak}");
+        }
+        assert_eq!(peak_along_the_step(10.0, 0.5, 5.0), Some(1.0));
+        assert_eq!(peak_along_the_step(10.0, 0.5, 6.0), Some(1.0));
+        assert_eq!(peak_along_the_step(0.0, 0.5, -1.0), None);
+        assert_eq!(peak_along_the_step(-1.0, 0.5, -1.0), None);
+        assert_eq!(peak_along_the_step(10.0, 0.5, f64::NAN), None);
+    }
+
+    /// **The next step is the Newton step plus β times the last kept step** (§3.3.1 point 1), β by
+    /// Polak–Ribière: the last step `(1, 0)`, built from the Newton step `(1, 0)` with slopes
+    /// `(2, 0)`, so `g_prev·d_prev = 2`; a new Newton step `(0.5, 1)` with slopes `(1, 1)` gives
+    /// `β = (1·(0.5 − 1) + 1·1) / 2 = 0.25`, and the step `(0.75, 1)`. A negative β, a parameter not
+    /// solved for, or steps over different parameters leave the Newton step as it is.
+    #[test]
+    fn the_next_step_is_blended_with_the_last_kept_one() {
+        let previous = PreviousStep::of(
+            &[Some(1.0), Some(0.0)],
+            &[Some(1.0), Some(0.0)],
+            &[Some(2.0), Some(0.0)],
+        );
+        assert_eq!(
+            previous.blended(&[Some(0.5), Some(1.0)], &[Some(1.0), Some(1.0)]),
+            vec![Some(0.75), Some(1.0)]
+        );
+        // g·(d − d_prev) = −1·(2 − 1) < 0: β is 0.
+        assert_eq!(
+            previous.blended(&[Some(2.0), Some(0.0)], &[Some(-1.0), Some(1.0)]),
+            vec![Some(2.0), Some(0.0)]
+        );
+        // A parameter not solved for stays unsolved for in the blend.
+        assert_eq!(
+            previous.blended(&[None, Some(1.0)], &[Some(1.0), Some(1.0)]),
+            vec![None, Some(1.0)]
+        );
+        assert_eq!(
+            previous.blended(&[Some(0.5)], &[Some(1.0)]),
+            vec![Some(0.5)]
+        );
+    }
+
+    /// **A refused try is shortened to the parabola's peak, between a quarter and a half of it**
+    /// (§3.3.1 point 4), the slope 10 per whole step: a whole step that lost 2 is retried at the
+    /// peak, 10/24; one that lost 10,000 at a quarter (shape 0.8), not at the peak's 0.0005; one
+    /// that lost 0.1 at the peak, 10/20.2 — a refused try's peak is always short of half of it, so
+    /// the half bound only guards against rounding. The kept quarter, which gained 1, hands back its
+    /// own peak, 10/48.
+    #[test]
+    fn a_refused_try_is_shortened_to_the_parabolas_peak_within_a_quarter_and_a_half() {
+        let judged = a_judged_point();
+        let target = a_target_moving_the_first_shape(&judged);
+        for (lost, shape) in [
+            (2.0, 0.6 + 0.8 * 10.0 / 24.0),
+            (10_000.0, 0.8),
+            (0.1, 0.6 + 0.8 * 10.0 / 20.2),
+        ] {
+            let mut run_at = Vec::new();
+            let outcome = try_the_newton_step(&judged, &target, 1.0, -100.0, 10.0, |candidate| {
+                run_at.push(candidate.density.a);
+                Some((
+                    if run_at.len() == 1 {
+                        -100.0 - lost
+                    } else {
+                        -99.0
+                    },
+                    (),
+                ))
+            });
+            assert_eq!(run_at.len(), 2, "{lost}");
+            assert!((run_at[1] - shape).abs() < 1e-12, "{lost}: {run_at:?}");
+            let NewtonOutcome::Accepted { best, .. } = outcome else {
+                panic!("the second try rose");
+            };
+            if lost == 10_000.0 {
+                assert!((best.unwrap() - 10.0 / 48.0).abs() < 1e-12, "{best:?}");
+            }
+        }
     }
 
     /// **The fraction a start accepted is remembered**: the next judging pass tries twice it first,
@@ -5531,7 +5757,7 @@ mod tests {
         let mut target = judged.values();
         target[1] = P_INVARIANT_BOUNDS.1;
         let mut run_at = Vec::new();
-        let outcome = try_the_newton_step(&judged, &target, 1.0, -100.0, |candidate| {
+        let outcome = try_the_newton_step(&judged, &target, 1.0, -100.0, 0.0, |candidate| {
             run_at.push(candidate.density.p_invariant);
             Some((-101.0, ()))
         });
@@ -5561,7 +5787,7 @@ mod tests {
             let mut target = judged.values();
             target[3] = lower;
             let mut run_at = Vec::new();
-            try_the_newton_step(&judged, &target, 1.0, -100.0, |candidate| {
+            try_the_newton_step(&judged, &target, 1.0, -100.0, 0.0, |candidate| {
                 run_at.push(candidate.density.a);
                 Some((-99.0, ()))
             });
@@ -5600,6 +5826,7 @@ mod tests {
         assert_eq!(as_a_fraction(1.0), "1");
         assert_eq!(as_a_fraction(0.25), "1/4");
         assert_eq!(as_a_fraction(0.125), "1/8");
+        assert_eq!(as_a_fraction(0.372), "0.372");
     }
 
     /// **A Newton step never puts a number the golden section maximises on an end of its
@@ -7977,11 +8204,17 @@ mod whole_fit_tests {
     /// cohort of 20 samples at 3 reads drawn with the density's second shape at 150, above its bound
     /// of 50: the fit returns that shape at the bound, and one more pass at the returned values
     /// finds the first shape where the step its slope still asks for, with the second held, is
-    /// below a hundredth of the shape. (The data do not tell this first shape apart from the
-    /// invariant share, so it has no standard error to measure the distance in.) A step that clamps
-    /// each shape of the joint step on its own leaves the first shape where its slope is not zero —
-    /// plan step A7's review measured a slope of −105 there, at a first shape of 4.4 where the
-    /// projected step reaches 0.29, a remaining step of about a tenth of the shape.
+    /// below 0.005. (The data do not tell this first shape apart from the invariant share, so it
+    /// has no standard error to measure the distance in.) A step that clamps each shape of the
+    /// joint step on its own leaves the first shape where its slope is not zero — plan step A7's
+    /// review measured a slope of −105 there, at a first shape of 4.4 where the projected step
+    /// reaches 0.29, 58 times the bound.
+    ///
+    /// *The bound was a hundredth of the shape until 2026-11-08*, when the Newton step took its
+    /// length from the curvature. Where the shape stops along the undetermined ridge depends on the
+    /// path, so a bound relative to it moved with the path: main stopped at a shape of 0.232 with a
+    /// step of 0.00217 left (94% of that bound), a sixteenth floor at 0.329 with 0.00140, and the
+    /// adopted quarter floor at 0.151 with 0.00164 — nearer rest than main, yet past a hundredth.
     #[test]
     fn the_shapes_rest_where_the_likelihoods_slope_is_zero_at_a_bound_too() {
         let drawn = draw_cohort_with_duplications(
@@ -8059,7 +8292,7 @@ mod whole_fit_tests {
             fit.passes, fit.converged
         );
         assert!(
-            remaining.abs() < 0.01 * a,
+            remaining.abs() < 0.005,
             "the first shape {a} rests where its slope still asks for a step of {remaining}"
         );
     }
