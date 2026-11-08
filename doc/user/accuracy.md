@@ -205,11 +205,11 @@ pvc calls the most false STR variants at 5× and 10×. DeepVariant makes the few
 30× and ~60×.
 
 At 5× and 10× most of the missed STR variants are heterozygotes: few reads cross the STR, so
-often only one of the two alleles is seen. Of the 11,150 true STR variants, about 7,300 are
+often only one of the two alleles is seen. Of the 11,150 true STR variants, about 7,200 are
 heterozygous and 3,900 homozygous. At 5× every caller misses about half of the heterozygotes
 (49% to 65%), but only 14% to 17% of the homozygotes, and 85% to 88% of each caller's missed
-STR variants are heterozygotes. Most of these are called homozygous for the reference allele.
-At 10× the callers miss 17% to 34% of the heterozygotes and 4% to 7% of the homozygotes.
+STR variants are heterozygotes. Three in four of these are called homozygous for the reference allele.
+At 10× the callers miss 16% to 34% of the heterozygotes and 3% to 6% of the homozygotes.
 
 ## Imputation: genotype refinement and filling
 
