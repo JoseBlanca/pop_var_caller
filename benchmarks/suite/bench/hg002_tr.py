@@ -1,4 +1,5 @@
-"""HG002 tandem-repeat benchmark: STR genotypes against HipSTR and GATK (plan §4.4).
+"""HG002 tandem-repeat benchmark: STR genotypes against HipSTR, GATK, DeepVariant and freebayes
+(plan §4.4).
 
 GIAB's HG002 tandem-repeat benchmark v1.0.1, 50,000 regions, at seven depths. Each caller's STR
 genotypes are judged by `benchmarks/lib/tract_qual_experiment.py`, which rebuilds both copies of the
@@ -29,13 +30,13 @@ how many tracts the truth calls variant, how many the caller also calls, and how
 genotype is right — compared as the two rebuilt DNA sequences over the tract, and as their repeat
 lengths. Small-variant rows: RTG vcfeval inside the regions. HipSTR runs as it was run on this
 benchmark before (`--use-unpaired --min-reads 5`) over pvc's typed repeat loci; GATK HaplotypeCaller
-with 6 pair-HMM threads. freebayes is not run here.
+with 6 pair-HMM threads; freebayes in blocks of regions, its calls kept at QUAL 20 or more.
 pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
 called with the SNP/indel model instead of left uncalled.
 """
 
 DEPTHS = ["5x", "10x", "15x", "20x", "30x", "50x", "300x"]
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "hipstr", "deepvariant"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "hipstr", "deepvariant", "freebayes"]
 GENOTYPE_METRICS = ["tracts_truth_calls", "tracts_both_call", "genotype_right", "no_call",
                     "genotype_accuracy", "right_as_lengths", "length_accuracy",
                     "called_hom_truth_het", "called_het_truth_hom", "wrong_some_other_way"]
@@ -207,11 +208,22 @@ def _str_score_step(ctx, callset, base, truth, regions, tracts, depth):
                     caller_version=ctx.version(arms.ARM_TOOL[callset.arm]))
     kind = arms.ARM_KIND[callset.arm]
 
+    min_qual = arms.MIN_QUAL.get(callset.arm)
+
     def action(d):
         hostjobs.skip_with(ctx, callset)
         genotype = os.path.join(d, "genotype.tsv")
+        query = callset.path
+        if min_qual is not None:
+            # The scorer gates on no QUAL; freebayes's calls are kept at QUAL 20 or more, as in the
+            # small-variant scoring (arms.MIN_QUAL).
+            query = os.path.join(d, "calls.min_qual.vcf.gz")
+            run_commands([("min_qual", f"bcftools view --no-version -i 'QUAL>={min_qual}' "
+                                       f"{q(callset.path)} -Oz -o {q(query)} && "
+                                       f"bcftools index -t {q(query)}")],
+                         os.path.join(d, "logs"))
         cmd = (f"python3 {q(scorer)} --reference {q(giab_sources.grch38(ctx)[1])} --truth {q(truth)} "
-               f"--query {q(callset.path)} --confident-bed {q(regions)} --tract-bed {q(tracts)} "
+               f"--query {q(query)} --confident-bed {q(regions)} --tract-bed {q(tracts)} "
                f"--arm {callset.arm} --ground hg002_tr --depth {depth} --sample HG002 "
                f"--calibration-out {q(os.path.join(d, 'calibration.tsv'))} "
                f"--sweep-out {q(os.path.join(d, 'sweep.tsv'))} "
@@ -233,6 +245,7 @@ def _str_score_step(ctx, callset, base, truth, regions, tracts, depth):
 
     return Step(f"{callset.step_name}/score_tracts", "score", action,
                 lambda: {"calls": file_identity(callset.path), "truth": file_identity(truth),
-                         "tracts": file_identity(tracts), "scorer": file_identity(scorer)},
+                         "tracts": file_identity(tracts), "scorer": file_identity(scorer),
+                         **({"min_qual": min_qual} if min_qual is not None else {})},
                 attrs={"caller": arms.ARM_CALLER[callset.arm], "depth": depth,
                        "home": "pvc" if kind == "pvc" else "competitor"})
