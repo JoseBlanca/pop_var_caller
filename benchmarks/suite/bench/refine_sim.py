@@ -6,7 +6,7 @@ the tools that do the same job without a reference panel:
 
 | cohort         | how it is drawn                                                     | samples, depth |
 |----------------|---------------------------------------------------------------------|----------------|
-| `f2`           | two inbred parents and their F2, one crossover a contig a meiosis   | parents at 30×, 20 F2 at 1× |
+| `f2`           | two inbred parents and their F2, one crossover a contig a meiosis   | parents at 30×, 100 F2 at 1× |
 | `natural_F0`   | msprime coalescent, outbred (`scripts/msprime_haplotypes.py`)      | 400: 100 each at 30×, 10×, 5×, 2× |
 | `natural_F0.9` | the same, selfing to F = 0.9, with autozygous runs                  | the same |
 
@@ -49,7 +49,7 @@ from lib.steps import Step, file_identity
 TITLE = "Simulated cohorts for genotype refinement and phase"
 DESCRIPTION = """
 Simulated. Three cohorts over one drawn 4 Mb genome (STR segments and bundles, SNPs, indels), reads
-mapped with minimap2: an F2 (two inbred parents at 30×, 20 F2 at 1×, one crossover per contig per
+mapped with minimap2: an F2 (two inbred parents at 30×, 100 F2 at 1×, one crossover per contig per
 meiosis, so recombination far denser than in a real chromosome), and two natural populations from a
 coalescent simulation (msprime), 400 samples each, 100 at each of 30×, 10×, 5× and 2×, one outbred
 and one selfing to F = 0.9. pvc fits its parameters, then calls with refinement off and on. The
@@ -100,8 +100,8 @@ def configurations(ctx):
     tiers = [("30x", 100), ("10x", 100), ("5x", 100), ("2x", 100)]
     depths = "depths=" + ",".join(f"{g[:-1]}:{n}" for g, n in tiers)
     return [
-        ("f2", "cross=f2 samples=22 deep_samples=2 deep_depth=30 depth=1", None,
-         [("parents 30x", 2), ("F2 1x", 20)]),
+        ("f2", "cross=f2 samples=102 deep_samples=2 deep_depth=30 depth=1", None,
+         [("parents 30x", 2), ("F2 1x", 100)]),
         ("natural_F0", f"samples=400 {depths}", 0.0, tiers),
         ("natural_F0.9", f"samples=400 {depths}", 0.9, tiers),
     ]

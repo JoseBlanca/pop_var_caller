@@ -345,7 +345,7 @@ def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggreg
 # STITCH the light neutral HipSTR has in the repeat benchmarks, where STITCH never appears.
 REFINE_PANELS = [
     # (panel, dataset, {the benchmark's depth group: the depth it is drawn as})
-    ("F2, 20 plants at 1×", "simulated F2", {"F2 1x": "1x"}),
+    ("F2, 100 plants at 1×", "simulated F2", {"F2 1x": "1x"}),
     ("outbred, 100 samples a depth", "simulated natural population, outbred",
      {d: d for d in ("2x", "5x", "10x", "30x")}),
     ("selfing F = 0.9, 100 samples a depth", "simulated natural population, selfing F = 0.9",
