@@ -3514,7 +3514,7 @@ fn try_the_newton_step<Pass>(
             };
         }
         fraction = match best {
-            Some(best) => best.clamp(fraction / 16.0, fraction / 2.0),
+            Some(best) => best.clamp(fraction / if std::env::var_os("D_LOW4").is_some() { 4.0 } else { 16.0 }, fraction / 2.0),
             None => fraction / 2.0,
         };
     }
