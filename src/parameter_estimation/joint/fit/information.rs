@@ -4022,11 +4022,9 @@ mod tests {
     const SHORT_OF_CONVERGING: u32 = 15;
 
     /// **The pass limit at which the yardstick test's four-sample fixture has every start at the
-    /// limit and a later start well into its judging passes**: alone, its three starts converge
-    /// after 25, 27 and 24 passes, and at 23 each runs to the limit; start 2, judged against start 1's
-    /// answer at the limit, would agree after 16 passes (measured with the yardstick rule mutated to
-    /// accept a start at the limit: starts 2 and 3 then agree at 16 and 13 passes, and the fit
-    /// returns start 1's −6,423.754 in place of the best start's −6,423.641).
+    /// limit and a later start well into its judging passes**: at 23 each of its three starts runs to
+    /// the limit, and start 2, judged against start 1's answer at the limit, would agree after 15
+    /// passes (16 before the Newton step took its length from the curvature, 2026-11-08).
     const ALL_AT_THE_LIMIT_YET_JUDGING: u32 = 23;
 
     /// Three samples over 600 positions at 5 reads, one position in 330 mismapped, the duplicated
@@ -4138,9 +4136,9 @@ mod tests {
         assert_eq!(stopped.parameters.hom_excess, judged_at.hom_excess);
     }
 
-    /// The first start of the four-sample fixture, traced, which accepts a Newton step at every
-    /// judging pass but its last, eight in all: at a quarter of the step five times, then a half,
-    /// then the whole twice. Its ninth judging pass, at pass 25, finds it converged.
+    /// The first start of the four-sample fixture, traced, which keeps a Newton step at all but one
+    /// of its judging passes before the last, 22 in all, at lengths the curvature chose; its
+    /// judging pass at pass 46 finds it converged.
     fn a_start_accepting_its_newton_steps() -> super::super::StartOutcome {
         let config = JointFitConfig {
             estimate_contamination: false,
@@ -4183,18 +4181,34 @@ mod tests {
     }
 
     /// **An accepted try's pass is judged even when the limit leaves no room for a cycle after it**
-    /// (review Mi2): the start of the test above, limited to 24 passes, a pass short of where it
-    /// converges. Its last steps are kept at passes 23 and 24; each of those passes is judged, so
-    /// the start's last pass is a judging pass and the start ends at the parameters it judged.
-    /// Leaving the loop as soon as fewer than three passes remain left the kept try's pass
-    /// unjudged, and the final pass re-ran it.
+    /// (review Mi2): the start of the test above, limited to the pass of a step it kept, after pass
+    /// 20, from the pass of the step kept before it — two kept steps in a row, so the limit changes
+    /// nothing before it. That pass is judged, so the start's last pass is a judging pass and the
+    /// start ends at the parameters it judged. Leaving the loop as soon as fewer than three passes remain left the
+    /// kept try's pass unjudged, and the final pass re-ran it.
     #[test]
     fn an_accepted_trys_pass_is_judged_at_the_pass_limit() {
+        let free = a_start_accepting_its_newton_steps();
+        let trials: Vec<_> = free
+            .trace
+            .iter()
+            .filter_map(|summary| summary.newton)
+            .collect();
+        let limit = trials
+            .windows(2)
+            .find(|pair| {
+                pair[0].accepted.is_some()
+                    && pair[1].accepted.is_some()
+                    && pair[1].last_pass == pair[0].last_pass + 1
+                    && pair[1].last_pass >= 20
+            })
+            .map(|pair| pair[1].last_pass)
+            .expect("the fixture keeps two steps in a row after pass 20");
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
             pass_trace: true,
-            max_passes: 24,
+            max_passes: limit,
             ..JointFitConfig::default()
         };
         let outcome = first_start(
@@ -4202,8 +4216,8 @@ mod tests {
             &config,
         );
         let last = outcome.trace.last().expect("traced");
-        assert_eq!(outcome.passes, 24);
-        assert_eq!(last.pass, 24);
+        assert_eq!(outcome.passes, limit);
+        assert_eq!(last.pass, limit);
         assert!(
             last.decrement.is_some(),
             "the last pass, a kept try's, was judged"
@@ -4212,28 +4226,38 @@ mod tests {
         assert_eq!(outcome.parameters.density.b, last.density_b);
     }
 
-    /// **Each judging pass first tries twice the fraction its start last accepted, at most the whole
-    /// step** (§3.3.1 point 2): after steps kept at a quarter the next first try is a half, after a
-    /// half the whole, and a start's first try is the whole step.
+    /// **Each judging pass first tries where the last kept try put the peak, at most twice the
+    /// fraction kept** (§3.3.1 point 2): a start's first try is the whole step; after a kept try
+    /// the first try is at most twice its fraction, and at least 1/1024; after a step no try kept it
+    /// is the same as that step's. The curvature is in use: on this fixture at least three first
+    /// tries fall short of twice the fraction kept before them.
     #[test]
-    fn the_first_newton_try_after_an_accepted_quarter_is_half_the_step() {
+    fn the_first_newton_try_is_the_last_peak_at_most_twice_the_fraction_kept() {
         let outcome = a_start_accepting_its_newton_steps();
-        let mut last_accepted = 0.5_f64;
-        let mut halves_after_a_quarter = 0;
-        for trial in outcome.trace.iter().filter_map(|summary| summary.newton) {
-            assert_eq!(
-                trial.first_fraction,
-                (2.0 * last_accepted).min(1.0),
-                "after {last_accepted}"
-            );
-            if last_accepted == 0.25 {
-                halves_after_a_quarter += 1;
-            }
-            if let Some(fraction) = trial.accepted {
-                last_accepted = fraction;
+        let trials: Vec<_> = outcome
+            .trace
+            .iter()
+            .filter_map(|summary| summary.newton)
+            .collect();
+        assert_eq!(trials[0].first_fraction, 1.0);
+        let mut shortened = 0;
+        for pair in trials.windows(2) {
+            let (before, next) = (pair[0], pair[1]);
+            match before.accepted {
+                Some(kept) => {
+                    let doubled = (2.0 * kept).min(1.0);
+                    assert!(
+                        next.first_fraction <= doubled && next.first_fraction >= 1.0 / 1024.0,
+                        "{next:?} after {kept}"
+                    );
+                    if next.first_fraction < doubled {
+                        shortened += 1;
+                    }
+                }
+                None => assert_eq!(next.first_fraction, before.first_fraction, "{trials:?}"),
             }
         }
-        assert!(halves_after_a_quarter >= 3, "{halves_after_a_quarter}");
+        assert!(shortened >= 3, "{shortened}");
     }
 
     /// **A start at the pass limit is no yardstick** (spec §3.4's second trap): on four samples at 3
@@ -4306,10 +4330,11 @@ mod tests {
 
     /// **Once a start converges, later starts heading there stop and do not compete**: on 20 samples
     /// at 3 reads, where the second start run alone converges a little higher than the first
-    /// (−16686.00559 against −16686.00591), `fit_jointly` returns the first start's answer, pass for
-    /// pass. The cohort was redrawn when the Newton step came in (plan step B1): on the earlier draw
-    /// the second start no longer scored above the first; this one is the first of 40 seeds tried
-    /// (`+ 1000` to `+ 1039`) where it does.
+    /// (−17082.02883 against −17082.02934), `fit_jointly` returns the first start's answer, pass for
+    /// pass. The cohort was redrawn when the Newton step came in (plan step B1), and again when the
+    /// step took its length from the curvature (2026-11-08): each time the second start no longer
+    /// scored above the first on the earlier draw; this one is the first of 40 seeds tried (`+ 1000`
+    /// to `+ 1039`) where it does.
     #[test]
     fn later_starts_that_agree_leave_the_first_converged_answer() {
         use crate::parameter_estimation::joint::fit::settled::StartEnding;
@@ -4322,7 +4347,7 @@ mod tests {
             decrement_threshold: 0.001,
             ..JointFitConfig::default()
         };
-        let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000 + 1001);
+        let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000 + 1002);
         let alone: Vec<_> =
             with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
                 (1..=2)

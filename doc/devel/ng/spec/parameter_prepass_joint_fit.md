@@ -1057,7 +1057,7 @@ finding B2 and its addendum of 2026-10-17).
   losses of up to 35 units there, because jumps and Newton steps left the ordered region. Impose the
   order as that constraint only if a reader of the mismapped rate turns up.
 
-#### 3.3.1 The climb as built, and the Newton step it takes — amended 2026-10-16
+#### 3.3.1 The climb as built, and the Newton step it takes — amended 2026-10-16 and 2026-11-08
 
 **What is built.** Each pass over the kept positions computes every position's posteriors and then
 updates the three blocks above from them (expectation–maximisation); SQUAREM, a method that
@@ -1100,19 +1100,34 @@ stops — converged, or heading where an earlier start arrived ([`fit_precision.
    A coordinate the step does not move keeps its exact bits, as SQUAREM's jump keeps them
    ([`fit.rs:2894`](../../../../src/parameter_estimation/joint/fit.rs#L2894)): that is how the
    homozygote excess the fit holds at zero at one sample stays zero.
-2. **The first fraction tried** is `f = min(1, 2·f_last)`, where `f_last` is the fraction the start
-   last accepted, 0.5 before any; so the first try of a start is the whole step. `f_last` belongs to
-   the start: each start begins at 0.5.
+   *Amended 2026-11-08:* after a kept step, `d` is **blended with it** (point 6).
+2. **The first fraction tried** is the whole step for a start's first Newton step. *Amended
+   2026-11-08:* after a kept try at `f`, it is `min(t*, 2f)`, where `t*` is where that try put the
+   log-likelihood's peak along its step (point 4), never below 1/1024; it is `min(1, 2f)` when the
+   try gave no peak. After a step no try kept, it is unchanged. It belongs to the start.
+   (Until 2026-11-08 it was `min(1, 2·f_last)`, `f_last` the fraction last kept.)
 3. **A try costs one pass, and that pass sums the information** (`Alternation::step` with the
    information kept). The try is kept when its log-likelihood is **strictly higher** than the judged
    point's. A kept try's pass, and the maximisation step it ran, are the next cycle's judging pass and
-   first step, so an accepted step costs one pass in all; `f_last` becomes `f`.
-4. **A try that does not rise is halved**, up to `NEWTON_TRIES` = 4 tries in all (`f`, `f/2`, `f/4`,
-   `f/8`). A try whose invariant and fixed-non-reference shares together reach their upper bound
-   (`p_invariant + p_fixed_alt ≥ 1 − 10⁻⁹`, the test SQUAREM's jump makes) is halved without a pass,
-   and counts as one of the four.
+   first step, so an accepted step costs one pass in all.
+4. **A try that does not rise is shortened to where the log-likelihood peaks along the step**, up to
+   `NEWTON_TRIES` = 4 tries in all. *Amended 2026-11-08 (was: halved).* The judging pass gives the
+   log-likelihood's slope along the whole step, `s = g·(θ* − θ)`, `g` the scores; a try at `t` that
+   gained `Δ` fixes the parabola `s·t − ½c·t²` with `c = 2(s·t − Δ)/t²`, which peaks at
+   `t* = s/c` (`peak_along_the_step`). The next try is at `t*`, kept between `t/4` and `t/2`;
+   a refused try's peak is always short of `t/2`, so that bound only guards against rounding. When
+   `s ≤ 0` there is no parabola and the try is halved. A try whose invariant and
+   fixed-non-reference shares together reach their upper bound (`p_invariant + p_fixed_alt ≥
+   1 − 10⁻⁹`, the test SQUAREM's jump makes) is halved without a pass, and counts as one of the four.
 5. **When no try rises**, the usual SQUAREM cycle runs from `θ`, unchanged, from the maximisation
    step the judging pass already ran.
+6. **After a kept step, the next is blended with it** — *added 2026-11-08*: preconditioned nonlinear
+   conjugate gradients (Polak–Ribière), the information as the preconditioner (`PreviousStep`). With
+   `d` the new Newton step and `g` the scores at its judged point, `d_prev`, `g_prev` and `p_prev` the
+   last kept step's Newton step, scores and direction, the step taken is
+   `p = d + β·p_prev`, `β = max(0, g·(d − d_prev) / (g_prev·d_prev))`. It is the plain `d` when
+   `β` is 0 or not finite, when `p` would not point uphill (`g·p ≤ 0`), and after a step no try
+   kept. A parameter not solved for stays unmoved.
 
 **Why the halving is not optional.** The information summed from per-position slopes (the "outer
 product of gradients", [`fit_precision.md`](fit_precision.md) §3.2) describes the curved ridge as
@@ -1148,12 +1163,56 @@ fits nothing (`--defaults`) is untouched.
   forever.
 - **The progress line is printed for every cycle**, including one that ends in an accepted step;
   the prototype skipped it there, which left a fit that converged by Newton steps silent. It says
-  which way the cycle went (`Newton step at 1/4 accepted` or `rejected four times; SQUAREM`).
+  which way the cycle went (`Newton step at 1/4 accepted`, `at 0.372 accepted`, or `rejected four
+  times; SQUAREM`).
 - **Determinism is kept**: the step uses only sums an existing pass already makes, in the fit's
   fixed chunk order, so the result does not depend on the thread count.
 
-**Soft:** `NEWTON_TRIES` = 4, the doubling of `f_last` and its starting 0.5 are what the prototype
-used; none was tuned.
+**Soft:** `NEWTON_TRIES` = 4 and the doubling cap are what the prototype used; the quarter floor on
+a shortened try was compared only against a sixteenth (below). None was tuned further.
+
+**Why the length and the blend (amendment of 2026-11-08).** On 400 tomato accessions at about 3
+reads a position (the kimura set), the fit finished on every position took 132 passes and 66
+minutes. Two things wasted them. First, half the finish's passes, 64 of 133, were tries that fell
+and were thrown away: the old first try, twice the fraction last kept, overshot again and again.
+Second, successive kept steps undid each other along the mismapped share and its error rates,
+because the outer-product information ([`fit_precision.md`](fit_precision.md) §3.2) gets the
+curvature wrong there; the blend carries the last direction forward, as conjugate gradients do.
+Neither needs anything a judging pass does not already sum. Measured with `estimate-parameters`,
+6 threads on the laptop and 48 on kimura; the passes are those of each start on the thinned census
+(§3.3.2), then of the finish:
+
+| input | main's rule | adopted rule |
+|---|---|---|
+| kimura, 400 samples, from scratch | 50 + finish 132; fit 66 min, run 1 h 20 | 48 + finish 40; fit 22 min 10 s, run 35 min 44 s |
+| tomato2, 59 samples | 44/39/42 + 15; 5 min 36 s | 33/40/44 + 14; 5 min 20 s |
+| one tomato2 accession | 59/23/19 + 8; 11 s | 65/21/19 + 10; 13 s |
+| HG002 chr20, 5×, one sample | 23/16/14 + 12; 9 s | 26/15/15 + 18; 13 s |
+| HG002 chr20, 30×, one sample | 14/10/11 + 7; 6 s | the same passes, the same numbers |
+
+Every fitted number with a standard error stays within 0.06 of it: at most 0.034 on 59 samples,
+0.06 on one accession, 0.006 on HG002 5×; at 400 samples within 0.015 of the run below with the
+blend uncapped, which was itself within 0.06 of main's rule. The change pays where the finish is
+long — many samples — and costs a few passes, seconds, where it is already short.
+
+**The cap is not optional.** Without it — the next first try at the peak itself — a short kept try
+reads too little of the curvature and its peak lies far beyond: the try overshoots, is cut short,
+is kept, and the cycle repeats. On 59 tomato2 samples one thinned start then took 110 passes and
+the fit 9 min 06 s; on the test suite's four-sample fixture the start converged after 46 passes,
+against 25 under main's rule.
+
+**Measured and not adopted** (the same inputs; 400 samples finish passes and fit time, 59 samples
+fit time, one accession's passes, HG002 5× finish passes):
+
+| rule | 400 samples | 59 | one accession | HG002 5× |
+|---|---|---|---|---|
+| a sixteenth floor, capped, blended | 47, 26 min 27 s | 6 min 21 s | 55/21/19 + 10 | 17 |
+| a sixteenth floor, blended, not capped | 53, 29 min 30 s | 9 min 06 s | 72/21/19 + 10 | 15 |
+| a sixteenth floor, capped, no blend | 65, 34 min 21 s | 5 min 42 s | 51/20/20 + 9 | 12 |
+| a sixteenth floor, no blend, not capped | 83, 47 min (machine shared) | 6 min 15 s | 51/20/19 + 9 | 12 |
+
+The blend is most of the gain at 400 samples: at the sixteenth floor, 47 finish passes with it
+against 65 without. Below about 60 samples it costs a few passes.
 
 **Alternatives measured and not adopted** (diagnosis §4.2, §4.3). *Letting a start agree with an
 earlier start that ran to the limit* cut the 4-sample stage to 12 min 26 s, returned the same
@@ -2550,7 +2609,8 @@ holds, and where the generic budget starts to matter — are
 
     1. **The Newton step with halving.** Each judging pass's bounded Newton step is tried, kept only
        if the log-likelihood rises, halved up to four times otherwise, then the usual SQUAREM cycle;
-       the last fraction that worked is remembered (§3.3.1). Measured 3.8 to 4.5 times fewer passes
+       the last fraction that worked is remembered (§3.3.1; the tries' lengths and a blend with the
+       last kept step changed 2026-11-08, same section). Measured 3.8 to 4.5 times fewer passes
        and a log-likelihood never lower. *Rejected:* letting a start agree with one that ran to the
        limit, and judging every third cycle (§3.3.1).
     2. **Report the density's determined share.** The parameters file reports the share of positions

@@ -1046,7 +1046,14 @@ mod tests {
     /// SNP/indel fit's own numbers in `[snp_indel_fit]`: the file moves by `format_version` and the
     /// new table only — taking both out reproduces the old checksum, `6e530103f02863b91403e1439c31f235`, exactly — and the
     /// VCF by its `##pvcParameters` line. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "e16b29242babebdc03b366f82a780913";
+    /// **Re-recorded 2026-11-08** when the SNP/indel fit's Newton tries began taking their length
+    /// from the curvature along the step, blended with the last kept step
+    /// (`parameter_prepass_joint_fit.md` §3.3.1): the fit converges after 42 passes instead of 49,
+    /// at another point within its tolerance; of the 23 numbers here with a standard error, none
+    /// moves by more than 0.057 of it. It was `e16b29242babebdc03b366f82a780913`. Measured on 400,
+    /// 59 and one tomato samples and HG002 chr20 at 5× and 30× before it was recorded. Recorded on
+    /// the macOS host (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "3a92b5c4fad52c5fbf9b99edd11f2cc3";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1251,7 +1258,12 @@ mod tests {
     /// **Re-recorded 2026-11-07** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was
     /// `2c1f1ceeec780ecd5ed4e6f3da251411`. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "8e6bfdaa782ce9bf6c8facafec4d8aa2";
+    ///
+    /// **Re-recorded 2026-11-08** with the SNP/indel fit's new Newton step: the same 23 records and
+    /// genotypes; QUAL moves by at most 4.5 and a GQ by at most 1, from the fit's slightly
+    /// different stopping point. It was `8e6bfdaa782ce9bf6c8facafec4d8aa2`. Recorded on the macOS
+    /// host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "26160913e14bfc87da2b784e972484ed";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
