@@ -60,24 +60,17 @@ aa39bbbf.
 ![False positives against false negatives in the GIAB trio, called jointly, at 5×, 10×, 30× and about 300×: SNPs, and indels, STRs and complex variants together; below them, the genotypes left missing](figures/errors_giab_trio_scatter_snps_other.svg)
 
 *Each line corresponds to one caller, joining its results from 5× to about 300×. The size of each
-mark is the read depth. The bottom panel counts the genotypes the caller left missing (`./.`) at
-each depth, all kinds of variant together; a missing genotype is counted only there, not as a
-false positive or a false negative. The bottom-left corner is the best. The axes are on a log
-scale.*
+mark is the read depth. The first panel counts the SNPs; the second the indels, STRs (a change in
+the number of copies of a repeat unit) and complex variants (several changes written as one
+record) together. The bottom panel counts the genotypes the caller left missing (`./.`) at each
+depth, all kinds of variant together; a missing genotype is counted only there, not as a false
+positive or a false negative.*
 
-The first panel counts the SNPs; the second the indels, STRs (a change in the number of copies
-of a repeat unit) and complex variants (several changes written as one record) together. A
-variant counted as complex for one caller may be a SNP or an indel for another: freebayes writes
-variants a few bases apart as one record, so some of its errors in the second panel are SNPs
-and indels the other callers write separately.
-
-At 5× and 10×, pvc gets about as many genotypes wrong as the other callers, and leaves almost
+At 5× and 10×, pvc gets about as many genotypes wrong as the other callers, but leaves almost
 none missing. At 5×, each caller gives the wrong genotype for between about 180 and 260 of the
 trio's true SNP genotypes. Besides those, GATK and DeepVariant leave about 150 missing, pvc
 about 12. The same holds for the other variants: at 5× each caller gets 45 to 66 wrong, and GATK
 and DeepVariant leave another 22 and 37 missing, pvc 1.
-
-At 30× and above, every caller makes 12 errors or fewer of any kind.
 
 **Mendelian errors.** In a trio, a child's genotype must be possible given the parents': a child
 `1/1` cannot have a `0/0` parent. A genotype that breaks this rule is a mistake in at least one of
@@ -102,8 +95,8 @@ Indels:
 | ~300× | 1 of 115 | 1 of 79 | 1 of 92 | 1 of 78 |
 
 At 5× the share of SNP sites with an error is about the same for the four callers: one in seven
-to one in nine. For indels at 5×, GATK has an error at one site in three, the other three callers
-at about one in five.
+to one in nine. Above 5× the error rates fall quickly for every caller, and from 30× up all four
+callers have almost none.
 
 ## STRs
 
@@ -127,9 +120,12 @@ there, not as a false positive or a false negative. False positives are counted 
 reference genotypes, false negatives among the 9,725 variant genotypes. The bottom-left corner is
 the best. Both panels have the same log scales. pvc version aa39bbbf.*
 
-DeepVariant's missing genotypes are mostly at homopolymers where the truth is reference: in the
-PCR-free library at 30×, 1,947 of its 2,030. It leaves a genotype missing (`NoCall`) at long
-homopolymers where some of the reads are one base shorter, and more reads do not change that.
+With PCR stutter, in 50 samples, pvc's F1 over all STRs is 0.96 at 15× and 0.99 at 30×; the
+others are between 0.83 and 0.94. In one sample pvc also has the best F1 from 15× on. Without
+PCR stutter the callers are closer: in 50 samples pvc is ahead by 0.01 to 0.03 from 15× on, and
+in one sample GATK is level with it. However, pvc gets these F1 results leaving no genotype
+missing from 15× on, while at 30× DeepVariant leaves 3,600 to 12,600 missing and GATK about 370.
+DeepVariant's missing genotypes are mostly at homopolymers where the truth is reference.
 
 **PCR stutter.** Share right, then false calls per 1,000:
 
@@ -213,11 +209,9 @@ At 10× the callers miss 16% to 34% of the heterozygotes and 3% to 6% of the hom
 
 ## Imputation: genotype refinement and filling
 
-pvc can use the other samples' haplotypes at the surrounding loci as priors, to refine each
-sample's genotypes or to fill missing data: it works out which samples' haplotypes the sample's
-two copies resemble along the genome, and calls the sample from its own reads together with
-theirs. Where the sample has no read at all, this fills a genotype the reads alone could not
-give. The approach is similar to that of Beagle and STITCH.
+pvc can use the other samples' haplotypes at the surrounding loci to refine each
+sample's genotypes or to fill missing data. It works out which samples' haplotypes the sample's
+two copies resemble along the genome, and uses that information as priors. The approach is similar to that of Beagle and STITCH.
 
 Three cohorts are simulated over one 4 Mb genome, with reads mapped by minimap2:
 
