@@ -3229,7 +3229,7 @@ fn maximise(
                 } => {
                     let gain = pass.1.log_likelihood - entering.log_likelihood;
                     last_fraction = fraction;
-                    next_first = best;
+                    next_first = if std::env::var_os("D_CAP").is_some() { Some(best.map_or(first_newton_fraction(fraction), |best| best.min(first_newton_fraction(fraction)))) } else { best };
                     conjugate = Some(Conjugate::of(
                         &distances,
                         &judgement.distances,
