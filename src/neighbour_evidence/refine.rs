@@ -62,11 +62,16 @@ pub const MISMATCH: f64 = 0.01;
 pub const BACKGROUND_LANDING_SHARE: f64 = 1e-5;
 
 /// **The least `GQ` a sample whose reads said nothing is written with a genotype at** (§4.2, owner
-/// 2026-11-02): below it, a one-in-ten chance of being wrong, the sample stays `./.` with the pass's
-/// posterior as `GP`. On the founder simulator at 1× the calls below it were wrong 28 times in 100,
-/// most of them a common alternative called homozygous where the sample carries the reference
-/// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1).
-pub const NO_READ_MIN_GENOTYPE_QUALITY: f32 = 10.0;
+/// 2026-11-02, lowered from 10 on 2026-11-08): below it the sample stays `./.` with the pass's
+/// posterior as `GP`. Set for cohorts of 100 samples and more, where the refinement is meant to run.
+/// There the calls with `GQ` 8 or 9 were wrong 3 to 6 times in 100 (outbred, all at 2×: 129 of
+/// 2,107; an F2 of 100 plants at 1×: 61 of 1,550), and 20 in 100 in a selfing population, which
+/// has few of them (19 of 93); at `GQ` 6 and 7, 6 to 9 times in 100 and 25 in the selfing one.
+/// Lowering it to 8 cut the missing SNP genotypes of the shallowest samples by a fifth to a third
+/// and added 1.5% to 4% to their SNP errors (`doc/devel/reports/implementations/no_read_fill_gq_2026-11-08.md`).
+/// On the founder simulator at 1× (30 samples) the calls below 10 were wrong 28 times in 100
+/// (`neighbour_pass_phase4_2026-11-02.md`, decision 1).
+pub const NO_READ_MIN_GENOTYPE_QUALITY: f32 = 8.0;
 
 /// **When a sample's own evidence settles its genotype**, for [`FillCheck`]: the genotype's
 /// posterior from its reads and the prior calling uses — the cohort's allele frequencies and the
