@@ -169,7 +169,7 @@ at hidden records, re-estimated without the sample's reads.
 A heterozygous genotype filled at a record without reads (pass, no-read rules) is phased like any
 other. Its phase was measured no worse: links touching a fill flipped 4 times in 456 (0.9%) against
 91 in 5,777 (1.6%) between records with reads, on the first cohort (review I7). Its genotype is held
-to `GQ` 8, as every fill (10 when that was measured).
+to `GQ` 9, as every fill (10 when that was measured).
 
 ### 2.3 Blocks: which links are confident
 

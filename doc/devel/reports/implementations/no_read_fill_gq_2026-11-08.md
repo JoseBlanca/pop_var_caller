@@ -1,13 +1,14 @@
-# Genotypes without reads: the `GQ` floor lowered from 10 to 8
+# Genotypes without reads: the `GQ` floor lowered from 10 to 9
 
-*2026-11-08. Branch `fill-gq8`. Measured on rick, refine_sim cohorts, pvc aa39bbbf with refinement on.*
+*2026-11-08. Branches `fill-gq8`, then `fill-gq9`. Measured on rick, refine_sim cohorts, pvc aa39bbbf with refinement on.*
 
 ## The result
 
 The refinement writes a genotype for a sample with no reads at a site only if the call's `GQ` is at
-least a floor; below it the sample stays `./.`. The floor was 10. **It is now 8.** In every cohort of
-100 samples or more measured, that cuts the SNP genotypes left missing in the shallowest samples by a
-fifth to a third, and adds 1.5% to 4% to their SNP errors.
+least a floor; below it the sample stays `./.`. The floor was 10. **It is now 9** — first 8, then
+9 the same day, the conservative choice (see *8 or 9* below). In every cohort of 100 samples or more
+measured, a floor of 8 cuts the SNP genotypes left missing in the shallowest samples by a fifth to a
+third, and adds 1.5% to 4% to their SNP errors; 9 keeps about half of that gain.
 
 The owner's question was whether pvc could leave fewer genotypes missing — Beagle leaves none, at
 many more errors — without many more false positives and negatives. The owner set the target range:
@@ -79,3 +80,36 @@ Scripts: `tmp/fill_cutoff/` (not committed) — `fill.py` fills the `./.` genoty
 sets each filled genotype's outcome beside its `GQ`, `sub.sh` builds and calls the 100-sample
 cohorts, `summary.py` prints the tables above. Results on rick under
 `~/pop_var_caller/tmp/fill_cutoff/`.
+
+## 8 or 9
+
+8 was merged first; the owner then chose 9, the more conservative floor (2026-11-08). The two bands
+apart, SNP genotypes of the shallowest group:
+
+| cohort, group | filled at `GQ` 8 | wrong | filled at `GQ` 9 | wrong |
+|---|---|---|---|---|
+| F2, 100 plants at 1× | 1,041 | 28 | 509 | 33 |
+| outbred, 100 samples all at 2× | 1,088 | 83 | 1,019 | 46 |
+| outbred 400, its 2× group | 676 | 20 | 422 | 8 |
+| selfing 400, its 2× group | 49 | 15 | 44 | 4 |
+| the four 5× groups together | 73 | 3 | 65 | 4 |
+
+A floor of 9 gives up about 2,900 fills, 19 in 20 of them right, to avoid about 150 errors — chiefly
+the selfing population's, where a fill at `GQ` 8 was wrong 31 times in 100.
+
+## Which of the other two rules holds genotypes back
+
+A diagnostic build (branch `fill-reason-diag`, `PVC_DIAG_FILL_REASON`) printed each rule's verdict
+apart for every genotype without reads, on the 100-plant F2 (SNPs, floor 8):
+
+| held back by | genotypes | of them wrong |
+|---|---|---|
+| the background rule alone | 2,419 | 34 |
+| `GQ` below the floor alone | 1,822 | 313 |
+| both | 2,178 | 395 |
+| (filled) | 32,946 | 146 |
+
+The rule wanting reads on both sides holds back none. In the F2 the background value does not
+predict a wrong fill: of those held back by it alone, 388 between 0.1 and 0.2 had 22 wrong, 1,791
+between 0.2 and 0.5 had 12, and 240 above 0.5 none. Not yet measured in the outbred and selfing
+populations, so the limit is unchanged.
