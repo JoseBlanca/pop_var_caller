@@ -111,5 +111,20 @@ apart for every genotype without reads, on the 100-plant F2 (SNPs, floor 8):
 
 The rule wanting reads on both sides holds back none. In the F2 the background value does not
 predict a wrong fill: of those held back by it alone, 388 between 0.1 and 0.2 had 22 wrong, 1,791
-between 0.2 and 0.5 had 12, and 240 above 0.5 none. Not yet measured in the outbred and selfing
-populations, so the limit is unchanged.
+predict a wrong fill: of those held back by it alone, 388 between 0.1 and 0.2 had 22 wrong, 1,791
+between 0.2 and 0.5 had 12, and 240 above 0.5 none.
+
+The same build on the 400-sample outbred and selfing cohorts (aa39bbbf psps and fits, refinement
+on, floor 9, SNP genotypes without reads that the truth covers):
+
+| cohort | filled (wrong) | held back by the background rule alone (wrong) | held back by `GQ` below 9 (wrong) |
+|---|---|---|---|
+| outbred | 33,490 (116) | 58 (0) | 3,192 (502) |
+| selfing | 33,424 (89) | 406 (24) | 374 (142) |
+
+The rule wanting reads on both sides holds back none here either. In the selfing cohort the
+genotypes held back by the background rule alone are wrong about 6 times in 100, twenty times the
+rate of those filled, and 385 of the 406 are in 2x samples. The background value does not sort them:
+every band from 0.1 to 1.0 is wrong 4 to 8 times in 100. In the outbred cohort the rule holds back
+too few to matter. So the limit stays at 0.1 (owner, 2026-11-08). Only the F2 would gain from
+relaxing it, and the F2 already fills well.
