@@ -147,6 +147,6 @@ duplicated, which may deserve its own look.
 - **Experiment code with environment switches:** branch `fit-finish-kimura` (from tag
   `fit-subset-experiment`), kept as tag `fit-finish-experiment`.
 - **Raw runs:**
-  - kimura runs: logs and parameters files copied back to `tmp/fit_finish/` and
-    `tmp/fit_finish/kimura400/` in the main checkout;
+  - kimura runs (logs, parameters files, per-pass traces and scripts): copied back to
+    `tmp/fit_finish/kimura_runs/` in the main checkout; the kimura checkout is deleted;
   - laptop runs (logs, parameters files and scripts): `tmp/fit_finish/check/` in the main checkout.
