@@ -742,9 +742,8 @@ fn the_written_phase_follows_the_true_copies() {
 /// window of [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] at 4×, FNV-1a over each
 /// sample's `[copy 0's allele, copy 1's allele, phase set]` at each record as little-endian `u64`s,
 /// `u64::MAX` three times where unphased. Recorded on macOS arm64 at 19102f1e and unchanged by the
-/// review's fixes; re-recorded when the no-read `GQ` floor went from 10 to 8 (four more
-/// fills, which joined blocks: 46 columns changed phase set, no allele moved); to be checked on
-/// Linux x86-64.
+/// review's fixes; to be checked on Linux x86-64. (A floor of 8 for genotypes without reads
+/// changed it: four more fills at `GQ` 8 joined blocks; at 9 it is back.)
 #[test]
 fn a_phased_windows_phase_is_the_same_bits_everywhere() {
     let cohort = test_cohort(CohortShape {
@@ -792,7 +791,7 @@ fn a_phased_windows_phase_is_the_same_bits_everywhere() {
 }
 
 /// The hash and the count [`a_phased_windows_phase_is_the_same_bits_everywhere`] expects.
-const RECORDED_PHASE_BITS: u64 = 0x2f24_65d0_0960_c9fd;
+const RECORDED_PHASE_BITS: u64 = 0x877b_d070_d59b_9d79;
 const RECORDED_PHASED_COLUMNS: usize = 2_834;
 
 /// **More rounds than the link test's masks hold are refused when the phasing is set up**, not in

@@ -453,12 +453,14 @@ the site** (on one side, where the contig ends within `S` on the other — at a 
 when the header gives its length); a record at the same position counts on neither side, since it
 shares the site's reads rather than bracketing it; otherwise it stays `./.` and
 its `GP` is the pass's posterior, as calling writes a prior. **And only if the call's `GQ` is at
-least 8** (owner, 2026-11-02 at 10; lowered to 8 on 2026-11-08): below it the sample stays `./.`
-with the pass's posterior as `GP`. The floor is set for cohorts of 100 samples and more, where the
-refinement is meant to run (owner, 2026-11-08). There, calls without reads at `GQ` 8 or 9 were wrong
-3 to 6 times in 100 in outbred cohorts and an F2 of 100 plants, and 20 in 100 in a selfing
-population, which has few of them; lowering the floor from 10 to 8 cut the missing SNP genotypes of
-the shallowest samples by a fifth to a third for 1.5% to 4% more SNP errors
+least 9** (owner, 2026-11-02 at 10; 9 since 2026-11-08): below it the sample stays `./.` with the
+pass's posterior as `GP`. The floor is set for cohorts of 100 samples and more, where the
+refinement is meant to run (owner, 2026-11-08). There, calls without reads at `GQ` 9 were wrong 2
+to 6 times in 100 in outbred cohorts and an F2 of 100 plants, and 9 in 100 in a selfing
+population. 8 was not taken, the conservative choice: its calls were wrong 3 to 8 times in 100 in
+the outbred cohorts and the F2, but 31 in 100 in the selfing population. Lowering the floor from 10
+to 8 cut the missing SNP genotypes of the shallowest samples by a fifth to a third for 1.5% to 4%
+more SNP errors
 (`doc/devel/reports/implementations/no_read_fill_gq_2026-11-08.md`). In smaller cohorts the floor
 was set at 10 because, on the founder simulator at 1× (30 samples), calls below it were wrong 28
 times in 100, mostly a common alternative called homozygous in a sample carrying the reference;
