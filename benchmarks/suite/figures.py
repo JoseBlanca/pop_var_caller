@@ -354,7 +354,8 @@ REFINE_PANELS = [
 REFINE_STYLE = {"pvc (refinement on)": dict(STYLE["pvc (fitted)"], label="pvc"),
                 "GATK + Beagle 4.1": dict(STYLE["GATK"], label="GATK + Beagle"),
                 "STITCH": dict(STYLE["HipSTR"], label="STITCH")}
-REFINE_CALLERS = ["pvc (refinement on)", "pvc (refinement off)", "GATK + Beagle 4.1", "STITCH"]
+# In this order in the F2's bars: pvc's baseline before pvc, Beagle last (owner, 9 November 2026).
+REFINE_CALLERS = ["pvc (refinement off)", "pvc (refinement on)", "STITCH", "GATK + Beagle 4.1"]
 
 
 def refine_figures(rows, out):
@@ -388,7 +389,7 @@ def refine_figures(rows, out):
     try:
         return [scatter_figure(panels, "Errors — refined genotypes, simulated cohorts: SNPs", None,
                                out, "errors_refine_sim_snps", callers=REFINE_CALLERS,
-                               missing_panel=True)]
+                               missing_panel=True, axis_floor={REFINE_PANELS[0][0]: 100})]
     finally:
         for c, st in saved.items():
             if st is None:
@@ -678,7 +679,8 @@ def zero_log_axes(ax, xs, ys):
 
 
 def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALLERS,
-                   shared_axes=False, missing_panel=False, sum_missing=False, from_data=()):
+                   shared_axes=False, missing_panel=False, sum_missing=False, from_data=(),
+                   axis_floor=None):
     """One panel a row, false positives against false negatives, one line a caller through its
     depths, a marker's size its depth. `panels`: (panel title, {(depth, caller): error counts}).
     With `shared_axes`, every panel has the same scales, so the panels compare at a glance. With
@@ -686,7 +688,7 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
     it: the genotypes left missing (./.) at each depth, in the same lines and marks (owner,
     8 November 2026). With `sum_missing` as well, there is one such panel, under them all, its
     counts the panels' summed. Every axis starts at 0 except those of the panels named in
-    `from_data`."""
+    `from_data` or `axis_floor` ({panel: the lower limit of both its axes})."""
     styles = {c: dict(STYLE[c], label=SCATTER_LABEL.get(c, STYLE[c]["label"]),
                       linestyle="-") for c in callers}
     depths = sorted({d for _, c in panels for d, _ in c}, key=depth_key)
@@ -736,7 +738,14 @@ def scatter_figure(panels, title, subtitle, out, name, callers=ERROR_FIGURE_CALL
         if shared_axes:
             points = [(c.get("wrong_gt_truth_ref", 0), c.get("wrong_gt_truth_var", 0))
                       for _, cs in panels for c in cs.values()]
-        if panel in from_data:
+        if panel in (axis_floor or {}):
+            # Log axes from a fixed floor, so a panel whose counts are all in the hundreds or more
+            # does not spend half its width on the empty decades below (owner, 9 November 2026:
+            # the F2).
+            for limits, values in ((ax.set_xlim, [p[0] for p in points]),
+                                   (ax.set_ylim, [p[1] for p in points])):
+                limits(axis_floor[panel], max(values) * 1.6)
+        elif panel in from_data:
             # The panels named in `from_data` are on log axes from just under their data, not from
             # 0 (owner, 8 November 2026: the chromosome 20 SNPs, whose counts are all far above 0).
             for limits, values in ((ax.set_xlim, [p[0] for p in points]),
@@ -791,7 +800,9 @@ def missing_by_depth(ax, counts, callers, styles, depths, reach, title=""):
             ax.annotate(f"{value:,.0f}", (i, value), xytext=(0, 2), textcoords="offset points",
                         ha="center", va="bottom", fontsize=7.5, color=TEXT_2)
         ax.set_xticks(range(len(drawn)))
-        ax.set_xticklabels([styles[c]["label"] for c in drawn], fontsize=8)
+        # Two lines a name at most, so neighbouring callers' names do not run into each other.
+        ax.set_xticklabels([styles[c]["label"].replace(", ", ",\n").replace(" + ", " +\n")
+                            for c in drawn], fontsize=8)
         ax.set_xlim(-0.6, len(drawn) - 0.4)
         ax.grid(False, axis="x")
         zero_log_axes(ax, None, [v * 2 for v in reach])
