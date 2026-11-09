@@ -15,17 +15,21 @@ Supported on Linux and macOS.
 - **Calls** SNPs, indels (up to 100 bp by default), and STRs with repeat units of 1 to 6 bases
   spanning up to 100 bp by default.
 - **Lets you add samples to a cohort later** without re-reading the alignments of the samples you
-  already have. To do that, you generate intermediate pileup files, which are then reused for
+  already have. To do that, it generates intermediate pileup files, which are then reused for
   the cohort calling.
+- **Filters out calls caused by hidden duplications**: places where two copies of a sequence
+  exist in the genome but only one in the reference, so both copies' reads pile onto one place
+  and look like heterozygous variants.
+- **Refines genotypes with the neighbouring loci**: in a cohort, it re-calls each sample from the
+  haplotypes it shares with other samples, which corrects genotypes and fills those with no reads.
+  By default it runs on a diploid cohort of at least 10 samples that are mostly inbred (median F at
+  least 0.5).
 - **Estimates the calling model's priors from the data** before calling: base-quality calibration
   and contamination for each read group, the inbreeding coefficient F of each sample,
   the population's diversity, and stutter for each kind of repeat. They are written to a
   parameters file that you can read, edit and reuse.
 - **Estimates contamination**: what share of each read group's reads came from another individual.
   Calling then takes it into account.
-- **Flags hidden duplications**: places where two copies of a sequence exist in the genome but
-  only one in the reference, so both copies' reads pile onto one place and look like
-  heterozygous variants.
 
 It does not call structural variants, satellite repeats longer than 100 bp, or deletions longer
 than 100 bp.
@@ -34,13 +38,16 @@ than 100 bp.
 
 | | SNP F1, HG002 30× [^giab] | indel F1, HG002 30× [^giab] | STR genotypes right, HG002 30× [^str] | 100 tomato samples: time / memory [^tomato] | [overlapping variants](doc/user/overlapping_variants.md) |
 |---|---|---|---|---|---|
-| pvc | 0.9942 | 0.9845 | 88% | one step: 1 h 13 min / 31 GB; three steps: 1 h 45 min / 11 GB | one record, never `*` |
+| pvc | 0.9943 | 0.9859 | 88% | [direct mode](doc/user/calling.md): 1 h 16 min / 32 GB<br>[psp mode](doc/user/calling.md), parameters estimated from the data: 2 h 12 min / 13 GB | one record, never `*` |
 | GATK | 0.9928 | 0.9839 | 82% | 9 h 50 min / 75 GB | separate records, with `*` |
-| freebayes | 0.9933 | 0.9606 | not run | stalled, stopped after 41 h | one record, which also merges variants within 3 bases |
+| freebayes | 0.9933 | 0.9606 | 77% | stalled, stopped after 41 h | one record, which also merges variants within 3 bases |
 | DeepVariant | 0.9966 | 0.9934 | 87% | not run | separate records, without `*`: a copy the deletion removes is written as missing in a cohort, as reference in a single sample |
 | HipSTR | n/a | n/a | 73% | not run | STRs only: one record per repeat |
 
-At larger scale, pvc called more than 2,000 whole tomato genomes in a week using less than 30 GB.
+At larger scale, pvc called 2,176 whole tomato genomes (783 Mb each) in psp mode on one server
+(Intel Xeon 6527P, 96 cores), writing 6.7 million variants. The pileup files took 80 hours, up
+to 16 samples at a time; estimating the parameters took 34 hours on 16 threads, and calling 104
+hours on 48 threads: about 9 days of running in all. No step used more than 33 GB of memory.
 
 [Accuracy](doc/user/accuracy.md) has the full results behind the accuracy columns, at every
 read depth, with the errors split by kind.
@@ -48,22 +55,25 @@ read depth, with the errors split by kind.
 [^giab]: GIAB HG002, the whole of chromosome 20 (64 Mb), reads downsampled to 30×, scored with
     RTG vcfeval against the GIAB truth set: a call counts only if its genotype matches. pvc ran
     its full pipeline, with parameters estimated from the data. Measured on a Linux server limited
-    to 30 cores and 80 GB (Intel Xeon E5-2667 v4): pvc fedb2290 on 2026-10-31, GATK 4.6.0.0,
+    to 30 cores and 80 GB (Intel Xeon E5-2667 v4): pvc 909ea135 on 2026-11-09, GATK 4.6.0.0,
     freebayes 1.3.6, DeepVariant 1.10.0.
 
 [^str]: GIAB HG002 tandem-repeat benchmark v1.0.1, reads downsampled to 30×: of the 6,995 repeats
     where the truth carries a variant, the share whose genotype the caller gets right, compared as
     repeat lengths (HipSTR reports lengths only). Same server as the SNP and indel columns,
-    pvc 2026-11-01; HipSTR 0.6.2. freebayes was not run on this benchmark.
+    pvc 909ea135 on 2026-11-09; HipSTR 0.6.2; freebayes's calls kept at QUAL ≥ 20.
 
 [^tomato]: Wall time and peak memory of the whole pipeline: 100 tomato accessions at about 3 reads
-    a position over 91 Mb of chromosome 1, on the same server, 2026-10-26 to 30, pvc c3d1ed69.
-    Memory is the total of the processes running at once. pvc's one step is direct mode
-    (`call-from-alignments`) run on 3 segments of the regions at once, 10 threads each, and the
-    three VCFs joined. pvc's three steps are psp mode: pileup files, parameter estimation,
-    calling. freebayes did not finish: 6 of its 114 blocks of regions stayed on a single site
-    for 24 to 36 hours, possibly because those sites had too many alleles, and the run was
-    stopped after 41 hours.
+    a position over 91 Mb of chromosome 1, on the same server: pvc b45c7f50 on 2026-11-04, the
+    other callers 2026-10-26 to 30.
+    Memory is the total of the processes running at once. In direct mode (`call-from-alignments`)
+    pvc reads the alignments and calls in one command, with its built-in parameters; it ran on 3
+    segments of the regions at once, 10 threads each, and the three VCFs were joined. In psp mode
+    it first writes one pileup file per sample, estimates the parameters from those files, then
+    calls from them; it uses less memory, and a sample can be added later without reading the
+    others' alignments again. freebayes did not finish: 6 of its 114 blocks of regions stayed on a
+    single site for 24 to 36 hours, possibly because those sites had too many alleles, and the run
+    was stopped after 41 hours.
 
 ## Install
 

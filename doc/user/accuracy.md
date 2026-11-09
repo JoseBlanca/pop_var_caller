@@ -18,7 +18,7 @@ The tools used in the comparison were:
 
 GIAB sample HG002 over the whole of chromosome 20, scored against GIAB's v4.2.1 truth set in
 its confident regions. The reads were downsampled at random from the full data, about 60×, to
-each lower depth. pvc version aa39bbbf.
+each lower depth. pvc version 909ea135.
 
 ![False positives against false negatives in HG002 over chromosome 20, 5× to ~60×: SNPs, and indels, STRs and complex variants together](figures/errors_giab_chr20_scatter_snps_other.svg)
 
@@ -55,7 +55,7 @@ calls the most false variants.
 
 The child HG002 and the parents HG003 and HG004, called together over 100 regions (452 kb) where
 the truth sets of all three are confident. Counts are summed over the three samples. pvc version
-aa39bbbf.
+909ea135.
 
 ![False positives against false negatives in the GIAB trio, called jointly, at 5×, 10×, 30× and about 300×: SNPs, and indels, STRs and complex variants together; below them, the genotypes left missing](figures/errors_giab_trio_scatter_snps_other.svg)
 
@@ -80,7 +80,7 @@ SNPs:
 
 | depth | pvc | GATK | freebayes | DeepVariant |
 |---|---|---|---|---|
-| 5× | 67 of 574 | 58 of 428 | 62 of 510 | 61 of 445 |
+| 5× | 68 of 574 | 58 of 428 | 62 of 510 | 61 of 445 |
 | 10× | 13 of 649 | 9 of 610 | 10 of 604 | 9 of 621 |
 | 30× | 1 of 655 | 0 of 668 | 0 of 626 | 0 of 667 |
 | ~300× | 0 of 627 | 0 of 671 | 0 of 640 | 5 of 661 |
@@ -108,7 +108,7 @@ simulation is run twice: once with PCR stutter, where a read often gains or lose
 and once with the much lower stutter of a PCR-free library. Each is called with 1 sample and
 with 50, at 5×, 15×, 30× and 60×.
 
-pvc version aa39bbbf estimated its parameters, stutter included, from the run's own reads.
+pvc version 909ea135 estimated its parameters, stutter included, from the run's own reads.
 freebayes's calls are kept at QUAL ≥ 20. HipSTR ran at its defaults.
 
 ![False positives against false negatives in simulated homopolymers, 50 samples, with PCR stutter and PCR-free, 5× to 60×; under each, the genotypes left missing](figures/errors_stutter_homopolymers_50s.svg)
@@ -118,7 +118,7 @@ results from 5× to 60×. The size of each mark is the read depth. The panel und
 genotypes the caller left missing (`./.`) at each depth; a missing genotype is counted only
 there, not as a false positive or a false negative. False positives are counted among the 15,275
 reference genotypes, false negatives among the 9,725 variant genotypes. The bottom-left corner is
-the best. Both panels have the same log scales. pvc version aa39bbbf.*
+the best. Both panels have the same log scales. pvc version 909ea135.*
 
 With PCR stutter, in 50 samples, pvc's F1 over all STRs is 0.96 at 15× and 0.99 at 30×; the
 others are between 0.83 and 0.94. In one sample pvc also has the best F1 from 15× on. Without
@@ -169,22 +169,22 @@ Without PCR stutter, every caller makes few false calls, at most 22 per 1,000.
 ### GIAB STRs
 
 Sample HG002 over the 50,000 regions (6.1 Mb) of GIAB's tandem-repeat benchmark v1.0.1. pvc
-version aa39bbbf.
+version 909ea135.
 
 At each depth, how many of the 6,995 repeats where the truth carries a variant each caller
 genotypes right, compared as repeat lengths:
 
-| depth | pvc | DeepVariant | GATK | HipSTR |
-|---|---|---|---|---|
-| 5× | 46% | 45% | 39% | 15% |
-| 10× | 70% | 69% | 62% | 46% |
-| 15× | 80% | 79% | 72% | 61% |
-| 20× | 85% | 83% | 77% | 67% |
-| 30× | 88% | 87% | 82% | 73% |
-| 50× | 89% | 89% | 86% | 76% |
-| ~300× | 90% | 91% | 91% | 77% |
+| depth | pvc | DeepVariant | GATK | freebayes | HipSTR |
+|---|---|---|---|---|---|
+| 5× | 46% | 45% | 39% | 36% | 15% |
+| 10× | 70% | 69% | 62% | 56% | 46% |
+| 15× | 80% | 79% | 72% | 66% | 61% |
+| 20× | 85% | 83% | 77% | 71% | 67% |
+| 30× | 88% | 87% | 82% | 77% | 73% |
+| 50× | 89% | 89% | 86% | 81% | 76% |
+| ~300× | 90% | 91% | 91% | 87% | 77% |
 
-freebayes was not run on this benchmark.
+freebayes's calls are kept at QUAL ≥ 20, as in the simulated STRs.
 
 ### HG002, chromosome 20
 
@@ -356,7 +356,7 @@ pvc ran three ways:
 - **F = 0**, its defaults, which take every sample as outbred;
 - **F = 0.9 stated** for every sample, the opposite mistake for the outbred groups.
 
-pvc version aa39bbbf.
+pvc version 909ea135.
 
 **pvc's estimate of F.** The mean of the 10 estimates in each group, with the lowest and highest,
 against the F the simulation actually produced:
