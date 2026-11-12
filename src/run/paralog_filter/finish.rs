@@ -137,7 +137,7 @@ pub struct FilteredRun {
     /// Where the run's wall time went, pass by pass.
     pub spent: WhereTheTimeWent,
     /// How large the spill grew, or `None` where its size could not be read. **Reported because
-    /// nothing else says it**: the spill holds every record's line uncompressed plus about ten
+    /// nothing else says it**: the spill holds every called record with its reads and about ten
     /// bytes a sample, so an operator sizing a filesystem for a run cannot get it from the
     /// output's own size.
     pub spill_bytes_on_disk: Option<u64>,

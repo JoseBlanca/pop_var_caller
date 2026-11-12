@@ -810,8 +810,8 @@ fn the_report_says_where_the_time_went_and_what_share_each_pass_took() {
 }
 
 /// **The report says how much disk the parked records took**, which nothing else in the run does —
-/// the spill holds every record's line uncompressed plus about ten bytes a sample, so an operator
-/// cannot read it off the compressed output (B2 review M6).
+/// the spill holds every called record with its reads and about ten bytes a sample, so an
+/// operator cannot read it off the compressed output (B2 review M6).
 #[test]
 fn the_report_says_how_much_disk_the_parked_records_took() {
     // **Enough records that the printed figure has a digit that can be wrong.** Two records give

@@ -370,17 +370,25 @@ record's VCF line as the encoder produced it and what the scorer needs beside it
 
 ```text
 entry :=
-  contig          varint     -- the three fields the writer's ordering check reads
-  position        varint     -- (`place_of`, writer.rs)
-  is_repeat_tract u8         -- 0 or 1
-  line            bytes      -- length-prefixed; the record's line, no newline
-  samples         varint     -- the run's sample count, dense
-  per sample:
-    gc_fraction   u32        -- an f32's bits; NaN = absent
-    mean_depth    u32        -- an f32's bits
-    ref_reads     varint     -- AD[0]
-    alt_reads     varint     -- every alternative's reads, summed (§3.2)
+  body_bytes      varint     -- the compressed length of the body's frame
+  body            one zstd frame, holding:
+    contig          varint     -- the three fields the writer's ordering check reads
+    position        varint     -- (`place_of`, writer.rs)
+    is_repeat_tract u8         -- 0 or 1
+    line            bytes      -- length-prefixed; the record's line, no newline
+    samples         varint     -- the run's sample count, dense
+    per sample:
+      gc_fraction   u32        -- an f32's bits; NaN = absent
+      mean_depth    u32        -- an f32's bits
+      ref_reads     varint     -- AD[0]
+      alt_reads     varint     -- every alternative's reads, summed (§3.2)
+  fragments_bytes varint     -- the compressed length of the fragments' frame; 0 = none
+  fragments       one zstd frame: the record's reads that reach another record
+                             (read phase spec §4.1), sample and fragment as steps
 ```
+
+The field-by-field layout, the fragments' included, is in
+[`spill.rs`](../../../../src/run/paralog_filter/spill.rs)'s header.
 
 **The tract flag is there for the writer's ordering rule only** — a tract may share a position
 with the generic locus owning its anchor base. Every record's samples have one shape (§3.2). Until
@@ -408,9 +416,16 @@ itself — is the reason.
 **Where it lives**: `<output>.paralog-spill.tmp`, beside the output on the same filesystem, in the
 convention the writer already uses for `<output>.tmp`. **Deleted when the run ends, success or
 failure**, by a guard that runs on every exit path the process reaches; a run killed from outside
-leaves it, as it leaves `<output>.tmp`. Streaming compression is not built: the file is about the
-VCF's size, and the owner ruled it is not worth building unless it is easy — it is a later change
-to one writer and one reader if it becomes so.
+leaves it, as it leaves `<output>.tmp`.
+
+**Each entry is compressed, as two zstd frames** (2026-11-12). Until then the file was not
+compressed, on the owner's ruling that it was about the VCF's size and not worth it unless easy.
+Carrying each record's reads for the genotype refinement (read phase spec §4.1) changed the size:
+on 2,176 tomato samples an entry came to about 213 kB, a projected 25 to 30 TB for the genome. A
+frame per entry is compressed by the thread that encodes the entry, not by the one thread that
+writes in genome order, and the reads are a frame of their own so pass two steps over them without
+inflating them. Measured on 6,000 real entries, an entry compresses to about 42 kB at zstd level 1
+(the table in `spill.rs`).
 
 **Alternatives that lost.** *Serde with a binary codec crate*: it would work, and what it buys —
 a field cannot be forgotten — the destructure already gives without a new dependency in a manifest

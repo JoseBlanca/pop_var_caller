@@ -59,9 +59,9 @@ const BUFFER_BYTES: usize = 64 * 1024;
 /// The name follows the convention the VCF writer already uses for `<output>.tmp`: beside the
 /// output rather than in a scratch directory anywhere else, so that the spill lands on the
 /// filesystem the operator chose for the run's output and a leftover is found next to the run
-/// it belongs to. **It is not the same size as the output**: the spill holds each record's line
-/// uncompressed plus about ten bytes a sample, so against a `.vcf.gz` output it is several
-/// times larger.
+/// it belongs to. **It is not the same size as the output**: the spill holds every called
+/// record, the ones the filter will drop included, each with its reads that reach another record
+/// and about ten bytes a sample beside its line — compressed, but not the size of a `.vcf.gz`.
 pub struct SpillFile {
     path: PathBuf,
     /// When this spill was named, which is just before the calling loop starts — **not** when its
@@ -73,8 +73,8 @@ pub struct SpillFile {
     /// wiring that already differ only by an error type.
     named_at: Instant,
     /// Bytes on disk when pass one finished, or `None` before that. **What it is for**: the spill
-    /// holds every record's line uncompressed plus about ten bytes a sample, so it is several
-    /// times a compressed output and nothing said by how much (B2 review M6).
+    /// holds every called record with its reads and about ten bytes a sample, so it is not the
+    /// size of the output and nothing said by how much (B2 review M6).
     bytes_on_disk: Option<u64>,
     /// The open writer, from the first appended entry until [`Self::finish_writing`].
     writer: Option<SpillWriter<BufWriter<File>>>,

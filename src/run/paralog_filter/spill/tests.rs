@@ -11,17 +11,21 @@
 //! test.** A comparator that stopped discriminating would disarm all of them at once, and four
 //! of the nine would then assert nothing but *the decode did not panic*.
 //!
-//! The tests that corrupt bytes by index all work on [`a_tiny_record`], whose whole encoding is
-//! written out in [`the_encoding_matches_the_layout_the_spec_fixes`]; the offsets they use are
-//! read off that list rather than counted from a fixture that could change under them.
+//! The tests that corrupt bytes by index all work on [`a_tiny_record`], whose body and fragments
+//! are written out in [`the_encoding_matches_the_layout_the_spec_fixes`]; the offsets they use are
+//! read off that list rather than counted from a fixture that could change under them. **They
+//! corrupt the uncompressed fields and then frame them** ([`framed`]), because a byte changed
+//! inside a compressed frame reaches no field — it is the frame's checksum that refuses it, which
+//! [`a_damaged_frame_is_refused_and_not_read_as_a_record`] tests on its own.
 
 use std::io::Cursor;
 
 use proptest::prelude::*;
 
 use super::{
-    EncodedSpillEntry, MAX_FRAGMENTS_BYTES, SpillEntry, SpillError, SpillReader,
-    SpillReaderWithFragments, SpillWriter, SpilledSample, leb128_bytes,
+    EncodedSpillEntry, MAX_BODY_BYTES, MAX_FRAGMENTS_BYTES, SpillEntry, SpillError, SpillReader,
+    SpillReaderWithFragments, SpillWriter, SpilledSample, encode_body, encode_fragments,
+    max_frame_bytes,
 };
 use crate::psp::varint::encode_u64_leb128;
 use crate::read_phase::capture::LARGEST_ERROR_PHRED;
@@ -118,13 +122,68 @@ fn a_tiny_records_fragments() -> RecordFragments {
     }])
 }
 
-/// [`a_tiny_record`]'s bytes, with its fragments: the encoding every test that corrupts a byte
-/// by index starts from.
+/// [`a_tiny_record`]'s entry as the writer writes it, with its fragments.
 fn a_tiny_records_bytes() -> Vec<u8> {
     encoded_bytes_with_fragments(&[(a_tiny_record(), a_tiny_records_fragments())])
 }
 
-/// Offsets into [`a_tiny_record`]'s encoding, read off the byte list in
+/// `entry`'s body, uncompressed.
+fn raw_body(entry: &SpillEntry) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_body(entry, &mut out);
+    out
+}
+
+/// `fragments`, uncompressed, as the fragments' frame holds them.
+fn raw_fragments(fragments: &RecordFragments) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_fragments(fragments, &mut out);
+    out
+}
+
+/// **An entry made of these uncompressed bytes**: `body` as one frame behind its length, then
+/// `fragments` likewise, or a length of 0 where there are none. What the corruption tests read, so
+/// that the bytes they change reach the field decoders.
+fn framed(body: &[u8], fragments: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_frame(body, &mut out);
+    match fragments {
+        Some(fragments) => push_frame(fragments, &mut out),
+        None => encode_u64_leb128(0, &mut out),
+    }
+    out
+}
+
+/// Compress `raw` as one frame, as the writer does, and append it behind its length.
+fn push_frame(raw: &[u8], out: &mut Vec<u8>) {
+    let frame = zstd::bulk::compress(raw, 1).expect("zstd compresses any bytes");
+    encode_u64_leb128(frame.len() as u64, out);
+    out.extend_from_slice(&frame);
+}
+
+/// One entry's frames, inflated: its body, and its fragments or `None` for a length of 0.
+fn unframed(entry: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
+    let mut at = entry;
+    let body = next_frame(&mut at).expect("an entry starts with its body");
+    let fragments = next_frame(&mut at);
+    assert!(at.is_empty(), "one entry, and nothing after it");
+    (body, fragments)
+}
+
+/// The frame at the front of `at`, inflated, or `None` for a length of 0; moves past it.
+fn next_frame(at: &mut &[u8]) -> Option<Vec<u8>> {
+    let (length, read) =
+        crate::psp::varint::decode_u64_leb128(at).expect("a frame starts with its length");
+    *at = &at[read..];
+    if length == 0 {
+        return None;
+    }
+    let (frame, rest) = at.split_at(length as usize);
+    *at = rest;
+    Some(zstd::decode_all(frame).expect("the writer's frames inflate"))
+}
+
+/// Offsets into [`a_tiny_record`]'s body, read off the byte list in
 /// [`the_encoding_matches_the_layout_the_spec_fixes`].
 const TRACT_FLAG_OFFSET_IN_TINY_RECORD: usize = 3;
 
@@ -640,10 +699,11 @@ fn an_empty_file_yields_no_entries() {
 
 #[test]
 fn the_encoding_matches_the_layout_the_spec_fixes() {
-    // Pins the field order and each field's width. A codec whose encoder and decoder agree
-    // with each other but not with §3.4 passes every round trip above and fails this.
+    // Pins the field order and each field's width inside each frame, and the frames' order. A
+    // codec whose encoder and decoder agree with each other but not with §3.4 passes every round
+    // trip above and fails this.
     assert_eq!(
-        a_tiny_records_bytes(),
+        raw_body(&a_tiny_record()),
         vec![
             0x01, // contig 1, one varint byte                          — offset 0
             0xAC, 0x02, // position 300, two varint bytes               — offsets 1, 2
@@ -655,13 +715,104 @@ fn the_encoding_matches_the_layout_the_spec_fixes() {
             0x00, 0x00, 0x00, 0x40, // mean_depth 2.0
             0x03, // ref_reads 3
             0x82, 0x01, // alt_reads 130, two varint bytes
-            0x05, // the fragments section is five bytes long          — offset 19
-            0x01, // one fragment allele
-            0x00, // sample 0
-            0x05, // fragment 5
-            0x01, // allele 1
-            0x1E, // error Phred 30
         ]
+    );
+    assert_eq!(
+        raw_fragments(&a_tiny_records_fragments()),
+        vec![
+            0x01, // one fragment allele                                — offset 0
+            0x00, // sample 0, a step of 0 from the start               — offset 1
+            0x05, // fragment 5, whole at its sample's first entry      — offset 2
+            0x01, // allele 1                                           — offset 3
+            0x1E, // error Phred 30                                     — offset 4
+        ]
+    );
+    // And the entry the writer writes is the body's frame, then the fragments' frame.
+    assert_eq!(
+        unframed(&a_tiny_records_bytes()),
+        (
+            raw_body(&a_tiny_record()),
+            Some(raw_fragments(&a_tiny_records_fragments()))
+        )
+    );
+}
+
+/// **The fragments are written as steps**: a sample as the step from the entry before, and a
+/// fragment as the step from the one before within its sample — whole again at each sample's
+/// first entry, which is what makes the steps short.
+#[test]
+fn fragments_are_written_as_steps_that_restart_at_each_sample() {
+    let fragments = RecordFragments::from_entries(vec![
+        FragmentAllele {
+            sample: 0,
+            fragment: 1_000,
+            allele: 0,
+            error_phred: 30,
+        },
+        FragmentAllele {
+            sample: 0,
+            fragment: 1_003,
+            allele: 1,
+            error_phred: 30,
+        },
+        FragmentAllele {
+            sample: 2,
+            fragment: 900,
+            allele: 0,
+            error_phred: 20,
+        },
+    ]);
+    assert_eq!(
+        raw_fragments(&fragments),
+        vec![
+            0x03, // three fragment alleles
+            // sample 0; fragment 1,000 whole; allele 0; Phred 30
+            0x00, 0xE8, 0x07, 0x00, 0x1E,
+            // sample 0 again; fragment 1,003 as a step of 3
+            0x00, 0x03, 0x01, 0x1E,
+            // sample 2, a step of 2; fragment 900 whole again; Phred 20
+            0x02, 0x84, 0x07, 0x00, 0x14,
+        ]
+    );
+}
+
+/// **A record with no fragments writes no frame for them**, only a length of 0 — so a run whose
+/// records carry none pays one byte an entry for them, not an empty frame's dozen.
+#[test]
+fn a_record_with_no_fragments_writes_a_length_of_zero_and_no_frame() {
+    let written = encoded_bytes(&[a_tiny_record()]);
+    assert_eq!(written.last(), Some(&0x00));
+    assert_eq!(unframed(&written), (raw_body(&a_tiny_record()), None));
+    let (entry, fragments) =
+        read_with_fragments(written).expect("pass three reads an entry without fragments");
+    assert!(holds_the_same_bits(&entry, &a_tiny_record()));
+    assert!(fragments.is_empty());
+}
+
+/// **Real entries shrink**: a cohort's line repeats the same few genotype strings, and the frame
+/// is where that is taken out. Pinned loosely — a third — so that a frame written uncompressed by
+/// mistake fails, and a zstd version that compresses a little differently does not.
+#[test]
+fn a_cohort_whose_genotypes_repeat_is_written_in_a_fraction_of_its_bytes() {
+    let samples = 1_000;
+    let mut line = b"SL4.0ch01\t1000\t.\tA\tG\t50\tPASS\t.\tGT:AD:DP".to_vec();
+    for at in 0..samples {
+        line.extend_from_slice(if at % 3 == 0 {
+            b"\t0/0:5,0:5"
+        } else {
+            b"\t1/1:0,4:4"
+        });
+    }
+    let entry = SpillEntry {
+        line,
+        samples: vec![a_sample_with_a_window(0.4, 5.0, 5, 0); samples],
+        ..a_tiny_record()
+    };
+    let written = encoded_bytes(std::slice::from_ref(&entry)).len();
+    let raw = raw_body(&entry).len();
+    assert!(
+        written * 3 < raw,
+        "{raw} bytes of body were written as {written}"
     );
 }
 
@@ -670,11 +821,13 @@ fn the_encoding_matches_the_layout_the_spec_fixes() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
-    // A file that fails is not enough: the field name is the whole diagnostic a spill failure
-    // carries, so every cut has to blame the right one. The offsets are a_tiny_record's, from
-    // the byte list above.
+fn a_body_cut_anywhere_inside_names_the_field_the_bytes_ran_out_in() {
+    // A body that fails is not enough: the field name is the whole diagnostic a spill failure
+    // carries, so every cut has to blame the right one. The offsets are a_tiny_record's body,
+    // from the byte list above; each cut body is framed whole, so it is the field decoders that
+    // meet the end.
     let expected: &[(usize, &str)] = &[
+        (0, "contig"),
         (1, "position"),
         (2, "position"),
         (3, "is_repeat_tract"),
@@ -693,35 +846,51 @@ fn a_file_cut_anywhere_inside_a_record_names_the_field_the_bytes_ran_out_in() {
         (16, "ref_reads"),
         (17, "alt_reads"),
         (18, "alt_reads"),
-        (19, "fragments_bytes"),
-        (20, "fragments_bytes"),
-        (22, "fragments_bytes"),
-        (24, "fragments_bytes"),
     ];
 
-    let whole = a_tiny_records_bytes();
+    let whole = raw_body(&a_tiny_record());
     assert_eq!(
         whole.len(),
-        25,
+        19,
         "the byte list moved and the offsets below move with it"
     );
 
     for &(cut, field) in expected {
-        let mut reader = SpillReader::new(Cursor::new(whole[..cut].to_vec()), 1);
+        let mut reader = SpillReader::new(Cursor::new(framed(&whole[..cut], None)), 1);
         match reader.next_entry() {
             Some(Err(error)) => assert_eq!(
                 truncated_field(&error),
                 field,
-                "a file cut after {cut} bytes blamed {} rather than {field}",
+                "a body cut after {cut} bytes blamed {} rather than {field}",
                 truncated_field(&error)
             ),
-            other => panic!("a file cut after {cut} bytes gave {other:?} rather than failing"),
+            other => panic!("a body cut after {cut} bytes gave {other:?} rather than failing"),
         }
     }
 }
 
-/// An empty fragments section closes every entry: its length, one byte, then a count of zero.
-const EMPTY_FRAGMENTS_SECTION_BYTES: usize = 2;
+/// **A file cut anywhere inside an entry is refused, naming the part it ran out in**: a frame's
+/// length, or the frame itself. A spill that lost its tail mid-entry is a partial final write.
+#[test]
+fn a_file_cut_anywhere_inside_an_entry_names_the_frame_the_bytes_ran_out_in() {
+    let whole = a_tiny_records_bytes();
+    // The body's frame is under 128 bytes, so its length is one byte.
+    let body_frame = usize::from(whole[0]);
+    let fragments_length_at = 1 + body_frame;
+    for cut in 1..whole.len() {
+        let field = if cut < fragments_length_at {
+            "body"
+        } else if cut == fragments_length_at {
+            "fragments_bytes"
+        } else {
+            "fragments"
+        };
+        match read_with_fragments(whole[..cut].to_vec()) {
+            Err(error) => assert_eq!(truncated_field(&error), field, "a cut after {cut} bytes"),
+            other => panic!("a file cut after {cut} bytes gave {other:?} rather than failing"),
+        }
+    }
+}
 
 #[test]
 fn a_failure_inside_the_samples_names_which_sample() {
@@ -731,18 +900,17 @@ fn a_failure_inside_the_samples_names_which_sample() {
         samples: vec![a_sample_with_a_window(0.5, 2.0, 1, 1); 3],
         ..a_tiny_record()
     };
-    let whole = encoded_bytes(std::slice::from_ref(&entry));
-    let head = encoded_bytes(&[SpillEntry {
+    let whole = raw_body(&entry);
+    let head = raw_body(&SpillEntry {
         samples: Vec::new(),
         ..entry
-    }])
+    })
     .len();
     let bytes_per_sample = (whole.len() - head) / 3;
-    let two_bytes_into_the_second_sample =
-        head - EMPTY_FRAGMENTS_SECTION_BYTES + bytes_per_sample + 2;
+    let two_bytes_into_the_second_sample = head + bytes_per_sample + 2;
 
     let mut reader = SpillReader::new(
-        Cursor::new(whole[..two_bytes_into_the_second_sample].to_vec()),
+        Cursor::new(framed(&whole[..two_bytes_into_the_second_sample], None)),
         1,
     );
 
@@ -757,9 +925,9 @@ fn a_failure_inside_the_samples_names_which_sample() {
 
 #[test]
 fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
-    let mut bytes = a_tiny_records_bytes();
-    bytes[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 2;
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    let mut body = raw_body(&a_tiny_record());
+    body[TRACT_FLAG_OFFSET_IN_TINY_RECORD] = 2;
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::NotABoolean { field, byte })) => {
@@ -770,13 +938,29 @@ fn a_tract_flag_byte_that_is_neither_zero_nor_one_is_refused() {
     }
 }
 
+/// **A body holding bytes past its last sample is refused**: the frame's size and the body's own
+/// counts disagree, so one of them is damaged.
+#[test]
+fn a_body_longer_than_its_fields_is_refused() {
+    let mut body = raw_body(&a_tiny_record());
+    body.extend_from_slice(&[0x00, 0x00, 0x00]);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
+
+    match reader.next_entry() {
+        Some(Err(SpillError::SectionLongerThanItsEntries { field, unread })) => {
+            assert_eq!((field, unread), ("body", 3));
+        }
+        other => panic!("a body with bytes past its samples gave {other:?}"),
+    }
+}
+
 #[test]
 fn a_contig_too_large_for_the_field_is_refused_rather_than_wrapped() {
     // A varint holding 2^32 — one past the largest contig index there can be. Written by
     // hand because the encoder cannot produce it.
-    let mut bytes = Vec::new();
-    encode_u64_leb128(1 << 32, &mut bytes);
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    let mut body = Vec::new();
+    encode_u64_leb128(1 << 32, &mut body);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OutOfRange { field, value })) => {
@@ -791,18 +975,18 @@ fn a_contig_too_large_for_the_field_is_refused_rather_than_wrapped() {
 fn a_read_count_too_large_for_its_field_is_refused() {
     // `ref_reads` and `alt_reads` are `u32` behind a `u64` varint; a decoder that read them
     // with `read_varint` instead of `read_u32` would wrap silently.
-    let mut bytes = Vec::new();
-    encode_u64_leb128(0, &mut bytes); // contig
-    encode_u64_leb128(1, &mut bytes); // position
-    bytes.push(0); // not a tract, so the samples carry read counts
-    encode_u64_leb128(0, &mut bytes); // an empty line
-    encode_u64_leb128(1, &mut bytes); // one sample
-    bytes.extend_from_slice(&0.5f32.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
-    encode_u64_leb128(1 << 32, &mut bytes); // ref_reads, one past the field
-    encode_u64_leb128(0, &mut bytes);
+    let mut body = Vec::new();
+    encode_u64_leb128(0, &mut body); // contig
+    encode_u64_leb128(1, &mut body); // position
+    body.push(0); // not a tract, so the samples carry read counts
+    encode_u64_leb128(0, &mut body); // an empty line
+    encode_u64_leb128(1, &mut body); // one sample
+    body.extend_from_slice(&0.5f32.to_bits().to_le_bytes());
+    body.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
+    encode_u64_leb128(1 << 32, &mut body); // ref_reads, one past the field
+    encode_u64_leb128(0, &mut body);
 
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::InSample { index, source })) => {
@@ -822,13 +1006,17 @@ fn a_read_count_too_large_for_its_field_is_refused() {
 #[test]
 fn an_over_long_varint_is_refused() {
     // Eleven continuation bytes: longer than any `u64` needs, so corruption rather than a
-    // value.
-    let bytes = vec![0xFF; 11];
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
-
+    // value — inside a frame, and as a frame's own length.
+    let mut reader = SpillReader::new(Cursor::new(framed(&[0xFF; 11], None)), 1);
     match reader.next_entry() {
         Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "contig"),
         other => panic!("expected an over-long varint, got {other:?}"),
+    }
+
+    let mut reader = SpillReader::new(Cursor::new(vec![0xFF; 11]), 1);
+    match reader.next_entry() {
+        Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "body_bytes"),
+        other => panic!("expected an over-long frame length, got {other:?}"),
     }
 }
 
@@ -837,9 +1025,9 @@ fn a_ten_byte_varint_holding_more_than_a_u64_is_refused_rather_than_truncated() 
     // Ten bytes is a legal LEB128 width, but the tenth byte contributes `data << 63`, so all
     // but its lowest bit falls off the top of the `u64`. The psp primitive returns `Ok` with
     // the high bits dropped; this codec refuses corruption rather than absorbing it.
-    let mut bytes = vec![0x80; 9];
-    bytes.push(0x7F);
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    let mut body = vec![0x80; 9];
+    body.push(0x7F);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OverlongVarint { field })) => assert_eq!(field, "contig"),
@@ -849,17 +1037,16 @@ fn a_ten_byte_varint_holding_more_than_a_u64_is_refused_rather_than_truncated() 
 
 #[test]
 fn a_line_longer_than_the_ceiling_is_refused_before_it_is_read() {
-    // Without the ceiling the length is believed and every byte the file still holds is
-    // appended before the short-read check fires — on a spill the size of a genome's VCF,
-    // that is the rest of the file in one `Vec`.
-    let mut bytes = Vec::new();
-    encode_u64_leb128(0, &mut bytes); // contig
-    encode_u64_leb128(1, &mut bytes); // position
-    bytes.push(0); // not a tract, so generic-locus rows
-    encode_u64_leb128(u64::from(u32::MAX), &mut bytes); // a line of four billion bytes
-    bytes.extend_from_slice(&vec![b'X'; 4096]);
+    // Without the ceiling the length is believed and every byte the body still holds is
+    // appended before the short-read check fires.
+    let mut body = Vec::new();
+    encode_u64_leb128(0, &mut body); // contig
+    encode_u64_leb128(1, &mut body); // position
+    body.push(0); // not a tract, so generic-locus rows
+    encode_u64_leb128(u64::from(u32::MAX), &mut body); // a line of four billion bytes
+    body.extend_from_slice(&vec![b'X'; 4096]);
 
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OutOfRange { field, value })) => {
@@ -870,20 +1057,98 @@ fn a_line_longer_than_the_ceiling_is_refused_before_it_is_read() {
     }
 }
 
+/// **A frame's length past what any frame can be is refused before a byte of the frame is
+/// read**, so one damaged length cannot make the reader hold the rest of a multi-terabyte file.
 #[test]
-fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
+fn a_frame_length_past_the_ceiling_is_refused_before_the_frame_is_read() {
+    let mut bytes = Vec::new();
+    let too_long = max_frame_bytes(MAX_BODY_BYTES) as u64 + 1;
+    encode_u64_leb128(too_long, &mut bytes);
+    bytes.extend_from_slice(&[0u8; 4096]);
+    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OutOfRange { field, value })) => {
+            assert_eq!((field, value), ("body_bytes", too_long));
+        }
+        other => panic!("expected a refused frame length, got {other:?}"),
+    }
+}
+
+/// **A frame that claims to inflate past the ceiling is refused before anything is allocated for
+/// it**: the frame records its size, and that is checked first. Zeros compress to almost
+/// nothing, so a small frame can claim a large size.
+#[test]
+fn a_frame_claiming_more_than_the_ceiling_is_refused_before_it_is_inflated() {
+    let too_large = vec![0u8; MAX_BODY_BYTES + 1];
+    let mut reader = SpillReader::new(Cursor::new(framed(&too_large, None)), 1);
+
+    match reader.next_entry() {
+        Some(Err(SpillError::OutOfRange { field, value })) => {
+            assert_eq!((field, value), ("body", MAX_BODY_BYTES as u64 + 1));
+        }
+        other => panic!("expected a refused frame size, got {other:?}"),
+    }
+}
+
+/// **A frame damaged inside is refused, not read as a record**: the byte changed is in the
+/// compressed data, where no field decoder sees it, and it is the frame's checksum or zstd's own
+/// checks that catch it.
+#[test]
+fn a_damaged_frame_is_refused_and_not_read_as_a_record() {
+    let whole = a_tiny_records_bytes();
+    let body_frame = usize::from(whole[0]);
+    // Every byte of the body's frame after its four-byte magic number, flipped one at a time.
+    for at in 1 + 4..1 + body_frame {
+        let mut bytes = whole.clone();
+        bytes[at] ^= 0x55;
+        match read_with_fragments(bytes) {
+            Err(SpillError::NotAFrame { field, .. }) => assert_eq!(field, "body", "byte {at}"),
+            // A damaged frame header can also make the frame claim a size past the ceiling.
+            Err(SpillError::OutOfRange { field, .. }) => assert_eq!(field, "body", "byte {at}"),
+            other => panic!("a frame damaged at byte {at} gave {other:?}"),
+        }
+    }
+}
+
+/// **A frame that does not record its size is refused**: the writer always records it, and the
+/// reader needs it to bound what it allocates.
+#[test]
+fn a_frame_that_does_not_record_its_size_is_refused() {
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).expect("a zstd encoder over a Vec");
+    encoder
+        .include_contentsize(false)
+        .expect("the flag is accepted");
+    std::io::Write::write_all(&mut encoder, &raw_body(&a_tiny_record())).expect("a Vec");
+    let frame = encoder.finish().expect("the frame ends");
+    let mut bytes = Vec::new();
+    encode_u64_leb128(frame.len() as u64, &mut bytes);
+    bytes.extend_from_slice(&frame);
+    encode_u64_leb128(0, &mut bytes);
+
+    match SpillReader::new(Cursor::new(bytes), 1).next_entry() {
+        Some(Err(SpillError::NotAFrame { field, reason })) => {
+            assert_eq!(field, "body");
+            assert_eq!(reason, "the frame does not record its size");
+        }
+        other => panic!("a frame without its size gave {other:?}"),
+    }
+}
+
+#[test]
+fn a_sample_count_larger_than_the_body_is_an_error_and_not_an_allocation() {
     // Nine hundred thousand samples — under the ceiling, so the decoder believes the count —
-    // and a file that ends immediately. It must fail on the bytes it does not have rather
+    // and a body that ends immediately. It must fail on the bytes it does not have rather
     // than reserve for the count it was told: without the reservation cap this allocates
     // 900,000 x 16 bytes before reading one.
-    let mut bytes = vec![
+    let mut body = vec![
         0x00, // contig 0
         0x01, // position 1
         0x00, // not a tract, so generic-locus rows
         0x00, // an empty line
     ];
-    encode_u64_leb128(900_000, &mut bytes);
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    encode_u64_leb128(900_000, &mut body);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::InSample { index, source })) => {
@@ -897,18 +1162,18 @@ fn a_sample_count_larger_than_the_file_is_an_error_and_not_an_allocation() {
 #[test]
 fn a_sample_count_past_the_ceiling_is_refused_before_the_samples_are_built() {
     // The reservation cap bounds what is *reserved*; without a cap on the count itself the
-    // loop keeps decoding until the file runs out, so the memory held is the rest of the file
-    // rather than one entry. The bytes below are a header followed by a count of ten million
-    // and enough sample bytes that a decoder without the ceiling would build them all.
-    let mut bytes = vec![
+    // loop keeps decoding until the body runs out. The bytes below are a head followed by a
+    // count of ten million and enough sample bytes that a decoder without the ceiling would
+    // build them all.
+    let mut body = vec![
         0x00, // contig 0
         0x01, // position 1
         0x00, // not a tract, so generic-locus rows
         0x00, // an empty line
     ];
-    encode_u64_leb128(10_000_000, &mut bytes);
-    bytes.extend_from_slice(&vec![0u8; 4096]);
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    encode_u64_leb128(10_000_000, &mut body);
+    body.extend_from_slice(&vec![0u8; 4096]);
+    let mut reader = SpillReader::new(Cursor::new(framed(&body, None)), 1);
 
     match reader.next_entry() {
         Some(Err(SpillError::OutOfRange { field, value })) => {
@@ -940,14 +1205,13 @@ fn a_file_holding_more_records_than_were_written_is_refused() {
 }
 
 #[test]
-fn a_source_that_fails_mid_float_says_the_read_failed_and_not_that_the_file_ended() {
-    // A device failure and a file that ends are different things, and the field's four bytes
-    // are the one place the codec has to tell them apart by hand.
-    struct FailsAfterTheHeader {
+fn a_source_that_fails_mid_frame_says_the_read_failed_and_not_that_the_file_ended() {
+    // A device failure and a file that ends are different things.
+    struct FailsAfterTheStart {
         remaining: Vec<u8>,
     }
 
-    impl std::io::Read for FailsAfterTheHeader {
+    impl std::io::Read for FailsAfterTheStart {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
             if self.remaining.is_empty() {
                 return Err(std::io::Error::other("the device went away"));
@@ -959,25 +1223,15 @@ fn a_source_that_fails_mid_float_says_the_read_failed_and_not_that_the_file_ende
         }
     }
 
-    let head = vec![
-        0x00, // contig 0
-        0x01, // position 1
-        0x00, // not a tract, so generic-locus rows
-        0x00, // an empty line
-        0x01, // one sample
-    ];
-    let source = std::io::BufReader::with_capacity(1, FailsAfterTheHeader { remaining: head });
+    // The body's length and the first half of its frame, then the device fails.
+    let whole = a_tiny_records_bytes();
+    let head = whole[..1 + usize::from(whole[0]) / 2].to_vec();
+    let source = std::io::BufReader::with_capacity(1, FailsAfterTheStart { remaining: head });
     let mut reader = SpillReader::new(source, 1);
 
     match reader.next_entry() {
-        Some(Err(SpillError::InSample { index, source })) => {
-            assert_eq!(index, 0);
-            match *source {
-                SpillError::Read { field, .. } => assert_eq!(field, "gc_fraction"),
-                other => panic!("expected a read failure, got {other:?}"),
-            }
-        }
-        other => panic!("expected a read failure inside the sample, got {other:?}"),
+        Some(Err(SpillError::Read { field, .. })) => assert_eq!(field, "body"),
+        other => panic!("expected a read failure inside the frame, got {other:?}"),
     }
 }
 
@@ -989,9 +1243,9 @@ fn a_source_that_fails_mid_float_says_the_read_failed_and_not_that_the_file_ende
 fn the_reader_stops_after_a_decode_error() {
     // A stream that failed once is not at an entry boundary any more, so bytes from the middle
     // of an entry would decode — plausibly — into a record that was never written.
-    let mut bytes = vec![0x01, 0x01, 0x02]; // contig, position, then a flag byte of 2
+    let mut bytes = framed(&[0x01, 0x01, 0x02], None); // contig, position, then a flag byte of 2
     bytes.extend_from_slice(&a_tiny_records_bytes());
-    let mut reader = SpillReader::new(Cursor::new(bytes), 1);
+    let mut reader = SpillReader::new(Cursor::new(bytes), 2);
 
     assert!(matches!(
         reader.next_entry(),
@@ -1153,12 +1407,8 @@ fn an_entry_encoded_ahead_of_time_writes_what_append_writes() {
 }
 
 // ---------------------------------------------------------------------------
-// A damaged fragments section, read by pass three
+// A damaged fragments frame, read by pass three
 // ---------------------------------------------------------------------------
-
-/// Offset of [`a_tiny_record`]'s fragments section length, from the byte list in
-/// [`the_encoding_matches_the_layout_the_spec_fixes`]; the section's five bytes follow it.
-const FRAGMENTS_LENGTH_OFFSET_IN_TINY_RECORD: usize = 19;
 
 /// What pass three's reader makes of these bytes, holding one entry.
 fn read_with_fragments(bytes: Vec<u8>) -> Result<(SpillEntry, RecordFragments), SpillError> {
@@ -1167,103 +1417,166 @@ fn read_with_fragments(bytes: Vec<u8>) -> Result<(SpillEntry, RecordFragments), 
         .expect("the reader yields something for one entry's bytes")
 }
 
-/// **Each kind of damage to a fragments section is refused, naming its field** (review Mi2): a
-/// count the section cannot hold, bytes past the last entry, an allele past `u16`, a section
-/// longer than any real one, a Phred above the largest stored, and a sample the entry does not
-/// have. Before, the last two decoded as data and changed phase silently, and bytes past the last
-/// entry were reported as an out-of-range length.
+/// **Each kind of damage to the fragments is refused, naming its field** (review Mi2): a count
+/// the frame cannot hold, bytes past the last entry, an allele past `u16`, a frame larger than any
+/// real one, a Phred above the largest stored, a sample the entry does not have, and steps that
+/// run past the end of a `u32`. Read as data, the sample and the Phred would change or drop phase
+/// silently. The offsets are [`a_tiny_records_fragments`]'s, from the byte list in
+/// [`the_encoding_matches_the_layout_the_spec_fixes`].
 #[test]
-fn a_damaged_fragments_section_is_refused() {
-    let base = a_tiny_records_bytes();
-    let at = FRAGMENTS_LENGTH_OFFSET_IN_TINY_RECORD;
+fn a_damaged_fragments_frame_is_refused() {
+    let body = raw_body(&a_tiny_record());
+    let section = raw_fragments(&a_tiny_records_fragments());
     let with = |edit: &dyn Fn(&mut Vec<u8>)| {
-        let mut bytes = base.clone();
+        let mut bytes = section.clone();
         edit(&mut bytes);
-        read_with_fragments(bytes)
+        read_with_fragments(framed(&body, Some(&bytes)))
     };
 
-    // A count of 2 in a five-byte section: two entries need at least eight bytes.
-    match with(&|bytes| bytes[at + 1] = 2) {
+    // A count of 2 in a five-byte frame: two entries need at least eight bytes.
+    match with(&|bytes| bytes[0] = 2) {
         Err(SpillError::OutOfRange { field, value: 2 }) => assert_eq!(field, "fragment_count"),
-        other => panic!("a count the section cannot hold gave {other:?}"),
+        other => panic!("a count the frame cannot hold gave {other:?}"),
     }
     // A count of 0, leaving the four bytes of the one entry unread.
-    match with(&|bytes| bytes[at + 1] = 0) {
+    match with(&|bytes| bytes[0] = 0) {
         Err(SpillError::SectionLongerThanItsEntries { field, unread: 4 }) => {
-            assert_eq!(field, "fragments_bytes");
+            assert_eq!(field, "fragments");
         }
         other => panic!("bytes past the last entry gave {other:?}"),
     }
-    // An allele of 65,536: three varint bytes in place of one, the section's length grown to fit.
+    // An allele of 65,536: three varint bytes in place of one.
     match with(&|bytes| {
-        bytes[at] = 7;
-        bytes.splice(at + 4..at + 5, [0x80, 0x80, 0x04]);
+        bytes.splice(3..4, [0x80, 0x80, 0x04]);
     }) {
         Err(SpillError::OutOfRange { field, value }) => {
             assert_eq!((field, value), ("fragment_allele", 65_536));
         }
         other => panic!("an allele past u16 gave {other:?}"),
     }
-    // A section declared longer than MAX_FRAGMENTS_BYTES.
-    match with(&|bytes| {
-        let mut length = Vec::new();
-        encode_u64_leb128(MAX_FRAGMENTS_BYTES as u64 + 1, &mut length);
-        bytes.splice(at..at + 1, length);
-    }) {
-        Err(SpillError::OutOfRange { field, .. }) => assert_eq!(field, "fragments_bytes"),
-        other => panic!("an oversized section gave {other:?}"),
-    }
     // A Phred of 61, one above the largest a read allele stores.
-    match with(&|bytes| bytes[at + 5] = LARGEST_ERROR_PHRED + 1) {
+    match with(&|bytes| bytes[4] = LARGEST_ERROR_PHRED + 1) {
         Err(SpillError::OutOfRange { field, value: 61 }) => {
             assert_eq!(field, "fragment_error_phred");
         }
         other => panic!("a Phred above the largest stored gave {other:?}"),
     }
-    // Sample 1 in an entry with one sample.
-    match with(&|bytes| bytes[at + 2] = 1) {
+    // Sample 1, a step of 1, in an entry with one sample.
+    match with(&|bytes| bytes[1] = 1) {
         Err(SpillError::OutOfRange { field, value: 1 }) => assert_eq!(field, "fragment_sample"),
         other => panic!("a sample the entry does not have gave {other:?}"),
     }
+    // A sample step of 2^32, past any sample a `u32` holds.
+    match with(&|bytes| {
+        let mut step = Vec::new();
+        encode_u64_leb128(1 << 32, &mut step);
+        bytes.splice(1..2, step);
+    }) {
+        Err(SpillError::OutOfRange { field, value }) => {
+            assert_eq!((field, value), ("fragment_sample", 1 << 32));
+        }
+        other => panic!("a sample step past u32 gave {other:?}"),
+    }
+    // A fragment of 2^32, past any fragment a `u32` holds.
+    match with(&|bytes| {
+        let mut step = Vec::new();
+        encode_u64_leb128(1 << 32, &mut step);
+        bytes.splice(2..3, step);
+    }) {
+        Err(SpillError::OutOfRange { field, value }) => {
+            assert_eq!((field, value), ("fragment", 1 << 32));
+        }
+        other => panic!("a fragment past u32 gave {other:?}"),
+    }
     // And the undamaged bytes read back whole.
-    let (entry, fragments) = read_with_fragments(base).expect("the undamaged entry");
+    let (entry, fragments) =
+        read_with_fragments(framed(&body, Some(&section))).expect("the undamaged entry");
     assert!(holds_the_same_bits(&entry, &a_tiny_record()));
     assert_eq!(fragments, a_tiny_records_fragments());
 }
 
-/// **A file cut inside the fragments section is refused by both readers**, each naming the
-/// section: pass two's while stepping over it, pass three's while reading it.
+/// **A fragments frame larger than any real one is refused**, by its compressed length before it
+/// is read, and by the size it records before it is inflated.
 #[test]
-fn a_file_cut_inside_the_fragments_section_is_refused_by_both_readers() {
+fn a_fragments_frame_past_the_ceilings_is_refused() {
+    let body = raw_body(&a_tiny_record());
+
+    let mut bytes = framed(&body, None);
+    bytes.pop(); // the fragments' length of 0
+    let too_long = max_frame_bytes(MAX_FRAGMENTS_BYTES) as u64 + 1;
+    encode_u64_leb128(too_long, &mut bytes);
+    match read_with_fragments(bytes) {
+        Err(SpillError::OutOfRange { field, value }) => {
+            assert_eq!((field, value), ("fragments_bytes", too_long));
+        }
+        other => panic!("an over-long fragments frame gave {other:?}"),
+    }
+
+    let too_large = vec![0u8; MAX_FRAGMENTS_BYTES + 1];
+    match read_with_fragments(framed(&body, Some(&too_large))) {
+        Err(SpillError::OutOfRange { field, value }) => {
+            assert_eq!(
+                (field, value),
+                ("fragments", MAX_FRAGMENTS_BYTES as u64 + 1)
+            );
+        }
+        other => panic!("a fragments frame claiming too much gave {other:?}"),
+    }
+}
+
+/// **Pass two steps over the fragments without inflating them**: a fragments frame that is
+/// damaged inside, which pass three refuses, is stepped over by pass two all the same, because
+/// pass two reads only its length.
+#[test]
+fn pass_two_steps_over_the_fragments_without_inflating_them() {
+    let body = raw_body(&a_tiny_record());
+    let mut bytes = framed(&body, None);
+    bytes.pop();
+    let not_a_frame = [0xAAu8; 12];
+    encode_u64_leb128(not_a_frame.len() as u64, &mut bytes);
+    bytes.extend_from_slice(&not_a_frame);
+
+    let entry = SpillReader::new(Cursor::new(bytes.clone()), 1)
+        .next_entry()
+        .expect("one entry")
+        .expect("pass two steps over the frame unread");
+    assert!(holds_the_same_bits(&entry, &a_tiny_record()));
+    assert!(matches!(
+        read_with_fragments(bytes),
+        Err(SpillError::NotAFrame {
+            field: "fragments",
+            ..
+        })
+    ));
+}
+
+/// **A file cut inside the fragments frame is refused by both readers**, each naming the frame:
+/// pass two's while stepping over it, pass three's while reading it.
+#[test]
+fn a_file_cut_inside_the_fragments_frame_is_refused_by_both_readers() {
     let whole = a_tiny_records_bytes();
-    for cut in FRAGMENTS_LENGTH_OFFSET_IN_TINY_RECORD + 1..whole.len() {
+    let fragments_length_at = 1 + usize::from(whole[0]);
+    for cut in fragments_length_at + 1..whole.len() {
         let bytes = whole[..cut].to_vec();
         match SpillReader::new(Cursor::new(bytes.clone()), 1).next_entry() {
-            Some(Err(error)) => assert_eq!(truncated_field(&error), "fragments_bytes", "{cut}"),
+            Some(Err(error)) => assert_eq!(truncated_field(&error), "fragments", "{cut}"),
             other => panic!("pass two read a file cut after {cut} bytes as {other:?}"),
         }
         match read_with_fragments(bytes) {
-            Err(error) => assert_eq!(truncated_field(&error), "fragments_bytes", "{cut}"),
+            Err(error) => assert_eq!(truncated_field(&error), "fragments", "{cut}"),
             other => panic!("pass three read a file cut after {cut} bytes as {other:?}"),
         }
     }
 }
 
-/// **The encoder's length of a varint is the bytes it writes**, at every boundary of seven bits.
+/// **The ceiling on a frame's length is above zstd's own bound** for the largest body and the
+/// largest fragments, so no frame the writer can make is refused by it.
 #[test]
-fn the_section_length_counts_the_bytes_each_varint_takes() {
-    for value in [
-        0,
-        1,
-        127,
-        128,
-        16_383,
-        16_384,
-        u64::from(u32::MAX),
-        u64::MAX,
-    ] {
-        let mut out = Vec::new();
-        encode_u64_leb128(value, &mut out);
-        assert_eq!(leb128_bytes(value), out.len(), "{value}");
+fn the_frame_ceilings_are_above_what_zstd_can_write() {
+    for inflated in [0, 1, 1_000, MAX_BODY_BYTES, MAX_FRAGMENTS_BYTES] {
+        assert!(
+            max_frame_bytes(inflated) >= zstd::zstd_safe::compress_bound(inflated),
+            "{inflated}"
+        );
     }
 }

@@ -18,34 +18,71 @@
 //! line is the record's own bytes, so byte-identity for every record the verdict does not touch
 //! holds by construction, and nothing about the record's shape has to be mirrored here.
 //!
-//! **The layout is spec §3.4's, field for field:**
+//! **The layout is spec §3.4's, field for field.** An entry is two zstd frames, each behind its
+//! compressed length:
 //!
 //! ```text
 //! entry :=
-//!   contig           varint    -- the three fields the writer's ordering check reads
-//!   position         varint
-//!   is_repeat_tract  u8        -- 0 or 1
-//!   line_length      varint
-//!   line             bytes     -- the record's line, no newline
-//!   sample_count     varint    -- the run's sample count, dense
-//!   per sample:
-//!     gc_fraction    4 bytes   -- an f32's bits, little-endian; NaN = absent
-//!     mean_depth     4 bytes   -- an f32's bits, little-endian
-//!     ref_reads      varint    -- AD[0]
-//!     alt_reads      varint    -- every alternative's reads, summed
-//!   fragments_bytes  varint    -- the section below's length, so pass two steps over it unread
-//!   fragments:
-//!     count          varint
+//!   body_bytes       varint    -- the compressed length of the frame below
+//!   body             one zstd frame, holding:
+//!     contig           varint    -- the three fields the writer's ordering check reads
+//!     position         varint
+//!     is_repeat_tract  u8        -- 0 or 1
+//!     line_length      varint
+//!     line             bytes     -- the record's line, no newline
+//!     sample_count     varint    -- the run's sample count, dense
+//!     per sample:
+//!       gc_fraction    4 bytes   -- an f32's bits, little-endian; NaN = absent
+//!       mean_depth     4 bytes   -- an f32's bits, little-endian
+//!       ref_reads      varint    -- AD[0]
+//!       alt_reads      varint    -- every alternative's reads, summed
+//!   fragments_bytes  varint    -- the compressed length of the frame below; 0 = no fragments,
+//!                                 and no frame follows
+//!   fragments        one zstd frame, holding:
+//!     count            varint
 //!     per entry, sorted by sample and then fragment:
-//!       sample       varint
-//!       fragment     varint
-//!       allele       varint    -- numbered as the record numbers its alleles
-//!       error_phred  u8        -- at most LARGEST_ERROR_PHRED
+//!       sample_step    varint    -- this entry's sample less the previous entry's (0 at the first)
+//!       fragment_step  varint    -- this entry's fragment less the previous entry's of the same
+//!                                   sample, or the fragment itself at a sample's first entry
+//!       allele         varint    -- numbered as the record numbers its alleles
+//!       error_phred    u8        -- at most LARGEST_ERROR_PHRED
 //! ```
+//!
+//! **Why compressed.** Uncompressed, an entry is the record's VCF line as text plus its
+//! fragments, and on 2,176 tomato samples that came to about 80 kB a called locus — a projected
+//! 25 to 30 TB of spill for a 783 Mb genome, against 6.8 TB for the same cohort before the
+//! fragments were carried. The
+//! line is a genotype column per sample, most of them alike, so it shrinks several-fold under
+//! zstd. The fragments are written as steps because they are sorted: a sample's fragment numbers
+//! are read indices, three or four varint bytes each, while the step from one to the next is
+//! mostly one byte — and zstd alone does not find that.
+//!
+//! **Measured on the first 6,000 entries of a real spill** (2,176 tomato samples, the start of
+//! chromosome 1, 1.28 GB uncompressed), compressing each frame on its own on one thread:
+//!
+//! | frame | uncompressed | level 1 | level 3 |
+//! |---|---|---|---|
+//! | body | 105.0 kB an entry | 26.4 kB (4.0×) | 25.6 kB (4.1×) |
+//! | fragments, numbers as they are | 107.9 kB | 86.9 kB (1.2×) | 38.8 kB (2.8×) |
+//! | fragments, numbers as steps | 74.3 kB | 15.7 kB (6.9×) | 15.4 kB (7.0×) |
+//!
+//! So an entry goes from about 213 kB to about 42 kB, five times smaller. Level 1 compressed at
+//! about 600 MB/s and inflated at about 1,100 MB/s a thread; level 3 gains 3% and compresses at
+//! about 350 MB/s, which is why the level is 1 ([`ZSTD_COMPRESSION_LEVEL`]).
+//!
+//! **Why each entry on its own, and two frames to an entry.** A frame per entry is compressed by
+//! whichever thread encodes the entry ([`EncodedSpillEntry::of`]) — the threads that called the
+//! loci, where the run is wired for it — so the thread that writes in genome order still only
+//! copies bytes. A stream compressor over the whole file would put every byte through that one
+//! thread instead. The fragments are their own frame so that pass two, which never reads them,
+//! steps over them by their compressed length without inflating them. Each frame records its
+//! uncompressed size and a checksum: the size bounds what the reader allocates before it inflates
+//! anything, and the checksum turns damage inside a frame into a refusal rather than a plausible
+//! wrong record.
 //!
 //! **The fragments are the record's reads that reach another record** (read phase spec §2.4),
 //! which the line never carries. Only pass three reads them, handing them to the writer beside
-//! the line; pass two, which reads every entry to score it, steps over the section by its length.
+//! the line; pass two, which reads every entry to score it, steps over the frame by its length.
 //! **They travel beside an entry, never inside it**: [`SpillEntry`] has no fragments field, the
 //! writer takes them as their own argument, and only [`SpillReaderWithFragments`] gives them back,
 //! as the second half of each item. A pass three switched to pass two's reader does not compile,
@@ -60,9 +97,10 @@
 //! alleles (owner, 2026-10-10). The tract flag is there for the writer's ordering rule alone: a tract may share
 //! a position with the generic locus owning its anchor base.
 //!
-//! Every field is either fixed-width, length-prefixed, or self-delimiting — a varint ends at
-//! the first byte whose top bit is clear — so an entry ends where the next begins and there is
-//! no outer frame. **No manifest, no layout check, no version**: the file is created, read
+//! Every field inside a frame is either fixed-width, length-prefixed, or self-delimiting — a varint
+//! ends at the first byte whose top bit is clear — and each frame is behind its length, so an entry
+//! ends where the next begins and there is no outer frame. **No manifest, no layout check, no
+//! version**: the file is created, read
 //! twice and deleted inside one run, and its only reader is the process that wrote it. That is
 //! what separates it from the psp, which is a user-facing artifact that has to interpret
 //! itself.
@@ -95,6 +133,9 @@ use crate::types::{ContigId, Position};
 /// once, and so no two call sites can spell the same field differently — a failure message
 /// naming a field that no longer exists sends the reader somewhere there is nothing to find.
 mod field {
+    pub const BODY_BYTES: &str = "body_bytes";
+    pub const BODY: &str = "body";
+    pub const FRAGMENTS: &str = "fragments";
     pub const CONTIG: &str = "contig";
     pub const POSITION: &str = "position";
     pub const IS_REPEAT_TRACT: &str = "is_repeat_tract";
@@ -149,6 +190,35 @@ const MAX_SAMPLES: usize = 1_000_000;
 /// spill the size of a genome's VCF one corrupt byte turns a decode error into an
 /// out-of-memory kill of a run that has already finished calling.
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The most bytes one sample's row inflates to: two floats and two `u32` varints of at most five
+/// bytes each.
+const MAX_SAMPLE_BYTES: usize = 4 + 4 + 5 + 5;
+
+/// The largest body the decoder will inflate: the head's four fields at their widest, the longest
+/// line, and the most samples at their widest row. **About 35 MB**, so a frame that claims more is
+/// damage — and a frame records its own size, so this is checked before anything is allocated
+/// for it.
+const MAX_BODY_BYTES: usize =
+    3 * MAX_VARINT_BYTES + 1 + MAX_LINE_BYTES + MAX_SAMPLES * MAX_SAMPLE_BYTES;
+
+/// The longest compressed frame the decoder will read for something that inflates to at most
+/// `inflated` bytes.
+///
+/// **Above zstd's own bound on what compressing that many bytes can produce**
+/// (`ZSTD_COMPRESSBOUND`, a little over `inflated + inflated / 256`), so every frame the writer can
+/// make is under it, and a length past it is damage that would otherwise have the reader hold
+/// the rest of the file — the failure [`MAX_LINE_BYTES`] closes for the line.
+const fn max_frame_bytes(inflated: usize) -> usize {
+    inflated + inflated / 128 + 4096
+}
+
+/// The level each frame is compressed at.
+///
+/// **Level 1, zstd's fastest of its ordinary levels**, because the frames are compressed while
+/// the run is calling and every entry passes through it. On a real spill it gives within 3% of
+/// level 3's size at about twice its speed (the table at the top of this module).
+const ZSTD_COMPRESSION_LEVEL: i32 = 1;
 
 /// One record on the spill: the line the writer would have written, and what the scorer needs
 /// beside it.
@@ -210,6 +280,28 @@ pub enum SpillError {
     Flush {
         /// What the sink said.
         source: io::Error,
+    },
+
+    /// zstd refused to compress one of an entry's frames. Not reachable from any input the
+    /// encoder is given — zstd refuses only a context it could not allocate — but carried rather
+    /// than unwrapped, so that a refusal reaches the run as an error naming the spill.
+    #[error("the paralog spill's {field} could not be compressed: {reason}")]
+    Compress {
+        /// The frame being compressed.
+        field: &'static str,
+        /// What zstd said.
+        reason: &'static str,
+    },
+
+    /// One of an entry's frames is not a frame this writer makes: zstd refused it, it does not
+    /// record its own size, or it inflated to a size other than the one it records. Damage
+    /// inside a frame lands here, which is what the frame's checksum is for.
+    #[error("the paralog spill's {field} is not a readable zstd frame: {reason}")]
+    NotAFrame {
+        /// The frame that could not be inflated.
+        field: &'static str,
+        /// What was wrong with it.
+        reason: &'static str,
     },
 
     /// The source failed while a field was being decoded.
@@ -329,14 +421,15 @@ impl<W: Write> SpillWriter<W> {
     ///
     /// # Errors
     ///
-    /// If the sink refuses the bytes. An entry the sink refused is not counted.
+    /// If the entry cannot be compressed, or the sink refuses the bytes. An entry the sink
+    /// refused is not counted.
     pub fn append(
         &mut self,
         entry: &SpillEntry,
         fragments: &RecordFragments,
     ) -> Result<(), SpillError> {
         self.scratch.clear();
-        encode_entry(entry, fragments, &mut self.scratch);
+        encode_entry(entry, fragments, &mut self.scratch)?;
         self.sink
             .write_all(&self.scratch)
             .map_err(|source| SpillError::Write { source })?;
@@ -407,8 +500,28 @@ pub struct SpillReader<R: BufRead> {
     entries_read: u64,
     /// Whether each entry's fragments are read, or stepped over unread (pass two).
     fragments: FragmentsSection,
-    /// Scratch for one entry's fragments section, reused across entries.
-    section: Vec<u8>,
+    /// What inflating a frame needs, reused across entries.
+    inflating: Inflating,
+}
+
+/// **What a reader holds to inflate frames**: one decompression context and two buffers, reused
+/// across entries, so a reader allocates for its largest entry once rather than for every one.
+struct Inflating {
+    context: zstd::zstd_safe::DCtx<'static>,
+    /// One frame's compressed bytes, as read off the stream.
+    compressed: Vec<u8>,
+    /// The same frame, inflated.
+    inflated: Vec<u8>,
+}
+
+impl Inflating {
+    fn new() -> Self {
+        Self {
+            context: zstd::zstd_safe::DCtx::create(),
+            compressed: Vec::new(),
+            inflated: Vec::new(),
+        }
+    }
 }
 
 /// What a reader does with each entry's fragments section.
@@ -440,7 +553,7 @@ impl<R: BufRead> SpillReader<R> {
             entries_expected,
             entries_read: 0,
             fragments,
-            section: Vec::new(),
+            inflating: Inflating::new(),
         }
     }
 
@@ -467,7 +580,7 @@ impl<R: BufRead> SpillReader<R> {
             Err(source) => {
                 self.failed = true;
                 return Some(Err(SpillError::Read {
-                    field: field::CONTIG,
+                    field: field::BODY_BYTES,
                     source,
                 }));
             }
@@ -482,7 +595,7 @@ impl<R: BufRead> SpillReader<R> {
             }
             return None;
         }
-        let decoded = decode_entry(&mut self.source, self.fragments, &mut self.section);
+        let decoded = decode_entry(&mut self.source, self.fragments, &mut self.inflating);
         match &decoded {
             Ok(_) => self.entries_read += 1,
             Err(_) => self.failed = true,
@@ -542,21 +655,104 @@ impl EncodedSpillEntry {
     /// Encode `entry`, with the record's fragments beside it, as [`SpillWriter::append`] would
     /// write it.
     ///
+    /// **The compression happens here**, on the thread that calls this, which is what makes it
+    /// worth calling ahead of the writing thread.
+    ///
     /// # Errors
     ///
-    /// None today; the `Result` is kept so a refusal the codec gains later reaches every caller.
+    /// If zstd refuses to compress a frame ([`SpillError::Compress`]).
     pub fn of(entry: &SpillEntry, fragments: &RecordFragments) -> Result<Self, SpillError> {
         let mut bytes = Vec::new();
-        encode_entry(entry, fragments, &mut bytes);
+        encode_entry(entry, fragments, &mut bytes)?;
         Ok(Self { bytes })
     }
 }
 
-/// Append one entry's bytes to `out`, in the layout at the top of this module.
+/// **What a thread holds to compress frames**: one compression context set to
+/// [`ZSTD_COMPRESSION_LEVEL`], and two buffers, reused for every entry the thread encodes.
+struct Deflating {
+    context: zstd::zstd_safe::CCtx<'static>,
+    /// One frame's uncompressed bytes, as the field encoders write them.
+    raw: Vec<u8>,
+    /// The same frame, compressed.
+    compressed: Vec<u8>,
+}
+
+impl Deflating {
+    fn new() -> Self {
+        use zstd::zstd_safe::CParameter;
+        let mut context = zstd::zstd_safe::CCtx::create();
+        // PANIC-FREE: each of the three is a parameter zstd defines with a value in its range —
+        // a level between 1 and 22, and two flags — so none can be refused.
+        for parameter in [
+            CParameter::CompressionLevel(ZSTD_COMPRESSION_LEVEL),
+            CParameter::ContentSizeFlag(true),
+            CParameter::ChecksumFlag(true),
+        ] {
+            context
+                .set_parameter(parameter)
+                .expect("a zstd parameter in its range is accepted");
+        }
+        Self {
+            context,
+            raw: Vec::new(),
+            compressed: Vec::new(),
+        }
+    }
+
+    /// Compress what is in `raw` into one frame, and append the frame to `out` behind its length.
+    fn append_frame(&mut self, field: &'static str, out: &mut Vec<u8>) -> Result<(), SpillError> {
+        self.compressed.clear();
+        self.compressed
+            .reserve(zstd::zstd_safe::compress_bound(self.raw.len()));
+        self.context
+            .compress2(&mut self.compressed, &self.raw)
+            .map_err(|code| SpillError::Compress {
+                field,
+                reason: zstd::zstd_safe::get_error_name(code),
+            })?;
+        encode_u64_leb128(self.compressed.len() as u64, out);
+        out.extend_from_slice(&self.compressed);
+        Ok(())
+    }
+}
+
+thread_local! {
+    /// **One compressor a thread**: an entry is encoded on whichever thread called its locus, and
+    /// a zstd context is about a megabyte of tables at this level, too much to build per entry.
+    static DEFLATING: std::cell::RefCell<Deflating> = std::cell::RefCell::new(Deflating::new());
+}
+
+/// Append one entry's bytes to `out`, in the layout at the top of this module: the body's frame,
+/// then the fragments' frame, or a length of 0 where the record has none.
+///
+/// # Errors
+///
+/// If zstd refuses to compress either frame.
+fn encode_entry(
+    entry: &SpillEntry,
+    fragments: &RecordFragments,
+    out: &mut Vec<u8>,
+) -> Result<(), SpillError> {
+    DEFLATING.with_borrow_mut(|deflating| {
+        deflating.raw.clear();
+        encode_body(entry, &mut deflating.raw);
+        deflating.append_frame(field::BODY, out)?;
+        if fragments.is_empty() {
+            encode_u64_leb128(0, out);
+            return Ok(());
+        }
+        deflating.raw.clear();
+        encode_fragments(fragments, &mut deflating.raw);
+        deflating.append_frame(field::FRAGMENTS, out)
+    })
+}
+
+/// Append the body's fields to `out`, uncompressed: the record's head, its line and its samples.
 ///
 /// **The entry and each sample are destructured exhaustively**, so a field added to either
 /// struct stops the build here instead of vanishing from the file.
-fn encode_entry(entry: &SpillEntry, fragments: &RecordFragments, out: &mut Vec<u8>) {
+fn encode_body(entry: &SpillEntry, out: &mut Vec<u8>) {
     let SpillEntry {
         contig,
         position,
@@ -583,22 +779,15 @@ fn encode_entry(entry: &SpillEntry, fragments: &RecordFragments, out: &mut Vec<u
         encode_u64_leb128(u64::from(*ref_reads), out);
         encode_u64_leb128(u64::from(*alt_reads), out);
     }
+}
 
-    // The section's length goes first, so it is summed before anything is written: no
-    // intermediate buffer per entry.
-    let section_bytes = leb128_bytes(fragments.len() as u64)
-        + fragments
-            .entries()
-            .iter()
-            .map(|entry| {
-                leb128_bytes(u64::from(entry.sample))
-                    + leb128_bytes(u64::from(entry.fragment))
-                    + leb128_bytes(u64::from(entry.allele))
-                    + 1
-            })
-            .sum::<usize>();
-    encode_u64_leb128(section_bytes as u64, out);
+/// Append the fragments' fields to `out`, uncompressed: their count, then each one.
+///
+/// The sample and the fragment are written as steps from the entry before (the layout at the top
+/// of this module).
+fn encode_fragments(fragments: &RecordFragments, out: &mut Vec<u8>) {
     encode_u64_leb128(fragments.len() as u64, out);
+    let mut previous = Steps::default();
     for entry in fragments.entries() {
         let FragmentAllele {
             sample,
@@ -606,17 +795,77 @@ fn encode_entry(entry: &SpillEntry, fragments: &RecordFragments, out: &mut Vec<u
             allele,
             error_phred,
         } = *entry;
-        encode_u64_leb128(u64::from(sample), out);
-        encode_u64_leb128(u64::from(fragment), out);
+        let (sample_step, fragment_step) = previous.step_to(sample, fragment);
+        encode_u64_leb128(u64::from(sample_step), out);
+        encode_u64_leb128(u64::from(fragment_step), out);
         encode_u64_leb128(u64::from(allele), out);
         out.push(error_phred);
     }
 }
 
-/// How many bytes [`encode_u64_leb128`] writes for `value`: seven bits a byte, at least one.
-fn leb128_bytes(value: u64) -> usize {
-    let bits = (u64::BITS - (value | 1).leading_zeros()) as usize;
-    bits.div_ceil(7)
+/// **The sample and fragment the next fragment entry is written as a step from**: the previous
+/// entry's, or sample 0 and no fragment before the first.
+#[derive(Default)]
+struct Steps {
+    sample: u32,
+    /// The previous entry's fragment, or `None` at the start of a sample, where the fragment is
+    /// written whole.
+    fragment: Option<u32>,
+}
+
+impl Steps {
+    /// The steps that reach `sample` and `fragment` from here, and move here to them.
+    ///
+    /// # Panics
+    ///
+    /// If `sample` and `fragment` come before where this is. **They cannot**: a
+    /// [`RecordFragments`] sorts its entries by sample and then fragment when it is built, and
+    /// the encoder walks them in that order.
+    fn step_to(&mut self, sample: u32, fragment: u32) -> (u32, u32) {
+        let sample_step = sample
+            .checked_sub(self.sample)
+            .expect("a record's fragments are sorted by sample");
+        if sample_step > 0 {
+            self.fragment = None;
+        }
+        let fragment_step = match self.fragment {
+            None => fragment,
+            Some(previous) => fragment
+                .checked_sub(previous)
+                .expect("a sample's fragments are sorted by fragment"),
+        };
+        self.sample = sample;
+        self.fragment = Some(fragment);
+        (sample_step, fragment_step)
+    }
+
+    /// The sample and fragment `sample_step` and `fragment_step` reach from here, and move here to
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Where either passes the end of a `u32`, which the encoder cannot write.
+    fn take(&mut self, sample_step: u64, fragment_step: u64) -> Result<(u32, u32), SpillError> {
+        let sample = u64::from(self.sample).saturating_add(sample_step);
+        let sample = u32::try_from(sample).map_err(|_| SpillError::OutOfRange {
+            field: field::FRAGMENT_SAMPLE,
+            value: sample,
+        })?;
+        if sample != self.sample {
+            self.fragment = None;
+        }
+        let fragment = self
+            .fragment
+            .map_or(0, u64::from)
+            .saturating_add(fragment_step);
+        let fragment = u32::try_from(fragment).map_err(|_| SpillError::OutOfRange {
+            field: field::FRAGMENT,
+            value: fragment,
+        })?;
+        self.sample = sample;
+        self.fragment = Some(fragment);
+        Ok((sample, fragment))
+    }
 }
 
 /// The window pair, by bit pattern, so an absent one survives the round trip.
@@ -631,12 +880,109 @@ fn encode_window(window: &WindowCoverage, out: &mut Vec<u8>) {
 }
 
 /// Read one entry from `source`, which is positioned at its first byte, and its fragments —
-/// empty when `fragments` says to step over them. `section` is scratch for the section's bytes.
+/// empty when `fragments` says to step over them.
 fn decode_entry<R: BufRead>(
     source: &mut R,
     fragments: FragmentsSection,
-    section: &mut Vec<u8>,
+    inflating: &mut Inflating,
 ) -> Result<(SpillEntry, RecordFragments), SpillError> {
+    read_frame(
+        source,
+        field::BODY_BYTES,
+        field::BODY,
+        max_frame_bytes(MAX_BODY_BYTES),
+        &mut inflating.compressed,
+    )?;
+    inflating.inflate(field::BODY, MAX_BODY_BYTES)?;
+    let mut body = inflating.inflated.as_slice();
+    let entry = decode_body(&mut body)?;
+    if !body.is_empty() {
+        return Err(SpillError::SectionLongerThanItsEntries {
+            field: field::BODY,
+            unread: body.len() as u64,
+        });
+    }
+    let fragments = read_fragments(source, fragments, entry.samples.len(), inflating)?;
+    Ok((entry, fragments))
+}
+
+impl Inflating {
+    /// Inflate the frame in `compressed` into `inflated`, refusing one that claims more than `max`
+    /// bytes before anything is allocated for it.
+    fn inflate(&mut self, field: &'static str, max: usize) -> Result<(), SpillError> {
+        let size = match zstd::zstd_safe::get_frame_content_size(&self.compressed) {
+            Ok(Some(size)) => size,
+            Ok(None) => {
+                return Err(SpillError::NotAFrame {
+                    field,
+                    reason: "the frame does not record its size",
+                });
+            }
+            Err(_) => {
+                return Err(SpillError::NotAFrame {
+                    field,
+                    reason: "the bytes do not begin a zstd frame",
+                });
+            }
+        };
+        if size > max as u64 {
+            return Err(SpillError::OutOfRange { field, value: size });
+        }
+        self.inflated.clear();
+        // The size is under `max`, so this fits a `usize`.
+        self.inflated.reserve(size as usize);
+        let written = self
+            .context
+            .decompress(&mut self.inflated, &self.compressed)
+            .map_err(|code| SpillError::NotAFrame {
+                field,
+                reason: zstd::zstd_safe::get_error_name(code),
+            })?;
+        if written as u64 != size {
+            return Err(SpillError::NotAFrame {
+                field,
+                reason: "the frame inflated to a size other than the one it records",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Read a frame's length, as `length_field`, and then that many bytes into `out`.
+///
+/// The length is refused before a byte of the frame is read if it is past `max`, so the bytes
+/// held are bounded by that and not by what the file still holds.
+fn read_frame<R: BufRead>(
+    source: &mut R,
+    length_field: &'static str,
+    frame_field: &'static str,
+    max: usize,
+    out: &mut Vec<u8>,
+) -> Result<(), SpillError> {
+    let length = read_usize(source, length_field)?;
+    if length > max {
+        return Err(SpillError::OutOfRange {
+            field: length_field,
+            value: length as u64,
+        });
+    }
+    out.clear();
+    let bytes_read = source
+        .by_ref()
+        .take(length as u64)
+        .read_to_end(out)
+        .map_err(|source| SpillError::Read {
+            field: frame_field,
+            source,
+        })?;
+    if bytes_read != length {
+        return Err(SpillError::Truncated { field: frame_field });
+    }
+    Ok(())
+}
+
+/// Read the body's fields from `source`, which holds the inflated body.
+fn decode_body<R: BufRead>(source: &mut R) -> Result<SpillEntry, SpillError> {
     let contig = read_u32(source, field::CONTIG)?;
     let position = read_varint(source, field::POSITION)?;
     let is_repeat_tract = read_bool(source, field::IS_REPEAT_TRACT)?;
@@ -660,95 +1006,95 @@ fn decode_entry<R: BufRead>(
         samples.push(sample);
     }
 
-    let fragments = read_fragments_section(source, fragments, samples.len(), section)?;
-
-    Ok((
-        SpillEntry {
-            contig: ContigId(contig),
-            position: Position(position),
-            is_repeat_tract,
-            line,
-            samples,
-        },
-        fragments,
-    ))
+    Ok(SpillEntry {
+        contig: ContigId(contig),
+        position: Position(position),
+        is_repeat_tract,
+        line,
+        samples,
+    })
 }
 
-/// The largest fragments section the decoder will believe: 3,000 samples × 32 read alleles × at most
-/// 16 bytes is 1.5 MiB, so 64 MiB is far above any real entry and still bounds what one corrupt
-/// length can make the reader hold, as [`MAX_LINE_BYTES`] does for the line.
+/// The largest fragments frame the decoder will inflate: 3,000 samples × 32 read alleles × at
+/// most 16 bytes is 1.5 MiB, so 64 MiB is far above any real entry and still bounds what one
+/// corrupt frame can make the reader hold, as [`MAX_LINE_BYTES`] does for the line.
 const MAX_FRAGMENTS_BYTES: usize = 64 * 1024 * 1024;
 
 /// The fewest bytes one fragment entry encodes to: four fields of at least one byte each.
 const MIN_FRAGMENT_ENTRY_BYTES: usize = 4;
 
-/// **Read the fragments section, or step over it**: its length, then — when `fragments` says
-/// read — its entries, and otherwise that many bytes consumed unread, which is pass two's case.
+/// **Read the fragments' frame, or step over it**: its length, then — when `fragments` says
+/// read — the frame, inflated and decoded, and otherwise that many bytes consumed unread, which
+/// is pass two's case. A length of 0 is a record with no fragments.
 ///
 /// A decoded entry is refused when its sample is not one of the entry's `sample_count`, its
 /// allele does not fit a `u16`, or its Phred is above [`LARGEST_ERROR_PHRED`]: none of those can
 /// be written, so each is damage, and read as data it would change or drop phase silently.
-fn read_fragments_section<R: BufRead>(
+fn read_fragments<R: BufRead>(
     source: &mut R,
     fragments: FragmentsSection,
     sample_count: usize,
-    section: &mut Vec<u8>,
+    inflating: &mut Inflating,
 ) -> Result<RecordFragments, SpillError> {
-    let length = read_usize(source, field::FRAGMENTS_BYTES)?;
-    if length > MAX_FRAGMENTS_BYTES {
-        return Err(SpillError::OutOfRange {
-            field: field::FRAGMENTS_BYTES,
-            value: length as u64,
-        });
-    }
     if fragments == FragmentsSection::Skip {
+        let length = read_usize(source, field::FRAGMENTS_BYTES)?;
+        if length > max_frame_bytes(MAX_FRAGMENTS_BYTES) {
+            return Err(SpillError::OutOfRange {
+                field: field::FRAGMENTS_BYTES,
+                value: length as u64,
+            });
+        }
         let skipped = io::copy(&mut source.by_ref().take(length as u64), &mut io::sink()).map_err(
             |source| SpillError::Read {
-                field: field::FRAGMENTS_BYTES,
+                field: field::FRAGMENTS,
                 source,
             },
         )?;
         if skipped != length as u64 {
             return Err(SpillError::Truncated {
-                field: field::FRAGMENTS_BYTES,
+                field: field::FRAGMENTS,
             });
         }
         return Ok(RecordFragments::default());
     }
-    section.clear();
-    let bytes_read = source
-        .by_ref()
-        .take(length as u64)
-        .read_to_end(section)
-        .map_err(|source| SpillError::Read {
-            field: field::FRAGMENTS_BYTES,
-            source,
-        })?;
-    if bytes_read != length {
-        return Err(SpillError::Truncated {
-            field: field::FRAGMENTS_BYTES,
-        });
+    read_frame(
+        source,
+        field::FRAGMENTS_BYTES,
+        field::FRAGMENTS,
+        max_frame_bytes(MAX_FRAGMENTS_BYTES),
+        &mut inflating.compressed,
+    )?;
+    if inflating.compressed.is_empty() {
+        return Ok(RecordFragments::default());
     }
-    let mut bytes = section.as_slice();
+    inflating.inflate(field::FRAGMENTS, MAX_FRAGMENTS_BYTES)?;
+    decode_fragments(&inflating.inflated, sample_count)
+}
+
+/// Decode the inflated fragments' frame, `section`, of an entry with `sample_count` samples.
+fn decode_fragments(section: &[u8], sample_count: usize) -> Result<RecordFragments, SpillError> {
+    let mut bytes = section;
     let count = read_usize(&mut bytes, field::FRAGMENT_COUNT)?;
     // Every entry takes at least four bytes, so a count the section cannot hold is refused
     // before anything is reserved for it.
-    if count > length / MIN_FRAGMENT_ENTRY_BYTES {
+    if count > section.len() / MIN_FRAGMENT_ENTRY_BYTES {
         return Err(SpillError::OutOfRange {
             field: field::FRAGMENT_COUNT,
             value: count as u64,
         });
     }
     let mut entries = Vec::with_capacity(count);
+    let mut previous = Steps::default();
     for _ in 0..count {
-        let sample = read_u32(&mut bytes, field::FRAGMENT_SAMPLE)?;
+        let sample_step = read_varint(&mut bytes, field::FRAGMENT_SAMPLE)?;
+        let fragment_step = read_varint(&mut bytes, field::FRAGMENT)?;
+        let (sample, fragment) = previous.take(sample_step, fragment_step)?;
         if sample as usize >= sample_count {
             return Err(SpillError::OutOfRange {
                 field: field::FRAGMENT_SAMPLE,
                 value: u64::from(sample),
             });
         }
-        let fragment = read_u32(&mut bytes, field::FRAGMENT)?;
         let allele = read_varint(&mut bytes, field::FRAGMENT_ALLELE)?;
         let allele = u16::try_from(allele).map_err(|_| SpillError::OutOfRange {
             field: field::FRAGMENT_ALLELE,
@@ -773,7 +1119,7 @@ fn read_fragments_section<R: BufRead>(
     }
     if !bytes.is_empty() {
         return Err(SpillError::SectionLongerThanItsEntries {
-            field: field::FRAGMENTS_BYTES,
+            field: field::FRAGMENTS,
             unread: bytes.len() as u64,
         });
     }
