@@ -2,7 +2,7 @@
 
 When two variants overlap, such as a SNP inside a deletion, a VCF can write them in one record
 or in separate records. Callers differ in which way they use, and population-genetics tools read
-them very differently. Separate records can distort the results.
+them differently; separate records can distort the results.
 
 Let's imagine a reference `ATT` at positions 1 to 3 of `chrom1`, and three individuals:
 
@@ -12,16 +12,15 @@ Let's imagine a reference `ATT` at positions 1 to 3 of `chrom1`, and three indiv
 | ind2 | `ACT` / `ACT`: both copies carry a SNP, `T` to `C` at position 2 |
 | ind3 | `A` / `ACT`: one copy of each |
 
-Written **as one record**, whose alleles are the whole haplotypes. freebayes and pvc write it
-this way:
+Written **as one record**, whose alleles are the whole haplotypes, like freebayes and pvc do:
 
 ```
 #CHROM  POS  REF  ALT     ind1  ind2  ind3
 chrom1  1    ATT  A,ACT   1/1   2/2   1/2
 ```
 
-Written **as separate records**, one per event, each at its own position. GATK HaplotypeCaller
-writes it this way. The SNP at position 2 lies inside the deletion, so its record needs the `*`
+Written **as separate records**, one per event, each at its own position, like GATK
+HaplotypeCaller does. The SNP at position 2 lies inside the deletion, so its record needs the `*`
 allele, which means "this position is deleted on this copy by a deletion that starts upstream":
 
 ```
@@ -30,8 +29,8 @@ chrom1  1    ATT  A     1/1   0/0   0/1
 chrom1  2    T    C,*   2/2   1/1   1/2
 ```
 
-Written **as separate records, without `*`**. DeepVariant writes it this way. It calls each
-sample on its own, and its cohorts are usually merged with GLnexus. GLnexus writes a copy that
+Written **as separate records, without `*`**, like DeepVariant does. It calls each sample on its
+own, and its cohorts are usually merged with GLnexus. GLnexus writes a copy that
 carries the deletion as missing, `.`, in the SNP's record, and gives the reason in the FORMAT
 field `RNC` as `-`, "unrepresentable overlapping deletion":
 
@@ -46,18 +45,18 @@ would be `0/1` at position 2.
 
 The first two forms say the same thing. The third has already lost information, the same way a
 tool loses it when it reads the second form: as if `*` were read as missing in a merged cohort,
-and as if `*` were recoded as reference in a single sample's VCF. The next section describes both.
+and as if `*` were recoded as reference in a single sample's VCF.
 
-## What goes wrong with the separate-records form
+## How population-genetics tools handle `*`
 
-Most population-genetics tools expect biallelic SNPs and do not understand `*`. They usually
-handle it in one of three ways, and each one distorts the results.
+Most population-genetics tools do not understand `*`. They usually handle it in one of three
+ways, and each one distorts the results.
 
 **`*` read as missing.** At position 2, ind1 becomes `./.` and ind3 becomes half or wholly
 missing.
 
 - The data go missing *because* an individual carries the deletion. Missing-data filters then
-  remove sites or individuals according to the deletion's frequency, and imputation is biased.
+  remove sites or individuals in a biased way.
 - Among the copies left, `C` has frequency 1, so the site looks fixed, although `C` is on only
   half of the copies.
 - ind3, a true heterozygote at this locus, is lost.
@@ -69,17 +68,10 @@ time, as a SNP.
 **`*` counted as another allele.**
 
 - If `C` and `*` are both taken as "not reference", every individual becomes `1/1`. ind3, a
-  heterozygote, becomes a false homozygote, and the site again looks fixed.
+  heterozygote, becomes a false homozygote.
 - If the site is kept with three alleles, the deletion is counted twice: once at position 1 and
   again as `*` at position 2, and once more for every other variable position it covers. That
-  adds segregating sites, and it also creates perfect linkage disequilibrium between the two
-  records.
-
-Across a genome these sites are few, so genome-wide averages move little. But they cluster
-where indels cluster: repeats, low-complexity sequence and highly polymorphic regions. **Window
-scans are affected far more than averages**: windowed π and Tajima's D, F<sub>ST</sub> outlier
-scans, selection scans. If a deletion's frequency differs between populations, so does the
-missing data it causes, which can create a false signal of differentiation or hide a real one.
+  adds segregating sites in perfect linkage disequilibrium.
 
 The common workaround, keeping only biallelic SNPs and dropping SNPs close to indels (for
 example with `bcftools filter --SnpGap`), avoids these artifacts, but at a cost. It
@@ -87,21 +79,25 @@ systematically loses SNPs on deletion-carrying copies and under-samples diversit
 those regions. And it throws away the sites with more than two alleles, which are the most
 informative ones, because a site with more alleles tells more individuals apart.
 
-## What pvc writes
+## The data lost
 
-- **Overlapping SNPs and indels go in one record**, whose alleles span all of them, as in the
-  first example above.
-- **An STR is one record**, whose alleles are the whole repeat sequences. Variants inside a repeat
-  are never split into separate records.
-- **Variants that do not overlap get separate records**, even when they are a base apart. Unlike
-  freebayes, pvc does not merge them. This causes none of the problems above: neither event
-  covers the other's position, so no `*` is needed.
-- **At the edge of an STR, the same rule.** When a deletion runs from an STR into the sequence
-  beside it, pvc widens the STR record over those bases, and a SNP or indel that overlaps them is
-  merged into that record, whose alleles then span both.
+We applied the workaround to a VCF pvc wrote for 2,176 tomato genomes. First, records that hold
+several SNPs were split into single SNPs, as `bcftools norm -a` does. Then only the biallelic SNPs
+with no indel or STR within 10 bases were kept. Of 10.2 million variant sites, 3.5 million (34%)
+were lost:
 
-pvc never writes `*`. To check a VCF from any caller:
+- 1.7 million indels and STRs;
+- 1.3 million SNPs with more than two alleles;
+- 0.5 million biallelic SNPs within 10 bases of an indel or STR.
 
-```
-bcftools view -H -i 'ALT="*"' calls.vcf.gz | wc -l
-```
+![The variant sites a GATK-style analysis keeps and loses in 2,176 tomato genomes: 6.79 million kept, 3.46 million lost](figures/overlapping_sites_kept_lost.svg)
+
+Moreover, the lost markers are the more informative ones: they have a mean PIC of 0.22, the kept
+ones 0.13, and the 34% of the markers that are lost carry 46% of the summed PIC.
+
+![PIC distributions of the markers a GATK-style analysis keeps and of those it loses, in 2,176 tomato genomes](figures/overlapping_pic_kept_lost.svg)
+
+*The share of the kept and of the lost markers in each range of PIC.*
+
+Of the kept markers, 42% are nearly invariant, with a PIC under 0.02, against 13% of the lost
+ones. Only the lost markers go above 0.375, because only a site with more than two alleles can.
