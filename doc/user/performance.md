@@ -49,13 +49,16 @@ The input files were read once before each run, so the disk cache was used.
 
 ## A tomato cohort, 1 to 100 samples
 
-Tomato accessions at about 3 reads a position, over 91 Mb of chromosome 1 (SL4.0).
+Tomato accessions over 91 Mb of chromosome 1 (SL4.0).
 
-![Wall time and peak memory with 50 tomato samples, for pvc in direct mode split in 3 segments and in psp mode, GATK and freebayes](figures/performance_tomato.svg)
+![Wall time against the number of tomato samples, from 1 to 100, for pvc in its three ways of running, GATK and freebayes](figures/performance_tomato_samples.svg)
 
-*Wall time and peak memory with 50 samples, the largest cohort every tool finished. pvc is shown
-in direct mode split into 3 segments, run as GATK and freebayes are, and in psp mode; the table
-below also has direct mode in one command.*
+*Wall time from 1 to 100 samples, with pvc in direct mode split into 3 segments.*
+
+![Peak memory against the number of tomato samples, from 1 to 100, for pvc in direct mode split in 3 segments and in psp mode, GATK and freebayes](figures/performance_tomato_samples_memory.svg)
+
+*Peak memory from 1 to 100 samples. freebayes's line stops at 50 samples, because its run with 100 did not finish and
+recorded no memory.*
 
 Wall time / memory:
 
@@ -81,11 +84,6 @@ Wall time / memory:
 - **GATK's memory jumps from 2 GB with one sample to 36 GB with two.** With one sample it writes
   the VCF directly; with more it runs its joint genotyping, as 30 Java processes at once.
 
-![Wall time against the number of tomato samples, from 1 to 100, for pvc in its three ways of running, GATK and freebayes](figures/performance_tomato_samples.svg)
-
-*Wall time from 1 to 100 samples, with pvc in direct mode split into 3 segments; the table above
-has its other ways of running. freebayes's time grows much faster than the others': 37 min with 10
-samples, 1 h 50 min with 20, 9 h 41 min with 50, and with 100 it was stopped after 41 hours.*
 
 CPU time, with the average number of busy cores in brackets:
 
