@@ -101,6 +101,7 @@ summary marks those with ⚠).
 | `speed` | tomato cohort, 1, 8 and 62 accessions over 8 Mb (a 63rd, SRR7279543, has a truncated CRAM and is left out): wall time, CPU time, peak memory of each whole pipeline | pvc (both ways), GATK, freebayes |
 | read floor (in `speed` and `hg002_5mb`) | `samtools view -c -M -L` over the same files: the cost of only reading and decoding them, set beside pvc's `generate-psps` and `call-from-alignments` with their ratio | samtools, run once like a competitor |
 | `tomato_agreement` | pvc's 62-accession genotypes against GATK's (no truth set) | pvc against GATK |
+| `giab_genome` | GIAB HG002 over chromosomes 1 to 22, 5×, 10×, 30× and 50×, from alignments already downsampled on the machine; not in a full run (it takes days), needs `--giab-downsampled` (rick's profile sets it) | pvc (defaults, fitted), GATK, freebayes, DeepVariant |
 | `external_chr22` | the colleague's chr22 benchmark; not in a full run, needs `--external-config` (see `bench/external_chr22.py`) | pvc (defaults, fitted), GATK, freebayes |
 
 How each is scored:

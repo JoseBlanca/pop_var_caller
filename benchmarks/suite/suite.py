@@ -37,6 +37,9 @@ def parse_args():
     p.add_argument("--giab-alignments",
                    help="local copies of GIAB's 300x alignments, a path with {sample} in it, read "
                         "instead of fetching from GIAB (a machine profile sets it)")
+    p.add_argument("--giab-downsampled",
+                   help="local whole-genome GIAB alignments already downsampled, a path with "
+                        "{sample} and {depth} in it, for giab_genome (a machine profile sets it)")
     p.add_argument("--no-wait", action="store_true",
                    help="start timed steps even when the machine is busy (their times are marked)")
     p.add_argument("--quiet-cores", type=float, default=2.0)

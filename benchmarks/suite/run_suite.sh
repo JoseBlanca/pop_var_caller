@@ -71,6 +71,7 @@ pass+=(--threads "$threads")
 [[ -n "${BENCH_TOMATO_SIZES:-}" ]] && pass+=(--tomato-sizes "$BENCH_TOMATO_SIZES")
 [[ -n "${BENCH_TOMATO_REGIONS:-}" ]] && pass+=(--tomato-regions "$PROJECT_DIR/$BENCH_TOMATO_REGIONS")
 [[ -n "${BENCH_GIAB_ALIGNMENTS:-}" ]] && pass+=(--giab-alignments "$BENCH_GIAB_ALIGNMENTS")
+[[ -n "${BENCH_GIAB_DOWNSAMPLED:-}" ]] && pass+=(--giab-downsampled "$BENCH_GIAB_DOWNSAMPLED")
 [[ $slice == 1 ]] && RESULTS="$RESULTS/slice"
 mkdir -p "$RESULTS"
 

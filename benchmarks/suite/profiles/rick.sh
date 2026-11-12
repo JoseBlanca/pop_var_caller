@@ -12,6 +12,9 @@ BENCH_TOMATO_REFERENCE=/home/joxi/tomato25/genome/S_lycopersicum_chromosomes.4.0
 # suite would otherwise fetch from GIAB, as CRAMs of chromosomes 1 to 22 (every benchmark region is
 # autosomal), on the data disk.
 BENCH_GIAB_ALIGNMENTS='/media/giab/full_coverage/{sample}.chr1_22.300x.cram'
+# The same reads downsampled over chromosomes 1 to 22, seed 42, at 5x to 50x: what giab_genome
+# calls, made once outside the suite (each file's .coverage.json records how).
+BENCH_GIAB_DOWNSAMPLED='/media/giab/coverage_alignments/{sample}/{sample}.{depth}.seed42.cram'
 # Both data trees, mounted read-only into the dev container and the DeepVariant jobs.
 BENCH_EXTRA_MOUNT=/home/joxi/tomato25:/media/giab
 # Speed over all of chromosome 1 (90.9 Mb), as on kimura. Relative to the checkout.
