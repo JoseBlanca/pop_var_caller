@@ -119,8 +119,13 @@ struct HeldRecord<P> {
 /// so the worst this does is make one fragment two.
 ///
 /// `P` is whatever travels beside each record — the driver's coverage windows.
+///
+/// **A run whose output reads no fragments uses [`Self::passing_through`]**, which keeps none:
+/// see that constructor for what it does instead.
 #[derive(Debug)]
 pub struct FragmentKeeper<P> {
+    /// Whether it keeps fragments at all; `false` for [`Self::passing_through`].
+    keeps_fragments: bool,
     held: VecDeque<HeldRecord<P>>,
     samples: Vec<SampleReads>,
     contig: Option<ContigId>,
@@ -130,6 +135,7 @@ pub struct FragmentKeeper<P> {
 impl<P> Default for FragmentKeeper<P> {
     fn default() -> Self {
         Self {
+            keeps_fragments: true,
             held: VecDeque::new(),
             samples: Vec::new(),
             contig: None,
@@ -142,6 +148,45 @@ impl<P> Default for FragmentKeeper<P> {
 pub type KeptRecord<P> = (VcfRecord, P, RecordFragments);
 
 impl<P> FragmentKeeper<P> {
+    /// **A keeper for a run whose output reads no fragments**
+    /// ([`writer_reads_fragments`](crate::vcf::writer_reads_fragments) is `false`): each record
+    /// leaves the moment it arrives, with its read alleles taken off it as the keeping keeper takes
+    /// them, and with no fragments.
+    ///
+    /// **Why the record is not held.** Holding is what lets a later record's reads join this one's
+    /// into a fragment; a run that will read no fragment gains nothing from it and pays for it in
+    /// records parked on the one thread that puts them in genome order. Released at once, the
+    /// records leave in the order they came, as the keeping keeper's do.
+    ///
+    /// **Why the read alleles are still taken off.** A run that gathers no fragments asks the merge
+    /// for no read alleles either, so there are normally none to take; taking them anyway means a
+    /// record leaves this keeper in one shape whichever way it was built. Its counts stay at zero,
+    /// and the driver logs none.
+    #[must_use]
+    pub fn passing_through() -> Self {
+        Self {
+            keeps_fragments: false,
+            ..Self::default()
+        }
+    }
+
+    /// The keeper a run uses: [`Self::default`] where its output reads fragments,
+    /// [`Self::passing_through`] where it does not.
+    #[must_use]
+    pub fn for_a_run(gathers_fragments: bool) -> Self {
+        if gathers_fragments {
+            Self::default()
+        } else {
+            Self::passing_through()
+        }
+    }
+
+    /// Whether this keeper keeps fragments: `false` only for [`Self::passing_through`].
+    #[must_use]
+    pub fn keeps_fragments(&self) -> bool {
+        self.keeps_fragments
+    }
+
     /// **Take one record**, appending to `released` every held record it releases, in the order
     /// they came.
     ///
@@ -150,6 +195,11 @@ impl<P> FragmentKeeper<P> {
     /// If a record is written before the one handed in before it on the same contig: the writer's
     /// order is non-decreasing in written position, so that is a wiring defect.
     pub fn accept(&mut self, mut record: VcfRecord, payload: P, released: &mut Vec<KeptRecord<P>>) {
+        if !self.keeps_fragments {
+            let _ = record.replace_read_alleles(Default::default());
+            released.push((record, payload, RecordFragments::default()));
+            return;
+        }
         let contig = record.region().contig;
         let position = crate::vcf::encode::written_position(&record);
         if self.contig != Some(contig) {

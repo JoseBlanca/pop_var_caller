@@ -54,7 +54,7 @@ pub use header::{
     HiddenParalogProvenance, MAX_CONTIG_LENGTH, PARALOG_POSTERIOR_DECIMALS, PARALOG_RATIO_DECIMALS,
     VcfHeaderMetadata, WindowedPriorProvenance, header_text,
 };
-pub use writer::{FinishedVcf, RecordPlace, VcfWriteError, VcfWriter};
+pub use writer::{FinishedVcf, RecordPlace, VcfWriteError, VcfWriter, writer_reads_fragments};
 
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::read_phase::record_reads::RecordReadAlleles;

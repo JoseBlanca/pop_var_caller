@@ -672,3 +672,64 @@ fn the_order_is_checked_against_the_place_and_not_the_line() {
         "the writer checks the place it is given, never the line's own POS"
     );
 }
+
+/// **`writer_reads_fragments` says yes exactly where the writer builds a stage that reads them**,
+/// over the cases that choose the stage: ploidy one, two and four, with refinement decided on,
+/// decided off, and not decided at all (a writer opened by a test or a tool with no decision).
+///
+/// A run trusts the answer to skip gathering fragments, so a `false` where the writer has a
+/// stage would drop every `PS` from a file and no error would say so. At ploidy two the answer is
+/// `true` both ways round: refinement off hands the phase to reads alone, which read them too.
+#[test]
+fn the_writer_reads_fragments_exactly_where_it_builds_a_stage_that_phases() {
+    use crate::neighbour_evidence::stage::{NeighbourEvidenceSwitch, decide};
+
+    let directory = scratch("the_writer_reads_fragments_exactly_where_it_builds_a_stage");
+    let output = directory.join("cohort.vcf");
+    // Ten samples, every one fully inbred: enough for `auto` to run refinement at ploidy two.
+    let names: Vec<String> = (0..10).map(|sample| format!("s{sample}")).collect();
+    let inbreeding = vec![1.0; names.len()];
+    let with_samples = || {
+        VcfHeaderMetadata::try_new(
+            metadata().contigs().to_vec(),
+            names.clone(),
+            "ng call".to_string(),
+            "/genomes/ref.fa".to_string(),
+            "pvc_calls.log".to_owned(),
+            "defaults".to_owned(),
+        )
+        .expect("well-formed header metadata")
+    };
+    for copies in [1, 2, 4] {
+        let ploidy = Ploidy::try_new(copies).expect("a ploidy");
+        for switch in [
+            None,
+            Some(NeighbourEvidenceSwitch::Auto),
+            Some(NeighbourEvidenceSwitch::On),
+            Some(NeighbourEvidenceSwitch::Off),
+        ] {
+            let metadata = match switch {
+                Some(switch) => with_samples().the_neighbour_evidence_decision(decide(
+                    switch,
+                    &inbreeding,
+                    ploidy,
+                )),
+                None => with_samples(),
+            };
+            let reads = writer_reads_fragments(&metadata, ploidy);
+            let writer = VcfWriter::create(&output, metadata, ploidy).expect("a writer");
+            let has_a_stage = !matches!(writer.stage, LineStage::None);
+            assert_eq!(
+                reads, has_a_stage,
+                "ploidy {copies}, refinement {switch:?}: the answer must match the stage"
+            );
+            assert_eq!(
+                reads,
+                copies == 2,
+                "ploidy {copies}, refinement {switch:?}: every diploid run phases from reads, \
+                 one way or the other, and no other ploidy does"
+            );
+            writer.finish().expect("an empty file");
+        }
+    }
+}
