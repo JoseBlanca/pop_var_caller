@@ -38,7 +38,7 @@ than 100 bp.
 
 | | SNP F1, HG002 30× [^giab] | indel F1, HG002 30× [^giab] | STR genotypes right, HG002 30× [^str] | 100 tomato samples: time / memory [^tomato] | [overlapping variants](doc/user/overlapping_variants.md) |
 |---|---|---|---|---|---|
-| pvc | 0.9943 | 0.9859 | 88% | [direct mode](doc/user/calling.md): 1 h 16 min / 32 GB<br>[psp mode](doc/user/calling.md), parameters estimated from the data: 2 h 12 min / 13 GB | one record, never `*` |
+| pvc | 0.9943 | 0.9859 | 88% | [direct mode](doc/user/calling.md): 1 h 25 min / 23 GB<br>[psp mode](doc/user/calling.md), parameters estimated from the data: 1 h 37 min / 10 GB | one record, never `*` |
 | GATK | 0.9928 | 0.9839 | 82% | 9 h 50 min / 75 GB | separate records, with `*` |
 | freebayes | 0.9933 | 0.9606 | 77% | stalled, stopped after 41 h | one record, which also merges variants within 3 bases |
 | DeepVariant | 0.9966 | 0.9934 | 87% | not run | separate records, without `*`: a copy the deletion removes is written as missing in a cohort, as reference in a single sample |
@@ -51,6 +51,8 @@ hours on 48 threads: about 9 days of running in all. No step used more than 33 G
 
 [Accuracy](doc/user/accuracy.md) has the full results behind the accuracy columns, at every
 read depth, with the errors split by kind.
+[Performance](doc/user/performance.md) has the full time and memory results, from 1 to 100
+samples and for one human sample.
 
 [^giab]: GIAB HG002, the whole of chromosome 20 (64 Mb), reads downsampled to 30×, scored with
     RTG vcfeval against the GIAB truth set: a call counts only if its genotype matches. pvc ran
@@ -64,7 +66,7 @@ read depth, with the errors split by kind.
     pvc 909ea135 on 2026-11-09; HipSTR 0.6.2; freebayes's calls kept at QUAL ≥ 20.
 
 [^tomato]: Wall time and peak memory of the whole pipeline: 100 tomato accessions at about 3 reads
-    a position over 91 Mb of chromosome 1, on the same server: pvc b45c7f50 on 2026-11-04, the
+    a position over 91 Mb of chromosome 1, on the same server: pvc 909ea135 on 2026-11-10, the
     other callers 2026-10-26 to 30.
     Memory is the total of the processes running at once. In direct mode (`call-from-alignments`)
     pvc reads the alignments and calls in one command, with its built-in parameters; it ran on 3

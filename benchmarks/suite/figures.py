@@ -103,27 +103,6 @@ def style_axes(ax, xlabel, ylabel, title):
     ax.set_title(title, color=TEXT, fontsize=11, loc="left")
 
 
-def draw_lines(ax, series, point_labels_for="pvc (defaults)", styles=None, order=None):
-    """`series`: line -> list of (x, y, point label) in order."""
-    styles = styles or STYLE
-    for caller in order or CALLERS:
-        pts = series.get(caller)
-        if not pts:
-            continue
-        st = styles[caller]
-        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-        ax.plot(xs, ys, color=st["color"], linestyle=st["linestyle"], linewidth=2,
-                marker=st["marker"], markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.5,
-                label=st["label"], zorder=3)
-        # A direct label at the line's last point, in text ink, beside the colored mark.
-        ax.annotate(st["label"], (xs[-1], ys[-1]), xytext=(6, 0), textcoords="offset points",
-                    fontsize=8.5, color=TEXT, va="center", zorder=4, gid="caller")
-        if caller == point_labels_for:
-            for x, y, lab in pts:
-                ax.annotate(lab, (x, y), xytext=(-7, -13), textcoords="offset points", fontsize=8,
-                            color=TEXT_2, ha="right", zorder=4, gid="point")
-
-
 def declutter(fig):
     """Move a text label the shortest way, up or down, until it overlaps no label already placed."""
     fig.canvas.draw()
@@ -890,70 +869,152 @@ def stutter_homopolymer_figure(rows, out, samples="50"):
                           callers=HOMOPOLYMER_CALLERS, shared_axes=True, missing_panel=True)
 
 
-# The performance figures' lines: (line, caller in the table, its stages in order of preference).
-# pvc is three lines, its three ways of spending time: in one step from the reads, building the
-# psps from the reads, and calling from the psps. Its parameter fit is optional, made once for a
-# cohort, and is in no line (the summary reports it on its own).
-PERF_LINES = [
-    ("pvc, one step", "pvc (defaults)", ("call-from-alignments",)),
-    ("pvc, one step, 3 segments", "pvc (defaults, 3 segments)", ("whole pipeline",)),
-    ("pvc, building psps", "pvc (fitted)", ("generate-psps",)),
-    ("pvc, calling from psps", "pvc (fitted)", ("call-from-psps",)),
-    ("GATK", "GATK", ("whole pipeline", "HaplotypeCaller")),
-    ("freebayes", "freebayes", ("freebayes",)),
-    ("DeepVariant", "DeepVariant", ("DeepVariant + GLnexus", "DeepVariant")),
+# The performance figures (owner, 12 November 2026): side by side, wall time and peak memory as
+# bars, one bar a tool, at one configuration; and wall time against the number of samples. The
+# tools: (label, caller in the table, its stages in order of preference, colour).
+PERF_TOOLS = [
+    ("pvc\ndirect mode", "pvc (defaults)", ("call-from-alignments",), "#2a78d6"),
+    ("pvc\ndirect mode,\n3 segments", "pvc (defaults, 3 segments)", ("whole pipeline",), "#2a78d6"),
+    ("pvc\npsp mode", "pvc (fitted)", ("whole pipeline",), "#2a78d6"),
+    ("GATK", "GATK", ("whole pipeline", "HaplotypeCaller"), "#eb6834"),
+    ("freebayes", "freebayes", ("freebayes",), "#1baf7a"),
+    ("DeepVariant", "DeepVariant", ("DeepVariant + GLnexus", "DeepVariant"), "#6250d6"),
 ]
-PERF_STYLE = dict(STYLE)
-PERF_STYLE["pvc, one step"] = dict(STYLE["pvc (defaults)"], label="pvc, one step")
-PERF_STYLE["pvc, one step, 3 segments"] = dict(color="#2a78d6", linestyle="-.", marker="*",
-                                               label="pvc, one step, 3 segments")
-PERF_STYLE["pvc, building psps"] = dict(color="#2a78d6", linestyle="--", marker="s",
-                                        label="pvc, building psps")
-PERF_STYLE["pvc, calling from psps"] = dict(color="#2a78d6", linestyle=":", marker="v",
-                                            label="pvc, calling from psps")
+PERF_GRID = "#d9d8d3"
 
 
-def performance_series(rows, benchmark, label_of):
-    vals = collections.defaultdict(dict)
-    for line, caller, stages in PERF_LINES:
-        for r in rows:
-            if r["benchmark"] != benchmark or r["caller"] != caller or r["stage"] not in stages:
-                continue
-            if r["metric"] not in ("wall_seconds", "peak_rss_mb_all_processes"):
-                continue
-            if r.get("outcome"):  # did not finish: a lower bound, not a point on the curve
-                continue
-            key = (line, r["samples"], r["depth"])
-            rank = stages.index(r["stage"])
-            prior = vals[key].get(("rank", r["metric"]))
-            if prior is not None and prior < rank:
-                continue
-            vals[key][r["metric"]] = float(r["value"])
-            vals[key][("rank", r["metric"])] = rank
-    series = collections.defaultdict(list)
-    for (line, samples, depth), m in vals.items():
-        if "wall_seconds" in m and "peak_rss_mb_all_processes" in m:
-            series[line].append((label_of(samples, depth), m["wall_seconds"],
-                                 m["peak_rss_mb_all_processes"] / 1024))
-    return series
+def perf_measure(rows, benchmark, samples, depth, caller, stages):
+    """(wall seconds, peak GB of the processes at once, note) of a tool's run, from its most
+    preferred stage; the note is the outcome of a run that did not finish (its time a lower bound,
+    its memory unknown). None if the tool did not run there."""
+    found = {}
+    for r in rows:
+        if (r["benchmark"] == benchmark and r["samples"] == samples and r["depth"] == depth
+                and r["caller"] == caller and r["stage"] in stages and r["value"]):
+            found.setdefault(r["stage"], {})[r["metric"]] = (float(r["value"]), r.get("outcome"))
+    for stage in stages:
+        m = found.get(stage, {})
+        if "wall_seconds" in m:
+            wall, note = m["wall_seconds"]
+            mem = m.get("peak_rss_mb_all_processes")
+            return wall, (mem[0] / 1000 if mem else None), note or None
+    return None
 
 
-def performance_figure(rows, benchmark, order_key, label_of, title, subtitle, out, name):
-    raw = performance_series(rows, benchmark, label_of)
-    series = {c: [(w, mem, depth_label(lab) if lab in DEPTH_ORDER else lab)
-                  for lab, w, mem in sorted(pts, key=lambda p: order_key(p[0]))]
-              for c, pts in raw.items()}
-    fig, ax = plt.subplots(figsize=(7.5, 5), facecolor=SURFACE)
-    style_axes(ax, "wall time (seconds)", "peak memory (GB)", "")
-    ax.margins(x=0.08, y=0.12)
-    draw_lines(ax, series, point_labels_for="pvc, one step", styles=PERF_STYLE,
-               order=[line for line, _, _ in PERF_LINES])
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
-    ax.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: f"{v:g}" if is_two_or_five(v) else ""))
-    fig.suptitle(title, x=0.01, ha="left", color=TEXT, fontsize=13, y=1.02)
-    fig.text(0.01, 0.955, subtitle, ha="left", color=TEXT_2, fontsize=9)
-    ax.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=TEXT)
-    return save(fig, out, name)
+def perf_style(ax):
+    ax.set_facecolor(SURFACE)
+    ax.grid(axis="y", color=PERF_GRID, linewidth=0.8, linestyle=(0, (1, 3)))
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left", "bottom"):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(colors=TEXT_2, labelsize=9, length=0)
+
+
+def perf_time_unit(seconds):
+    return (3600, "hours") if seconds >= 2 * 3600 else (60, "minutes")
+
+
+def perf_duration(seconds):
+    s = round(seconds)
+    if s < 600:
+        return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
+    if s < 3600:
+        return f"{round(s / 60)} min"
+    h, m = divmod(round(s / 60), 60)
+    return f"{h} h {m} min" if m else f"{h} h"
+
+
+def performance_bars(rows, benchmark, samples, depth, title, subtitle, out, name, leave_out=()):
+    """Two panels side by side: each tool's wall time and its peak memory, as bars; the tools
+    whose labels are in `leave_out` are not drawn."""
+    with plt.rc_context({"font.family": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
+                         "svg.fonttype": "none"}):
+        tools = [(label, colour, perf_measure(rows, benchmark, samples, depth, caller, stages))
+                 for label, caller, stages, colour in PERF_TOOLS if label not in leave_out]
+        tools = [(label, colour, m) for label, colour, m in tools if m]
+        if not tools:
+            return None
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4.6), facecolor=SURFACE)
+        unit, unit_name = perf_time_unit(max(m[0] for _, _, m in tools))
+        x = range(len(tools))
+        for ax, which in zip(axes, ("time", "memory")):
+            perf_style(ax)
+            top = 0
+            for xi, (label, colour, (wall, mem, note)) in zip(x, tools):
+                value = wall / unit if which == "time" else mem
+                if value is None:
+                    ax.annotate("not\nmeasured", (xi, 0), xytext=(0, 3), textcoords="offset points",
+                                ha="center", va="bottom", color=TEXT_2, fontsize=8.5)
+                    continue
+                top = max(top, value)
+                stopped = which == "time" and note
+                ax.bar(xi, value, width=0.66, color=colour, alpha=0.28, linewidth=0, zorder=2)
+                # A run that did not finish is hatched: its bar is a lower bound.
+                ax.bar(xi, value, width=0.66, fill=False, edgecolor=colour, linewidth=1, zorder=3,
+                       hatch="///" if stopped else None)
+                text = (perf_duration(wall) if which == "time" else
+                        f"{mem:.1f} GB" if mem < 10 else f"{mem:.0f} GB")
+                if stopped:
+                    text = f"stopped after\n{perf_duration(wall)}"
+                ax.annotate(text, (xi, value), xytext=(0, 3), textcoords="offset points",
+                            ha="center", va="bottom", color=TEXT, fontsize=8.5, linespacing=1.1)
+            ax.set_ylim(0, top * 1.18)
+            ax.set_xticks(list(x), [label for label, _, _ in tools], fontsize=8.5, color=TEXT)
+            ax.set_title("wall time" if which == "time" else "peak memory", loc="left",
+                         color=TEXT, fontsize=11)
+            ax.set_ylabel(unit_name if which == "time" else "GB", color=TEXT_2, fontsize=9.5)
+        fig.text(0.01, 0.985, title, color=TEXT, fontsize=13, fontweight="semibold", va="top")
+        fig.text(0.01, 0.925, subtitle, color=TEXT_2, fontsize=9.5, va="top")
+        fig.subplots_adjust(left=0.06, right=0.99, top=0.78, bottom=0.16, wspace=0.18)
+        return save(fig, out, name)
+
+
+def performance_by_samples(rows, out, name, leave_out=()):
+    """Wall time against the number of samples on the tomato cohort, one line a tool; a run that
+    did not finish is an open mark at the time it was stopped. The tools whose labels are in
+    `leave_out` are not drawn."""
+    with plt.rc_context({"font.family": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
+                         "svg.fonttype": "none"}):
+        sizes = sorted({int(r["samples"]) for r in rows if r["benchmark"] == "speed"})
+        if not sizes:
+            return None
+        fig, ax = plt.subplots(figsize=(7.2, 4.6), facecolor=SURFACE)
+        perf_style(ax)
+        ax.grid(axis="x", color=PERF_GRID, linewidth=0.8, linestyle=(0, (1, 3)))
+        for label, caller, stages, colour in PERF_TOOLS:
+            if label in leave_out:
+                continue
+            pts = [(n, perf_measure(rows, "speed", str(n), "about 3x", caller, stages)) for n in sizes]
+            pts = [(n, m) for n, m in pts if m]
+            if not pts:
+                continue
+            done = [(n, m[0] / 3600) for n, m in pts if not m[2]]
+            ax.plot([n for n, _ in done], [h for _, h in done], color=colour, linewidth=1.8,
+                    marker="o", markersize=4.5, zorder=3)
+            name_at = done[-1]
+            for n, m in pts:
+                if m[2]:
+                    ax.plot([done[-1][0], n], [done[-1][1], m[0] / 3600], color=colour,
+                            linewidth=1.2, linestyle=(0, (2, 2)), zorder=2)
+                    ax.plot(n, m[0] / 3600, marker="o", markersize=6, markerfacecolor=SURFACE,
+                            markeredgecolor=colour, markeredgewidth=1.5, zorder=4)
+                    ax.annotate(f"stopped after {perf_duration(m[0])},\nnot finished",
+                                (n, m[0] / 3600), xytext=(-8, 0), textcoords="offset points",
+                                ha="right", va="center", color=TEXT_2, fontsize=8.5)
+                    name_at = (n, m[0] / 3600)
+            ax.annotate(label.replace("pvc\n", "pvc, ").replace("\n", " "), name_at, xytext=(8, 0), textcoords="offset points",
+                        va="center", color=TEXT, fontsize=9, gid="caller")
+        ax.set_xlim(0, max(sizes) * 1.32)
+        ax.set_ylim(0, None)
+        ax.set_xticks([s for s in sizes if s != 2])
+        ax.set_xlabel("samples", color=TEXT_2, fontsize=10)
+        ax.set_ylabel("wall time (hours)", color=TEXT_2, fontsize=10)
+        fig.text(0.01, 0.985, "Wall time and the number of samples", color=TEXT, fontsize=13,
+                 fontweight="semibold", va="top")
+        fig.text(0.01, 0.925, "Tomato cohort, about 3 reads a position over 91 Mb of chromosome 1",
+                 color=TEXT_2, fontsize=9.5, va="top")
+        fig.subplots_adjust(left=0.09, right=0.98, top=0.83, bottom=0.12)
+        return save(fig, out, name)
 
 
 def main():
@@ -992,18 +1053,20 @@ def main():
         stutter_homopolymer_figure(rows, out),
         *inbreeding_figures(rows, out),
         inbreeding_scatter_figure(rows, out),
-        performance_figure(
-            rows, "giab_chr20", depth_key, lambda s, d: d,
-            # depth_key orders the raw depths; their labels are made readable below.
-            "Speed and memory — HG002, chromosome 20, one sample",
-            "6 threads; points from 5× to ~60×; pvc's optional parameter fit is in no line",
-            out,
-            "performance_giab_chr20"),
-        performance_figure(
-            rows, "speed", lambda s: int(s), lambda s, d: s,
-            "Speed and memory — tomato cohort, 8 Mb at ~3 reads a position",
-            "6 threads; points are 1, 8 and 62 accessions; pvc's optional parameter fit is in no "
-            "line", out, "performance_tomato"),
+        performance_bars(rows, "giab_chr20", "1", "30x",
+                         "Speed and memory — one human sample",
+                         "GIAB HG002, chromosome 20 (64 Mb), 30×", out, "performance_giab_chr20"),
+        # 50 samples, the largest cohort every tool finished; pvc as its 3-segment run, set up as
+        # GATK's and freebayes' runs are, and in psp mode (owner, 12 November 2026).
+        performance_bars(rows, "speed", "50", "about 3x",
+                         "Speed and memory — 50 tomato samples",
+                         "About 3 reads a position over 91 Mb of chromosome 1", out,
+                         "performance_tomato",
+                         leave_out=("pvc\ndirect mode",)),
+        # pvc as its 3-segment run alone: its three lines lay too close together (owner,
+        # 12 November 2026).
+        performance_by_samples(rows, out, "performance_tomato_samples",
+                               leave_out=("pvc\ndirect mode", "pvc\npsp mode")),
     ]
     for m in made:
         if m:
