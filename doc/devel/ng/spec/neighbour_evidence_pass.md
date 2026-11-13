@@ -109,11 +109,17 @@ solved, with *margins* either side read for context and written by the neighbour
 - **Windows span the gaps between BED regions.** A gap is only a long distance, and the corrected
   transition (§3.5) returns the state to its long-run share across it. A window is cut only at a
   contig's end; nothing crosses contigs.
-- **Sizes are set by length and by a memory budget** (§6): the core starts at 2 Mb and each margin at
-  1 Mb, and both shrink with the cohort, the margin never below 500 kb. The core shrinks first, down
-  to the margins' length; then core and margins shrink together, in steps of 50 kb, to the floor. A
-  window's size is chosen from the records it would hold, so a window waits until the records its
-  largest affordable size reaches have arrived (`src/neighbour_evidence/windows.rs`).
+- **Sizes are set by length and by a memory budget in bytes** (§6): the core starts at 2 Mb and each
+  margin at 1 Mb, and both shrink as the cohort grows, the margin never below 500 kb. The core
+  shrinks first, down to the margins' length; then core and margins shrink together, in steps of
+  50 kb, to the floor. A window's size is chosen from the bytes its records would hold, so a window
+  waits until the records its largest affordable size reaches have arrived
+  (`src/neighbour_evidence/windows.rs`).
+- **A window over budget even at the floor stops the run** with an error naming the window, its
+  records, samples and bytes, and the budget to ask for (`--refine-window-bytes`). The run neither
+  switches refinement off nor goes on past the budget (owner, 2026-11-13): a run that cannot refine
+  says so, rather than writing a file whose header promises a pass it did not run, or running out of
+  memory ten minutes into a window.
 
 ### 2.3 Parallelism
 
@@ -548,21 +554,47 @@ the file**, since the pass can drop records.
     floor this cohort size reaches (0.5-Mb core and margins) — about 6,500 a sample a record. Over
     24 million records and 3,000 samples that is 4.7 × 10¹⁴ operations, **about 33 core-hours** at
     4 × 10⁹ a second; at 57 samples, at default sizes, 25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
+  - **Measured 2026-11-13, about 150 times that.** On 100 to 800 tomato25 samples over 1 to 4 Mb of
+    chromosome 0, 48 threads, the cost grew in proportion to the samples (773, 1,415, 2,871 and
+    5,281 CPU-seconds for 100, 200, 400 and 800 over the same 1 Mb), with no sign of the `N²`
+    template choice: 3 CPU-seconds a window at 400 samples. The walks were 85% of the time, about
+    130 µs a sample a record in a window after the fitting ones. Two factors make up the gap: the
+    phasing rounds (`neighbour_evidence_phasing.md`) walk five times, the later four drawing nine
+    paths each with reads, about eight walks' work; and a walk ran about 20 times slower than the
+    operation count above (12 µs a sample a record measured, 0.55 µs counted). At 2,176 samples that
+    projects to about 4,900 core-hours for the genome, five days on 48 cores
+    (`doc/devel/reports/implementations/refinement_memory_2026-11-13.md`; making the walk cheaper is the next
+    step).
 - **Three reads a position.** Where it helps: the prototype's gains are all at 1× and 3×.
 - **Three hundred reads.** The sample's own likelihood dominates every emission and the posterior is
   the calling's; the pass costs time and changes nearly nothing. It still runs if the switch says so:
   depth does not turn it off, because a deep cohort can hold shallow samples.
 
-**Memory.** A window holds, per sample and record, what rewriting the line needs (`DP`, `AD`, `PL`)
-and what the walk reads (`L` and the shares, as `f32`): about 40 bytes for a biallelic record, about
-twice that at three alleles, 400 at ten. At 3,000 samples and tomato's density a 4-Mb window is about
-104,000 records, 12 GB; **the window is therefore sized to a budget** — starting at 120 million
-sample-records, about 5 GB biallelic — by shrinking the core first and the margins to their 500-kb
-floor; at 3,000 samples that is a 1.5-Mb window. Past the floor, at about 3,000 samples, the budget
-is exceeded rather than the margins shortened, and the run report says by how much. A walk keeps its
-forward vectors, `K² + K` numbers a record, and its per-site terms for the backward sweep
-(`SiteTerms`, about as many): as `f64`, about 207 MB a sample over a 40,000-record window, one per
-thread.
+**Memory.** A window's memory has two parts: what it holds for every sample at every record, which
+grows with the cohort, and what each thread's walk holds at every record, which grows with the
+threads.
+
+- **Per sample and record**, for every record the window spans: the record's VCF line, held
+  compressed; its likelihoods and shares (`L` and `q`, as `f32`); each sample's read alleles, seven
+  bytes each (`PackedRecordFragments`); and each sample's two haplotypes, the templates they
+  followed and its phase across the rounds. For each record of the core, besides: each sample's sums
+  over the averaged rounds and what it writes. *Measured 2026-11-13* on 400 tomato25 samples
+  (chromosome 0, about 22 read alleles a sample a record there), about 140 bytes a sample a record
+  held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
+  of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
+  bytes, counted only the likelihoods and shares.
+- **Per thread and record**: the walk's forward probabilities, `K² + 3K` numbers, its terms for the
+  backward sweep, the round's inputs and, from round 2, the nine drawn paths — about 4 to 5 KB a
+  record, so 48 threads over a 70,000-record window hold about 15 GB. Its emissions, `K² + K` numbers
+  a record, are kept for two records only and computed again in the backward sweep (2026-11-13).
+
+**The window is sized to a budget in bytes**, `--refine-window-bytes`, 32 GB by default. It counts
+the per-sample part exactly as the records arrive — each line as it arrived, though most are held
+compressed, so the count does not depend on when its batch was compressed. It does not count the
+per-thread part: that would make the windows, and so the output, depend on the thread count (§2.3).
+At 2,176 samples and about 250 bytes a sample a record, 32 GB holds a window of about 58,000
+records, 2.2 Mb at 26 records a kilobase; the 500-kb floor is reached at about 3,000 samples, and
+past it the run stops (§2.2).
 
 ---
 
