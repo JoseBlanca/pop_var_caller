@@ -11,7 +11,7 @@
 use std::sync::OnceLock;
 
 use super::capture::LARGEST_ERROR_PHRED;
-use super::fragments::FragmentAllele;
+use super::fragments::{FragmentAllele, ReadAllele};
 
 /// **`T_link`, ln 199, in natural-log odds**: reads make or keep a link at odds of at least 199 to 1, one wrong link in
 /// 200 if the error model holds (§2.5). With the error floor at 0.01 one fragment is worth at most
@@ -183,16 +183,51 @@ impl ReadLink {
     }
 }
 
+/// **A read allele as a link reads it**: its fragment, its allele and its error. Both forms a
+/// read allele travels in give these, so one link sum serves both.
+pub trait LinkAllele: Copy {
+    /// The read, numbered within its sample and contig.
+    fn fragment(self) -> u32;
+    /// The allele, numbered as the record numbers its alleles.
+    fn allele(self) -> u16;
+    /// The read's error as a Phred integer.
+    fn error_phred(self) -> u8;
+}
+
+impl LinkAllele for FragmentAllele {
+    fn fragment(self) -> u32 {
+        self.fragment
+    }
+    fn allele(self) -> u16 {
+        self.allele
+    }
+    fn error_phred(self) -> u8 {
+        self.error_phred
+    }
+}
+
+impl LinkAllele for ReadAllele {
+    fn fragment(self) -> u32 {
+        ReadAllele::fragment(self)
+    }
+    fn allele(self) -> u16 {
+        ReadAllele::allele(self)
+    }
+    fn error_phred(self) -> u8 {
+        ReadAllele::error_phred(self)
+    }
+}
+
 /// **`L` for one sample's link between two records**, from that sample's fragments at each, both
 /// in fragment order as [`RecordFragments::of_sample`](super::fragments::RecordFragments::of_sample)
 /// gives them.
 ///
 /// The sum runs in fragment order, in `f64`, so it is the same at any thread count (§2.5).
 #[must_use]
-pub fn score_read_link(
-    at_one: &[FragmentAllele],
+pub fn score_read_link<A: LinkAllele, B: LinkAllele>(
+    at_one: &[A],
     one: Heterozygote,
-    at_other: &[FragmentAllele],
+    at_other: &[B],
     other: Heterozygote,
 ) -> ReadLink {
     let mut link = ReadLink {
@@ -202,13 +237,13 @@ pub fn score_read_link(
     let (mut i, mut j) = (0, 0);
     while i < at_one.len() && j < at_other.len() {
         let (x, y) = (at_one[i], at_other[j]);
-        match x.fragment.cmp(&y.fragment) {
+        match x.fragment().cmp(&y.fragment()) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                if one.holds(x.allele) && other.holds(y.allele) {
-                    let w = weight(x.error_phred, y.error_phred);
-                    let cis = (x.allele == one.lower) == (y.allele == other.lower);
+                if one.holds(x.allele()) && other.holds(y.allele()) {
+                    let w = weight(x.error_phred(), y.error_phred());
+                    let cis = (x.allele() == one.lower) == (y.allele() == other.lower);
                     link.log_odds += if cis { w } else { -w };
                     link.fragments += 1;
                 }

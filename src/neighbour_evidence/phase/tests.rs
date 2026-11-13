@@ -1,4 +1,5 @@
 use super::*;
+use crate::read_phase::fragments::{FragmentAllele, PackedRecordFragments, RecordFragments};
 
 /// A biallelic site's two haplotypes from each copy's probability of the alternative.
 fn site(first_alternative: f64, second_alternative: f64) -> HaplotypePair {
@@ -562,28 +563,31 @@ fn read_fixture(
     n: usize,
     at: &[(usize, &[(u32, u16)])],
     quality: impl Fn(usize) -> Option<u32>,
-) -> (Vec<Vec<FragmentAllele>>, Vec<Option<u32>>) {
-    let mut fragments = vec![Vec::new(); n];
+) -> (Vec<PackedRecordFragments>, Vec<Option<u32>>) {
+    let mut fragments = vec![PackedRecordFragments::default(); n];
     for &(site, entries) in at {
-        fragments[site] = entries
-            .iter()
-            .map(|&(fragment, allele)| FragmentAllele {
-                sample: 0,
-                fragment,
-                allele,
-                error_phred: 30,
-            })
-            .collect();
+        fragments[site] = RecordFragments::from_entries(
+            entries
+                .iter()
+                .map(|&(fragment, allele)| FragmentAllele {
+                    sample: 0,
+                    fragment,
+                    allele,
+                    error_phred: 30,
+                })
+                .collect(),
+        )
+        .into();
     }
     (fragments, (0..n).map(quality).collect())
 }
 
 fn site_reads<'a>(
-    fragments: &'a [Vec<FragmentAllele>],
+    fragments: &'a [PackedRecordFragments],
     qualities: &[Option<u32>],
 ) -> SiteReads<'a> {
     SiteReads {
-        fragments: fragments.iter().map(Vec::as_slice).collect(),
+        fragments: fragments.iter().map(|at| at.of_sample(0)).collect(),
         genotype_qualities: qualities.to_vec(),
         drawn_without_reads: Vec::new(),
     }

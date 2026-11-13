@@ -43,7 +43,8 @@ use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{ChosenTemplate, choose_haplotypes, choose_templates, compared_records};
 use crate::calling::quality::score_best_genotype;
-use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
+use crate::read_phase::fragments::PackedRecordFragments;
+use crate::read_phase::link::LinkAllele;
 use crate::read_phase::link::{Heterozygote, score_read_link};
 use crate::vcf::encode::written_genotype_quality;
 
@@ -315,7 +316,7 @@ impl Phasing {
 
     /// Whether the haplotype draw uses a window's reads: phasing on, the switch on, and the window
     /// has `fragments`.
-    fn draws_with_reads(self, fragments: &[RecordFragments]) -> bool {
+    fn draws_with_reads(self, fragments: &[PackedRecordFragments]) -> bool {
         self.is_on() && self.reads_in_draw && !fragments.is_empty()
     }
 
@@ -403,6 +404,9 @@ struct WindowLayout {
     site_of_record: Vec<Option<usize>>,
     /// The core's sites, ascending.
     core_sites: Vec<usize>,
+    /// Where each core site's sums start in [`SampleRounds::sums`], one past the last at the end:
+    /// a site of `G` genotypes holds `2·G + 1` numbers.
+    core_sums: Vec<usize>,
 }
 
 impl WindowLayout {
@@ -414,13 +418,20 @@ impl WindowLayout {
         for (site, &index) in record_of_site.iter().enumerate() {
             site_of_record[index] = Some(site);
         }
-        let core_sites = (0..record_of_site.len())
+        let core_sites: Vec<usize> = (0..record_of_site.len())
             .filter(|&site| core.contains(&record_of_site[site]))
             .collect();
+        let mut core_sums = Vec::with_capacity(core_sites.len() + 1);
+        core_sums.push(0);
+        for &site in &core_sites {
+            let last = core_sums.last().copied().unwrap_or(0);
+            core_sums.push(last + 2 * records[record_of_site[site]].genotype_count() + 1);
+        }
         Self {
             record_of_site,
             site_of_record,
             core_sites,
+            core_sums,
         }
     }
 
@@ -647,26 +658,6 @@ fn is_hidden(hidden: &[Vec<usize>], sample: usize, record: usize) -> bool {
     hidden[sample].binary_search(&record).is_ok()
 }
 
-/// **One core site's quantities from one round, or their sums over the averaged rounds.**
-struct CoreSite {
-    posterior: Vec<f64>,
-    prediction: Vec<f64>,
-    background_copy: f64,
-}
-
-impl CoreSite {
-    fn add(&mut self, other: CoreSite) {
-        let CoreSite {
-            posterior,
-            prediction,
-            background_copy,
-        } = other;
-        add_to(&mut self.posterior, &posterior);
-        add_to(&mut self.prediction, &prediction);
-        self.background_copy += background_copy;
-    }
-}
-
 /// One sample's state across a window's rounds.
 struct SampleRounds {
     /// Round 1's template samples; `None` when the sample has no informative record in the window,
@@ -685,8 +676,12 @@ struct SampleRounds {
     informative_positions: Vec<u64>,
     /// The parameters round 1 fitted or read.
     parameters: Option<WalkParameters>,
-    /// One per core site, in order: the sums over the averaged rounds; empty until the first.
-    sums: Vec<CoreSite>,
+    /// The sums over the averaged rounds, core site after core site in one array, each site's
+    /// genotype posterior, then its prediction, then its chance of copying the background, at
+    /// [`WindowLayout::core_sums`]; empty until the first averaged round. One flat array rather
+    /// than two vectors a site: held for every sample over a window's rounds, the vectors' own
+    /// headers and allocations were twice the numbers they held (pass spec §6).
+    sums: Vec<f64>,
     /// The phase across the averaged rounds; `None` without phasing or for a sample not walked.
     phase: Option<SamplePhase>,
 }
@@ -770,7 +765,7 @@ pub fn refine_window_joined(
 #[must_use]
 pub fn refine_window_with_reads(
     records: &[SiteRecord],
-    fragments: Option<&[RecordFragments]>,
+    fragments: Option<&[PackedRecordFragments]>,
     core: Range<usize>,
     contig_length: Option<u64>,
     fits: &mut [SampleFit],
@@ -953,10 +948,10 @@ pub fn refine_window_with_reads(
 /// at each, the heterozygote the chain reads at each, the lower allele first. Positive is *cis*,
 /// which the chain reads as the two records taking the same orientation; `None` where no fragment
 /// counts at both.
-fn draw_link(
-    at_one: &[FragmentAllele],
+fn draw_link<A: LinkAllele>(
+    at_one: &[A],
     one_pair: (usize, usize),
-    at_other: &[FragmentAllele],
+    at_other: &[A],
     other_pair: (usize, usize),
 ) -> Option<f64> {
     if at_one.is_empty() || at_other.is_empty() {
@@ -1021,7 +1016,7 @@ fn draw_hidden_records(
 /// record order from the window's [`StreamPurpose::ReadCheck`] stream. Returned as record indices,
 /// ascending.
 fn draw_read_check_records(
-    fragments: &[RecordFragments],
+    fragments: &[PackedRecordFragments],
     layout: &WindowLayout,
     sample: usize,
     hidden: &[usize],
@@ -1053,7 +1048,7 @@ fn keeps_reads_out(hidden: &[usize], read_check: &[usize], index: usize) -> bool
 /// and the round.
 struct RoundShared<'a> {
     records: &'a [SiteRecord],
-    fragments: &'a [RecordFragments],
+    fragments: &'a [PackedRecordFragments],
     layout: &'a WindowLayout,
     pairs: &'a PairLayout,
     genotype_pairs: &'a GenotypePairs,
@@ -1327,8 +1322,8 @@ fn solve_round(
         walk(&sites, walk_templates, Some(&template_weights), parameters)
     };
     let WalkResult {
-        mut posteriors,
-        mut neighbour_predictions,
+        posteriors,
+        neighbour_predictions,
         last_template_copy,
         ..
     } = result;
@@ -1338,22 +1333,20 @@ fn solve_round(
         .map(|&record| posteriors[layout.site(record)].clone())
         .collect();
     if phasing.averages(round) {
-        let core = layout.core_sites.iter().map(|&site| CoreSite {
-            posterior: std::mem::take(&mut posteriors[site]),
-            prediction: std::mem::take(&mut neighbour_predictions[site]),
-            background_copy: last_template_copy[site],
-        });
         if state.sums.is_empty() {
-            state.sums = core.collect();
-        } else {
-            assert_eq!(
-                state.sums.len(),
-                layout.core_sites.len(),
-                "one sum a core site"
+            // Zeros and then the first round's values added, which is those values exactly.
+            state.sums = vec![0.0; layout.core_sums.last().copied().unwrap_or(0)];
+        }
+        for (core_site, &site) in layout.core_sites.iter().enumerate() {
+            let sums =
+                &mut state.sums[layout.core_sums[core_site]..layout.core_sums[core_site + 1]];
+            let genotypes = posteriors[site].len();
+            add_to(&mut sums[..genotypes], &posteriors[site]);
+            add_to(
+                &mut sums[genotypes..2 * genotypes],
+                &neighbour_predictions[site],
             );
-            for (sum, site) in state.sums.iter_mut().zip(core) {
-                sum.add(site);
-            }
+            sums[2 * genotypes] += last_template_copy[site];
         }
     }
 }
@@ -1363,7 +1356,7 @@ fn solve_round(
 #[allow(clippy::too_many_arguments)] // the window's data, one sample's state, and the rules
 fn final_solution(
     records: &[SiteRecord],
-    fragments: &[RecordFragments],
+    fragments: &[PackedRecordFragments],
     layout: &WindowLayout,
     pairs_layout: &PairLayout,
     sample: usize,
@@ -1393,7 +1386,7 @@ fn final_solution(
     };
     assert_eq!(
         state.sums.len(),
-        layout.core_sites.len(),
+        layout.core_sums.last().copied().unwrap_or(0),
         "one sum a core site"
     );
     let mut heterozygotes: Vec<Option<(usize, usize)>> = vec![None; layout.sites()];
@@ -1402,14 +1395,16 @@ fn final_solution(
     // of the alleles some sample keeps, which can only raise it, so a link this allows has the
     // written `GQ` at least this at both ends.
     let mut genotype_qualities: Vec<Option<u32>> = vec![None; layout.sites()];
-    for (&site, sum) in layout.core_sites.iter().zip(&state.sums) {
+    for (core_site, &site) in layout.core_sites.iter().enumerate() {
         let index = layout.record_of_site[site];
         let record = &records[index];
+        let sum = &state.sums[layout.core_sums[core_site]..layout.core_sums[core_site + 1]];
+        let genotypes = record.genotype_count();
         let mean =
             |values: &[f64]| -> Vec<f64> { values.iter().map(|value| value / averaged).collect() };
-        let prediction = mean(&sum.prediction);
-        let background = sum.background_copy / averaged;
-        let mut posterior = mean(&sum.posterior);
+        let prediction = mean(&sum[genotypes..2 * genotypes]);
+        let background = sum[2 * genotypes] / averaged;
+        let mut posterior = mean(&sum[..genotypes]);
         let outcome = match record.row(sample) {
             SampleRow::Absent => continue,
             SampleRow::Informative => {

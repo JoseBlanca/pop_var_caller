@@ -32,7 +32,7 @@ use super::refine::{
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
-use crate::read_phase::fragments::RecordFragments;
+use crate::read_phase::fragments::{PackedRecordFragments, RecordFragments};
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
 
@@ -496,13 +496,13 @@ impl NeighbourEvidenceStage {
 #[derive(Debug, Default)]
 struct HeldSites {
     records: Vec<SiteRecord>,
-    fragments: Vec<RecordFragments>,
+    fragments: Vec<PackedRecordFragments>,
 }
 
 impl HeldSites {
     fn push(&mut self, record: SiteRecord, fragments: RecordFragments) {
         self.records.push(record);
-        self.fragments.push(fragments);
+        self.fragments.push(fragments.into());
     }
 
     fn clear(&mut self) {
@@ -517,7 +517,7 @@ impl HeldSites {
     }
 
     /// The sites in `range`, as the window solve takes them.
-    fn window(&self, range: std::ops::Range<usize>) -> (&[SiteRecord], &[RecordFragments]) {
+    fn window(&self, range: std::ops::Range<usize>) -> (&[SiteRecord], &[PackedRecordFragments]) {
         (&self.records[range.clone()], &self.fragments[range])
     }
 }

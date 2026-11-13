@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use super::model::HaplotypePair;
-use crate::read_phase::fragments::FragmentAllele;
+use crate::read_phase::fragments::ReadAllele;
 use crate::read_phase::link::{self, Heterozygote, ReadLink, Relation, score_read_link};
 
 /// **Paths drawn per averaged round besides the round's own** (spec §2.3): with 8, the 64-founder
@@ -554,7 +554,7 @@ impl Member {
 /// does.
 #[derive(Default)]
 pub(crate) struct SiteReads<'a> {
-    pub(crate) fragments: Vec<&'a [FragmentAllele]>,
+    pub(crate) fragments: Vec<&'a [ReadAllele]>,
     pub(crate) genotype_qualities: Vec<Option<u32>>,
     /// Per site, whether the draw kept the sample's reads out there (reads-in-draw spec §2.6); empty
     /// when the draw used no reads anywhere, and then every site counts as kept out.
