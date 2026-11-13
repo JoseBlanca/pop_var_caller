@@ -268,7 +268,7 @@ fn a_drawn_path_follows_the_only_template_that_fits() {
     for seed in 0..20 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
         let (_, drawn) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
-        for pair in &drawn.haplotypes {
+        for pair in drawn.haplotypes.iter() {
             for copy in pair {
                 assert!((copy[1] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
             }
@@ -324,7 +324,7 @@ fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
     for seed in 0..10 {
         let mut uniforms = Uniforms::new(StreamPurpose::Path, seed, 0, 1);
         let (_, drawn) = walk_and_draw(&sites, 2, None, parameters, &mut uniforms, None);
-        for pair in &drawn.haplotypes {
+        for pair in drawn.haplotypes.iter() {
             for copy in pair {
                 assert_eq!(copy.len(), 3);
                 assert!((copy[2] - 1.0).abs() < 1e-12, "seed {seed}: {copy:?}");
@@ -464,9 +464,9 @@ fn oriented(
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, seed, 0, 1),
     };
-    let mut joints = joints.to_vec();
+    let mut joints = Joints::from_options(joints);
     orient_by_reads(sites, &mut joints, &mut reads);
-    joints
+    joints.to_options()
 }
 
 /// Asserts `hits` of `draws` lies within five standard deviations of the binomial with `p`.
@@ -573,9 +573,9 @@ fn an_unlinked_site_keeps_its_joint() {
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, 3, 0, 1),
     };
-    let mut written = joints.clone();
+    let mut written = Joints::from_options(&joints);
     orient_by_reads(&sites, &mut written, &mut reads);
-    assert_eq!(written, joints);
+    assert_eq!(written.to_options(), joints);
     let mut fresh = Uniforms::new(StreamPurpose::Orientation, 3, 0, 1);
     assert_eq!(reads.uniforms.next_uniform(), fresh.next_uniform());
 }
@@ -632,7 +632,7 @@ fn a_one_two_heterozygote_is_read_as_alleles_one_and_two() {
         het_mass_min: 0.5,
         uniforms: Uniforms::new(StreamPurpose::Orientation, 1, 0, 1),
     };
-    let mut joints = vec![Some(three.to_vec()), biallelic([0.0, 0.5, 0.5, 0.0])];
+    let mut joints = Joints::from_options(&[Some(three.to_vec()), biallelic([0.0, 0.5, 0.5, 0.0])]);
     orient_by_reads(&sites, &mut joints, &mut reads);
     assert_eq!(*seen.borrow(), vec![(0, (1, 2), 1, (0, 1))]);
 }

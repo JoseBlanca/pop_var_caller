@@ -1,6 +1,7 @@
 use super::*;
 use crate::neighbour_evidence::templates::MAX_TEMPLATES;
 use crate::neighbour_evidence::test_cohort::{CohortShape, test_cohort};
+use crate::read_phase::fragments::{FragmentAllele, RecordFragments};
 
 const SHAPE: CohortShape = CohortShape {
     samples: 30,
@@ -847,7 +848,7 @@ fn read_check_records_are_one_in_twenty_and_never_hidden() {
         ..SHAPE
     });
     let layout = WindowLayout::new(&cohort.records, &(0..records));
-    let fragments: Vec<RecordFragments> = (0..records)
+    let fragments: Vec<PackedRecordFragments> = (0..records)
         .map(|index| {
             let entry = |sample: u32| FragmentAllele {
                 sample,
@@ -859,7 +860,7 @@ fn read_check_records_are_one_in_twenty_and_never_hidden() {
             if index % 2 == 0 {
                 entries.push(entry(1));
             }
-            RecordFragments::from_entries(entries)
+            RecordFragments::from_entries(entries).into()
         })
         .collect();
     let hidden: Vec<usize> = (0..100).collect();

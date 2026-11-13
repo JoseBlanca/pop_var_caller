@@ -1,4 +1,11 @@
 use super::*;
+use crate::neighbour_evidence::model::{HaplotypePair, PathHaplotypes};
+use crate::read_phase::fragments::{FragmentAllele, PackedRecordFragments, RecordFragments};
+
+/// A path's pairs in the flat form the phase reads.
+fn flat(pairs: &[HaplotypePair]) -> PathHaplotypes {
+    PathHaplotypes::from(pairs.to_vec())
+}
 
 /// A biallelic site's two haplotypes from each copy's probability of the alternative.
 fn site(first_alternative: f64, second_alternative: f64) -> HaplotypePair {
@@ -40,13 +47,13 @@ fn positions(n: usize) -> Vec<u64> {
 fn the_alignment_swaps_a_stretch_back_exactly() {
     let pairs = layout(20);
     let mut phase = SamplePhase::new(&[2; 20], &pairs);
-    phase.add_round(&path(20, |_| false));
+    phase.add_round(&flat(&path(20, |_| false)));
     let round = path(20, |site| (8..14).contains(&site));
-    let swapped = phase.align(&round);
+    let swapped = phase.align(&flat(&round));
     let expected: Vec<bool> = (0..20).map(|site| (8..14).contains(&site)).collect();
     assert_eq!(swapped, expected);
     // Added, the swapped round agrees with the consensus everywhere.
-    phase.add_round(&round);
+    phase.add_round(&flat(&round));
     for index in 0..20 {
         let (mut first, mut second) = (Vec::new(), Vec::new());
         phase.consensus_into(index, &mut first, &mut second);
@@ -59,8 +66,11 @@ fn the_alignment_swaps_a_stretch_back_exactly() {
 fn the_alignment_keeps_an_isolated_disagreement() {
     let pairs = layout(20);
     let mut phase = SamplePhase::new(&[2; 20], &pairs);
-    phase.add_round(&path(20, |_| false));
-    assert_eq!(phase.align(&path(20, |site| site == 10)), vec![false; 20]);
+    phase.add_round(&flat(&path(20, |_| false)));
+    assert_eq!(
+        phase.align(&flat(&path(20, |site| site == 10))),
+        vec![false; 20]
+    );
 }
 
 /// One round a path, each path's bits recorded and the path added to the consensus.
@@ -68,8 +78,8 @@ fn rounds(n: usize, paths: &[Vec<HaplotypePair>]) -> (PairLayout, SamplePhase) {
     let pairs = layout(n);
     let mut phase = SamplePhase::new(&vec![2; n], &pairs);
     for path in paths {
-        phase.record_path(&pairs, path);
-        phase.add_round(path);
+        phase.record_path(&pairs, &flat(path));
+        phase.add_round(&flat(path));
     }
     (pairs, phase)
 }
@@ -225,8 +235,8 @@ fn a_multi_allelic_pair_is_phased_on_its_own_alleles() {
     ];
     let pairs = PairLayout::new([2, 3, 2].into_iter());
     let mut phase = SamplePhase::new(&[2, 3, 2], &pairs);
-    phase.record_path(&pairs, &path);
-    phase.add_round(&path);
+    phase.record_path(&pairs, &flat(&path));
+    phase.add_round(&flat(&path));
     let phased = phase
         .phase_heterozygotes(
             &pairs,
@@ -446,11 +456,11 @@ fn a_share_asks_for_whole_paths_rounded_up() {
     let mut phase = SamplePhase::new(&[2; 2], &pairs);
     for _ in 0..3 {
         let agreeing = path(n, |_| false);
-        phase.record_path(&pairs, &agreeing);
-        phase.add_round(&agreeing);
+        phase.record_path(&pairs, &flat(&agreeing));
+        phase.add_round(&flat(&agreeing));
     }
     for _ in 0..2 {
-        phase.record_path(&pairs, &path(n, |site| site == 1));
+        phase.record_path(&pairs, &flat(&path(n, |site| site == 1)));
     }
     let at = |share: f64| {
         phase
@@ -492,8 +502,11 @@ fn a_path_agreement_is_a_share() {
 fn the_alignment_resolves_a_tie_to_kept() {
     let pairs = layout(2);
     let mut phase = SamplePhase::new(&[2; 2], &pairs);
-    phase.add_round(&path(2, |_| false));
-    assert_eq!(phase.align(&path(2, |site| site == 1)), vec![false, false]);
+    phase.add_round(&flat(&path(2, |_| false)));
+    assert_eq!(
+        phase.align(&flat(&path(2, |site| site == 1))),
+        vec![false, false]
+    );
 }
 
 /// **The alignment ignores sites where the round does not lean**: a stretch where the round is
@@ -502,7 +515,7 @@ fn the_alignment_resolves_a_tie_to_kept() {
 fn the_alignment_ignores_sites_where_the_round_does_not_lean() {
     let pairs = layout(20);
     let mut phase = SamplePhase::new(&[2; 20], &pairs);
-    phase.add_round(&path(20, |_| false));
+    phase.add_round(&flat(&path(20, |_| false)));
     let round: Vec<HaplotypePair> = (0..20)
         .map(|index| {
             if (8..14).contains(&index) {
@@ -512,7 +525,7 @@ fn the_alignment_ignores_sites_where_the_round_does_not_lean() {
             }
         })
         .collect();
-    assert_eq!(phase.align(&round), vec![false; 20]);
+    assert_eq!(phase.align(&flat(&round)), vec![false; 20]);
 }
 
 /// **A join reads the shared records nearest the core**: the farthest of four disagrees, the
@@ -562,28 +575,31 @@ fn read_fixture(
     n: usize,
     at: &[(usize, &[(u32, u16)])],
     quality: impl Fn(usize) -> Option<u32>,
-) -> (Vec<Vec<FragmentAllele>>, Vec<Option<u32>>) {
-    let mut fragments = vec![Vec::new(); n];
+) -> (Vec<PackedRecordFragments>, Vec<Option<u32>>) {
+    let mut fragments = vec![PackedRecordFragments::default(); n];
     for &(site, entries) in at {
-        fragments[site] = entries
-            .iter()
-            .map(|&(fragment, allele)| FragmentAllele {
-                sample: 0,
-                fragment,
-                allele,
-                error_phred: 30,
-            })
-            .collect();
+        fragments[site] = RecordFragments::from_entries(
+            entries
+                .iter()
+                .map(|&(fragment, allele)| FragmentAllele {
+                    sample: 0,
+                    fragment,
+                    allele,
+                    error_phred: 30,
+                })
+                .collect(),
+        )
+        .into();
     }
     (fragments, (0..n).map(quality).collect())
 }
 
 fn site_reads<'a>(
-    fragments: &'a [Vec<FragmentAllele>],
+    fragments: &'a [PackedRecordFragments],
     qualities: &[Option<u32>],
 ) -> SiteReads<'a> {
     SiteReads {
-        fragments: fragments.iter().map(Vec::as_slice).collect(),
+        fragments: fragments.iter().map(|at| at.of_sample(0)).collect(),
         genotype_qualities: qualities.to_vec(),
         drawn_without_reads: Vec::new(),
     }

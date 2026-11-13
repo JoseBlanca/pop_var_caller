@@ -285,6 +285,18 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
 
+    /// The most memory, in bytes, one window of genotype refinement may hold: its records' lines,
+    /// numbers and reads, and each sample's state while it is solved. Windows shrink to fit it,
+    /// down to 500 kb of core and margins; a cohort whose smallest window still does not fit stops
+    /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
+    /// walk's arrays, a few kilobytes a window record.
+    #[arg(
+        long,
+        default_value_t = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+        help_heading = "Advanced"
+    )]
+    pub refine_window_bytes: u64,
+
     /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
@@ -783,6 +795,7 @@ pub fn run_call_from_alignments(
             &inbreeding_by_sample,
             ploidy,
             args.phase_min_path_agreement,
+            args.refine_window_bytes,
         ));
     // **Fragments are gathered only where the output will read them**, which the header just
     // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.

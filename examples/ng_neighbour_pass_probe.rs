@@ -21,10 +21,11 @@ use std::process::ExitCode;
 use pop_var_caller::neighbour_evidence::fit::SampleFit;
 use pop_var_caller::neighbour_evidence::records::{SampleColumns, SampleRow, SiteRecord};
 use pop_var_caller::neighbour_evidence::refine::{
-    BACKGROUND_LANDING_SHARE, MISMATCH, NoReadRule, Outcome, refine_window,
+    BACKGROUND_LANDING_SHARE, MISMATCH, NoReadRule, Outcome, core_solve_bytes, held_solve_bytes,
+    refine_window,
 };
 use pop_var_caller::neighbour_evidence::templates::MAX_TEMPLATES;
-use pop_var_caller::neighbour_evidence::windows::{WindowSizes, plan_window};
+use pop_var_caller::neighbour_evidence::windows::{WindowBytes, WindowSizes, plan_window};
 
 /// One PASS record with rows: what is written next to the pass's result.
 struct Kept {
@@ -192,9 +193,28 @@ fn main() -> ExitCode {
     for (contig, kept) in &contigs {
         let records: Vec<SiteRecord> = kept.iter().map(|kept| kept.record.clone()).collect();
         let positions: Vec<u64> = records.iter().map(|record| record.position).collect();
+        // What each record costs a window, as the run's stage counts it less the line and the
+        // reads, which the probe does not hold.
+        let running = |cost: &dyn Fn(&SiteRecord) -> u64| -> Vec<u64> {
+            std::iter::once(0)
+                .chain(records.iter().scan(0, |total, record| {
+                    *total += cost(record);
+                    Some(*total)
+                }))
+                .collect()
+        };
+        let samples_u64 = samples.len() as u64;
+        let held = running(&|record| {
+            record.heap_bytes() as u64 + samples_u64 * held_solve_bytes(record.allele_count)
+        });
+        let core = running(&|record| samples_u64 * core_solve_bytes(record.allele_count));
         let mut core_start = 0;
         while core_start < records.len() {
-            let plan = plan_window(&positions, core_start, true, samples.len(), &sizes)
+            let bytes = WindowBytes {
+                held: &held,
+                core: &core,
+            };
+            let plan = plan_window(&positions, bytes, core_start, true, &sizes)
                 .expect("a whole contig always plans");
             windows += 1;
             over_budget = over_budget.max(plan.over_budget);
@@ -257,7 +277,7 @@ fn main() -> ExitCode {
     }
     let frozen = fits.iter().filter(|fit| fit.is_frozen()).count();
     eprintln!(
-        "{} samples, {} contigs, {windows} windows, largest over-budget {over_budget}, {frozen} fits frozen",
+        "{} samples, {} contigs, {windows} windows, largest over budget by {over_budget} bytes, {frozen} fits frozen",
         samples.len(),
         contigs.len()
     );

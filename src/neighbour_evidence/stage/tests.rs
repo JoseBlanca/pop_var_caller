@@ -41,7 +41,7 @@ fn the_header_line_states_the_decision() {
     assert_eq!(
         decision.as_header_value(),
         "<ran=yes,why=\"57 samples, median inbreeding 0.98\",templates=16,mismatch=0.01,\
-         core=2000000,margin=1000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
+         core=2000000,margin=1000000,window_bytes=32000000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
          hidden_share=0.05,extra_paths=8,lean_min=0.5,path_agreement=0.8,join_records=3,\
          alignment_costs=1/2,read_link_min=5.29,read_break_min=2.20,read_error_floor=0.01,\
          read_gq_min=30,read_reach=1000,read_cap=32>"
@@ -86,7 +86,7 @@ fn run_stage(threads: usize) -> StageRun {
         core_bases: 300_000,
         margin_bases: 300_000,
         margin_floor_bases: 300_000,
-        budget_sample_records: 120_000_000,
+        budget_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
     };
     let mut inputs: Vec<(RecordPlace, String)> = Vec::new();
     for contig in 0..2 {
@@ -109,14 +109,16 @@ fn run_stage(threads: usize) -> StageRun {
         let mut stage = NeighbourEvidenceStage::new(&decision, vec![1_000_000, 1_000_000]);
         let mut output = Vec::new();
         for (place, line) in &inputs {
-            stage.push(
-                *place,
-                line.clone().into_bytes(),
-                RecordFragments::default(),
-                &mut output,
-            );
+            stage
+                .push(
+                    *place,
+                    line.clone().into_bytes(),
+                    RecordFragments::default(),
+                    &mut output,
+                )
+                .expect("within the window budget");
         }
-        stage.finish(&mut output);
+        stage.finish(&mut output).expect("within the window budget");
         (output, stage.tally())
     });
     (
@@ -193,6 +195,16 @@ fn join_stage(
     sizes: WindowSizes,
     threads: usize,
 ) -> Vec<(RecordPlace, Vec<u8>)> {
+    join_stage_and_cores(cohort, position, sizes, threads).0
+}
+
+/// [`join_stage`], and the first position of every core the stage solved.
+fn join_stage_and_cores(
+    cohort: &crate::neighbour_evidence::test_cohort::TestCohort,
+    position: impl Fn(usize) -> u64 + Sync,
+    sizes: WindowSizes,
+    threads: usize,
+) -> (Vec<(RecordPlace, Vec<u8>)>, Vec<u64>) {
     let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
     decision.sizes = sizes;
     let pool = rayon::ThreadPoolBuilder::new()
@@ -206,15 +218,17 @@ fn join_stage(
             let at = position(index);
             // The drawn line's POS is `1 + 500·index`; it is moved to `at`.
             let line = line.replacen(&format!("\t{}\t", 1 + index * 500), &format!("\t{at}\t"), 1);
-            stage.push(
-                place(0, at),
-                line.into_bytes(),
-                RecordFragments::default(),
-                &mut output,
-            );
+            stage
+                .push(
+                    place(0, at),
+                    line.into_bytes(),
+                    RecordFragments::default(),
+                    &mut output,
+                )
+                .expect("within the window budget");
         }
-        stage.finish(&mut output);
-        output
+        stage.finish(&mut output).expect("within the window budget");
+        (output, stage.core_starts.clone())
     })
 }
 
@@ -289,7 +303,7 @@ const JOIN_WINDOWS: WindowSizes = WindowSizes {
     core_bases: 200_000,
     margin_bases: 200_000,
     margin_floor_bases: 200_000,
-    budget_sample_records: 120_000_000,
+    budget_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
 };
 
 /// **Blocks join across windows, and the phase stays right across them** (phase output spec
@@ -357,19 +371,11 @@ fn a_phase_set_carries_through_short_windows() {
         core_bases: 60_000,
         margin_bases: 60_000,
         margin_floor_bases: 20_000,
-        budget_sample_records: 9_000,
+        // Small enough that the dense records shrink the windows, large enough that the floor
+        // fits them.
+        budget_bytes: 2_500_000,
     };
-    // The cores the planner writes, as the stage plans them.
-    let mut core_starts = Vec::new();
-    let mut start = 0;
-    while start < positions.len() {
-        let plan =
-            crate::neighbour_evidence::windows::plan_window(&positions, start, true, 20, &sizes)
-                .expect("a whole contig plans");
-        core_starts.push(positions[plan.core_start]);
-        start = plan.core_end;
-    }
-    let output = join_stage(&cohort, position, sizes, 4);
+    let (output, core_starts) = join_stage_and_cores(&cohort, position, sizes, 4);
     let score = score_joins(
         &cohort,
         &output,
@@ -413,14 +419,16 @@ fn the_records_kept_are_those_some_sample_carries() {
     let mut output = Vec::new();
     for (index, line) in cohort.lines.iter().enumerate() {
         let position = 1 + index as u64 * 600;
-        stage.push(
-            place(0, position),
-            line.clone().into_bytes(),
-            RecordFragments::default(),
-            &mut output,
-        );
+        stage
+            .push(
+                place(0, position),
+                line.clone().into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            )
+            .expect("within the window budget");
     }
-    stage.finish(&mut output);
+    stage.finish(&mut output).expect("within the window budget");
     let kept = output.len();
     assert!(
         kept * 100 >= carried * 95 && kept * 100 <= carried * 105,
@@ -450,14 +458,16 @@ fn join_stage_drawing(
     let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
     let mut output = Vec::new();
     for (index, line) in cohort.lines.iter().enumerate() {
-        stage.push(
-            place(0, 1 + index as u64 * 500),
-            line.clone().into_bytes(),
-            fragments(index),
-            &mut output,
-        );
+        stage
+            .push(
+                place(0, 1 + index as u64 * 500),
+                line.clone().into_bytes(),
+                fragments(index),
+                &mut output,
+            )
+            .expect("within the window budget");
     }
-    stage.finish(&mut output);
+    stage.finish(&mut output).expect("within the window budget");
     output
 }
 
@@ -698,5 +708,41 @@ fn a_column_reads_newly_phase_has_gq_30_or_more() {
     assert!(
         low_quality_heterozygotes > 0,
         "the cohort has heterozygotes below GQ 30"
+    );
+}
+
+/// **A cohort whose smallest window does not fit the budget stops the stage with an error**
+/// saying what the window needs (owner, 2026-11-13): no line of that window is handed back, and the
+/// error names its records, its samples and its bytes, over the budget.
+#[test]
+fn a_window_over_budget_at_the_floor_stops_the_stage() {
+    let cohort = join_cohort();
+    let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+    decision.sizes = WindowSizes {
+        core_bases: 200_000,
+        margin_bases: 200_000,
+        margin_floor_bases: 200_000,
+        budget_bytes: 100_000,
+    };
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+    let mut output = Vec::new();
+    let mut refused = None;
+    for (index, line) in cohort.lines.iter().enumerate() {
+        if let Err(over) = stage.push(
+            place(0, 1 + index as u64 * 500),
+            line.clone().into_bytes(),
+            RecordFragments::default(),
+            &mut output,
+        ) {
+            refused = Some(over);
+            break;
+        }
+    }
+    let over = refused.expect("the first window is over budget");
+    assert!(output.is_empty());
+    assert_eq!((over.contig, over.position, over.samples), (0, 1, 20));
+    assert!(
+        over.records > 0 && over.bytes > over.budget && over.budget == 100_000,
+        "{over:?}"
     );
 }

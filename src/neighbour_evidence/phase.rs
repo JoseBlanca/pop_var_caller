@@ -19,8 +19,8 @@
 
 use std::collections::BTreeMap;
 
-use super::model::HaplotypePair;
-use crate::read_phase::fragments::FragmentAllele;
+use super::model::PathHaplotypes;
+use crate::read_phase::fragments::ReadAllele;
 use crate::read_phase::link::{self, Heterozygote, ReadLink, Relation, score_read_link};
 
 /// **Paths drawn per averaged round besides the round's own** (spec §2.3): with 8, the 64-founder
@@ -136,6 +136,13 @@ impl PairLayout {
     }
 }
 
+/// **The bytes one sample's phase holds at a site of `alleles` alleles**: its lined-up sums and its
+/// paths' bits at each allele pair (pass spec §6).
+pub(super) fn phase_bytes(alleles: usize) -> usize {
+    2 * (alleles - 1) * std::mem::size_of::<f32>()
+        + alleles * (alleles - 1) / 2 * std::mem::size_of::<PathBits>()
+}
+
 /// Each path's bits at one pair entry: bit `p` of `towards_lower` says path `p`'s copy 0 leans to
 /// the pair's lower-numbered allele, bit `p` of `leans` that it leans by at least [`LEAN_MIN`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -197,7 +204,7 @@ impl SamplePhase {
     ///
     /// If more than [`MAX_PATHS`] paths are recorded; `refine::Phasing::new` refuses round counts
     /// that would.
-    pub(super) fn record_path(&mut self, pairs: &PairLayout, haplotypes: &[HaplotypePair]) {
+    pub(super) fn record_path(&mut self, pairs: &PairLayout, haplotypes: &PathHaplotypes) {
         assert!(
             (self.paths as usize) < MAX_PATHS,
             "at most {MAX_PATHS} paths a window"
@@ -243,7 +250,7 @@ impl SamplePhase {
     }
 
     /// **Lines a round's own haplotypes up with the consensus and adds them** (spec §2.1).
-    pub(super) fn add_round(&mut self, haplotypes: &[HaplotypePair]) {
+    pub(super) fn add_round(&mut self, haplotypes: &PathHaplotypes) {
         let swapped = if self.rounds_added == 0 {
             vec![false; haplotypes.len()]
         } else {
@@ -274,7 +281,7 @@ impl SamplePhase {
     /// the sites where both the consensus and the round lean by at least [`LEAN_MIN`] on the allele
     /// the consensus's copies differ most on, ties to "kept"; each site takes the state of the last
     /// such site at or before it, the first such site's before it.
-    fn align(&self, haplotypes: &[HaplotypePair]) -> Vec<bool> {
+    fn align(&self, haplotypes: &PathHaplotypes) -> Vec<bool> {
         let (mut consensus_0, mut consensus_1) = (Vec::new(), Vec::new());
         let mut marked: Vec<(usize, bool)> = Vec::new();
         for (site, [copy_0, copy_1]) in haplotypes.iter().enumerate() {
@@ -554,7 +561,7 @@ impl Member {
 /// does.
 #[derive(Default)]
 pub(crate) struct SiteReads<'a> {
-    pub(crate) fragments: Vec<&'a [FragmentAllele]>,
+    pub(crate) fragments: Vec<&'a [ReadAllele]>,
     pub(crate) genotype_qualities: Vec<Option<u32>>,
     /// Per site, whether the draw kept the sample's reads out there (reads-in-draw spec §2.6); empty
     /// when the draw used no reads anywhere, and then every site counts as kept out.

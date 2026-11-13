@@ -232,6 +232,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         hidden_dup_window: 0,
         refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
         phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
+        refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
         locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,

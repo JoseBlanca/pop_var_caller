@@ -145,6 +145,15 @@ impl SiteRecord {
         self.allele_count * (self.allele_count + 1) / 2
     }
 
+    /// **The bytes the record holds on the heap** — what a window pays for it besides its line and
+    /// its reads (pass spec §6).
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.background_shares.capacity() * std::mem::size_of::<f32>()
+            + self.rows.capacity() * std::mem::size_of::<SampleRow>()
+            + (self.likelihoods.capacity() + self.shares.capacity()) * std::mem::size_of::<f32>()
+    }
+
     /// How many samples the record has a column for.
     #[must_use]
     pub fn sample_count(&self) -> usize {

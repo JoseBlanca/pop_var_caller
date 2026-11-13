@@ -169,15 +169,24 @@ struct SiteTerms {
     by_alleles: Vec<f64>,
 }
 
+/// Scratch the emissions are computed in: a template's shares weighed by the likelihood, the shares
+/// by allele, and the site's own emission shares blurred where it gives them.
+#[derive(Default)]
+struct EmissionScratch {
+    weighted: Vec<f64>,
+    by_allele: Vec<f64>,
+    own: Vec<f64>,
+}
+
 /// One site's terms, its emissions written over `autozygous` (`K`) and `pair_emissions` (`K × K`,
-/// row `k₁`); `weighted` and `by_allele` are scratch.
+/// row `k₁`).
 fn site_terms(
     site: &WalkSite<'_>,
     templates: usize,
     mismatch: f64,
     pairs: &[(usize, usize)],
-    (autozygous, pair_emissions): (&mut [f64], &mut [f64]),
-    (weighted, by_allele): (&mut Vec<f64>, &mut Vec<f64>),
+    emissions: (&mut [f64], &mut [f64]),
+    scratch: &mut EmissionScratch,
 ) -> SiteTerms {
     let alleles = site.allele_count;
     assert_eq!(
@@ -195,24 +204,11 @@ fn site_terms(
         "a site at {} needs {templates} templates × {alleles} allele shares",
         site.position
     );
-    let blur = |shares: &[f64]| -> Vec<f64> {
-        shares
-            .iter()
-            .map(|share| (1.0 - mismatch) * share + mismatch / alleles as f64)
-            .collect()
-    };
-    let blurred = blur(site.template_shares);
-    // The emissions read their own shares where the site gives them, `blurred` otherwise.
-    let emitting_own = site.emission_shares.map(|shares| {
-        assert_eq!(
-            shares.len(),
-            site.template_shares.len(),
-            "a site at {} gives emission shares laid out unlike its template shares",
-            site.position
-        );
-        blur(shares)
-    });
-    let emitting = emitting_own.as_deref().unwrap_or(&blurred);
+    let blurred: Vec<f64> = site
+        .template_shares
+        .iter()
+        .map(|&share| blur(share, mismatch, alleles))
+        .collect();
     // The likelihood as a symmetric allele-by-allele matrix, so the pair emission is two matrix
     // products: Σ_a Σ_b q̃_k₁(a) · L(a/b) · q̃_k₂(b).
     let mut by_alleles = vec![0.0; alleles * alleles];
@@ -220,6 +216,52 @@ fn site_terms(
         by_alleles[first * alleles + second] = likelihood;
         by_alleles[second * alleles + first] = likelihood;
     }
+    let terms = SiteTerms {
+        blurred,
+        by_alleles,
+    };
+    emissions_into(site, &terms, templates, mismatch, emissions, scratch);
+    terms
+}
+
+/// A template's share blurred by the mismatch rate: `(1 − ε)·q + ε/A`.
+fn blur(share: f64, mismatch: f64, alleles: usize) -> f64 {
+    (1.0 - mismatch) * share + mismatch / alleles as f64
+}
+
+/// **One site's emissions from its terms**, written over `autozygous` (`K`) and `pair_emissions`
+/// (`K × K`, row `k₁`): what [`site_terms`] writes, computed again where a walk needs a site's
+/// emissions it no longer holds.
+fn emissions_into(
+    site: &WalkSite<'_>,
+    terms: &SiteTerms,
+    templates: usize,
+    mismatch: f64,
+    (autozygous, pair_emissions): (&mut [f64], &mut [f64]),
+    scratch: &mut EmissionScratch,
+) {
+    let alleles = site.allele_count;
+    let EmissionScratch {
+        weighted,
+        by_allele,
+        own,
+    } = scratch;
+    // The emissions read their own shares where the site gives them, the blurred shares otherwise.
+    let emitting: &[f64] = match site.emission_shares {
+        Some(shares) => {
+            assert_eq!(
+                shares.len(),
+                site.template_shares.len(),
+                "a site at {} gives emission shares laid out unlike its template shares",
+                site.position
+            );
+            own.clear();
+            own.extend(shares.iter().map(|&share| blur(share, mismatch, alleles)));
+            own
+        }
+        None => &terms.blurred,
+    };
+    let by_alleles = &terms.by_alleles;
     weighted.clear();
     weighted.resize(templates * alleles, 0.0);
     for (out, shares) in weighted
@@ -266,10 +308,6 @@ fn site_terms(
         *emission = (0..alleles)
             .map(|a| emitting[k * alleles + a] * by_alleles[a * alleles + a])
             .sum();
-    }
-    SiteTerms {
-        blurred,
-        by_alleles,
     }
 }
 
@@ -342,7 +380,133 @@ pub(crate) struct DrawReads<'a> {
 
 /// **One haplotype pair at one site**: each copy's probability of carrying each allele, `A`
 /// numbers a copy.
+#[cfg(test)]
 pub(crate) type HaplotypePair = [Vec<f64>; 2];
+
+/// **One drawn path's two haplotypes at every site of a walk** (phasing spec §2.1): at each site,
+/// copy one's `A` allele probabilities and then copy two's, every site's in one array. One array
+/// rather than two vectors a site: a round draws nine paths at every site of a window, and the
+/// vectors' allocations were a tenth of the pass's time and a fifth of a walk's memory.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PathHaplotypes {
+    /// Where each site's numbers start in `values`.
+    starts: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl PathHaplotypes {
+    fn with_capacity(sites: usize) -> Self {
+        Self {
+            starts: Vec::with_capacity(sites),
+            values: Vec::with_capacity(4 * sites),
+        }
+    }
+
+    /// Appends a site of `alleles` alleles, its two copies at zero, to be written.
+    fn push_site(&mut self, alleles: usize) -> (&mut [f64], &mut [f64]) {
+        let start = self.values.len();
+        self.starts.push(start);
+        self.values.resize(start + 2 * alleles, 0.0);
+        self.values[start..].split_at_mut(alleles)
+    }
+
+    /// How many sites the path holds.
+    pub(crate) fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// The two copies' allele probabilities at `site`.
+    pub(crate) fn site(&self, site: usize) -> [&[f64]; 2] {
+        let start = self.starts[site];
+        let end = self
+            .starts
+            .get(site + 1)
+            .copied()
+            .unwrap_or(self.values.len());
+        let (first, second) = self.values[start..end].split_at((end - start) / 2);
+        [first, second]
+    }
+
+    /// Every site's two copies, in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = [&[f64]; 2]> + '_ {
+        (0..self.len()).map(|site| self.site(site))
+    }
+}
+
+#[cfg(test)]
+impl From<Vec<HaplotypePair>> for PathHaplotypes {
+    fn from(pairs: Vec<HaplotypePair>) -> Self {
+        let mut path = Self::with_capacity(pairs.len());
+        for [first, second] in pairs {
+            let (one, two) = path.push_site(first.len());
+            one.copy_from_slice(&first);
+            two.copy_from_slice(&second);
+        }
+        path
+    }
+}
+
+/// **Every site's joint of the two copies' alleles along one path**, `A × A` numbers a site in one
+/// array, and whether the site has one (`None` in [`joint_along`]'s terms). Kept across a walk's
+/// paths and refilled for each.
+#[derive(Default)]
+struct Joints {
+    starts: Vec<usize>,
+    values: Vec<f64>,
+    present: Vec<bool>,
+}
+
+impl Joints {
+    fn clear(&mut self) {
+        self.starts.clear();
+        self.values.clear();
+        self.present.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    fn range(&self, site: usize) -> std::ops::Range<usize> {
+        let start = self.starts[site];
+        start
+            ..self
+                .starts
+                .get(site + 1)
+                .copied()
+                .unwrap_or(self.values.len())
+    }
+
+    fn get(&self, site: usize) -> Option<&[f64]> {
+        self.present[site].then(|| &self.values[self.range(site)])
+    }
+
+    fn get_mut(&mut self, site: usize) -> Option<&mut [f64]> {
+        let range = self.range(site);
+        self.present[site].then(move || &mut self.values[range])
+    }
+    #[cfg(test)]
+    fn from_options(joints: &[Option<Vec<f64>>]) -> Self {
+        let mut out = Self::default();
+        for joint in joints {
+            out.starts.push(out.values.len());
+            out.present.push(joint.is_some());
+            match joint {
+                Some(values) => out.values.extend_from_slice(values),
+                // A missing joint still takes its site's room; 2 × 2 serves the tests' sites.
+                None => out.values.extend_from_slice(&[0.0; 4]),
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    fn to_options(&self) -> Vec<Option<Vec<f64>>> {
+        (0..self.len())
+            .map(|site| self.get(site).map(<[f64]>::to_vec))
+            .collect()
+    }
+}
 
 /// **A round's own drawn path**: the two haplotypes along it, and at each site the walk template
 /// each copy follows there — copy one's, then copy two's; the same template twice in an
@@ -351,7 +515,7 @@ pub(crate) type HaplotypePair = [Vec<f64>; 2];
 /// §2.3).
 #[derive(Debug, PartialEq)]
 pub(crate) struct DrawnPath {
-    pub haplotypes: Vec<HaplotypePair>,
+    pub haplotypes: PathHaplotypes,
     pub followed: Vec<[usize; 2]>,
 }
 
@@ -412,7 +576,7 @@ pub(crate) fn walk_and_draw_paths(
     extra_uniforms: &mut Uniforms,
     extra: usize,
     reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, DrawnPath, Vec<Vec<HaplotypePair>>) {
+) -> (WalkResult, DrawnPath, Vec<PathHaplotypes>) {
     let (result, drawn, extra_paths) = walk_with_draw(
         sites,
         templates,
@@ -448,9 +612,11 @@ struct Forward {
     columns: Vec<f64>,
 }
 
-/// **Every site's emissions, in one array of each kind** as [`Forward`] holds its probabilities:
-/// site `i`'s `K` autozygous emissions at `autozygous[i·K..]` and its `K²` pair emissions, row
-/// `k₁`, at `pairs[i·K²..]`.
+/// **Some sites' emissions, in one array of each kind** as [`Forward`] holds its probabilities:
+/// slot `i`'s `K` autozygous emissions at `autozygous[i·K..]` and its `K²` pair emissions, row
+/// `k₁`, at `pairs[i·K²..]`. A walk holds a block's ([`FORWARD_BLOCK`]) and one more: the window's
+/// every site, at `K + K²` numbers each, was a third of the pass's memory on 400 tomato samples and
+/// 48 threads (pass spec §6).
 #[derive(Default)]
 struct Emissions {
     k: usize,
@@ -483,13 +649,152 @@ impl Emissions {
         let states = self.k * self.k;
         &self.pairs[site * states..(site + 1) * states]
     }
+
+    /// Copies slot `from`'s emissions into slot `to`.
+    fn carry(&mut self, from: usize, to: usize) {
+        let (k, states) = (self.k, self.k * self.k);
+        self.autozygous
+            .copy_within(from * k..(from + 1) * k, to * k);
+        self.pairs
+            .copy_within(from * states..(from + 1) * states, to * states);
+    }
 }
 
-/// A walk's window-long arrays.
+/// **How many sites a block of the backward walk holds** (see [`walk_with_draw`]): its forward
+/// probabilities and emissions, about 330 KB at 17 templates, within a core's share of the L2
+/// cache on the machine it was measured on (2 MB a core, two threads).
+const FORWARD_BLOCK: usize = 64;
+
+/// A walk's arrays: a block's emissions and forward probabilities, and the forward probabilities
+/// at every block's first site.
 #[derive(Default)]
 struct WalkArrays {
     emissions: Emissions,
     forward: Forward,
+    checkpoints: Checkpoints,
+}
+
+/// **The forward probabilities at the first site of every block**, `K + K²` numbers a block.
+#[derive(Default)]
+struct Checkpoints {
+    k: usize,
+    autozygous: Vec<f64>,
+    pairs: Vec<f64>,
+}
+
+impl Checkpoints {
+    fn resize(&mut self, blocks: usize, k: usize) {
+        self.k = k;
+        self.autozygous.resize(blocks * k, 0.0);
+        self.pairs.resize(blocks * k * k, 0.0);
+    }
+
+    /// Keeps `forward`'s slot `slot` as block `block`'s.
+    fn save(&mut self, block: usize, forward: &Forward, slot: usize) {
+        let (k, states) = (self.k, self.k * self.k);
+        self.autozygous[block * k..(block + 1) * k].copy_from_slice(forward.autozygous(slot));
+        self.pairs[block * states..(block + 1) * states].copy_from_slice(forward.pairs(slot));
+    }
+
+    /// Writes block `block`'s into `forward`'s slot `slot`.
+    fn restore(&self, block: usize, forward: &mut Forward, slot: usize) {
+        let (k, states) = (self.k, self.k * self.k);
+        forward.autozygous[slot * k..(slot + 1) * k]
+            .copy_from_slice(&self.autozygous[block * k..(block + 1) * k]);
+        forward.pairs[slot * states..(slot + 1) * states]
+            .copy_from_slice(&self.pairs[block * states..(block + 1) * states]);
+    }
+}
+
+/// **`values`' chunk `read` to read and chunk `write` to write**, chunks of `size`; two different
+/// chunks.
+fn read_and_write(
+    values: &mut [f64],
+    size: usize,
+    read: usize,
+    write: usize,
+) -> (&[f64], &mut [f64]) {
+    assert_ne!(read, write, "a step reads one slot and writes another");
+    if read < write {
+        let (before, after) = values.split_at_mut(write * size);
+        (&before[read * size..(read + 1) * size], &mut after[..size])
+    } else {
+        let (before, after) = values.split_at_mut(read * size);
+        (
+            &after[..size],
+            &mut before[write * size..(write + 1) * size],
+        )
+    }
+}
+
+/// **One forward step**, written into `forward`'s slot `at`: from the landing weights at a walk's
+/// first site, or from slot `previous` across the persistence `(keep, stay autozygous, stay
+/// other)` between the two sites — writing the previous slot's row and column sums on the way —
+/// then times the site's `emissions` and normalised. Returns the scale it was divided by. The
+/// forward walk and the backward walk's blocks both step through this one function, so a block
+/// computed again holds the same bits.
+fn forward_step(
+    forward: &mut Forward,
+    at: usize,
+    previous: Option<(usize, (f64, f64, f64))>,
+    landing: &[f64],
+    share: f64,
+    (emission_autozygous, emission_pairs): (&[f64], &[f64]),
+) -> f64 {
+    let k = forward.k;
+    match previous {
+        None => {
+            let autozygous = &mut forward.autozygous[at * k..(at + 1) * k];
+            for (value, &weight) in autozygous.iter_mut().zip(landing) {
+                *value = share * weight;
+            }
+            let pairs = &mut forward.pairs[at * k * k..(at + 1) * k * k];
+            for (row, &first) in pairs.chunks_exact_mut(k).zip(landing) {
+                for (value, &second) in row.iter_mut().zip(landing) {
+                    *value = (1.0 - share) * first * second;
+                }
+            }
+        }
+        Some((before, (keep, stay_autozygous, stay_other))) => {
+            let (previous_autozygous, autozygous) =
+                read_and_write(&mut forward.autozygous, k, before, at);
+            let (previous_pairs, pairs) = read_and_write(&mut forward.pairs, k * k, before, at);
+            let mass_autozygous: f64 = previous_autozygous.iter().sum();
+            let mass_pairs = lane_sum(previous_pairs);
+            // The previous site's margins, which this step needs and the draw reads again.
+            let rows = &mut forward.rows[before * k..(before + 1) * k];
+            let columns = &mut forward.columns[before * k..(before + 1) * k];
+            margins(previous_pairs, k, rows, columns);
+            for ((value, &previous), &weight) in
+                autozygous.iter_mut().zip(previous_autozygous).zip(landing)
+            {
+                let within = keep * previous + (1.0 - keep) * mass_autozygous * weight;
+                *value = stay_autozygous * within + (1.0 - stay_other) * mass_pairs * weight;
+            }
+            forward_pair_step(
+                previous_pairs,
+                rows,
+                columns,
+                landing,
+                PairTransition::new(keep, mass_pairs, stay_other),
+                (1.0 - stay_autozygous) * mass_autozygous,
+                pairs,
+            );
+        }
+    }
+    let autozygous = &mut forward.autozygous[at * k..(at + 1) * k];
+    for (value, emission) in autozygous.iter_mut().zip(emission_autozygous) {
+        *value *= emission;
+    }
+    let pairs = &mut forward.pairs[at * k * k..(at + 1) * k * k];
+    for (value, emission) in pairs.iter_mut().zip(emission_pairs) {
+        *value *= emission;
+    }
+    let scale: f64 = autozygous.iter().sum::<f64>() + lane_sum(pairs);
+    let inverse = 1.0 / scale;
+    scale_by(autozygous, inverse);
+    scale_by(pairs, inverse);
+    scale
 }
 
 thread_local! {
@@ -540,7 +845,7 @@ fn walk_with_draw(
     uniforms: Option<&mut Uniforms>,
     extra: Option<(&mut Uniforms, usize)>,
     mut reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, Option<DrawnPath>, Vec<Vec<HaplotypePair>>) {
+) -> (WalkResult, Option<DrawnPath>, Vec<PathHaplotypes>) {
     assert!(
         sites
             .windows(2)
@@ -559,93 +864,56 @@ fn walk_with_draw(
     let WalkArrays {
         mut emissions,
         mut forward,
+        mut checkpoints,
     } = WALK_ARRAYS.take();
-    emissions.resize(sites.len(), k);
-    let (mut weighted, mut by_allele) = (Vec::new(), Vec::new());
-    let terms: Vec<SiteTerms> = sites
-        .iter()
-        .enumerate()
-        .map(|(index, site)| {
-            site_terms(
-                site,
-                k,
-                parameters.mismatch,
-                genotype_pairs.of(site.allele_count),
-                emissions.site_mut(index),
-                (&mut weighted, &mut by_allele),
-            )
-        })
-        .collect();
+    // **The forward probabilities are kept at the first site of every block of
+    // [`FORWARD_BLOCK`] sites, not at every site.** The backward walk computes a block's again from
+    // its first site, by the same steps from the same inputs, just before it reads them: a
+    // block's probabilities and emissions fit a core's cache, where the window's did not, and the
+    // walk spent most of its time waiting for memory (perf: 0.6 instructions a cycle).
+    let blocks = sites.len().div_ceil(FORWARD_BLOCK);
+    forward.resize(FORWARD_BLOCK, k);
+    emissions.resize(FORWARD_BLOCK + 1, k);
+    checkpoints.resize(blocks, k);
+    let mut scratch = EmissionScratch::default();
+    let mut terms: Vec<SiteTerms> = Vec::with_capacity(sites.len());
+    let transition = |index: usize| {
+        persistence(
+            (sites[index].position - sites[index - 1].position) as f64,
+            &parameters,
+        )
+    };
 
     // Forward: each site's state distribution given the sites up to it, normalised; the scales
-    // multiply to the window's likelihood.
-    forward.resize(sites.len(), k);
+    // multiply to the window's likelihood. Two slots, the site's and the one before.
     let mut log_likelihood = 0.0;
-    for index in 0..sites.len() {
-        let (done_autozygous, autozygous) = forward.autozygous.split_at_mut(index * k);
-        let autozygous = &mut autozygous[..k];
-        let (done_pairs, pairs) = forward.pairs.split_at_mut(index * k * k);
-        let pairs = &mut pairs[..k * k];
-        if index == 0 {
-            for (value, &weight) in autozygous.iter_mut().zip(&landing) {
-                *value = share * weight;
-            }
-            for (row, &first) in pairs.chunks_exact_mut(k).zip(&landing) {
-                for (value, &second) in row.iter_mut().zip(&landing) {
-                    *value = (1.0 - share) * first * second;
-                }
-            }
-        } else {
-            let gap = (sites[index].position - sites[index - 1].position) as f64;
-            let (keep, stay_autozygous, stay_other) = persistence(gap, &parameters);
-            let previous_autozygous = &done_autozygous[(index - 1) * k..];
-            let previous_pairs = &done_pairs[(index - 1) * k * k..];
-            let mass_autozygous: f64 = previous_autozygous.iter().sum();
-            let mass_pairs = lane_sum(previous_pairs);
-            // The previous site's margins, which this step needs and the draw reads again.
-            let rows = &mut forward.rows[(index - 1) * k..index * k];
-            let columns = &mut forward.columns[(index - 1) * k..index * k];
-            margins(previous_pairs, k, rows, columns);
-            for ((value, &previous), &weight) in
-                autozygous.iter_mut().zip(previous_autozygous).zip(&landing)
-            {
-                let within = keep * previous + (1.0 - keep) * mass_autozygous * weight;
-                *value = stay_autozygous * within + (1.0 - stay_other) * mass_pairs * weight;
-            }
-            forward_pair_step(
-                previous_pairs,
-                rows,
-                columns,
-                &landing,
-                PairTransition::new(keep, mass_pairs, stay_other),
-                (1.0 - stay_autozygous) * mass_autozygous,
-                pairs,
-            );
-        }
-        for (value, emission) in autozygous.iter_mut().zip(emissions.autozygous(index)) {
-            *value *= emission;
-        }
-        for (value, emission) in pairs.iter_mut().zip(emissions.pairs(index)) {
-            *value *= emission;
-        }
-        let scale: f64 = autozygous.iter().sum::<f64>() + lane_sum(pairs);
-        let inverse = 1.0 / scale;
-        scale_by(autozygous, inverse);
-        scale_by(pairs, inverse);
-        log_likelihood += float::ln(scale);
-    }
-    if let Some(last) = sites.len().checked_sub(1) {
-        margins(
-            &forward.pairs[last * k * k..],
+    for (index, site) in sites.iter().enumerate() {
+        terms.push(site_terms(
+            site,
             k,
-            &mut forward.rows[last * k..],
-            &mut forward.columns[last * k..],
+            parameters.mismatch,
+            genotype_pairs.of(site.allele_count),
+            emissions.site_mut(0),
+            &mut scratch,
+        ));
+        let previous = (index > 0).then(|| ((index - 1) % 2, transition(index)));
+        let scale = forward_step(
+            &mut forward,
+            index % 2,
+            previous,
+            &landing,
+            share,
+            (emissions.autozygous(0), emissions.pairs(0)),
         );
+        log_likelihood += float::ln(scale);
+        if index % FORWARD_BLOCK == 0 {
+            checkpoints.save(index / FORWARD_BLOCK, &forward, index % 2);
+        }
     }
 
     // The round's own path from `uniforms`, then each extra path from `extra_uniforms`, one
-    // uniform a site from the last site back. All are drawn in one sweep, so each site's totals
-    // are summed once for every path.
+    // uniform a site from the last site back. All are drawn in the backward walk's one sweep, so
+    // each site's totals are summed once for every path.
     let mut streams: Vec<Vec<f64>> = Vec::new();
     let draws_own = uniforms.is_some();
     if let Some(uniforms) = uniforms {
@@ -660,22 +928,7 @@ fn walk_with_draw(
             );
         }
     }
-    let state_paths = draw_state_paths(sites, &forward, &parameters, &landing, &streams);
-    let mut paths: Vec<Vec<HaplotypePair>> = state_paths
-        .iter()
-        .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
-        .collect();
-    let drawn = draws_own.then(|| DrawnPath {
-        haplotypes: paths.remove(0),
-        followed: state_paths[0]
-            .iter()
-            .map(|&state| match state {
-                State::Autozygous(template) => [template, template],
-                State::Pair(first, second) => [first, second],
-            })
-            .collect(),
-    });
-    let extra_paths = paths;
+    let mut state_paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
     let mut posteriors = vec![Vec::new(); sites.len()];
@@ -693,170 +946,261 @@ fn walk_with_draw(
     let (mut second_copy, mut pair_weight, mut autozygous_weight) =
         (Vec::new(), Vec::new(), Vec::new());
     let mut pairs_of_alleles = genotype_pairs;
-    for index in (0..sites.len()).rev() {
-        if index + 1 < sites.len() {
-            let gap = (sites[index + 1].position - sites[index].position) as f64;
-            let (keep, stay_autozygous, stay_other) = persistence(gap, &parameters);
-            for ((weighted, value), emission) in weighted_autozygous
-                .iter_mut()
-                .zip(&backward_autozygous)
-                .zip(emissions.autozygous(index + 1))
-            {
-                *weighted = value * emission;
-            }
-            for ((weighted, value), emission) in weighted_pairs
-                .iter_mut()
-                .zip(&backward_pairs)
-                .zip(emissions.pairs(index + 1))
-            {
-                *weighted = value * emission;
-            }
-            // Read backwards, a jump lands where `landing` says, so what a state can reach is
-            // weighed by it: each row and column summed with the landing weights, and the totals.
-            let total_autozygous: f64 = weighted_autozygous
-                .iter()
-                .zip(&landing)
-                .map(|(value, weight)| value * weight)
-                .sum();
-            landing_margins(&weighted_pairs, &landing, &mut rows, &mut columns);
-            let total_pairs: f64 = rows
-                .iter()
-                .zip(&landing)
-                .map(|(row, weight)| row * weight)
-                .sum();
-            for (value, weighted) in backward_autozygous.iter_mut().zip(&weighted_autozygous) {
-                let within = keep * weighted + (1.0 - keep) * total_autozygous;
-                *value = stay_autozygous * within + (1.0 - stay_autozygous) * total_pairs;
-            }
-            backward_pair_step(
-                &weighted_pairs,
-                &rows,
-                &columns,
-                PairTransition::new(keep, total_pairs, stay_other),
-                (1.0 - stay_other) * total_autozygous,
-                &mut backward_pairs,
+    for block in (0..blocks).rev() {
+        // The block's forward probabilities from its first site, and its emissions; slot
+        // `FORWARD_BLOCK` of the emissions holds the next block's first site's.
+        let start = block * FORWARD_BLOCK;
+        let end = (start + FORWARD_BLOCK).min(sites.len());
+        checkpoints.restore(block, &mut forward, 0);
+        for index in start..end {
+            let local = index - start;
+            emissions_into(
+                &sites[index],
+                &terms[index],
+                k,
+                parameters.mismatch,
+                emissions.site_mut(local),
+                &mut scratch,
             );
-            let total: f64 = backward_autozygous.iter().sum::<f64>() + lane_sum(&backward_pairs);
-            let inverse = 1.0 / total;
-            scale_by(&mut backward_autozygous, inverse);
-            scale_by(&mut backward_pairs, inverse);
+            if index > start {
+                forward_step(
+                    &mut forward,
+                    local,
+                    Some((local - 1, transition(index))),
+                    &landing,
+                    share,
+                    (emissions.autozygous(local), emissions.pairs(local)),
+                );
+            }
         }
-        let site = &sites[index];
-        let site_terms = &terms[index];
-        let alleles = site.allele_count;
+        let last = end - start - 1;
+        margins(
+            &forward.pairs[last * k * k..(last + 1) * k * k],
+            k,
+            &mut forward.rows[last * k..(last + 1) * k],
+            &mut forward.columns[last * k..(last + 1) * k],
+        );
+        for index in (start..end).rev() {
+            let local = index - start;
+            let next_slot = if index + 1 < end {
+                local + 1
+            } else {
+                FORWARD_BLOCK
+            };
+            if !streams.is_empty() {
+                let draw = SiteDraw::new(
+                    forward.autozygous(local),
+                    forward.pairs(local),
+                    forward.rows(local),
+                    forward.columns(local),
+                    k,
+                );
+                let persistence = (index + 1 < sites.len()).then(|| transition(index + 1));
+                for (path, stream) in state_paths.iter_mut().zip(&streams) {
+                    let next = persistence.zip(path.last().copied());
+                    path.push(draw.draw(next, stream[sites.len() - 1 - index], &landing));
+                }
+            }
+            if index + 1 < sites.len() {
+                let gap = (sites[index + 1].position - sites[index].position) as f64;
+                let (keep, stay_autozygous, stay_other) = persistence(gap, &parameters);
+                for ((weighted, value), emission) in weighted_autozygous
+                    .iter_mut()
+                    .zip(&backward_autozygous)
+                    .zip(emissions.autozygous(next_slot))
+                {
+                    *weighted = value * emission;
+                }
+                for ((weighted, value), emission) in weighted_pairs
+                    .iter_mut()
+                    .zip(&backward_pairs)
+                    .zip(emissions.pairs(next_slot))
+                {
+                    *weighted = value * emission;
+                }
+                // Read backwards, a jump lands where `landing` says, so what a state can reach is
+                // weighed by it: each row and column summed with the landing weights, and the totals.
+                let total_autozygous: f64 = weighted_autozygous
+                    .iter()
+                    .zip(&landing)
+                    .map(|(value, weight)| value * weight)
+                    .sum();
+                landing_margins(&weighted_pairs, &landing, &mut rows, &mut columns);
+                let total_pairs: f64 = rows
+                    .iter()
+                    .zip(&landing)
+                    .map(|(row, weight)| row * weight)
+                    .sum();
+                for (value, weighted) in backward_autozygous.iter_mut().zip(&weighted_autozygous) {
+                    let within = keep * weighted + (1.0 - keep) * total_autozygous;
+                    *value = stay_autozygous * within + (1.0 - stay_autozygous) * total_pairs;
+                }
+                backward_pair_step(
+                    &weighted_pairs,
+                    &rows,
+                    &columns,
+                    PairTransition::new(keep, total_pairs, stay_other),
+                    (1.0 - stay_other) * total_autozygous,
+                    &mut backward_pairs,
+                );
+                let total: f64 =
+                    backward_autozygous.iter().sum::<f64>() + lane_sum(&backward_pairs);
+                let inverse = 1.0 / total;
+                scale_by(&mut backward_autozygous, inverse);
+                scale_by(&mut backward_pairs, inverse);
+            }
+            let site = &sites[index];
+            let site_terms = &terms[index];
+            let alleles = site.allele_count;
 
-        // The state posterior with this site's own emission divided back out, so the sample's
-        // likelihood enters once, below (§3.6).
-        //
-        // **A state whose emission is exactly zero contributes zero**, not 0/0. It happens where the
-        // reads rule out every genotype the state allows — a deep heterozygote's homozygous
-        // likelihoods underflow to 0 at 30× — and then each of the emission's non-negative terms,
-        // q̃ · q̃ · L(g), is zero, so the state adds nothing to any genotype whatever its weight.
-        let without_emission = |both: f64, emission: f64| {
-            if emission > 0.0 { both / emission } else { 0.0 }
-        };
-        let (forward_autozygous, forward_pairs) = (forward.autozygous(index), forward.pairs(index));
-        for (state, value) in state_autozygous.iter_mut().enumerate() {
-            *value = without_emission(
-                forward_autozygous[state] * backward_autozygous[state],
-                emissions.autozygous(index)[state],
-            );
-        }
-        // Column by column, `[second][first]`, for the spreading over alleles below.
-        // Read row by row, so the three inputs are read in order, and written to their columns.
-        for (state, ((&forward, &backward), &emission)) in forward_pairs
-            .iter()
-            .zip(&backward_pairs)
-            .zip(emissions.pairs(index))
-            .enumerate()
-        {
-            by_second[(state % k) * k + state / k] = without_emission(forward * backward, emission);
-        }
-        let both_autozygous: f64 = (0..k)
-            .map(|state| forward_autozygous[state] * backward_autozygous[state])
-            .sum();
-        let both_pairs = lane_dot(forward_pairs, &backward_pairs);
-        autozygous_probability[index] = both_autozygous / (both_autozygous + both_pairs);
-        let last = k - 1;
-        let with_last: f64 = forward_autozygous[last] * backward_autozygous[last]
-            + (0..k)
-                .map(|other| {
-                    let row = forward_pairs[last * k + other] * backward_pairs[last * k + other];
-                    let column = if other == last {
-                        0.0
-                    } else {
-                        forward_pairs[other * k + last] * backward_pairs[other * k + last]
-                    };
-                    row + column
-                })
-                .sum::<f64>();
-        last_template_copy[index] = with_last / (both_autozygous + both_pairs);
+            // The state posterior with this site's own emission divided back out, so the sample's
+            // likelihood enters once, below (§3.6).
+            //
+            // **A state whose emission is exactly zero contributes zero**, not 0/0. It happens where the
+            // reads rule out every genotype the state allows — a deep heterozygote's homozygous
+            // likelihoods underflow to 0 at 30× — and then each of the emission's non-negative terms,
+            // q̃ · q̃ · L(g), is zero, so the state adds nothing to any genotype whatever its weight.
+            let without_emission = |both: f64, emission: f64| {
+                if emission > 0.0 { both / emission } else { 0.0 }
+            };
+            let (forward_autozygous, forward_pairs) =
+                (forward.autozygous(local), forward.pairs(local));
+            for (state, value) in state_autozygous.iter_mut().enumerate() {
+                *value = without_emission(
+                    forward_autozygous[state] * backward_autozygous[state],
+                    emissions.autozygous(local)[state],
+                );
+            }
+            // Column by column, `[second][first]`, for the spreading over alleles below.
+            // Read row by row, so the three inputs are read in order, and written to their columns.
+            // Two loops rather than one over the states split by `% k` and `/ k`: those were two
+            // integer divisions a state, by a `k` known only at run time, and the line was an eighth
+            // of the pass's time (perf, 800 tomato samples).
+            let pair_emissions = emissions.pairs(local);
+            for first in 0..k {
+                let row = first * k..(first + 1) * k;
+                for (second, ((&forward, &backward), &emission)) in forward_pairs[row.clone()]
+                    .iter()
+                    .zip(&backward_pairs[row.clone()])
+                    .zip(&pair_emissions[row])
+                    .enumerate()
+                {
+                    by_second[second * k + first] = without_emission(forward * backward, emission);
+                }
+            }
+            let both_autozygous: f64 = (0..k)
+                .map(|state| forward_autozygous[state] * backward_autozygous[state])
+                .sum();
+            let both_pairs = lane_dot(forward_pairs, &backward_pairs);
+            autozygous_probability[index] = both_autozygous / (both_autozygous + both_pairs);
+            let last = k - 1;
+            let with_last: f64 = forward_autozygous[last] * backward_autozygous[last]
+                + (0..k)
+                    .map(|other| {
+                        let row =
+                            forward_pairs[last * k + other] * backward_pairs[last * k + other];
+                        let column = if other == last {
+                            0.0
+                        } else {
+                            forward_pairs[other * k + last] * backward_pairs[other * k + last]
+                        };
+                        row + column
+                    })
+                    .sum::<f64>();
+            last_template_copy[index] = with_last / (both_autozygous + both_pairs);
 
-        // The pair states' weight on each ordered allele pair, Q̃ᵀ · W · Q̃ (§3.6): first each
-        // first-copy template's weight spread over the second copy's alleles (K² · A), then over
-        // the first copy's (K · A²) — not K² · A² by summing every state over every pair.
-        let blurred = &site_terms.blurred;
-        // `second_copy[b][first]`: the second templates taken in order, each adding its share of
-        // allele `b` to every first template at once — the same terms in the same order as a sum
-        // per first template, but the inner loop runs over templates and vectorises.
-        second_copy.clear();
-        second_copy.resize(alleles * k, 0.0);
-        for (column, shares) in by_second.chunks_exact(k).zip(blurred.chunks_exact(alleles)) {
-            for (out, &share) in second_copy.chunks_exact_mut(k).zip(shares) {
-                for (value, &weight) in out.iter_mut().zip(column) {
+            // The pair states' weight on each ordered allele pair, Q̃ᵀ · W · Q̃ (§3.6): first each
+            // first-copy template's weight spread over the second copy's alleles (K² · A), then over
+            // the first copy's (K · A²) — not K² · A² by summing every state over every pair.
+            let blurred = &site_terms.blurred;
+            // `second_copy[b][first]`: the second templates taken in order, each adding its share of
+            // allele `b` to every first template at once — the same terms in the same order as a sum
+            // per first template, but the inner loop runs over templates and vectorises.
+            second_copy.clear();
+            second_copy.resize(alleles * k, 0.0);
+            for (column, shares) in by_second.chunks_exact(k).zip(blurred.chunks_exact(alleles)) {
+                for (out, &share) in second_copy.chunks_exact_mut(k).zip(shares) {
+                    for (value, &weight) in out.iter_mut().zip(column) {
+                        *value += weight * share;
+                    }
+                }
+            }
+            pair_weight.clear();
+            pair_weight.resize(alleles * alleles, 0.0);
+            for (first, first_shares) in blurred.chunks_exact(alleles).enumerate() {
+                for (&first_share, out) in first_shares
+                    .iter()
+                    .zip(pair_weight.chunks_exact_mut(alleles))
+                {
+                    for (value, spread) in out.iter_mut().zip(second_copy.chunks_exact(k)) {
+                        *value += first_share * spread[first];
+                    }
+                }
+            }
+            autozygous_weight.clear();
+            autozygous_weight.resize(alleles, 0.0);
+            for (&weight, shares) in state_autozygous.iter().zip(blurred.chunks_exact(alleles)) {
+                for (value, share) in autozygous_weight.iter_mut().zip(shares) {
                     *value += weight * share;
                 }
             }
-        }
-        pair_weight.clear();
-        pair_weight.resize(alleles * alleles, 0.0);
-        for (first, first_shares) in blurred.chunks_exact(alleles).enumerate() {
-            for (&first_share, out) in first_shares
+            let mut prediction: Vec<f64> = pairs_of_alleles
+                .of(alleles)
                 .iter()
-                .zip(pair_weight.chunks_exact_mut(alleles))
-            {
-                for (value, spread) in out.iter_mut().zip(second_copy.chunks_exact(k)) {
-                    *value += first_share * spread[first];
-                }
+                .map(|&(a, b)| {
+                    let mut weight = pair_weight[a * alleles + b];
+                    if a == b {
+                        weight += autozygous_weight[a];
+                    } else {
+                        weight += pair_weight[b * alleles + a];
+                    }
+                    weight
+                })
+                .collect();
+            let mut posterior: Vec<f64> = prediction
+                .iter()
+                .zip(site.likelihoods)
+                .map(|(weight, likelihood)| weight * likelihood)
+                .collect();
+            let total: f64 = posterior.iter().sum();
+            for value in &mut posterior {
+                *value /= total;
             }
-        }
-        autozygous_weight.clear();
-        autozygous_weight.resize(alleles, 0.0);
-        for (&weight, shares) in state_autozygous.iter().zip(blurred.chunks_exact(alleles)) {
-            for (value, share) in autozygous_weight.iter_mut().zip(shares) {
-                *value += weight * share;
+            let total: f64 = prediction.iter().sum();
+            for value in &mut prediction {
+                *value /= total;
             }
+            posteriors[index] = posterior;
+            neighbour_predictions[index] = prediction;
         }
-        let mut prediction: Vec<f64> = pairs_of_alleles
-            .of(alleles)
-            .iter()
-            .map(|&(a, b)| {
-                let mut weight = pair_weight[a * alleles + b];
-                if a == b {
-                    weight += autozygous_weight[a];
-                } else {
-                    weight += pair_weight[b * alleles + a];
-                }
-                weight
-            })
-            .collect();
-        let mut posterior: Vec<f64> = prediction
-            .iter()
-            .zip(site.likelihoods)
-            .map(|(weight, likelihood)| weight * likelihood)
-            .collect();
-        let total: f64 = posterior.iter().sum();
-        for value in &mut posterior {
-            *value /= total;
-        }
-        let total: f64 = prediction.iter().sum();
-        for value in &mut prediction {
-            *value /= total;
-        }
-        posteriors[index] = posterior;
-        neighbour_predictions[index] = prediction;
+        emissions.carry(0, FORWARD_BLOCK);
     }
-    WALK_ARRAYS.set(WalkArrays { emissions, forward });
+    WALK_ARRAYS.set(WalkArrays {
+        emissions,
+        forward,
+        checkpoints,
+    });
+
+    // The paths were drawn from the last site back.
+    for path in &mut state_paths {
+        path.reverse();
+    }
+    let mut joints = Joints::default();
+    let mut paths: Vec<PathHaplotypes> = state_paths
+        .iter()
+        .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut(), &mut joints))
+        .collect();
+    let drawn = draws_own.then(|| DrawnPath {
+        haplotypes: paths.remove(0),
+        followed: state_paths[0]
+            .iter()
+            .map(|&state| match state {
+                State::Autozygous(template) => [template, template],
+                State::Pair(first, second) => [first, second],
+            })
+            .collect(),
+    });
+    let extra_paths = paths;
 
     (
         WalkResult {
@@ -869,42 +1213,6 @@ fn walk_with_draw(
         drawn,
         extra_paths,
     )
-}
-
-/// **Draws every path's states backwards from the forward probabilities** (phasing spec §2.1),
-/// each state given the one after it. `streams` holds each path's uniforms, one a site from the
-/// last site back. Each site's totals ([`SiteDraw`]) are summed once and serve every path.
-fn draw_state_paths(
-    sites: &[WalkSite<'_>],
-    forward: &Forward,
-    parameters: &WalkParameters,
-    landing: &[f64],
-    streams: &[Vec<f64>],
-) -> Vec<Vec<State>> {
-    let mut paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
-    for (drawn, index) in (0..sites.len()).rev().enumerate() {
-        let site = SiteDraw::new(
-            forward.autozygous(index),
-            forward.pairs(index),
-            forward.rows(index),
-            forward.columns(index),
-            forward.k,
-        );
-        let persistence = (index + 1 < sites.len()).then(|| {
-            persistence(
-                (sites[index + 1].position - sites[index].position) as f64,
-                parameters,
-            )
-        });
-        for (path, stream) in paths.iter_mut().zip(streams) {
-            let next = persistence.zip(path.last().copied());
-            path.push(site.draw(next, stream[drawn], landing));
-        }
-    }
-    for path in &mut paths {
-        path.reverse();
-    }
-    paths
 }
 
 /// **One site's forward probabilities, arranged so a state can be drawn given the next in about
@@ -1054,28 +1362,35 @@ fn haplotypes_along(
     terms: &[SiteTerms],
     states: &[State],
     reads: Option<&mut DrawReads<'_>>,
-) -> Vec<HaplotypePair> {
-    let mut joints: Vec<Option<Vec<f64>>> = sites
-        .iter()
-        .zip(terms)
-        .zip(states)
-        .map(|((site, site_terms), &state)| {
-            joint_along(
-                state,
-                &site_terms.blurred,
-                &site_terms.by_alleles,
-                site.allele_count,
-            )
-        })
-        .collect();
-    if let Some(reads) = reads {
-        orient_by_reads(sites, &mut joints, reads);
+    joints: &mut Joints,
+) -> PathHaplotypes {
+    joints.clear();
+    for ((site, site_terms), &state) in sites.iter().zip(terms).zip(states) {
+        let alleles = site.allele_count;
+        let start = joints.values.len();
+        joints.starts.push(start);
+        joints.values.resize(start + alleles * alleles, 0.0);
+        let present = joint_into(
+            state,
+            &site_terms.blurred,
+            &site_terms.by_alleles,
+            alleles,
+            &mut joints.values[start..],
+        );
+        joints.present.push(present);
     }
-    sites
-        .iter()
-        .zip(&joints)
-        .map(|(site, joint)| copies_of(joint.as_deref(), site.allele_count))
-        .collect()
+    if let Some(reads) = reads {
+        orient_by_reads(sites, joints, reads);
+    }
+    let mut path = PathHaplotypes::with_capacity(sites.len());
+    for (index, site) in sites.iter().enumerate() {
+        copies_into(
+            joints.get(index),
+            site.allele_count,
+            path.push_site(site.allele_count),
+        );
+    }
+    path
 }
 
 /// **The heterozygote a chain reads at a site**, its two alleles the lower first, or `None` when
@@ -1102,17 +1417,11 @@ fn orientable_pair(joint: &[f64], alleles: usize, het_mass_min: f64) -> Option<(
 /// site's heterozygous mass onto it** (reads-in-draw spec §2.2). A group is a run of consecutive
 /// orientable sites, each linked to the next by the sample's fragments; a site outside every group
 /// of two or more keeps its joint.
-fn orient_by_reads(
-    sites: &[WalkSite<'_>],
-    joints: &mut [Option<Vec<f64>>],
-    reads: &mut DrawReads<'_>,
-) {
-    let orientable: Vec<(usize, (usize, usize))> = joints
-        .iter()
-        .enumerate()
-        .filter(|&(site, _)| !(reads.kept_out)(site))
-        .filter_map(|(site, joint)| {
-            let joint = joint.as_deref()?;
+fn orient_by_reads(sites: &[WalkSite<'_>], joints: &mut Joints, reads: &mut DrawReads<'_>) {
+    let orientable: Vec<(usize, (usize, usize))> = (0..joints.len())
+        .filter(|&site| !(reads.kept_out)(site))
+        .filter_map(|site| {
+            let joint = joints.get(site)?;
             orientable_pair(joint, sites[site].allele_count, reads.het_mass_min)
                 .map(|pair| (site, pair))
         })
@@ -1152,7 +1461,7 @@ fn orient_by_reads(
 /// backwards from the last; then each site's heterozygous mass moves onto the drawn order.
 /// `links[i]` joins `group[i]` and `group[i + 1]`.
 fn orient_group(
-    joints: &mut [Option<Vec<f64>>],
+    joints: &mut Joints,
     sites: &[WalkSite<'_>],
     group: &[(usize, (usize, usize))],
     links: &[f64],
@@ -1165,9 +1474,7 @@ fn orient_group(
         .map(|&(site, _)| {
             let alleles = sites[site].allele_count;
             // PANIC-FREE: only sites with a joint are orientable.
-            let joint = joints[site]
-                .as_deref()
-                .expect("an orientable site has a joint");
+            let joint = joints.get(site).expect("an orientable site has a joint");
             let mut weights = [0.0; 2];
             for a in 0..alleles {
                 for b in a + 1..alleles {
@@ -1207,8 +1514,8 @@ fn orient_group(
     for (&(site, _), &orientation) in group.iter().zip(&drawn) {
         let alleles = sites[site].allele_count;
         // PANIC-FREE: as above.
-        let joint = joints[site]
-            .as_mut()
+        let joint = joints
+            .get_mut(site)
             .expect("an orientable site has a joint");
         for a in 0..alleles {
             for b in a + 1..alleles {
@@ -1236,23 +1543,31 @@ fn copies_along(
     by_alleles: &[f64],
     alleles: usize,
 ) -> HaplotypePair {
-    copies_of(
-        joint_along(state, blurred, by_alleles, alleles).as_deref(),
+    let mut joint = vec![0.0; alleles * alleles];
+    let present = joint_into(state, blurred, by_alleles, alleles, &mut joint);
+    let mut path = PathHaplotypes::with_capacity(1);
+    copies_into(
+        present.then_some(&joint[..]),
         alleles,
-    )
+        path.push_site(alleles),
+    );
+    let [first, second] = path.site(0);
+    [first.to_vec(), second.to_vec()]
 }
 
-/// **Each copy's haplotype, the margins of `joint`**; flat where there is no joint.
-fn copies_of(joint: Option<&[f64]>, alleles: usize) -> HaplotypePair {
+/// **Each copy's haplotype, the margins of `joint`**, written over the two copies, which hold
+/// zeros; flat where there is no joint.
+fn copies_into(
+    joint: Option<&[f64]>,
+    alleles: usize,
+    (first_copy, second_copy): (&mut [f64], &mut [f64]),
+) {
     let Some(joint) = joint else {
         // Every allele pair ruled out — the state's emission was zero (§3.6's guard).
-        return [
-            vec![1.0 / alleles as f64; alleles],
-            vec![1.0 / alleles as f64; alleles],
-        ];
+        first_copy.fill(1.0 / alleles as f64);
+        second_copy.fill(1.0 / alleles as f64);
+        return;
     };
-    let mut first_copy = vec![0.0; alleles];
-    let mut second_copy = vec![0.0; alleles];
     for a in 0..alleles {
         for b in 0..alleles {
             let value = joint[a * alleles + b];
@@ -1260,18 +1575,17 @@ fn copies_of(joint: Option<&[f64]>, alleles: usize) -> HaplotypePair {
             second_copy[b] += value;
         }
     }
-    [first_copy, second_copy]
 }
 
-/// **The joint of [`copies_along`] at one site**, normalised to sum to one; `None` where every
-/// allele pair is ruled out.
-fn joint_along(
+/// **The joint of [`copies_along`] at one site**, normalised to sum to one, written over `joint`,
+/// `A × A` zeros; `false` where every allele pair is ruled out.
+fn joint_into(
     state: State,
     blurred: &[f64],
     by_alleles: &[f64],
     alleles: usize,
-) -> Option<Vec<f64>> {
-    let mut joint = vec![0.0; alleles * alleles];
+    joint: &mut [f64],
+) -> bool {
     match state {
         State::Pair(first, second) => {
             for a in 0..alleles {
@@ -1291,12 +1605,12 @@ fn joint_along(
     }
     let total: f64 = joint.iter().sum();
     if total <= 0.0 {
-        return None;
+        return false;
     }
-    for value in &mut joint {
+    for value in joint.iter_mut() {
         *value /= total;
     }
-    Some(joint)
+    true
 }
 
 /// **A pair state's transition, split by how many copies keep their template**: both
