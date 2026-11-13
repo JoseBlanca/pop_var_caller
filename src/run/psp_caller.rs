@@ -38,6 +38,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use super::records::DEFAULT_MIN_SITE_QUALITY;
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
@@ -51,6 +53,7 @@ use crate::read::input::reference::OpenReference;
 use crate::read_phase::fragments::RecordFragments;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
+use crate::run::fragment_keeper::KeptRecord;
 use crate::types::{Bp, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
@@ -686,12 +689,15 @@ impl PspVariantCaller {
     }
 
     /// `call_cohort_handing_each_record_over`, with
-    /// each record **got ready by `prepare` on the thread that called its locus** and then taken
-    /// by `hand_over` on the calling thread, in genome order, beside every sample's window.
+    /// each record **got ready by `prepare` on the pool, a batch of [`PREPARED_A_BATCH`] at a
+    /// time,** and then taken by `hand_over` on the calling thread, in genome order, beside every
+    /// sample's window.
     ///
-    /// What `prepare` does is whatever of the output's work needs no file — encoding the record's
-    /// spill entry, with the hidden-duplication filter on — so that the one thread writing in
-    /// genome order does not do it while the others wait.
+    /// What `prepare` does is whatever of the output's work needs no file — the record's VCF line,
+    /// or its spill entry with the hidden-duplication filter on — so that the one thread writing in
+    /// genome order does not do it while the others wait. It cannot run where the locus was
+    /// called, because a record is final only once the edge-deletion gathering and the fragment
+    /// keeper, which need the records in genome order, have released it.
     ///
     /// # Errors
     ///
@@ -815,6 +821,15 @@ impl PspVariantCaller {
             // or, where the output reads no fragments, at once and with none.
             let mut keeper =
                 crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
+            // **Then prepared on the pool, a batch at a time, and handed over in order.**
+            // Preparing — the VCF line and, with the filter on, the spill entry — needs the record
+            // alone, so it need not wait its turn on this thread: at 2,176 tomato samples it cost
+            // 1.7 ms a record here, with most of the pool idle. Released records wait in `kept`
+            // until [`PREPARED_A_BATCH`] have, are prepared together, and are handed over in the
+            // order they were released, so the output is what preparing one at a time gave. A
+            // refusal reaches the driver at the record that filled the batch, and is named at that
+            // record's locus — as before, a later locus than the one refused, since the keeper
+            // already held records back.
             let mut kept = Vec::new();
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
@@ -824,9 +839,9 @@ impl PspVariantCaller {
              -> Result<(), E> {
                 for (record, windows) in gathering.accept(record, windows) {
                     keeper.accept(record, windows, &mut kept);
-                    for (record, windows, fragments) in kept.drain(..) {
-                        hand_over(prepare(record, &windows, fragments)?, &windows)?;
-                    }
+                }
+                if kept.len() >= PREPARED_A_BATCH {
+                    prepare_and_hand_over(&mut kept, prepare, hand_over)?;
                 }
                 Ok(())
             };
@@ -851,7 +866,9 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
-            let mut released = Vec::new();
+            // What calling left in the batch goes first, then what the gathering and the keeper
+            // still held, in that order, which is the order they were released in.
+            let mut released = kept;
             for (record, windows) in gathering.finish() {
                 keeper.accept(record, windows, &mut released);
             }
@@ -859,14 +876,22 @@ impl PspVariantCaller {
             if keeper.keeps_fragments() {
                 crate::run::fragment_keeper::log_counts(keeper.counts());
             }
-            for (record, windows, fragments) in released {
-                let locus = record.region();
-                prepare(record, &windows, fragments)
-                    .and_then(|ready| hand_over(ready, &windows))
-                    .map_err(|source| RunError::RecordNotWritten {
-                        locus,
-                        source: Box::new(source),
-                    })?;
+            let mut released = released.into_iter();
+            loop {
+                let batch: Vec<_> = released.by_ref().take(PREPARED_A_BATCH).collect();
+                if batch.is_empty() {
+                    break;
+                }
+                let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
+                let prepared = prepare_on_the_pool(batch, prepare);
+                for (locus, prepared) in loci.into_iter().zip(prepared) {
+                    prepared
+                        .and_then(|(ready, windows)| hand_over(ready, &windows))
+                        .map_err(|source| RunError::RecordNotWritten {
+                            locus,
+                            source: Box::new(source),
+                        })?;
+                }
             }
             let mut outcome = outcome;
             outcome.calling.after_gathering(gathering.counts());
@@ -1313,6 +1338,49 @@ fn refuse_if_more_descriptors_are_needed_than_allowed_for_psps(
             needed,
             limit,
         });
+    }
+    Ok(())
+}
+
+/// **How many released records are prepared together on the pool.** Enough that a batch splits
+/// into work for every thread — at 2,176 samples a record took 1.7 ms to prepare, so 256 of them
+/// are about 440 ms of work — and few enough that a batch of the largest records stays small
+/// beside the round it overlaps: about 50 MB at 213 kB a record before compression.
+const PREPARED_A_BATCH: usize = 256;
+
+/// **Prepare every record of `batch` on the pool**, each with its windows back beside it, in the
+/// batch's order. Each record's preparation depends on that record alone, so the results are the
+/// ones preparing them one at a time gives.
+fn prepare_on_the_pool<P, E>(
+    batch: Vec<KeptRecord<Vec<WindowCoverage>>>,
+    prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
+) -> Vec<Result<(P, Vec<WindowCoverage>), E>>
+where
+    P: Send,
+    E: Send,
+{
+    batch
+        .into_par_iter()
+        .map(|(record, windows, fragments)| {
+            prepare(record, &windows, fragments).map(|ready| (ready, windows))
+        })
+        .collect()
+}
+
+/// **Prepare the waiting records on the pool and hand them over in order**, leaving `waiting`
+/// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there.
+fn prepare_and_hand_over<P, E>(
+    waiting: &mut Vec<KeptRecord<Vec<WindowCoverage>>>,
+    prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+) -> Result<(), E>
+where
+    P: Send,
+    E: Send,
+{
+    for prepared in prepare_on_the_pool(std::mem::take(waiting), prepare) {
+        let (ready, windows) = prepared?;
+        hand_over(ready, &windows)?;
     }
     Ok(())
 }

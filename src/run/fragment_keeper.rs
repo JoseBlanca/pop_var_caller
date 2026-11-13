@@ -11,9 +11,11 @@
 use std::collections::VecDeque;
 
 use ahash::AHashMap;
+use rayon::prelude::*;
 
 use crate::read_phase::capture::{READ_ALLELES_KEPT, ReadAllele};
 use crate::read_phase::fragments::{FragmentAllele, READ_REACH, RecordFragments};
+use crate::read_phase::record_reads::SampleReadAllele;
 use crate::types::{ChainId, ContigId};
 use crate::vcf::VcfRecord;
 
@@ -50,6 +52,11 @@ pub fn log_counts(counts: KeeperCounts) {
         READ_REACH,
     );
 }
+
+/// **How many samples one task of the keeper handles.** Small enough that a cohort of a few
+/// thousand splits into dozens of tasks for the pool, large enough that a task's work — tens of
+/// microseconds at three reads a position — outweighs handing it to another thread.
+pub const SAMPLES_A_TASK: usize = 64;
 
 /// What the keeper remembers of one read.
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +124,16 @@ struct HeldRecord<P> {
 /// alleles can be kept after that. A read met again later — a pair with an insert over a
 /// kilobase, say — is numbered as a new fragment. Its read alleles there are still one molecule's,
 /// so the worst this does is make one fragment two.
+///
+/// **Each sample's reads are its own, so the samples are shared among the threads.** Taking a
+/// record in, forgetting reads out of reach and releasing a record each touch one sample's reads
+/// at a time and nothing else, so each is done over groups of [`SAMPLES_A_TASK`] samples at once
+/// and the groups' results joined in sample order: the result is the one-thread result, read
+/// allele for read allele, whatever the thread count. It matters at the large end of the cohort
+/// range: at 2,176 tomato samples and about three reads a position a record carried about 18,000
+/// read alleles, and the keeper on one thread cost 1.8 ms a record, a third of the time the one
+/// thread putting records in genome order spent on each. Below `SAMPLES_A_TASK` samples there is one
+/// group and the work stays on the calling thread.
 ///
 /// `P` is whatever travels beside each record — the driver's coverage windows.
 ///
@@ -232,44 +249,29 @@ impl<P> FragmentKeeper<P> {
 
         let read_alleles = record.replace_read_alleles(Default::default());
         self.counts.read_alleles_over_the_cap += read_alleles.dropped_by_the_cap();
-        let mut within_reach = Vec::with_capacity(read_alleles.len());
-        for entry in read_alleles.entries() {
-            self.counts.read_alleles_in += 1;
-            let sample = entry.sample as usize;
-            if self.samples.len() <= sample {
-                self.samples.resize_with(sample + 1, SampleReads::default);
-            }
-            let reads = &mut self.samples[sample];
-            let ReadAllele {
-                read,
-                allele,
-                error_phred,
-            } = entry.read_allele;
-            let next_fragment = &mut reads.next_fragment;
-            let first_seen = &mut reads.first_seen;
-            let seen = reads.by_read.entry(read).or_insert_with(|| {
-                let fragment = *next_fragment;
-                *next_fragment += 1;
-                first_seen.push_back(FirstSeen { position, read });
-                ReadSeen {
-                    first_position: position,
-                    records_within_reach: 0,
-                    fragment,
-                }
-            });
-            if position - seen.first_position > READ_REACH {
-                self.counts.read_alleles_beyond_reach += 1;
-                continue;
-            }
-            seen.records_within_reach += 1;
-            within_reach.push(HeldReadAllele {
-                sample: entry.sample,
-                read,
-                // PANIC-FREE: the allele indexes the record's alleles, which calling numbers as
-                // `AlleleId`, a `u16`.
-                allele: u16::try_from(allele).expect("a record holds fewer than 65,536 alleles"),
-                error_phred,
-            });
+        let entries = read_alleles.entries();
+        // The entries are sorted by sample, so the last names the highest.
+        if let Some(last) = entries.last()
+            && self.samples.len() <= last.sample as usize
+        {
+            self.samples
+                .resize_with(last.sample as usize + 1, SampleReads::default);
+        }
+        let taken: Vec<(Vec<HeldReadAllele>, u64)> = self
+            .samples
+            .par_chunks_mut(SAMPLES_A_TASK)
+            .enumerate()
+            .map(|(task, samples)| {
+                let first = task * SAMPLES_A_TASK;
+                let in_task = of_samples(entries, first, samples.len(), |entry| entry.sample);
+                take_in(samples, first, in_task, position)
+            })
+            .collect();
+        self.counts.read_alleles_in += entries.len() as u64;
+        let mut within_reach = Vec::with_capacity(entries.len());
+        for (kept, beyond_reach) in taken {
+            within_reach.extend(kept);
+            self.counts.read_alleles_beyond_reach += beyond_reach;
         }
         self.held.push_back(HeldRecord {
             record,
@@ -299,32 +301,22 @@ impl<P> FragmentKeeper<P> {
     /// One record out: every record within reach of each of its reads' first ones has arrived,
     /// since the newest is more than `R` past this one, which is at or after the read's first.
     fn release(&mut self, held: HeldRecord<P>) -> KeptRecord<P> {
-        let mut entries = Vec::new();
-        for HeldReadAllele {
-            sample,
-            read,
-            allele,
-            error_phred,
-        } in held.read_alleles
-        {
-            // A held read allele was kept within reach, `position − first_position ≤ R`, and a
-            // read is forgotten only once `first_position + R` is behind the oldest held record,
-            // which is this one or later; so a held record's reads are never forgotten.
-            let Some(seen) = self.samples[sample as usize].by_read.get(&read) else {
-                // UNREACHABLE: by the forgetting rule just stated.
-                unreachable!("a held record's read {read} of sample {sample} was forgotten");
-            };
-            if seen.records_within_reach >= 2 {
-                self.counts.read_alleles_kept += 1;
-                entries.push(FragmentAllele {
-                    sample,
-                    fragment: seen.fragment,
-                    allele,
-                    error_phred,
-                });
-            } else {
-                self.counts.read_alleles_alone += 1;
-            }
+        let read_alleles = &held.read_alleles;
+        let released: Vec<(Vec<FragmentAllele>, u64)> = self
+            .samples
+            .par_chunks(SAMPLES_A_TASK)
+            .enumerate()
+            .map(|(task, samples)| {
+                let first = task * SAMPLES_A_TASK;
+                let in_task = of_samples(read_alleles, first, samples.len(), |held| held.sample);
+                fragments_of(samples, first, in_task)
+            })
+            .collect();
+        let mut entries = Vec::with_capacity(read_alleles.len());
+        for (kept, alone) in released {
+            self.counts.read_alleles_kept += kept.len() as u64;
+            self.counts.read_alleles_alone += alone;
+            entries.extend(kept);
         }
         (
             held.record,
@@ -338,15 +330,113 @@ impl<P> FragmentKeeper<P> {
     /// is), so every read allele they have at a held record was already dropped as beyond reach,
     /// and every later one would be too.
     fn forget_reads_out_of_reach(&mut self, oldest_position: u64) {
-        for sample in &mut self.samples {
-            while let Some(&FirstSeen { position, read }) = sample.first_seen.front()
-                && position + READ_REACH < oldest_position
-            {
-                sample.first_seen.pop_front();
-                sample.by_read.remove(&read);
+        self.samples
+            .par_chunks_mut(SAMPLES_A_TASK)
+            .for_each(|samples| {
+                for sample in samples {
+                    while let Some(&FirstSeen { position, read }) = sample.first_seen.front()
+                        && position + READ_REACH < oldest_position
+                    {
+                        sample.first_seen.pop_front();
+                        sample.by_read.remove(&read);
+                    }
+                }
+            });
+    }
+}
+
+/// **The part of `sorted` — sorted by sample — whose samples are `first..first + count`**, the
+/// samples one task of the keeper holds.
+fn of_samples<T>(sorted: &[T], first: usize, count: usize, sample: impl Fn(&T) -> u32) -> &[T] {
+    let start = sorted.partition_point(|item| (sample(item) as usize) < first);
+    let end =
+        start + sorted[start..].partition_point(|item| (sample(item) as usize) < first + count);
+    &sorted[start..end]
+}
+
+/// **One task's samples take in a record's read alleles at `position`**: `samples[i]` is run
+/// sample `first + i`, and `entries` are those samples' read alleles, sorted by sample. Returns the
+/// read alleles within reach of their read's first, in the order given, and how many were not.
+fn take_in(
+    samples: &mut [SampleReads],
+    first: usize,
+    entries: &[SampleReadAllele],
+    position: u64,
+) -> (Vec<HeldReadAllele>, u64) {
+    let mut within_reach = Vec::with_capacity(entries.len());
+    let mut beyond_reach = 0;
+    for entry in entries {
+        let reads = &mut samples[entry.sample as usize - first];
+        let ReadAllele {
+            read,
+            allele,
+            error_phred,
+        } = entry.read_allele;
+        let next_fragment = &mut reads.next_fragment;
+        let first_seen = &mut reads.first_seen;
+        let seen = reads.by_read.entry(read).or_insert_with(|| {
+            let fragment = *next_fragment;
+            *next_fragment += 1;
+            first_seen.push_back(FirstSeen { position, read });
+            ReadSeen {
+                first_position: position,
+                records_within_reach: 0,
+                fragment,
             }
+        });
+        if position - seen.first_position > READ_REACH {
+            beyond_reach += 1;
+            continue;
+        }
+        seen.records_within_reach += 1;
+        within_reach.push(HeldReadAllele {
+            sample: entry.sample,
+            read,
+            // PANIC-FREE: the allele indexes the record's alleles, which calling numbers as
+            // `AlleleId`, a `u16`.
+            allele: u16::try_from(allele).expect("a record holds fewer than 65,536 alleles"),
+            error_phred,
+        });
+    }
+    (within_reach, beyond_reach)
+}
+
+/// **One task's samples release a held record's read alleles**: `samples[i]` is run sample
+/// `first + i`, and `held` are those samples' read alleles. Returns the fragment alleles of reads
+/// seen at two records or more, and how many read alleles were their read's only one.
+fn fragments_of(
+    samples: &[SampleReads],
+    first: usize,
+    held: &[HeldReadAllele],
+) -> (Vec<FragmentAllele>, u64) {
+    let mut kept = Vec::with_capacity(held.len());
+    let mut alone = 0;
+    for &HeldReadAllele {
+        sample,
+        read,
+        allele,
+        error_phred,
+    } in held
+    {
+        // A held read allele was kept within reach, `position − first_position ≤ R`, and a read is
+        // forgotten only once `first_position + R` is behind the oldest held record, which is this
+        // one or later; so a held record's reads are never forgotten.
+        let Some(seen) = samples[sample as usize - first].by_read.get(&read) else {
+            // UNREACHABLE: by the forgetting rule just stated.
+            unreachable!("a held record's read {read} of sample {sample} was forgotten");
+        };
+        if seen.records_within_reach >= 2 {
+            kept.push(FragmentAllele {
+                sample,
+                fragment: seen.fragment,
+                allele,
+                error_phred,
+            });
+        } else {
+            alone += 1;
         }
     }
+    (kept, alone)
 }
 
 #[cfg(test)]

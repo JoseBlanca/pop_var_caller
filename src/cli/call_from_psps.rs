@@ -709,8 +709,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         ))
     };
 
-    // **The record's spill entry is encoded on the thread that called its locus** — the preparer
-    // is the sink's, taken once here — and the sink only appends it, in genome order.
+    // **The record's spill entry is encoded on the pool**, a batch of records at a time — the
+    // preparer is the sink's, taken once here — and the sink only appends it, in genome order.
     let preparer = sink.preparer();
     let (mut calling, mut stored) = caller
         .call_cohort_preparing_each_record(

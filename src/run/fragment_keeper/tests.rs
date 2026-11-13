@@ -317,3 +317,93 @@ fn a_passing_through_keeper_releases_each_record_at_once_with_no_fragments() {
         "a run that reads fragments keeps them"
     );
 }
+
+/// **Sharing the samples among the threads changes nothing a sample is given.** A 300-sample
+/// stream spans five groups of [`SAMPLES_A_TASK`], the last one short; each sample's fragments out
+/// of it must be the ones a keeper handed that sample's reads alone gives, and the counts their
+/// sums. Each sample's reads differ — which records it has reads at, how many, how far they
+/// reach — so a read allele handed to the wrong sample's state, or a group boundary off by one,
+/// shows as a sample whose fragments differ from its own run.
+#[test]
+fn each_sample_is_kept_as_it_would_be_alone_across_groups_of_samples() {
+    const SAMPLES: usize = 300;
+    assert!(SAMPLES > 4 * SAMPLES_A_TASK && SAMPLES % SAMPLES_A_TASK != 0);
+    // A cheap, fixed scramble, so the stream is the same on every run.
+    let mix = |a: u64, b: u64| {
+        (a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33
+    };
+    // (contig, position) of each record: two contigs, records 37 to 400 bases apart, so reads
+    // reach some neighbours and not others, and the contig change resets every sample.
+    let mut places = Vec::new();
+    for contig in 0..2u32 {
+        let mut position = 1;
+        for step in 0..120u64 {
+            position += 37 + mix(u64::from(contig), step) % 364;
+            places.push((contig, position));
+        }
+    }
+    // Sample `s` at record `r`: none, or up to three reads, each a read the sample started at one
+    // of its last few records, so reads recur across records within and beyond the reach.
+    let reads_of = |sample: usize, record: usize| -> Vec<(ChainId, u32)> {
+        let roll = mix(sample as u64, record as u64);
+        if roll % 4 == 0 {
+            return Vec::new();
+        }
+        let count = 1 + roll % 3;
+        (0..count)
+            .map(|k| {
+                let started = record.saturating_sub((mix(roll, k) % 4) as usize);
+                let read: ChainId = sample as u64 * 1_000_000 + started as u64 * 4 + k;
+                (read, (mix(read, record as u64) % 2) as u32)
+            })
+            .collect()
+    };
+    let stream = |samples: &[usize]| -> Vec<VcfRecord> {
+        places
+            .iter()
+            .enumerate()
+            .map(|(record, &(contig, position))| {
+                let reads: Vec<(usize, ChainId, u32)> = samples
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(slot, &sample)| {
+                        reads_of(sample, record)
+                            .into_iter()
+                            .map(move |(read, allele)| (slot, read, allele))
+                    })
+                    .collect();
+                snp_at(contig, position, &reads)
+            })
+            .collect()
+    };
+
+    let all: Vec<usize> = (0..SAMPLES).collect();
+    let (together, counts) = kept(stream(&all));
+    let mut summed = KeeperCounts::default();
+    for sample in 0..SAMPLES {
+        let (alone, alone_counts) = kept(stream(&[sample]));
+        let picked: Vec<Released> = together
+            .iter()
+            .map(|(position, entries)| {
+                (
+                    *position,
+                    entries
+                        .iter()
+                        .filter(|entry| entry.0 as usize == sample)
+                        .map(|&(_, fragment, allele)| (0, fragment, allele))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(picked, alone, "sample {sample}");
+        summed.read_alleles_in += alone_counts.read_alleles_in;
+        summed.read_alleles_kept += alone_counts.read_alleles_kept;
+        summed.read_alleles_alone += alone_counts.read_alleles_alone;
+        summed.read_alleles_beyond_reach += alone_counts.read_alleles_beyond_reach;
+    }
+    assert_eq!(counts, summed);
+    // The stream exercises every outcome, or the comparison above proves less than it says.
+    assert!(counts.read_alleles_kept > 0);
+    assert!(counts.read_alleles_alone > 0);
+    assert!(counts.read_alleles_beyond_reach > 0);
+}
