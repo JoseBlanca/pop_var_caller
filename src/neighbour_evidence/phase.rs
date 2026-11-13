@@ -136,6 +136,13 @@ impl PairLayout {
     }
 }
 
+/// **The bytes one sample's phase holds at a site of `alleles` alleles**: its lined-up sums and its
+/// paths' bits at each allele pair (pass spec §6).
+pub(super) fn phase_bytes(alleles: usize) -> usize {
+    2 * (alleles - 1) * std::mem::size_of::<f32>()
+        + alleles * (alleles - 1) / 2 * std::mem::size_of::<PathBits>()
+}
+
 /// Each path's bits at one pair entry: bit `p` of `towards_lower` says path `p`'s copy 0 leans to
 /// the pair's lower-numbered allele, bit `p` of `leans` that it leans by at least [`LEAN_MIN`].
 #[derive(Clone, Copy, Debug, Default)]

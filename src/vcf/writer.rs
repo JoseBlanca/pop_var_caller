@@ -280,7 +280,7 @@ impl VcfWriter {
         match &mut self.stage {
             LineStage::None => self.write_checked_line(&line),
             LineStage::Refinement(stage) => {
-                stage.push(place, line, fragments, &mut self.released);
+                stage.push(place, line, fragments, &mut self.released)?;
                 self.write_released()
             }
             LineStage::ReadsAlone(stage) => {
@@ -404,7 +404,7 @@ impl VcfWriter {
         let mut read_phase_tally = None;
         let mut stage = std::mem::replace(&mut self.stage, LineStage::None);
         if let LineStage::Refinement(stage) = &mut stage {
-            stage.finish(&mut self.released);
+            stage.finish(&mut self.released)?;
             neighbour_evidence = Some(stage.tally());
             fill_checks = self
                 .metadata
@@ -663,6 +663,23 @@ pub enum VcfWriteError {
         source: io::Error,
     },
 
+    /// **The neighbour-evidence pass cannot go on**: its smallest window here holds more than
+    /// `--refine-window-bytes` allows (`neighbour_evidence_pass.md` §6). The run stops rather than
+    /// switch refinement off or go on past the budget.
+    #[error(
+        "genotype refinement cannot go on: its smallest window, from contig {} position {}, \
+         holds {} records of {} samples, {:.1} GB, and --refine-window-bytes allows {:.1} GB. \
+         Raise --refine-window-bytes to at least {}.",
+        .0.contig,
+        .0.position,
+        .0.records,
+        .0.samples,
+        .0.bytes as f64 / 1e9,
+        .0.budget as f64 / 1e9,
+        .0.bytes
+    )]
+    RefinementOverBudget(crate::neighbour_evidence::stage::WindowOverBudget),
+
     /// **A record ran backwards.** A VCF's records are in genome order, and a consumer that
     /// indexes one would find the index disagreeing with the file rather than fail here.
     #[error(
@@ -699,6 +716,12 @@ pub enum VcfWriteError {
         /// Whether the arriving record is a repeat tract.
         is_repeat_tract: bool,
     },
+}
+
+impl From<crate::neighbour_evidence::stage::WindowOverBudget> for VcfWriteError {
+    fn from(over: crate::neighbour_evidence::stage::WindowOverBudget) -> Self {
+        Self::RefinementOverBudget(over)
+    }
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ use super::model::{
 };
 use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
-    SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks,
+    SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks, phase_bytes,
 };
 use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
@@ -392,6 +392,35 @@ pub fn refine_window(
         no_read,
         Phasing::none(),
     )
+}
+
+/// **The bytes the solve holds for one sample at every record of a window**, at a record of
+/// `alleles` alleles, over the window's rounds (pass spec §6): its two haplotypes in the round read
+/// and the round written, the templates they followed, and its phase. Counted at every record,
+/// whether a walk uses it or not.
+#[must_use]
+pub fn held_solve_bytes(alleles: usize) -> u64 {
+    let stored = 2 * (alleles - 1) * std::mem::size_of::<f32>();
+    let followed = std::mem::size_of::<[u8; 2]>();
+    (2 * (stored + followed) + phase_bytes(alleles)) as u64
+}
+
+/// **The bytes the solve holds for one sample at a record of a window's core** besides
+/// [`held_solve_bytes`]: the sums over its averaged rounds, and what it writes — its result, then
+/// the record's rewritten columns, both held at the window's end (pass spec §6).
+#[must_use]
+pub fn core_solve_bytes(alleles: usize) -> u64 {
+    let genotypes = alleles * (alleles + 1) / 2;
+    let sums = (2 * genotypes + 1) * std::mem::size_of::<f64>();
+    let phase = std::mem::size_of::<Option<WrittenPhase>>();
+    let result = genotypes * std::mem::size_of::<f64>()
+        + std::mem::size_of::<(usize, Outcome, usize, f64)>()
+        + phase;
+    let written = genotypes * std::mem::size_of::<f64>()
+        + std::mem::size_of::<Outcome>()
+        + std::mem::size_of::<f64>()
+        + phase;
+    (sums + result + written) as u64
 }
 
 /// **Where a window's records sit in its walks.** Three index spaces meet here, and every
