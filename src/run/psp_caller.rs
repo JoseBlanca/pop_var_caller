@@ -818,7 +818,8 @@ impl PspVariantCaller {
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
             // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
             // the same order, with only the read alleles of reads seen at two records or more —
-            // or, where the output reads no fragments, at once and with none.
+            // or, where the output reads no fragments, at once and with none. It takes them a batch
+            // of [`KEPT_A_BATCH`] at a time, waiting in `gathered`.
             let mut keeper =
                 crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
             // **Then prepared on the pool, a batch at a time, and handed over in order.**
@@ -831,14 +832,16 @@ impl PspVariantCaller {
             // record's locus — as before, a later locus than the one refused, since the keeper
             // already held records back.
             let mut kept = Vec::new();
+            let mut gathered = Vec::new();
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
             };
             let mut gather = |(record, windows): (VcfRecord, Vec<WindowCoverage>),
                               _: &[WindowCoverage]|
              -> Result<(), E> {
-                for (record, windows) in gathering.accept(record, windows) {
-                    keeper.accept(record, windows, &mut kept);
+                gathered.extend(gathering.accept(record, windows));
+                if gathered.len() >= KEPT_A_BATCH {
+                    keeper.accept_batch(std::mem::take(&mut gathered), &mut kept);
                 }
                 if kept.len() >= PREPARED_A_BATCH {
                     prepare_and_hand_over(&mut kept, prepare, hand_over)?;
@@ -866,12 +869,12 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
-            // What calling left in the batch goes first, then what the gathering and the keeper
-            // still held, in that order, which is the order they were released in.
+            // What calling left in the batch goes first. Then the keeper takes the records the
+            // gathering released that it had not taken yet, and those the gathering still held,
+            // and releases everything: the order they were released in.
             let mut released = kept;
-            for (record, windows) in gathering.finish() {
-                keeper.accept(record, windows, &mut released);
-            }
+            gathered.extend(gathering.finish());
+            keeper.accept_batch(gathered, &mut released);
             keeper.finish(&mut released);
             if keeper.keeps_fragments() {
                 crate::run::fragment_keeper::log_counts(keeper.counts());
@@ -1347,6 +1350,14 @@ fn refuse_if_more_descriptors_are_needed_than_allowed_for_psps(
 /// are about 440 ms of work — and few enough that a batch of the largest records stays small
 /// beside the round it overlaps: about 50 MB at 213 kB a record before compression.
 const PREPARED_A_BATCH: usize = 256;
+
+/// **How many gathered records the fragment keeper takes in at once**
+/// ([`FragmentKeeper::accept_batch`](crate::run::fragment_keeper::FragmentKeeper::accept_batch)).
+/// Each batch goes to the pool once, where one record at a time went up to three times a record
+/// and waited each time behind the region builds the pool was running: at 2,176 tomato samples
+/// that wait was most of the keeper's 73 s over 300 kb. A batch of 64 is a few tens of
+/// milliseconds of work there, and few enough records held back to be small beside a round.
+const KEPT_A_BATCH: usize = 64;
 
 /// **Prepare every record of `batch` on the pool**, each with its windows back beside it, in the
 /// batch's order. Each record's preparation depends on that record alone, so the results are the
