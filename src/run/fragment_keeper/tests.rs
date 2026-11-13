@@ -79,10 +79,23 @@ type Released = (u64, Vec<(u32, u32, u16)>);
 
 /// Every record through a keeper, as `(position, [(sample, fragment, allele)])`.
 fn kept(records: Vec<VcfRecord>) -> (Vec<Released>, KeeperCounts) {
+    kept_in_batches(records, 1)
+}
+
+/// [`kept`], with the records handed in `batch` at a time, and released ones checked to come out
+/// of a batch in the order they went in.
+fn kept_in_batches(records: Vec<VcfRecord>, batch: usize) -> (Vec<Released>, KeeperCounts) {
     let mut keeper = FragmentKeeper::default();
     let mut out = Vec::new();
-    for record in records {
-        keeper.accept(record, (), &mut out);
+    let mut records = records.into_iter().peekable();
+    while records.peek().is_some() {
+        let chunk: Vec<(VcfRecord, ())> = records.by_ref().take(batch).map(|r| (r, ())).collect();
+        if batch == 1 {
+            let (record, ()) = chunk.into_iter().next().expect("one record");
+            keeper.accept(record, (), &mut out);
+        } else {
+            keeper.accept_batch(chunk, &mut out);
+        }
     }
     keeper.finish(&mut out);
     let shown = out
@@ -327,7 +340,7 @@ fn a_passing_through_keeper_releases_each_record_at_once_with_no_fragments() {
 #[test]
 fn each_sample_is_kept_as_it_would_be_alone_across_groups_of_samples() {
     const SAMPLES: usize = 300;
-    assert!(SAMPLES > 4 * SAMPLES_A_TASK && SAMPLES % SAMPLES_A_TASK != 0);
+    const { assert!(SAMPLES > 4 * SAMPLES_A_TASK && !SAMPLES.is_multiple_of(SAMPLES_A_TASK)) };
     // A cheap, fixed scramble, so the stream is the same on every run.
     let mix = |a: u64, b: u64| {
         (a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33
@@ -406,4 +419,52 @@ fn each_sample_is_kept_as_it_would_be_alone_across_groups_of_samples() {
     assert!(counts.read_alleles_kept > 0);
     assert!(counts.read_alleles_alone > 0);
     assert!(counts.read_alleles_beyond_reach > 0);
+}
+
+/// **Records taken in a batch come out as they do taken one at a time**, at every batch size:
+/// batches that end mid-contig, straddle the contig change, release records taken in the same
+/// batch, and hold the whole stream. Same stream as the test above, over 300 samples.
+#[test]
+fn a_batch_of_records_is_kept_as_one_record_at_a_time_is() {
+    const SAMPLES: usize = 300;
+    let mix = |a: u64, b: u64| {
+        (a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 33
+    };
+    let mut places = Vec::new();
+    for contig in 0..2u32 {
+        let mut position = 1;
+        for step in 0..120u64 {
+            position += 37 + mix(u64::from(contig), step) % 364;
+            places.push((contig, position));
+        }
+    }
+    let stream = || -> Vec<VcfRecord> {
+        places
+            .iter()
+            .enumerate()
+            .map(|(record, &(contig, position))| {
+                let reads: Vec<(usize, ChainId, u32)> = (0..SAMPLES)
+                    .flat_map(|sample| {
+                        let roll = mix(sample as u64, record as u64);
+                        let count = if roll % 4 == 0 { 0 } else { 1 + roll % 3 };
+                        (0..count).map(move |k| {
+                            let started = record.saturating_sub((mix(roll, k) % 4) as usize);
+                            let read: ChainId = sample as u64 * 1_000_000 + started as u64 * 4 + k;
+                            (sample, read, (mix(read, record as u64) % 2) as u32)
+                        })
+                    })
+                    .collect();
+                snp_at(contig, position, &reads)
+            })
+            .collect()
+    };
+    let one_at_a_time = kept(stream());
+    assert!(one_at_a_time.1.read_alleles_kept > 0 && one_at_a_time.1.read_alleles_beyond_reach > 0);
+    for batch in [2, 3, 7, 64, 119, 121, 240, 1000] {
+        assert_eq!(
+            kept_in_batches(stream(), batch),
+            one_at_a_time,
+            "batches of {batch}"
+        );
+    }
 }

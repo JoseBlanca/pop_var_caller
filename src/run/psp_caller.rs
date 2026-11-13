@@ -818,7 +818,8 @@ impl PspVariantCaller {
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
             // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
             // the same order, with only the read alleles of reads seen at two records or more —
-            // or, where the output reads no fragments, at once and with none.
+            // or, where the output reads no fragments, at once and with none. It takes them a batch
+            // of [`KEPT_A_BATCH`] at a time, waiting in `gathered`.
             let mut keeper =
                 crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
             // **Then prepared on the pool, a batch at a time, and handed over in order.**
@@ -831,17 +832,23 @@ impl PspVariantCaller {
             // record's locus — as before, a later locus than the one refused, since the keeper
             // already held records back.
             let mut kept = Vec::new();
+            let mut gathered = Vec::new();
+            // **Both on threads of their own** ([`HandOverPool`]), so their tasks do not queue
+            // behind the region builds the merge's pool is running.
+            let hand_over_pool = HandOverPool::beside(rayon::current_num_threads());
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
             };
             let mut gather = |(record, windows): (VcfRecord, Vec<WindowCoverage>),
                               _: &[WindowCoverage]|
              -> Result<(), E> {
-                for (record, windows) in gathering.accept(record, windows) {
-                    keeper.accept(record, windows, &mut kept);
+                gathered.extend(gathering.accept(record, windows));
+                if gathered.len() >= KEPT_A_BATCH {
+                    let batch = std::mem::take(&mut gathered);
+                    hand_over_pool.run(|| keeper.accept_batch(batch, &mut kept));
                 }
                 if kept.len() >= PREPARED_A_BATCH {
-                    prepare_and_hand_over(&mut kept, prepare, hand_over)?;
+                    prepare_and_hand_over(&mut kept, &hand_over_pool, prepare, hand_over)?;
                 }
                 Ok(())
             };
@@ -866,12 +873,12 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
-            // What calling left in the batch goes first, then what the gathering and the keeper
-            // still held, in that order, which is the order they were released in.
+            // What calling left in the batch goes first. Then the keeper takes the records the
+            // gathering released that it had not taken yet, and those the gathering still held,
+            // and releases everything: the order they were released in.
             let mut released = kept;
-            for (record, windows) in gathering.finish() {
-                keeper.accept(record, windows, &mut released);
-            }
+            gathered.extend(gathering.finish());
+            keeper.accept_batch(gathered, &mut released);
             keeper.finish(&mut released);
             if keeper.keeps_fragments() {
                 crate::run::fragment_keeper::log_counts(keeper.counts());
@@ -1348,6 +1355,14 @@ fn refuse_if_more_descriptors_are_needed_than_allowed_for_psps(
 /// beside the round it overlaps: about 50 MB at 213 kB a record before compression.
 const PREPARED_A_BATCH: usize = 256;
 
+/// **How many gathered records the fragment keeper takes in at once**
+/// ([`FragmentKeeper::accept_batch`](crate::run::fragment_keeper::FragmentKeeper::accept_batch)).
+/// Each batch goes to the pool once, where one record at a time went up to three times a record
+/// and waited each time behind the region builds the pool was running: at 2,176 tomato samples
+/// that wait was most of the keeper's 73 s over 300 kb. A batch of 64 is a few tens of
+/// milliseconds of work there, and few enough records held back to be small beside a round.
+const KEPT_A_BATCH: usize = 64;
+
 /// **Prepare every record of `batch` on the pool**, each with its windows back beside it, in the
 /// batch's order. Each record's preparation depends on that record alone, so the results are the
 /// ones preparing them one at a time gives.
@@ -1371,6 +1386,7 @@ where
 /// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there.
 fn prepare_and_hand_over<P, E>(
     waiting: &mut Vec<KeptRecord<Vec<WindowCoverage>>>,
+    pool: &HandOverPool,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
     hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<(), E>
@@ -1378,12 +1394,72 @@ where
     P: Send,
     E: Send,
 {
-    for prepared in prepare_on_the_pool(std::mem::take(waiting), prepare) {
+    let batch = std::mem::take(waiting);
+    for prepared in pool.run(|| prepare_on_the_pool(batch, prepare)) {
         let (ready, windows) = prepared?;
         hand_over(ready, &windows)?;
     }
     Ok(())
 }
+
+/// **Threads of their own for the hand-over's parallel work** — the fragment keeper taking records
+/// in and records being prepared — beside the pool the merge builds and calls regions on.
+///
+/// **Why not the merge's pool.** The hand-over runs on the calling thread while the next round's
+/// regions are built, and it splits its work into small tasks. On the shared pool those tasks
+/// queue behind region builds of several seconds each, and the calling thread waits for them; at
+/// 2,176 tomato samples over 300 kb that wait made the hand-over longer than the rounds, so it set
+/// the pace of calling. On threads of their own the tasks start at once.
+///
+/// **Its size**: [`hand_over_threads`] of the run's workers, **in addition to them**. The
+/// hand-over threads are idle most of the time — they work in bursts while the calling thread
+/// waits for them — so taking them out of the merge's pool would cost the merge their share all
+/// the time to save it in bursts. Measured at 2,176 samples over 300 kb: 48 merge threads and 8
+/// hand-over threads called it in 58 s, 44 + 4 in 64 s, 40 + 8 in 63 s.
+struct HandOverPool(Option<rayon::ThreadPool>);
+
+impl HandOverPool {
+    /// The pool beside `workers` merge threads, or none — the hand-over then shares the merge's
+    /// pool, as it did before — when [`hand_over_threads`] gives none or the threads cannot be
+    /// started.
+    fn beside(workers: usize) -> Self {
+        let threads = hand_over_threads(workers);
+        if threads == 0 {
+            return Self(None);
+        }
+        Self(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|at| format!("pvc-hand-over-{at}"))
+                .build()
+                .ok(),
+        )
+    }
+
+    /// Run `work` on the pool, or on the calling thread's pool when there is none.
+    fn run<R: Send>(&self, work: impl FnOnce() -> R + Send) -> R {
+        match &self.0 {
+            Some(pool) => pool.install(work),
+            None => work(),
+        }
+    }
+}
+
+/// **How many hand-over threads a run of `workers` merge threads gets**: one for every six, at most
+/// eight, and none below [`FEWEST_WORKERS_FOR_A_HAND_OVER_POOL`].
+///
+/// Below that the hand-over stays on the shared pool, as it did before. Eight at 48 workers is the
+/// point measured; 16 there was slower than 8 (81 s against 76 s over 300 kb at 2,176 samples,
+/// before the keeper took records in batches). The other points of the rule are not measured.
+fn hand_over_threads(workers: usize) -> usize {
+    if workers < FEWEST_WORKERS_FOR_A_HAND_OVER_POOL {
+        return 0;
+    }
+    (workers / 6).clamp(1, 8)
+}
+
+/// The fewest merge threads a run has before the hand-over gets threads of its own.
+const FEWEST_WORKERS_FOR_A_HAND_OVER_POOL: usize = 12;
 
 /// The merge's cache over `sources`, telling `prefetch` where every cover begins when there is
 /// one. **The prefetch moves into the hook**, so it stops when the calling pass drops the cache.

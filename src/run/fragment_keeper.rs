@@ -205,80 +205,188 @@ impl<P> FragmentKeeper<P> {
     }
 
     /// **Take one record**, appending to `released` every held record it releases, in the order
-    /// they came.
+    /// they came. The same as [`Self::accept_batch`] with a batch of one.
     ///
     /// # Panics
     ///
     /// If a record is written before the one handed in before it on the same contig: the writer's
     /// order is non-decreasing in written position, so that is a wiring defect.
-    pub fn accept(&mut self, mut record: VcfRecord, payload: P, released: &mut Vec<KeptRecord<P>>) {
+    pub fn accept(&mut self, record: VcfRecord, payload: P, released: &mut Vec<KeptRecord<P>>) {
+        self.accept_batch(vec![(record, payload)], released);
+    }
+
+    /// **Take several records, in order**, appending to `released` every held record they
+    /// release, in the order they came: the same records, read alleles and counts as taking them
+    /// one at a time.
+    ///
+    /// **Why a batch.** Which held records a record releases, and how far back reads are forgotten,
+    /// depend on record positions alone, so they are planned here on one thread for the whole
+    /// batch. Each group of [`SAMPLES_A_TASK`] samples then replays the plan in order on its own
+    /// reads, and the groups' results are joined in sample order. Taken one at a time, each record
+    /// paid up to three rounds of handing its groups to the pool and waiting for them; at 2,176
+    /// tomato samples that wait, not the work, was most of the keeper's time.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::accept`].
+    pub fn accept_batch(&mut self, batch: Vec<(VcfRecord, P)>, released: &mut Vec<KeptRecord<P>>) {
         if !self.keeps_fragments {
-            let _ = record.replace_read_alleles(Default::default());
-            released.push((record, payload, RecordFragments::default()));
+            for (mut record, payload) in batch {
+                let _ = record.replace_read_alleles(Default::default());
+                released.push((record, payload, RecordFragments::default()));
+            }
             return;
         }
-        let contig = record.region().contig;
-        let position = crate::vcf::encode::written_position(&record);
-        if self.contig != Some(contig) {
-            self.release_all_into(released);
-            for sample in &mut self.samples {
-                sample.by_read.clear();
-                sample.first_seen.clear();
-                sample.next_fragment = 0;
+        // **The plan, from positions alone**, in the order taking the records one at a time
+        // performs it. `combined` numbers the held records as they will stand: those held
+        // before the batch first, then the batch's own, so releasing is always the next number.
+        let already_held = self.held.len();
+        let mut queue: VecDeque<u64> = self.held.iter().map(|held| held.position).collect();
+        let mut next_released = 0_usize;
+        let mut newest = self.held.back().map(|held| held.position);
+        let mut contig = self.contig;
+        let mut steps = Vec::with_capacity(batch.len() * 3);
+        let mut incoming = Vec::with_capacity(batch.len());
+        for (mut record, payload) in batch {
+            let record_contig = record.region().contig;
+            let position = crate::vcf::encode::written_position(&record);
+            if contig != Some(record_contig) {
+                while queue.pop_front().is_some() {
+                    steps.push(Step::Release(next_released));
+                    next_released += 1;
+                }
+                steps.push(Step::Reset);
+                contig = Some(record_contig);
+                newest = None;
             }
-            self.contig = Some(contig);
+            if let Some(newest) = newest {
+                assert!(
+                    newest <= position,
+                    "records out of order: {position} after {newest}"
+                );
+            }
+            while let Some(&oldest) = queue.front()
+                && position - oldest > READ_REACH
+            {
+                queue.pop_front();
+                steps.push(Step::Release(next_released));
+                next_released += 1;
+            }
+            steps.push(Step::Forget(queue.front().copied().unwrap_or(position)));
+            steps.push(Step::TakeIn(incoming.len(), position));
+            queue.push_back(position);
+            newest = Some(position);
+            let read_alleles = record.replace_read_alleles(Default::default());
+            self.counts.read_alleles_over_the_cap += read_alleles.dropped_by_the_cap();
+            // The entries are sorted by sample, so the last names the highest.
+            if let Some(last) = read_alleles.entries().last()
+                && self.samples.len() <= last.sample as usize
+            {
+                self.samples
+                    .resize_with(last.sample as usize + 1, SampleReads::default);
+            }
+            incoming.push((record, payload, position, read_alleles));
         }
-        if let Some(newest) = self.held.back() {
-            assert!(
-                newest.position <= position,
-                "records out of order: {} after {}",
-                position,
-                newest.position
-            );
-        }
-        while let Some(oldest) = self.held.front()
-            && position - oldest.position > READ_REACH
-        {
-            // PANIC-FREE: the loop condition just saw a front.
-            let oldest = self.held.pop_front().expect("a front, just seen");
-            released.push(self.release(oldest));
-        }
-        self.forget_reads_out_of_reach(
-            self.held.front().map_or(position, |oldest| oldest.position),
-        );
+        self.contig = contig;
 
-        let read_alleles = record.replace_read_alleles(Default::default());
-        self.counts.read_alleles_over_the_cap += read_alleles.dropped_by_the_cap();
-        let entries = read_alleles.entries();
-        // The entries are sorted by sample, so the last names the highest.
-        if let Some(last) = entries.last()
-            && self.samples.len() <= last.sample as usize
-        {
-            self.samples
-                .resize_with(last.sample as usize + 1, SampleReads::default);
-        }
-        let taken: Vec<(Vec<HeldReadAllele>, u64)> = self
-            .samples
+        // **Each group of samples replays the plan.**
+        // Only the read alleles go to the pool, not the records or what travels beside them.
+        let held_read_alleles: Vec<&[HeldReadAllele]> = self
+            .held
+            .iter()
+            .take(next_released.min(already_held))
+            .map(|held| held.read_alleles.as_slice())
+            .collect();
+        let incoming_entries: Vec<&[SampleReadAllele]> = incoming
+            .iter()
+            .map(|(.., read_alleles)| read_alleles.entries())
+            .collect();
+        let held = &held_read_alleles;
+        let incoming_ref = &incoming_entries;
+        let steps = &steps;
+        let samples = &mut self.samples;
+        let per_task: Vec<TaskOutcome> = samples
             .par_chunks_mut(SAMPLES_A_TASK)
             .enumerate()
             .map(|(task, samples)| {
                 let first = task * SAMPLES_A_TASK;
-                let in_task = of_samples(entries, first, samples.len(), |entry| entry.sample);
-                take_in(samples, first, in_task, position)
+                let mut outcome = TaskOutcome {
+                    taken: Vec::with_capacity(incoming_ref.len()),
+                    released: Vec::new(),
+                };
+                for step in steps {
+                    match *step {
+                        Step::Reset => {
+                            for sample in samples.iter_mut() {
+                                sample.by_read.clear();
+                                sample.first_seen.clear();
+                                sample.next_fragment = 0;
+                            }
+                        }
+                        Step::Forget(oldest_position) => {
+                            forget_out_of_reach(samples, oldest_position);
+                        }
+                        Step::TakeIn(at, position) => {
+                            let entries = incoming_ref[at];
+                            let in_task =
+                                of_samples(entries, first, samples.len(), |entry| entry.sample);
+                            outcome
+                                .taken
+                                .push(take_in(samples, first, in_task, position));
+                        }
+                        Step::Release(number) => {
+                            let read_alleles: &[HeldReadAllele] = if number < already_held {
+                                of_samples(held[number], first, samples.len(), |held| held.sample)
+                            } else {
+                                &outcome.taken[number - already_held].0
+                            };
+                            let fragments = fragments_of(samples, first, read_alleles);
+                            outcome.released.push(fragments);
+                        }
+                    }
+                }
+                outcome
             })
             .collect();
-        self.counts.read_alleles_in += entries.len() as u64;
-        let mut within_reach = Vec::with_capacity(entries.len());
-        for (kept, beyond_reach) in taken {
-            within_reach.extend(kept);
-            self.counts.read_alleles_beyond_reach += beyond_reach;
+
+        // **Joined in sample order**: the batch's records go on the back of the held list, and
+        // the releases come off its front, in the plan's order.
+        let mut per_task = per_task;
+        for (at, (record, payload, position, read_alleles)) in incoming.into_iter().enumerate() {
+            let entries = read_alleles.entries();
+            self.counts.read_alleles_in += entries.len() as u64;
+            let mut within_reach = Vec::with_capacity(entries.len());
+            for task in &mut per_task {
+                let (kept, beyond_reach) = std::mem::take(&mut task.taken[at]);
+                within_reach.extend(kept);
+                self.counts.read_alleles_beyond_reach += beyond_reach;
+            }
+            self.held.push_back(HeldRecord {
+                record,
+                payload,
+                position,
+                read_alleles: within_reach,
+            });
         }
-        self.held.push_back(HeldRecord {
-            record,
-            payload,
-            position,
-            read_alleles: within_reach,
-        });
+        for release in 0..next_released {
+            // PANIC-FREE: the plan released no more records than were held or taken in.
+            let oldest = self
+                .held
+                .pop_front()
+                .expect("a held record the plan released");
+            let mut entries = Vec::with_capacity(oldest.read_alleles.len());
+            for task in &mut per_task {
+                let (kept, alone) = std::mem::take(&mut task.released[release]);
+                self.counts.read_alleles_kept += kept.len() as u64;
+                self.counts.read_alleles_alone += alone;
+                entries.extend(kept);
+            }
+            released.push((
+                oldest.record,
+                oldest.payload,
+                RecordFragments::from_entries(entries),
+            ));
+        }
     }
 
     /// **Release everything held**, at the end of the run, into `released`.
@@ -324,24 +432,42 @@ impl<P> FragmentKeeper<P> {
             RecordFragments::from_entries(entries),
         )
     }
+}
 
-    /// Forget the reads none of whose read alleles can still be kept: their first record lies more
-    /// than `R` behind `oldest_position`, the oldest record held (or the one arriving, when none
-    /// is), so every read allele they have at a held record was already dropped as beyond reach,
-    /// and every later one would be too.
-    fn forget_reads_out_of_reach(&mut self, oldest_position: u64) {
-        self.samples
-            .par_chunks_mut(SAMPLES_A_TASK)
-            .for_each(|samples| {
-                for sample in samples {
-                    while let Some(&FirstSeen { position, read }) = sample.first_seen.front()
-                        && position + READ_REACH < oldest_position
-                    {
-                        sample.first_seen.pop_front();
-                        sample.by_read.remove(&read);
-                    }
-                }
-            });
+/// One step of a batch's plan ([`FragmentKeeper::accept_batch`]), in the order taking the
+/// records one at a time performs it.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// Release held record number `n`: those held before the batch first, then the batch's own.
+    Release(usize),
+    /// A new contig: forget every read.
+    Reset,
+    /// Forget the reads whose first record lies more than `R` behind this position.
+    Forget(u64),
+    /// Take in the batch's record `at`, written at `position`.
+    TakeIn(usize, u64),
+}
+
+/// What one group of samples made of a batch's plan: per record taken in, its read alleles
+/// within reach and the count beyond; per record released, its fragment alleles and the count
+/// alone.
+struct TaskOutcome {
+    taken: Vec<(Vec<HeldReadAllele>, u64)>,
+    released: Vec<(Vec<FragmentAllele>, u64)>,
+}
+
+/// Forget the reads none of whose read alleles can still be kept: their first record lies more
+/// than `R` behind `oldest_position`, the oldest record held (or the one arriving, when none
+/// is), so every read allele they have at a held record was already dropped as beyond reach, and
+/// every later one would be too.
+fn forget_out_of_reach(samples: &mut [SampleReads], oldest_position: u64) {
+    for sample in samples {
+        while let Some(&FirstSeen { position, read }) = sample.first_seen.front()
+            && position + READ_REACH < oldest_position
+        {
+            sample.first_seen.pop_front();
+            sample.by_read.remove(&read);
+        }
     }
 }
 
