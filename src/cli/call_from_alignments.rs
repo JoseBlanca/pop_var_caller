@@ -618,6 +618,7 @@ pub fn run_call_from_alignments(
         args.max_locus_span,
         args.locus_builder_regions_len,
         args.alignments.len(),
+        calling_run::ObservationsReadFrom::Alignments,
     )?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;

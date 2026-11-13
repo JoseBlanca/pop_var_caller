@@ -507,6 +507,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         args.max_locus_span,
         args.locus_builder_regions_len,
         paths.len(),
+        calling_run::ObservationsReadFrom::StoredFiles,
     )?;
     // **The log opens once the command line has been judged**, so a typing mistake leaves no log
     // behind, and before the reference is read, so everything that takes time is in it.

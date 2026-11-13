@@ -433,41 +433,64 @@ pub fn round_width_for(samples: usize) -> CohortLocusBuilderRegionsLen {
 /// the round holds the ground one region holds today**: `ground` is that width — the flag's if
 /// one was typed, [`round_width_for`]'s otherwise — and this divides it.
 ///
-/// How far it can be divided is set by the merge's own floor
-/// ([`DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN`], 500 bases), below which a region is too
-/// narrow to be worth a fan-out and a barrier, and by the pool: there is nothing to gain from
-/// more regions in flight than there are threads to work them.
+/// # How narrow, and how many, reading stored files
 ///
-/// # What it gives, and where it gives nothing
+/// **Up to [`REGIONS_A_WORKER`] regions for every thread**, so that a thread whose region finishes
+/// early takes another rather than waiting for the round's slowest. A round cannot start until the
+/// one before has finished, so with one region a thread the round lasts as long as its slowest
+/// region; with four it lasts about as long as the average thread's share.
 ///
-/// | samples | ground | regions in flight | width |
-/// |---|---|---|---|
-/// | 8 | 16,000 | 18 | 888 |
-/// | 63 | 7,936 | 15 | 529 |
-/// | 1,000 | 500 | 1 | 500 |
+/// **No narrower than [`narrowest_round_region`]**, which keeps a region's work above the cost of
+/// handing it out: a region's work grows with its width times the samples, so a one-sample cohort
+/// keeps the merge's own 500 bases and a cohort of eight or more goes down to 125.
 ///
-/// **Above about a thousand samples it hands back one region and today's behaviour**, because
-/// `round_width_for` is already at its floor there and there is no ground left to divide. That
-/// is the honest degradation and it is the one this rule chooses: a large cohort keeps the
-/// memory it has and gives up the parallelism, rather than keeping the parallelism and
-/// multiplying the memory by the core count. Nothing at that end of the range has been
-/// measured; what has been is 1 through 63 accessions on the tomato benchmark, where peak
-/// resident rises between 4% and 13% and the calling pass falls by up to 5.5×.
+/// Measured on the tomato25 cohort's stored files at about three reads a position, 48 threads, the
+/// VCF byte-identical at every setting (the regions as narrow as 500 bases against 125, the
+/// ground unchanged):
+///
+/// | samples | ground | 500 bases | 125 bases | peak resident |
+/// |---|---|---|---|---|
+/// | 1 (4 Mb) | 16,000 | 5 s | 7 s | 1.5 GB either way |
+/// | 8 (4 Mb) | 16,000 | 22–24 s | 20 s | 3.9–4.2 GB |
+/// | 63 (4 Mb) | 7,936 | 42–43 s | 22–32 s | 1.3 GB |
+/// | 2,176 (300 kb) | 24,000 | 69 s | 58 s | 21.1 against 21.6 GB |
+///
+/// # Reading alignments: one region a thread, no narrower than 500 bases
+///
+/// **The narrower regions do not pay there.** At 48 tomato accessions over 200 kb of SL4.0
+/// chromosome 1, 48 threads, 125-base regions called in 76 s against 65 s at 500, with 30% more
+/// CPU, the VCF the same. A region there decodes its own reads and pays a start-up for it, which
+/// a region over stored files does not. So `call-from-alignments` keeps the rule measured on the
+/// tomato benchmark, 1 to 63 accessions: peak resident up 4% to 13% and the calling pass up to
+/// 5.5× faster than one region at a time.
+///
+/// # Large cohorts
+///
+/// **Above about a thousand samples, with no width typed, there is little to divide**:
+/// `round_width_for` gives 500 bases of ground there, which this cuts into four regions of 125.
+/// A large cohort keeps the memory it has and gives up most of the parallelism, rather than keeping
+/// the parallelism and multiplying the memory by the core count. A run that can afford more ground
+/// asks for it with `--locus-builder-regions-len`, as the 2,176-sample run above did.
 #[must_use]
 pub fn round_shape_for(
     ground: CohortLocusBuilderRegionsLen,
+    samples: usize,
+    read_from: ObservationsReadFrom,
 ) -> (
     CohortLocusBuilderRegionsLen,
     CohortLocusBuilderRegionsInFlight,
 ) {
     let ground = ground.get();
-    let floor = DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN;
+    let (floor, regions_a_worker) = match read_from {
+        ObservationsReadFrom::StoredFiles => (narrowest_round_region(samples), REGIONS_A_WORKER),
+        ObservationsReadFrom::Alignments => (DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 1),
+    };
     let workers = rayon::current_num_threads().max(1);
-    // PANIC-FREE: `ground >= floor` because `round_width_for` clamps to it, so the division is
-    // at least one, and `workers` is at least one.
+    // PANIC-FREE: the clamp's floor is one, so the division is by at least one, and `workers` is
+    // at least one.
     let in_flight = usize::try_from(ground / floor)
         .unwrap_or(usize::MAX)
-        .clamp(1, workers);
+        .clamp(1, workers.saturating_mul(regions_a_worker));
     let width = (ground / u32::try_from(in_flight).unwrap_or(u32::MAX)).max(floor);
     (
         CohortLocusBuilderRegionsLen(
@@ -478,6 +501,47 @@ pub fn round_shape_for(
         ),
     )
 }
+
+/// **Where a calling run reads its cohort's observations from**, which decides how its rounds are
+/// cut ([`round_shape_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationsReadFrom {
+    /// One alignment file per sample, decoded as the merge goes (`call-from-alignments`).
+    Alignments,
+    /// One stored psp file per sample, written beforehand (`call-from-psps`).
+    StoredFiles,
+}
+
+/// **How many regions a round over stored files gives each thread, at most** ([`round_shape_for`]). At 2,176 tomato
+/// samples over 300 kb, one region a thread called in 69 s, two in 61 s, four in 58 s and eight in
+/// 57 s, the ground the same each time.
+pub const REGIONS_A_WORKER: usize = 4;
+
+/// **The work a building region carries at least, in sample-bases** — its width times the
+/// cohort's samples ([`narrowest_round_region`]).
+const SAMPLE_BASES_A_REGION: u32 = 1_000;
+
+/// The narrowest region a round of a cohort of `samples` is cut into: [`SAMPLE_BASES_A_REGION`]
+/// over the samples, between 125 bases and the merge's own 500
+/// ([`DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN`]).
+///
+/// **Why it depends on the cohort.** Handing a region out costs about the same whatever is in it,
+/// and what is in it grows with the samples. At one sample, 125-base regions called 4 Mb in 7 s
+/// against 5 s at 500; at eight they called it in 20 s against 22–24. So one or two samples keep
+/// 500 bases, four get 250, and eight or more 125. Between one and eight the rule is interpolated,
+/// not measured.
+#[must_use]
+pub fn narrowest_round_region(samples: usize) -> u32 {
+    let samples = u32::try_from(samples.max(1)).unwrap_or(u32::MAX);
+    (SAMPLE_BASES_A_REGION / samples).clamp(
+        NARROWEST_ROUND_REGION,
+        DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN,
+    )
+}
+
+/// The narrowest a building region is cut, whatever the cohort ([`narrowest_round_region`]): at
+/// 2,176 samples, 64-base regions called 300 kb in 57 s against 58 s at 125, no faster.
+const NARROWEST_ROUND_REGION: u32 = 125;
 
 /// **The fewest checked sites a sample's fill disagreement rate is stated from**: below it, the
 /// table gives the counts and the log counts the sample as not measured. At 30 sites a rate of one
@@ -1080,9 +1144,10 @@ pub fn run_parameters(
 ///
 /// The round width is the one number here that is *chosen* rather than checked: left unset it
 /// comes from the cohort's size ([`round_width_for`]), which changes no answer and does change
-/// where a round's edge falls. Both calling commands take it from here so that the same cohort
-/// gets the same width whichever way its observations were read — spec §12.3 compares their
-/// output byte for byte.
+/// where a round's edge falls. Both calling commands take it from here, so the same cohort holds
+/// the same ground a round whichever way its observations were read; how that ground is cut into
+/// regions depends on which (`read_from`, [`round_shape_for`]). Neither changes the output, which
+/// spec §12.3 compares between the two byte for byte.
 ///
 /// # Errors
 ///
@@ -1093,6 +1158,7 @@ pub fn merge_parameters_for(
     max_cohort_locus_span: u32,
     cohort_locus_builder_regions_len: Option<u32>,
     samples: usize,
+    read_from: ObservationsReadFrom,
 ) -> Result<MergeParameters, CallingRunError> {
     Ok(MergeParameters {
         max_cohort_locus_span: MaxCohortLocusSpan(NonZeroU32::new(max_cohort_locus_span).ok_or(
@@ -1112,7 +1178,7 @@ pub fn merge_parameters_for(
                 ),
                 None => round_width_for(samples),
             };
-            let (width, in_flight) = round_shape_for(ground);
+            let (width, in_flight) = round_shape_for(ground, samples, read_from);
             MergeParameters {
                 cohort_locus_builder_regions_len: width,
                 cohort_locus_builder_regions_in_flight: in_flight,

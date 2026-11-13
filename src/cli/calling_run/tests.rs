@@ -253,3 +253,65 @@ fn the_path_agreement_option_takes_a_share() {
         );
     }
 }
+
+/// **A region's narrowest width follows the cohort**: the merge's own 500 bases at one or two
+/// samples, where handing a narrower region out cost more than it saved, 125 from eight up, and in
+/// between the width that keeps a region's sample-bases at the minimum.
+#[test]
+fn the_narrowest_region_is_500_bases_at_one_sample_and_125_from_eight() {
+    assert_eq!(narrowest_round_region(0), 500);
+    assert_eq!(narrowest_round_region(1), 500);
+    assert_eq!(narrowest_round_region(2), 500);
+    assert_eq!(narrowest_round_region(4), 250);
+    assert_eq!(narrowest_round_region(8), 125);
+    assert_eq!(narrowest_round_region(2_176), 125);
+}
+
+/// **A round over stored files holds the ground it was given, cut into up to four regions a
+/// thread**, never narrower than the cohort's narrowest, and one region when the ground is too
+/// narrow to cut; a round over alignments keeps one 500-base region a thread.
+#[test]
+fn a_round_is_cut_into_up_to_four_regions_a_thread_over_the_same_ground() {
+    let shape_reading = |ground: u32, samples: usize, threads: usize, read_from| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a test pool");
+        let (width, in_flight) = pool.install(|| {
+            round_shape_for(
+                CohortLocusBuilderRegionsLen(NonZeroU32::new(ground).expect("non-zero")),
+                samples,
+                read_from,
+            )
+        });
+        (width.get(), in_flight.get())
+    };
+    let shape = |ground, samples, threads| {
+        shape_reading(ground, samples, threads, ObservationsReadFrom::StoredFiles)
+    };
+    // Alignments keep one 500-base region a thread: 2,176 samples over 24,000 bases get 48.
+    let aligned = |ground, samples, threads| {
+        shape_reading(ground, samples, threads, ObservationsReadFrom::Alignments)
+    };
+    assert_eq!(aligned(24_000, 2_176, 48), (500, 48));
+    assert_eq!(aligned(16_000, 8, 18), (888, 18));
+    assert_eq!(aligned(500, 1_000, 48), (500, 1));
+    // The tomato25 run: 24,000 bases over 48 threads, 192 regions of 125.
+    assert_eq!(shape(24_000, 2_176, 48), (125, 192));
+    // A single sample keeps 500-base regions: 32 of them over its 16,000 bases.
+    assert_eq!(shape(16_000, 1, 48), (500, 32));
+    // Eight samples on 18 threads: four a thread, 72 regions of 222 bases.
+    assert_eq!(shape(16_000, 8, 18), (222, 72));
+    // A large cohort with no width typed: 500 bases of ground, four regions of 125.
+    assert_eq!(shape(500, 1_000, 48), (125, 4));
+    // Ground narrower than one region: one region, as wide as the floor.
+    assert_eq!(shape(100, 2_176, 48), (125, 1));
+    // Every shape holds at most the ground it was given, or one floor-width region.
+    for (ground, samples, threads) in [(24_000, 2_176, 48), (7_936, 63, 18), (16_000, 4, 6)] {
+        let (width, in_flight) = shape(ground, samples, threads);
+        assert!(
+            width as usize * in_flight <= ground as usize,
+            "{ground} {samples} {threads}"
+        );
+    }
+}
