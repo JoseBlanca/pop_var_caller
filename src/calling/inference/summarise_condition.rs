@@ -46,7 +46,7 @@ use crate::calling::{
     ExpectedAlleleCopies, FrozenParameters, GenericLocusSample, GenericSampleEvidence,
     GenotypeTable, LocusEvidence, LocusInference, ReadGroupParameters, RepeatTractProvenance,
     SampleGenotypeCall, SampleScoringBuffers, SsrLocusShape, SsrSampleEvidence,
-    WrongReadChargeTable, fill_batch_allele_copies, fill_contaminant_allele_frequencies,
+    WrongReadChargeTable, fill_batch_allele_copies, fill_own_batch_contaminant_row,
     fill_wrong_read_charges,
 };
 use crate::float;
@@ -2301,6 +2301,15 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
             )
         });
     let calibration = parameters.calibration_by_read_group();
+    // **The frequencies every row shares, filled and checked once a pass**; each row then fills
+    // and checks only its own batch's row, the one its subtraction changes. Lent out of the
+    // scratch for the pass and given back after it.
+    let shared = (frequencies == ContaminantFrequencies::TheLoopsOwnEstimate)
+        .then(|| scratch.lend_shared_contaminant_frequencies().0);
+    let checked = match (&frozen_contamination, &shared) {
+        (Some(frozen), Some(shared)) => Some(frozen.check_frequencies(shared, allele_count)),
+        _ => None,
+    };
 
     let row_count = scratch.row_count();
     scratch.charge_table_assembly();
@@ -2324,20 +2333,23 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
             // is E2b's, which is where the run says what contamination it used; it is bound
             // here rather than dropped so that the next reader sees it is owed rather than
             // handled.
-            let _batches_with_no_evidence = fill_contaminant_allele_frequencies(
+            let _own_batch_had_no_evidence = fill_own_batch_contaminant_row(
                 buffers.batch_allele_copies,
                 SampleAlleleCopies::new(buffers.own_expected_copies),
                 own_batch,
                 buffers.allele_count,
-                buffers.contaminant_allele_frequencies,
+                buffers.own_contaminant_row,
             );
+            *buffers.own_contaminant_batch = own_batch.get() as usize;
         }
         let buffers = scratch.generic_row_buffers_mut(row);
-        let mixture = match frozen_contamination {
-            None => ContaminationMixture::uncontaminated(),
-            Some(frozen) => {
-                frozen.with_frequencies(buffers.contaminant_allele_frequencies, allele_count)
-            }
+        let mixture = match (frozen_contamination, checked) {
+            (Some(frozen), Some(checked)) => frozen.with_checked_frequencies(
+                checked,
+                parameters.batch_of_sample(run_sample),
+                buffers.own_contaminant_row,
+            ),
+            _ => ContaminationMixture::uncontaminated(),
         };
         assemble_genotype_log_likelihood_row(
             &sample,
@@ -2347,6 +2359,9 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
             buffers.row_scratch,
             buffers.genotype_likelihoods,
         );
+    }
+    if let Some(shared) = shared {
+        scratch.return_shared_contaminant_frequencies(shared);
     }
 }
 

@@ -825,6 +825,52 @@ impl<'a> WindowedCohort<'a> {
             .ok()?;
         windows.get(found).map(|(_, window)| *window)
     }
+
+    /// **[`Self::window_coverage_at`], searched from where this sample's last answer was**:
+    /// `cursor` is an index into the sample's windows, left where `at` is or would be.
+    ///
+    /// **Why a cursor.** A builder asks for every covering sample's window at each locus it
+    /// builds, in increasing position, and a sample holds one window per covered position of the
+    /// ground the round has drawn — tens of thousands. A fresh binary search over that, per sample
+    /// per locus, is a cache miss at nearly every step: at 2,176 tomato samples it was 7% of the
+    /// calling pass. From the last answer the next is a few entries on, so the search gallops
+    /// forward from the cursor and touches memory it has just touched. A position behind the
+    /// cursor is searched for from the start, so the answer is the same in any order; it is only
+    /// slower.
+    #[must_use]
+    pub fn window_coverage_from(
+        &self,
+        sample: usize,
+        at: GenomePosition,
+        cursor: &mut usize,
+    ) -> Option<WindowCoverage> {
+        let windows = self.finalised_windows?.get(sample)?;
+        let start = (*cursor).min(windows.len());
+        let found = if windows.get(start).is_some_and(|(centre, _)| *centre <= at) {
+            // Gallop: double the stride until it passes `at`, then search the last stride.
+            let mut stride = 1;
+            while start + stride < windows.len() && windows[start + stride].0 <= at {
+                stride *= 2;
+            }
+            let end = (start + stride + 1).min(windows.len());
+            windows[start..end]
+                .binary_search_by_key(&at, |(centre, _)| *centre)
+                .map(|index| start + index)
+                .map_err(|index| start + index)
+        } else {
+            windows[..start].binary_search_by_key(&at, |(centre, _)| *centre)
+        };
+        match found {
+            Ok(index) => {
+                *cursor = index;
+                Some(windows[index].1)
+            }
+            Err(index) => {
+                *cursor = index;
+                None
+            }
+        }
+    }
 }
 
 /// A borrowed window is a window — so a caller handed one by the cache can pass it on.
@@ -4036,6 +4082,55 @@ mod tests {
             "{} of 200 layouts disagreed with the whole-stretch builder; the first:\n{}",
             disagreements.len(),
             disagreements.first().expect("not empty"),
+        );
+    }
+
+    /// **The cursor lookup answers what the binary search answers, in any order of asking.**
+    /// One sample's windows over 2,000 positions with gaps of one to five bases; asked in
+    /// increasing order (the builder's), with repeats, backwards, at random, at positions
+    /// between windows, before the first and past the last, and on another contig.
+    #[test]
+    fn a_window_found_from_a_cursor_is_the_one_a_binary_search_finds() {
+        let at = |contig: u32, position: u64| GenomePosition {
+            contig: ContigId(contig),
+            position: Position(position),
+        };
+        let mut windows = Vec::new();
+        let mut position = 10;
+        for step in 0..2_000u64 {
+            windows.push((
+                at(1, position),
+                WindowCoverage {
+                    gc_fraction: 0.5,
+                    mean_depth: step as f32,
+                },
+            ));
+            position += 1 + (step * 7919 % 5);
+        }
+        let per_sample: [&[(GenomePosition, WindowCoverage)]; 1] = [&windows];
+        let view = WindowedCohort {
+            finalised_windows: Some(&per_sample),
+            ..WindowedCohort::with_nothing_measured()
+        };
+        let last = position;
+        let mut asked: Vec<GenomePosition> = (0..last + 20).map(|p| at(1, p)).collect();
+        asked.extend((0..last + 20).rev().step_by(3).map(|p| at(1, p)));
+        asked.extend((0..3_000u64).map(|k| at(1, k * 104_729 % (last + 20))));
+        asked.extend([at(0, 50), at(2, 50), at(1, 10), at(1, 10)]);
+        let mut cursor = 0;
+        for (index, &position) in asked.iter().enumerate() {
+            let searched = view.window_coverage_at(0, position);
+            let from_cursor = view.window_coverage_from(0, position, &mut cursor);
+            assert_eq!(
+                from_cursor.map(|w| w.mean_depth.to_bits()),
+                searched.map(|w| w.mean_depth.to_bits()),
+                "ask {index}, at {position:?}"
+            );
+        }
+        // A sample the view has no windows for has none from a cursor either.
+        assert!(
+            view.window_coverage_from(1, at(1, 10), &mut cursor)
+                .is_none()
         );
     }
 }

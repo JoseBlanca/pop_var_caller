@@ -885,8 +885,18 @@ pub fn fill_contaminant_allele_frequencies(
         *slot = leaving_this_sample_out.max(0.0);
     }
 
+    normalise_batch_rows(out, allele_count, 0)
+}
+
+/// **Turn rows of batch copies into frequencies in place**, the rows being batches
+/// `first_batch..` of the table: each row divided by its total and floored at
+/// [`MIN_CONTAMINANT_FREQUENCY`], or, where nothing is left, the reference and the floor. Returns
+/// how many rows had nothing left. The one place the division is written, so every route to a
+/// frequency — the whole table, the shared table, one sample's own row — gives the same numbers.
+fn normalise_batch_rows(out: &mut [f64], allele_count: usize, first_batch: usize) -> usize {
     let mut batches_with_no_evidence = 0;
-    for (batch, row) in out.chunks_exact_mut(allele_count).enumerate() {
+    for (index, row) in out.chunks_exact_mut(allele_count).enumerate() {
+        let batch = first_batch + index;
         let total: f64 = row.iter().sum();
         // **A total that is not finite is arithmetic that went wrong, not a deep batch.** Each
         // slot is checked as it accumulates, so a row of finite copies whose sum overflows
@@ -925,6 +935,96 @@ pub fn fill_contaminant_allele_frequencies(
          went wrong rather than a thin batch"
     );
     batches_with_no_evidence
+}
+
+/// **The frequencies every sample of the locus shares**: each batch's copies made a
+/// distribution, nobody left out. A sample is scored against these rows for every batch but its
+/// own, whose row [`fill_own_batch_contaminant_row`] writes with the sample taken out; together
+/// they are what [`fill_contaminant_allele_frequencies`] writes for that sample, number for
+/// number.
+///
+/// **Why two halves.** The whole table, refilled per sample, costs `batches × alleles` a sample a
+/// pass for one row that differs; at 2,176 tomato samples in 103 batches that was an eighth of
+/// the calling pass. The shared rows are filled once a pass.
+///
+/// # Panics
+///
+/// As [`fill_contaminant_allele_frequencies`], on shapes that disagree and on a batch whose copies
+/// sum to something not finite.
+#[must_use]
+pub fn fill_shared_contaminant_allele_frequencies(
+    batch_copies: &[f64],
+    allele_count: usize,
+    out: &mut [f64],
+) -> usize {
+    assert!(
+        allele_count > 0,
+        "a locus is called over at least its reference allele"
+    );
+    assert_eq!(
+        batch_copies.len() % allele_count,
+        0,
+        "the copy table is {} entries and a batch's row is {allele_count} alleles wide",
+        batch_copies.len()
+    );
+    assert_eq!(
+        out.len(),
+        batch_copies.len(),
+        "the frequency table is {} entries and the copy table it is built from is {}",
+        out.len(),
+        batch_copies.len()
+    );
+    out.copy_from_slice(batch_copies);
+    normalise_batch_rows(out, allele_count, 0)
+}
+
+/// **One sample's own batch row**: that batch's copies with the sample's own taken out, made a
+/// distribution — the row [`fill_contaminant_allele_frequencies`] writes at `own_batch`. Returns
+/// whether nothing was left to read a frequency off.
+///
+/// # Panics
+///
+/// As [`fill_contaminant_allele_frequencies`].
+pub fn fill_own_batch_contaminant_row(
+    batch_copies: &[f64],
+    own_copies: SampleAlleleCopies<'_>,
+    own_batch: BatchId,
+    allele_count: usize,
+    out: &mut [f64],
+) -> bool {
+    assert_eq!(
+        own_copies.get().len(),
+        allele_count,
+        "this sample's copies cover {} alleles and the locus is called over {allele_count}",
+        own_copies.get().len()
+    );
+    assert_eq!(
+        out.len(),
+        allele_count,
+        "one batch's row is {allele_count} alleles"
+    );
+    let own_batch = own_batch.get() as usize;
+    let row = batch_copies
+        .get(own_batch * allele_count..(own_batch + 1) * allele_count)
+        .unwrap_or_else(|| {
+            panic!(
+                "this sample ran in batch {own_batch}, and the copy table holds {} batches",
+                batch_copies.len() / allele_count
+            )
+        });
+    for (allele, ((slot, &batch), &own)) in
+        out.iter_mut().zip(row).zip(own_copies.get()).enumerate()
+    {
+        let leaving_this_sample_out = batch - own;
+        debug_assert!(
+            leaving_this_sample_out > COUNT_PATH_DESYNC_THRESHOLD,
+            "this sample is expected to carry {own} copies of allele {allele} and its whole \
+             batch {batch}; the sample's own copies are one addend of the batch's, so the two \
+             count paths have gone out of step"
+        );
+        *slot = leaving_this_sample_out.max(0.0);
+    }
+    normalise_batch_rows(out, allele_count, own_batch) == 1
 }
 
 /// **The half of spec §3.6's mixture that is frozen for the run** — a contamination fraction per
@@ -1067,20 +1167,84 @@ impl<'a> FrozenContamination<'a> {
             contaminant_allele_frequencies.len(),
             self.batch_count
         );
-        for (slot, &frequency) in contaminant_allele_frequencies.iter().enumerate() {
-            assert!(
-                (0.0..=1.0).contains(&frequency),
-                "the contaminating population shows allele {} of batch {} at a frequency of \
-                 {frequency}, which is not a frequency",
-                slot % allele_count,
-                slot / allele_count
-            );
-        }
+        check_frequency_entries(contaminant_allele_frequencies, allele_count, 0);
         ContaminationMixture {
             fractions: self.fractions,
             batch_of_each_read_group: self.batch_of_each_read_group,
             contaminant_allele_frequencies,
             allele_count,
+            own_batch_row: None,
+        }
+    }
+
+    /// **Check a locus's shared frequency table once**, for every sample of the pass to be
+    /// scored against ([`Self::with_checked_frequencies`]): what [`Self::with_frequencies`]
+    /// checks per sample, done once a pass, since the shared rows are the same for every sample.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::with_frequencies`].
+    #[must_use]
+    pub fn check_frequencies(
+        &self,
+        shared_frequencies: &'a [f64],
+        allele_count: usize,
+    ) -> CheckedFrequencies<'a> {
+        assert!(
+            allele_count > 0,
+            "a locus is called over at least its reference allele, so a mixture cannot be for \
+             none"
+        );
+        assert_eq!(
+            shared_frequencies.len(),
+            self.batch_count * allele_count,
+            "the frequency table holds {} entries and the run declares {} batches over \
+             {allele_count} alleles",
+            shared_frequencies.len(),
+            self.batch_count
+        );
+        check_frequency_entries(shared_frequencies, allele_count, 0);
+        CheckedFrequencies {
+            table: shared_frequencies,
+            allele_count,
+        }
+    }
+
+    /// **The mixture one sample is scored against, from the locus's shared table and its own
+    /// batch's row** ([`fill_own_batch_contaminant_row`]): the mixture
+    /// [`Self::with_frequencies`] gives over the table
+    /// [`fill_contaminant_allele_frequencies`] writes for that sample, read for read.
+    ///
+    /// # Panics
+    ///
+    /// On a row that is not one batch's alleles wide or holds an entry outside `[0, 1]`, and on a
+    /// batch the run does not declare.
+    #[must_use]
+    pub fn with_checked_frequencies(
+        self,
+        shared: CheckedFrequencies<'a>,
+        own_batch: BatchId,
+        own_row: &'a [f64],
+    ) -> ContaminationMixture<'a> {
+        let own_batch = own_batch.get() as usize;
+        assert!(
+            own_batch < self.batch_count,
+            "this sample ran in batch {own_batch}, and the run declares {} batches",
+            self.batch_count
+        );
+        assert_eq!(
+            own_row.len(),
+            shared.allele_count,
+            "one batch's row is {} alleles",
+            shared.allele_count
+        );
+        check_frequency_entries(own_row, shared.allele_count, own_batch);
+        ContaminationMixture {
+            fractions: self.fractions,
+            batch_of_each_read_group: self.batch_of_each_read_group,
+            contaminant_allele_frequencies: shared.table,
+            allele_count: shared.allele_count,
+            own_batch_row: Some((own_batch, own_row)),
         }
     }
 
@@ -1150,6 +1314,11 @@ pub struct ContaminationMixture<'a> {
     /// reason, as the error-spread table the row reads beside it.
     contaminant_allele_frequencies: &'a [f64],
     allele_count: usize,
+    /// `(batch, row)`: the row read for that batch in place of the table's — the scored
+    /// sample's own batch with the sample left out, where the table is the locus's shared one
+    /// ([`FrozenContamination::with_checked_frequencies`]). `None` where the table is the
+    /// sample's own whole.
+    own_batch_row: Option<(usize, &'a [f64])>,
 }
 
 impl<'a> ContaminationMixture<'a> {
@@ -1164,6 +1333,7 @@ impl<'a> ContaminationMixture<'a> {
             batch_of_each_read_group: &[],
             contaminant_allele_frequencies: &[],
             allele_count: 0,
+            own_batch_row: None,
         }
     }
 
@@ -1345,7 +1515,32 @@ impl<'a> ContaminationMixture<'a> {
              {} alleles",
             self.allele_count
         );
-        self.contaminant_allele_frequencies[batch * self.allele_count + allele]
+        match self.own_batch_row {
+            Some((own_batch, row)) if own_batch == batch => row[allele],
+            _ => self.contaminant_allele_frequencies[batch * self.allele_count + allele],
+        }
+    }
+}
+
+/// **A locus's shared frequency table, checked** ([`FrozenContamination::check_frequencies`]):
+/// the one way to hand [`FrozenContamination::with_checked_frequencies`] a table it does not check
+/// again.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckedFrequencies<'a> {
+    table: &'a [f64],
+    allele_count: usize,
+}
+
+/// Every entry of `rows` — batches `first_batch..`, `allele_count` wide — is a frequency.
+fn check_frequency_entries(rows: &[f64], allele_count: usize, first_batch: usize) {
+    for (slot, &frequency) in rows.iter().enumerate() {
+        assert!(
+            (0.0..=1.0).contains(&frequency),
+            "the contaminating population shows allele {} of batch {} at a frequency of \
+             {frequency}, which is not a frequency",
+            slot % allele_count,
+            first_batch + slot / allele_count
+        );
     }
 }
 

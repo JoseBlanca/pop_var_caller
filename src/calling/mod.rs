@@ -86,7 +86,8 @@ pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericObservation, GenericRowScratch,
     GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY, ReadGroupCalibration,
     ReadGroupParameters, SsrRowScratch, SsrSampleEvidence, fill_batch_allele_copies,
-    fill_contaminant_allele_frequencies,
+    fill_contaminant_allele_frequencies, fill_own_batch_contaminant_row,
+    fill_shared_contaminant_allele_frequencies,
 };
 
 use crate::calling::genotype_prior::SpectrumSeed;
@@ -1567,13 +1568,20 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// Empty wherever nothing reads it — a run the fit found no contamination in, and **every
     /// repeat tract of any run**, whose mixture reads no per-batch frequency.
     batch_allele_copies: Vec<f64>,
-    /// `batches × alleles`, batch-major: the contaminant allele frequencies **one sample** is
-    /// scored against — the copies above turned into a distribution with that sample's own
-    /// copies taken out of its own batch. Refilled **once per sample per pass**, because the
-    /// subtraction is that sample's.
+    /// `batches × alleles`, batch-major: the contaminant allele frequencies **every** sample of
+    /// the locus shares — the copies above turned into a distribution, nobody left out. Filled
+    /// **once per pass**; each sample is scored against these rows for every batch but its own,
+    /// whose row is [`own_contaminant_row`](Self::own_contaminant_row).
     ///
     /// Empty wherever nothing reads it — see [`batch_allele_copies`](Self::batch_allele_copies).
     contaminant_allele_frequencies: Vec<f64>,
+    /// `alleles`: **one sample's own batch row** — that batch's copies with the sample's own taken
+    /// out, as a distribution. Refilled once per sample per pass, because the subtraction is that
+    /// sample's.
+    own_contaminant_row: Vec<f64>,
+    /// The batch [`own_contaminant_row`](Self::own_contaminant_row) was last filled for, so that
+    /// a test can see the whole table the last row was scored against.
+    own_contaminant_batch: usize,
     /// `run samples × alleles`, sample-major: the expected copies above, scattered from the
     /// scratch rows back onto the **run's** sample axis, with zero at every sample this locus
     /// has no row for.
@@ -1812,6 +1820,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.run_sample_count = 0;
         self.batch_allele_copies.clear();
         self.contaminant_allele_frequencies.clear();
+        self.own_contaminant_row.clear();
         self.expected_copies_by_run_sample.clear();
 
         self.row_count = row_count;
@@ -2104,7 +2113,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         let range = self.genotype_row_range(row);
         GenericRowBuffers {
             wrong_read_charges: &self.wrong_read_charges,
-            contaminant_allele_frequencies: &self.contaminant_allele_frequencies,
+            own_contaminant_row: &self.own_contaminant_row,
             row_scratch: &mut self.generic_rows[row],
             genotype_likelihoods: &mut self.genotype_likelihoods[range],
         }
@@ -2285,6 +2294,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             of(&self.inbreeding_coefficient_by_row),
             of(&self.batch_allele_copies),
             of(&self.contaminant_allele_frequencies),
+            of(&self.own_contaminant_row),
             of(&self.expected_copies_by_run_sample),
         ]
     }
@@ -2372,6 +2382,11 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             batch_table_len,
             UNWRITTEN_SCRATCH_VALUE,
         );
+        resize_and_fill(
+            &mut self.own_contaminant_row,
+            self.allele_count,
+            UNWRITTEN_SCRATCH_VALUE,
+        );
         self.batch_count = batch_count;
         self.run_sample_count = run_samples;
     }
@@ -2425,8 +2440,34 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             batch_allele_copies: &self.batch_allele_copies,
             own_expected_copies: &self.per_sample_expected_copies[range],
             allele_count: self.allele_count,
-            contaminant_allele_frequencies: &mut self.contaminant_allele_frequencies,
+            own_contaminant_row: &mut self.own_contaminant_row,
+            own_contaminant_batch: &mut self.own_contaminant_batch,
         }
+    }
+
+    /// **Fill the frequencies every sample of this pass shares, and lend them out for the pass**
+    /// ([`fill_shared_contaminant_allele_frequencies`](crate::calling::likelihood::fill_shared_contaminant_allele_frequencies)).
+    /// They leave the scratch so that each row's buffers can be borrowed beside them; give them
+    /// back with [`Self::return_shared_contaminant_frequencies`]. Returns them and how many
+    /// batches had nothing to read a frequency off.
+    ///
+    /// # Panics
+    ///
+    /// On a scratch whose contaminant tables were not prepared.
+    pub(crate) fn lend_shared_contaminant_frequencies(&mut self) -> (Vec<f64>, usize) {
+        self.assert_contaminant_tables_prepared();
+        let mut shared = std::mem::take(&mut self.contaminant_allele_frequencies);
+        let no_evidence = crate::calling::likelihood::fill_shared_contaminant_allele_frequencies(
+            &self.batch_allele_copies,
+            self.allele_count,
+            &mut shared,
+        );
+        (shared, no_evidence)
+    }
+
+    /// Take back what [`Self::lend_shared_contaminant_frequencies`] lent.
+    pub(crate) fn return_shared_contaminant_frequencies(&mut self, shared: Vec<f64>) {
+        self.contaminant_allele_frequencies = shared;
     }
 
     /// How many sequencing batches this locus's contaminant tables hold — **zero where they
@@ -2440,15 +2481,21 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.batch_count
     }
 
-    /// The contaminant allele frequencies as the last row's fill left them, batch-major.
+    /// The contaminant allele frequencies **the last row was scored against**, batch-major: the
+    /// shared table with that row's own batch row in place of the shared one.
     ///
     /// Test-only: in a run they are read through
     /// [`generic_row_buffers_mut`](Self::generic_row_buffers_mut), one row at a time and while
     /// that row is being assembled, so nothing outside a test ever sees them afterwards.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn contaminant_allele_frequencies(&self) -> &[f64] {
-        &self.contaminant_allele_frequencies
+    pub(crate) fn contaminant_allele_frequencies(&self) -> Vec<f64> {
+        let mut table = self.contaminant_allele_frequencies.clone();
+        if !table.is_empty() {
+            let from = self.own_contaminant_batch * self.allele_count;
+            table[from..from + self.allele_count].copy_from_slice(&self.own_contaminant_row);
+        }
+        table
     }
 
     /// Each sequencing batch's expected allele copies at this locus, batch-major, as the last
@@ -2807,10 +2854,10 @@ pub(crate) struct SampleScoringBuffers<'a> {
 pub(crate) struct GenericRowBuffers<'a> {
     /// The locus's per-allele wrong-read charge table, filled once before the first row.
     pub(crate) wrong_read_charges: &'a [WrongReadCharge],
-    /// The contaminant allele frequencies **this row** is scored against, batch-major — empty
-    /// on a run the fit found no contamination in, where the mixture is absent and the row
-    /// computes the plain formula.
-    pub(crate) contaminant_allele_frequencies: &'a [f64],
+    /// This row's own batch's contaminant frequencies, with the sample left out — the one row
+    /// of its table that is its own; the rest are the locus's shared table. Empty on a run the
+    /// fit found no contamination in, where the mixture is absent.
+    pub(crate) own_contaminant_row: &'a [f64],
     /// This row's own emission cache, which it sizes itself.
     pub(crate) row_scratch: &'a mut GenericRowScratch,
     /// This sample's row of the genotype-likelihood table, to fill.
@@ -2871,9 +2918,10 @@ pub(crate) struct ContaminantFrequencyBuffers<'a> {
     pub(crate) own_expected_copies: &'a [f64],
     /// How many alleles this locus is called over — the stride of both tables.
     pub(crate) allele_count: usize,
-    /// One row per sequencing batch, to fill: the frequencies **this** sample is scored
-    /// against.
-    pub(crate) contaminant_allele_frequencies: &'a mut [f64],
+    /// This sample's own batch row, to fill: that batch's frequencies with the sample left out.
+    pub(crate) own_contaminant_row: &'a mut [f64],
+    /// Which batch the row is, recorded for [`CallingScratch::contaminant_allele_frequencies`].
+    pub(crate) own_contaminant_batch: &'a mut usize,
 }
 
 /// The two buffers the **M-step** works between, borrowed from one [`CallingScratch`] at once.

@@ -1074,6 +1074,8 @@ pub fn build_region_handing_over_windowed<'a, E>(
     // materialising a locus's members costs no allocation after the first that needed one.
     let mut scratch: Vec<SampleLocusObservations> = Vec::new();
     let mut closer = LocusCloser::over_windowed(window, max_cohort_locus_span, min_alt_reads);
+    // Each sample's place in its windows, carried from one locus to the next.
+    let mut cursors: Vec<usize> = Vec::new();
 
     // **Driven by hand rather than by `for`, so that each locus's member vector goes back to
     // the walk** ([`LocusCloser::recycle`]). A `for` loop moves the closer, which leaves
@@ -1116,7 +1118,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
                 Some(records) => {
                     let resolved = locus.resolved_against(records);
                     keep(
-                        CohortObservation::over(&resolved, window),
+                        CohortObservation::over_from_cursors(&resolved, window, &mut cursors),
                         &LocusReads { locus: &resolved },
                     );
                 }
@@ -1140,7 +1142,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
                         // The records stay alive through the hand-over: calling may ask for the
                         // locus's read alleles ([`LocusReads`]).
                         keep(
-                            CohortObservation::over(&resolved, window),
+                            CohortObservation::over_from_cursors(&resolved, window, &mut cursors),
                             &LocusReads { locus: &resolved },
                         );
                     }
@@ -1363,6 +1365,30 @@ impl CohortObservation {
     /// measurement — every fixture that predates it, and the in-memory driver the cached one is
     /// compared against — gives every sample an absent pair.
     pub fn over(locus: &ClosedLocus<'_>, window: &WindowedCohort<'_>) -> Self {
+        Self::over_looking_up(locus, |sample, at| window.window_coverage_at(sample, at))
+    }
+
+    /// [`Self::over`], each sample's window found from `cursors[sample]`, where the builder's last
+    /// locus left it ([`WindowedCohort::window_coverage_from`]). What a builder walking its loci in
+    /// increasing position calls; `cursors` starts empty and grows to the samples it is asked for.
+    pub fn over_from_cursors(
+        locus: &ClosedLocus<'_>,
+        window: &WindowedCohort<'_>,
+        cursors: &mut Vec<usize>,
+    ) -> Self {
+        Self::over_looking_up(locus, |sample, at| {
+            if cursors.len() <= sample {
+                cursors.resize(sample + 1, 0);
+            }
+            window.window_coverage_from(sample, at, &mut cursors[sample])
+        })
+    }
+
+    /// The cohort observation of `locus`, each sample's window at its first base found by `lookup`.
+    fn over_looking_up(
+        locus: &ClosedLocus<'_>,
+        mut lookup: impl FnMut(usize, GenomePosition) -> Option<WindowCoverage>,
+    ) -> Self {
         // Destructured rather than field-accessed, so that anything the table gains has to
         // be answered for here — dropped deliberately or carried — instead of vanishing.
         let (
@@ -1383,9 +1409,7 @@ impl CohortObservation {
         let window_coverage = per_sample
             .iter()
             .map(|support| {
-                window
-                    .window_coverage_at(support.sample, first_base)
-                    .unwrap_or_else(WindowCoverage::absent)
+                lookup(support.sample, first_base).unwrap_or_else(WindowCoverage::absent)
             })
             .collect();
         // Kept only where some allele has one, so a generic locus carries an empty vector.
