@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use super::model::HaplotypePair;
+use super::model::PathHaplotypes;
 use crate::read_phase::fragments::ReadAllele;
 use crate::read_phase::link::{self, Heterozygote, ReadLink, Relation, score_read_link};
 
@@ -204,7 +204,7 @@ impl SamplePhase {
     ///
     /// If more than [`MAX_PATHS`] paths are recorded; `refine::Phasing::new` refuses round counts
     /// that would.
-    pub(super) fn record_path(&mut self, pairs: &PairLayout, haplotypes: &[HaplotypePair]) {
+    pub(super) fn record_path(&mut self, pairs: &PairLayout, haplotypes: &PathHaplotypes) {
         assert!(
             (self.paths as usize) < MAX_PATHS,
             "at most {MAX_PATHS} paths a window"
@@ -250,7 +250,7 @@ impl SamplePhase {
     }
 
     /// **Lines a round's own haplotypes up with the consensus and adds them** (spec §2.1).
-    pub(super) fn add_round(&mut self, haplotypes: &[HaplotypePair]) {
+    pub(super) fn add_round(&mut self, haplotypes: &PathHaplotypes) {
         let swapped = if self.rounds_added == 0 {
             vec![false; haplotypes.len()]
         } else {
@@ -281,7 +281,7 @@ impl SamplePhase {
     /// the sites where both the consensus and the round lean by at least [`LEAN_MIN`] on the allele
     /// the consensus's copies differ most on, ties to "kept"; each site takes the state of the last
     /// such site at or before it, the first such site's before it.
-    fn align(&self, haplotypes: &[HaplotypePair]) -> Vec<bool> {
+    fn align(&self, haplotypes: &PathHaplotypes) -> Vec<bool> {
         let (mut consensus_0, mut consensus_1) = (Vec::new(), Vec::new());
         let mut marked: Vec<(usize, bool)> = Vec::new();
         for (site, [copy_0, copy_1]) in haplotypes.iter().enumerate() {

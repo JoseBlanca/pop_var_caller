@@ -32,7 +32,7 @@ use rayon::prelude::*;
 
 use super::fit::SampleFit;
 use super::model::{
-    DrawReads, GenotypePairs, HaplotypePair, WalkParameters, WalkResult, WalkSite, walk,
+    DrawReads, GenotypePairs, PathHaplotypes, WalkParameters, WalkResult, WalkSite, walk,
     walk_and_draw, walk_and_draw_paths,
 };
 use super::phase::{
@@ -632,7 +632,7 @@ impl HaplotypeStore {
     fn write(
         offsets: &[usize],
         row: &mut [f32],
-        haplotypes: &[HaplotypePair],
+        haplotypes: &PathHaplotypes,
         absent: impl Fn(usize) -> bool,
     ) {
         assert_eq!(haplotypes.len() + 1, offsets.len(), "one drawn pair a site");

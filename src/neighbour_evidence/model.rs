@@ -342,7 +342,133 @@ pub(crate) struct DrawReads<'a> {
 
 /// **One haplotype pair at one site**: each copy's probability of carrying each allele, `A`
 /// numbers a copy.
+#[cfg(test)]
 pub(crate) type HaplotypePair = [Vec<f64>; 2];
+
+/// **One drawn path's two haplotypes at every site of a walk** (phasing spec §2.1): at each site,
+/// copy one's `A` allele probabilities and then copy two's, every site's in one array. One array
+/// rather than two vectors a site: a round draws nine paths at every site of a window, and the
+/// vectors' allocations were a tenth of the pass's time and a fifth of a walk's memory.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PathHaplotypes {
+    /// Where each site's numbers start in `values`.
+    starts: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl PathHaplotypes {
+    fn with_capacity(sites: usize) -> Self {
+        Self {
+            starts: Vec::with_capacity(sites),
+            values: Vec::with_capacity(4 * sites),
+        }
+    }
+
+    /// Appends a site of `alleles` alleles, its two copies at zero, to be written.
+    fn push_site(&mut self, alleles: usize) -> (&mut [f64], &mut [f64]) {
+        let start = self.values.len();
+        self.starts.push(start);
+        self.values.resize(start + 2 * alleles, 0.0);
+        self.values[start..].split_at_mut(alleles)
+    }
+
+    /// How many sites the path holds.
+    pub(crate) fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// The two copies' allele probabilities at `site`.
+    pub(crate) fn site(&self, site: usize) -> [&[f64]; 2] {
+        let start = self.starts[site];
+        let end = self
+            .starts
+            .get(site + 1)
+            .copied()
+            .unwrap_or(self.values.len());
+        let (first, second) = self.values[start..end].split_at((end - start) / 2);
+        [first, second]
+    }
+
+    /// Every site's two copies, in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = [&[f64]; 2]> + '_ {
+        (0..self.len()).map(|site| self.site(site))
+    }
+}
+
+#[cfg(test)]
+impl From<Vec<HaplotypePair>> for PathHaplotypes {
+    fn from(pairs: Vec<HaplotypePair>) -> Self {
+        let mut path = Self::with_capacity(pairs.len());
+        for [first, second] in pairs {
+            let (one, two) = path.push_site(first.len());
+            one.copy_from_slice(&first);
+            two.copy_from_slice(&second);
+        }
+        path
+    }
+}
+
+/// **Every site's joint of the two copies' alleles along one path**, `A × A` numbers a site in one
+/// array, and whether the site has one (`None` in [`joint_along`]'s terms). Kept across a walk's
+/// paths and refilled for each.
+#[derive(Default)]
+struct Joints {
+    starts: Vec<usize>,
+    values: Vec<f64>,
+    present: Vec<bool>,
+}
+
+impl Joints {
+    fn clear(&mut self) {
+        self.starts.clear();
+        self.values.clear();
+        self.present.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    fn range(&self, site: usize) -> std::ops::Range<usize> {
+        let start = self.starts[site];
+        start
+            ..self
+                .starts
+                .get(site + 1)
+                .copied()
+                .unwrap_or(self.values.len())
+    }
+
+    fn get(&self, site: usize) -> Option<&[f64]> {
+        self.present[site].then(|| &self.values[self.range(site)])
+    }
+
+    fn get_mut(&mut self, site: usize) -> Option<&mut [f64]> {
+        let range = self.range(site);
+        self.present[site].then(move || &mut self.values[range])
+    }
+    #[cfg(test)]
+    fn from_options(joints: &[Option<Vec<f64>>]) -> Self {
+        let mut out = Self::default();
+        for joint in joints {
+            out.starts.push(out.values.len());
+            out.present.push(joint.is_some());
+            match joint {
+                Some(values) => out.values.extend_from_slice(values),
+                // A missing joint still takes its site's room; 2 × 2 serves the tests' sites.
+                None => out.values.extend_from_slice(&[0.0; 4]),
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    fn to_options(&self) -> Vec<Option<Vec<f64>>> {
+        (0..self.len())
+            .map(|site| self.get(site).map(<[f64]>::to_vec))
+            .collect()
+    }
+}
 
 /// **A round's own drawn path**: the two haplotypes along it, and at each site the walk template
 /// each copy follows there — copy one's, then copy two's; the same template twice in an
@@ -351,7 +477,7 @@ pub(crate) type HaplotypePair = [Vec<f64>; 2];
 /// §2.3).
 #[derive(Debug, PartialEq)]
 pub(crate) struct DrawnPath {
-    pub haplotypes: Vec<HaplotypePair>,
+    pub haplotypes: PathHaplotypes,
     pub followed: Vec<[usize; 2]>,
 }
 
@@ -412,7 +538,7 @@ pub(crate) fn walk_and_draw_paths(
     extra_uniforms: &mut Uniforms,
     extra: usize,
     reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, DrawnPath, Vec<Vec<HaplotypePair>>) {
+) -> (WalkResult, DrawnPath, Vec<PathHaplotypes>) {
     let (result, drawn, extra_paths) = walk_with_draw(
         sites,
         templates,
@@ -545,7 +671,7 @@ fn walk_with_draw(
     uniforms: Option<&mut Uniforms>,
     extra: Option<(&mut Uniforms, usize)>,
     mut reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, Option<DrawnPath>, Vec<Vec<HaplotypePair>>) {
+) -> (WalkResult, Option<DrawnPath>, Vec<PathHaplotypes>) {
     assert!(
         sites
             .windows(2)
@@ -670,9 +796,10 @@ fn walk_with_draw(
         }
     }
     let state_paths = draw_state_paths(sites, &forward, &parameters, &landing, &streams);
-    let mut paths: Vec<Vec<HaplotypePair>> = state_paths
+    let mut joints = Joints::default();
+    let mut paths: Vec<PathHaplotypes> = state_paths
         .iter()
-        .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut()))
+        .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut(), &mut joints))
         .collect();
     let drawn = draws_own.then(|| DrawnPath {
         haplotypes: paths.remove(0),
@@ -785,13 +912,20 @@ fn walk_with_draw(
         }
         // Column by column, `[second][first]`, for the spreading over alleles below.
         // Read row by row, so the three inputs are read in order, and written to their columns.
-        for (state, ((&forward, &backward), &emission)) in forward_pairs
-            .iter()
-            .zip(&backward_pairs)
-            .zip(emissions.pairs(index % EMISSION_SLOTS))
-            .enumerate()
-        {
-            by_second[(state % k) * k + state / k] = without_emission(forward * backward, emission);
+        // Two loops rather than one over the states split by `% k` and `/ k`: those were two
+        // integer divisions a state, by a `k` known only at run time, and the line was an eighth
+        // of the pass's time (perf, 800 tomato samples).
+        let pair_emissions = emissions.pairs(index % EMISSION_SLOTS);
+        for first in 0..k {
+            let row = first * k..(first + 1) * k;
+            for (second, ((&forward, &backward), &emission)) in forward_pairs[row.clone()]
+                .iter()
+                .zip(&backward_pairs[row.clone()])
+                .zip(&pair_emissions[row])
+                .enumerate()
+            {
+                by_second[second * k + first] = without_emission(forward * backward, emission);
+            }
         }
         let both_autozygous: f64 = (0..k)
             .map(|state| forward_autozygous[state] * backward_autozygous[state])
@@ -1075,28 +1209,35 @@ fn haplotypes_along(
     terms: &[SiteTerms],
     states: &[State],
     reads: Option<&mut DrawReads<'_>>,
-) -> Vec<HaplotypePair> {
-    let mut joints: Vec<Option<Vec<f64>>> = sites
-        .iter()
-        .zip(terms)
-        .zip(states)
-        .map(|((site, site_terms), &state)| {
-            joint_along(
-                state,
-                &site_terms.blurred,
-                &site_terms.by_alleles,
-                site.allele_count,
-            )
-        })
-        .collect();
-    if let Some(reads) = reads {
-        orient_by_reads(sites, &mut joints, reads);
+    joints: &mut Joints,
+) -> PathHaplotypes {
+    joints.clear();
+    for ((site, site_terms), &state) in sites.iter().zip(terms).zip(states) {
+        let alleles = site.allele_count;
+        let start = joints.values.len();
+        joints.starts.push(start);
+        joints.values.resize(start + alleles * alleles, 0.0);
+        let present = joint_into(
+            state,
+            &site_terms.blurred,
+            &site_terms.by_alleles,
+            alleles,
+            &mut joints.values[start..],
+        );
+        joints.present.push(present);
     }
-    sites
-        .iter()
-        .zip(&joints)
-        .map(|(site, joint)| copies_of(joint.as_deref(), site.allele_count))
-        .collect()
+    if let Some(reads) = reads {
+        orient_by_reads(sites, joints, reads);
+    }
+    let mut path = PathHaplotypes::with_capacity(sites.len());
+    for (index, site) in sites.iter().enumerate() {
+        copies_into(
+            joints.get(index),
+            site.allele_count,
+            path.push_site(site.allele_count),
+        );
+    }
+    path
 }
 
 /// **The heterozygote a chain reads at a site**, its two alleles the lower first, or `None` when
@@ -1123,17 +1264,11 @@ fn orientable_pair(joint: &[f64], alleles: usize, het_mass_min: f64) -> Option<(
 /// site's heterozygous mass onto it** (reads-in-draw spec §2.2). A group is a run of consecutive
 /// orientable sites, each linked to the next by the sample's fragments; a site outside every group
 /// of two or more keeps its joint.
-fn orient_by_reads(
-    sites: &[WalkSite<'_>],
-    joints: &mut [Option<Vec<f64>>],
-    reads: &mut DrawReads<'_>,
-) {
-    let orientable: Vec<(usize, (usize, usize))> = joints
-        .iter()
-        .enumerate()
-        .filter(|&(site, _)| !(reads.kept_out)(site))
-        .filter_map(|(site, joint)| {
-            let joint = joint.as_deref()?;
+fn orient_by_reads(sites: &[WalkSite<'_>], joints: &mut Joints, reads: &mut DrawReads<'_>) {
+    let orientable: Vec<(usize, (usize, usize))> = (0..joints.len())
+        .filter(|&site| !(reads.kept_out)(site))
+        .filter_map(|site| {
+            let joint = joints.get(site)?;
             orientable_pair(joint, sites[site].allele_count, reads.het_mass_min)
                 .map(|pair| (site, pair))
         })
@@ -1173,7 +1308,7 @@ fn orient_by_reads(
 /// backwards from the last; then each site's heterozygous mass moves onto the drawn order.
 /// `links[i]` joins `group[i]` and `group[i + 1]`.
 fn orient_group(
-    joints: &mut [Option<Vec<f64>>],
+    joints: &mut Joints,
     sites: &[WalkSite<'_>],
     group: &[(usize, (usize, usize))],
     links: &[f64],
@@ -1186,9 +1321,7 @@ fn orient_group(
         .map(|&(site, _)| {
             let alleles = sites[site].allele_count;
             // PANIC-FREE: only sites with a joint are orientable.
-            let joint = joints[site]
-                .as_deref()
-                .expect("an orientable site has a joint");
+            let joint = joints.get(site).expect("an orientable site has a joint");
             let mut weights = [0.0; 2];
             for a in 0..alleles {
                 for b in a + 1..alleles {
@@ -1228,8 +1361,8 @@ fn orient_group(
     for (&(site, _), &orientation) in group.iter().zip(&drawn) {
         let alleles = sites[site].allele_count;
         // PANIC-FREE: as above.
-        let joint = joints[site]
-            .as_mut()
+        let joint = joints
+            .get_mut(site)
             .expect("an orientable site has a joint");
         for a in 0..alleles {
             for b in a + 1..alleles {
@@ -1257,23 +1390,31 @@ fn copies_along(
     by_alleles: &[f64],
     alleles: usize,
 ) -> HaplotypePair {
-    copies_of(
-        joint_along(state, blurred, by_alleles, alleles).as_deref(),
+    let mut joint = vec![0.0; alleles * alleles];
+    let present = joint_into(state, blurred, by_alleles, alleles, &mut joint);
+    let mut path = PathHaplotypes::with_capacity(1);
+    copies_into(
+        present.then_some(&joint[..]),
         alleles,
-    )
+        path.push_site(alleles),
+    );
+    let [first, second] = path.site(0);
+    [first.to_vec(), second.to_vec()]
 }
 
-/// **Each copy's haplotype, the margins of `joint`**; flat where there is no joint.
-fn copies_of(joint: Option<&[f64]>, alleles: usize) -> HaplotypePair {
+/// **Each copy's haplotype, the margins of `joint`**, written over the two copies, which hold
+/// zeros; flat where there is no joint.
+fn copies_into(
+    joint: Option<&[f64]>,
+    alleles: usize,
+    (first_copy, second_copy): (&mut [f64], &mut [f64]),
+) {
     let Some(joint) = joint else {
         // Every allele pair ruled out — the state's emission was zero (§3.6's guard).
-        return [
-            vec![1.0 / alleles as f64; alleles],
-            vec![1.0 / alleles as f64; alleles],
-        ];
+        first_copy.fill(1.0 / alleles as f64);
+        second_copy.fill(1.0 / alleles as f64);
+        return;
     };
-    let mut first_copy = vec![0.0; alleles];
-    let mut second_copy = vec![0.0; alleles];
     for a in 0..alleles {
         for b in 0..alleles {
             let value = joint[a * alleles + b];
@@ -1281,18 +1422,17 @@ fn copies_of(joint: Option<&[f64]>, alleles: usize) -> HaplotypePair {
             second_copy[b] += value;
         }
     }
-    [first_copy, second_copy]
 }
 
-/// **The joint of [`copies_along`] at one site**, normalised to sum to one; `None` where every
-/// allele pair is ruled out.
-fn joint_along(
+/// **The joint of [`copies_along`] at one site**, normalised to sum to one, written over `joint`,
+/// `A × A` zeros; `false` where every allele pair is ruled out.
+fn joint_into(
     state: State,
     blurred: &[f64],
     by_alleles: &[f64],
     alleles: usize,
-) -> Option<Vec<f64>> {
-    let mut joint = vec![0.0; alleles * alleles];
+    joint: &mut [f64],
+) -> bool {
     match state {
         State::Pair(first, second) => {
             for a in 0..alleles {
@@ -1312,12 +1452,12 @@ fn joint_along(
     }
     let total: f64 = joint.iter().sum();
     if total <= 0.0 {
-        return None;
+        return false;
     }
-    for value in &mut joint {
+    for value in joint.iter_mut() {
         *value /= total;
     }
-    Some(joint)
+    true
 }
 
 /// **A pair state's transition, split by how many copies keep their template**: both
