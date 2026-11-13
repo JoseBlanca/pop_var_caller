@@ -561,10 +561,11 @@ the file**, since the pass can drop records.
     130 µs a sample a record in a window after the fitting ones. Two factors make up the gap: the
     phasing rounds (`neighbour_evidence_phasing.md`) walk five times, the later four drawing nine
     paths each with reads, about eight walks' work; and a walk ran about 20 times slower than the
-    operation count above (12 µs a sample a record measured, 0.55 µs counted). At 2,176 samples that
-    projects to about 4,900 core-hours for the genome, five days on 48 cores
-    (`doc/devel/reports/implementations/refinement_memory_2026-11-13.md`; making the walk cheaper is the next
-    step).
+    operation count above (12 µs a sample a record measured, 0.55 µs counted), waiting on memory.
+    At 2,176 samples that projected to about 4,900 core-hours for the genome, five days on 48
+    cores. With the walk's arrays held a block at a time, the 2,176 samples' first 3 Mb took 4.2
+    core-hours, which projects to at most about 1,100 for the genome
+    (`doc/devel/reports/implementations/refinement_memory_2026-11-13.md`).
 - **Three reads a position.** Where it helps: the prototype's gains are all at 1× and 3×.
 - **Three hundred reads.** The sample's own likelihood dominates every emission and the posterior is
   the calling's; the pass costs time and changes nearly nothing. It still runs if the switch says so:
@@ -583,10 +584,13 @@ threads.
   held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
   of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
   bytes, counted only the likelihoods and shares.
-- **Per thread and record**: the walk's forward probabilities, `K² + 3K` numbers, its terms for the
-  backward sweep, the round's inputs and, from round 2, the nine drawn paths — about 4 to 5 KB a
-  record, so 48 threads over a 70,000-record window hold about 15 GB. Its emissions, `K² + K` numbers
-  a record, are kept for two records only and computed again in the backward sweep (2026-11-13).
+- **Per thread and record**: a walk's terms for the backward sweep, the round's inputs and, from
+  round 2, the nine drawn paths. Its forward probabilities (`K² + 3K` numbers a record) and
+  emissions (`K² + K`) are kept for one block of 64 records, the forward probabilities also at
+  every block's first record, and computed again block by block in the backward sweep (2026-11-13;
+  the same bits, and about three times fewer cycles, since the walk had been waiting on memory).
+  At 400 samples over a 70,000-record window and 48 threads, the run's peak was 16 GB, against
+  37.7 GB when every record's were kept.
 
 **The window is sized to a budget in bytes**, `--refine-window-bytes`, 32 GB by default. It counts
 the per-sample part exactly as the records arrive — each line as it arrived, though most are held
