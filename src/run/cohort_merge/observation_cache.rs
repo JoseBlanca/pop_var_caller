@@ -41,6 +41,9 @@
 //! and against it stood one file of two thousand-odd lines covering two types that share no
 //! field and no function.
 
+mod round_view;
+pub use round_view::RoundView;
+
 use super::CohortLocusBuilderRegionsLen;
 use crate::locus_generation::SampleLocusObservations;
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RefSeq, RefSeqError};
@@ -385,6 +388,31 @@ pub trait ObservationSource {
     fn release_before(&mut self, body_start: usize) {
         let _ = body_start;
     }
+
+    /// **Seal the evidence this source has kept so far**, so that a round can build it while the
+    /// source draws on, and hand back what builds every body at or after `from_body`
+    /// ([`ObservationCache::seal_round`]).
+    ///
+    /// **The default keeps nothing to seal and answers `None`**, which is right for a source that
+    /// builds each record as it is drawn: its records travel in the round itself.
+    fn seal(
+        &mut self,
+        from_body: usize,
+    ) -> Option<std::sync::Arc<dyn BuildsKeptEvidence<Self::Error>>> {
+        let _ = from_body;
+        None
+    }
+}
+
+/// **What builds a sealed round's kept bodies** ([`ObservationSource::seal`]): a source's arena
+/// as it stood when sealed, read from any thread.
+pub trait BuildsKeptEvidence<E>: Send + Sync {
+    /// Build the evidence kept at `body`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever building the evidence refuses, as [`ObservationSource::build`].
+    fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, E>;
 }
 
 /// Every iterator of one sample's observations is a source that does not reuse.
@@ -481,7 +509,9 @@ pub struct ObservationCache<S> {
     told_of_each_cover: Option<Box<dyn Fn(GenomePosition) + Send + Sync>>,
     /// **The `--explain-loci` log of loci the merge drops**, or `None` when the run explains
     /// nothing — which is every run that did not ask (`spec/explain_loci.md` §4.2).
-    dropped_loci: Option<DroppedLoci>,
+    ///
+    /// **Shared, not owned**, so that a sealed round ([`RoundView`]) notes into the same log.
+    dropped_loci: Option<std::sync::Arc<DroppedLoci>>,
 }
 
 /// One sample's reader and the observations drawn from it that have not been evicted.
@@ -955,18 +985,25 @@ impl<S> ObservationCache<S> {
     /// Note, in a log for the regions `regions` explains, every locus the merge drops as too
     /// quiet or too deep there (`--explain-loci`). **What is merged does not change.**
     pub fn explaining_drops(&mut self, regions: ExplainRegions) {
-        self.dropped_loci = Some(DroppedLoci::over(regions));
+        self.dropped_loci = Some(std::sync::Arc::new(DroppedLoci::over(regions)));
     }
 
     /// The log of dropped loci, when the run explains any — what the merge notes into.
     #[must_use]
     pub fn dropped_loci(&self) -> Option<&DroppedLoci> {
-        self.dropped_loci.as_ref()
+        self.dropped_loci.as_deref()
     }
 
     /// Take the log once the merge is done.
+    ///
+    /// # Panics
+    ///
+    /// If a sealed round still shares it — every round is dropped before a merge returns.
     pub fn take_dropped_loci(&mut self) -> Option<DroppedLoci> {
-        self.dropped_loci.take()
+        self.dropped_loci.take().map(|log| {
+            std::sync::Arc::try_unwrap(log)
+                .expect("every sealed round is dropped before the merge hands its log back")
+        })
     }
 
     /// The same cache, telling `tell` the first base of every cover before the cover draws.

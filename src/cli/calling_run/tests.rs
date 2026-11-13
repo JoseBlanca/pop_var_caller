@@ -267,9 +267,10 @@ fn the_narrowest_region_is_500_bases_at_one_sample_and_125_from_eight() {
     assert_eq!(narrowest_round_region(2_176), 125);
 }
 
-/// **A round over stored files holds the ground it was given, cut into up to four regions a
-/// thread**, never narrower than the cohort's narrowest, and one region when the ground is too
-/// narrow to cut; a round over alignments keeps one 500-base region a thread.
+/// **A round over stored files holds a sixth of the ground it was given** — the stream holds six —
+/// cut into up to four regions a thread, never narrower than the cohort's narrowest, and one region
+/// when the ground is too narrow to cut; a round over alignments keeps one 500-base region a
+/// thread over the whole ground.
 #[test]
 fn a_round_is_cut_into_up_to_four_regions_a_thread_over_the_same_ground() {
     let shape_reading = |ground: u32, samples: usize, threads: usize, read_from| {
@@ -296,21 +297,22 @@ fn a_round_is_cut_into_up_to_four_regions_a_thread_over_the_same_ground() {
     assert_eq!(aligned(24_000, 2_176, 48), (500, 48));
     assert_eq!(aligned(16_000, 8, 18), (888, 18));
     assert_eq!(aligned(500, 1_000, 48), (500, 1));
-    // The tomato25 run: 24,000 bases over 48 threads, 192 regions of 125.
-    assert_eq!(shape(24_000, 2_176, 48), (125, 192));
-    // A single sample keeps 500-base regions: 32 of them over its 16,000 bases.
-    assert_eq!(shape(16_000, 1, 48), (500, 32));
-    // Eight samples on 18 threads: four a thread, 72 regions of 222 bases.
-    assert_eq!(shape(16_000, 8, 18), (222, 72));
-    // A large cohort with no width typed: 500 bases of ground, four regions of 125.
-    assert_eq!(shape(500, 1_000, 48), (125, 4));
+    // Stored files stream six rounds at once, each a sixth of the ground. The tomato25 run:
+    // 24,000 bases over 48 threads, rounds of 4,000 cut into 32 regions of 125.
+    assert_eq!(shape(24_000, 2_176, 48), (125, 32));
+    // A single sample keeps 500-base regions: five of 533 over its round's 2,666 bases.
+    assert_eq!(shape(16_000, 1, 48), (533, 5));
+    // Eight samples on 18 threads: 21 regions of 126 over 2,666 bases.
+    assert_eq!(shape(16_000, 8, 18), (126, 21));
+    // A large cohort with no width typed: 500 bases of ground, one region of 125 a round.
+    assert_eq!(shape(500, 1_000, 48), (125, 1));
     // Ground narrower than one region: one region, as wide as the floor.
     assert_eq!(shape(100, 2_176, 48), (125, 1));
-    // Every shape holds at most the ground it was given, or one floor-width region.
+    // Every round holds at most its share of the ground: the six rounds, at most the ground.
     for (ground, samples, threads) in [(24_000, 2_176, 48), (7_936, 63, 18), (16_000, 4, 6)] {
         let (width, in_flight) = shape(ground, samples, threads);
         assert!(
-            width as usize * in_flight <= ground as usize,
+            width as usize * in_flight * 6 <= ground as usize,
             "{ground} {samples} {threads}"
         );
     }

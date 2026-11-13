@@ -776,6 +776,30 @@ Recovering the 12–14% the overlap is worth would move a whole run by roughly f
 hundred at 16 samples and by nothing measurable at one. **Nothing in this section should be
 built before the run it belongs to has been assembled and timed end to end.**
 
+**For a run over stored files, the round has been replaced by a stream of regions (owner,
+2026-11-13).** The paragraph above set the condition, and the run has now been timed end to end:
+in `call-from-psps` there is no upstream stage left in the calling pass — the psps were written
+beforehand — and at 2,176 tomato samples the merge with its calling is the whole pass, projected at
+about 43 hours for the genome. What was built (`stream.rs`, `observation_cache/round_view.rs`):
+
+- **each round's records are sealed once read** (`ObservationCache::seal_round`): moved, not
+  copied, into a read-only view its builders read, with only the records reaching past the round
+  copied back into the cache — the 2026-08-18 version's handover, with one difference that decides
+  it: **a psp source keeps its records' bodies in sealed stretches of its arena that the views
+  share** (`ObservationSource::seal`), so what is copied back is summaries and coverage windows,
+  never evidence;
+- **up to six rounds are held at once, each a sixth of the ground**, so the run holds about the
+  ground one round held before;
+- **the next rounds are read on a thread and a pool of their own, while earlier rounds' regions
+  are built**, and regions go to the pool as their round is sealed, with no barrier between rounds.
+
+Measured on the tomato25 cohort's stored files, 2,176 samples at about three reads a position,
+48 threads, 24,000 bases of ground, the VCF byte-identical: over 1 Mb of chromosome 0, calling
+fell from 3 min 17 s to 2 min 25 s, with peak resident 33.3 GB against 25.8 and 3% more CPU; over
+300 kb, from 57–59 s to 43 s, at the same 21 GB. The module's doc has the table of rounds held against time.
+`call-from-alignments` is unchanged: it merges one region at a time, and the generator upstream
+still dominates there, as this section found.
+
 ### 6.3 The organising thread: order, overlaps, emission
 
 One thread receives every builder's output and does three things: it keeps the cache, it resolves

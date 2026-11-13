@@ -279,7 +279,7 @@ impl<MK, CL> Round<'_, MK, CL> {
 }
 
 /// Claim `span`'s ground, or refuse it to whatever got there first.
-fn claim(
+pub(super) fn claim(
     owned_through: &mut Option<GenomePosition>,
     displaced: &mut u64,
     span: GenomeRegion,

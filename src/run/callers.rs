@@ -7532,23 +7532,17 @@ where
     let tract_selection = &tract_selection;
     let tract_totals_ref = &tract_totals;
 
-    let merged = crate::run::cohort_merge::rounds::merge_and_call_in_rounds(
-        segmentation.analysed_regions(),
-        &mut cache,
-        merge_parameters.cohort_locus_builder_regions_len,
-        merge_parameters.cohort_locus_builder_regions_in_flight,
-        merge_parameters.max_cohort_locus_span,
-        merge_parameters.min_alt_reads,
-        || RoundCallScratch::<S> {
-            shaping: GenericEvidenceScratch::default(),
-            tract_shaping: SsrEvidenceScratch::default(),
-            scratch: CallingScratch::default(),
-            padding_scratch: Vec::new(),
-            beside_scratch: ReferenceBesideScratch::default(),
-            window_coverage: Vec::with_capacity(run_sample_count),
-            tracts: TractOutcomes::default(),
-            totals: tract_totals_ref,
-        },
+    let make_scratch = || RoundCallScratch::<S> {
+        shaping: GenericEvidenceScratch::default(),
+        tract_shaping: SsrEvidenceScratch::default(),
+        scratch: CallingScratch::default(),
+        padding_scratch: Vec::new(),
+        beside_scratch: ReferenceBesideScratch::default(),
+        window_coverage: Vec::with_capacity(run_sample_count),
+        tracts: TractOutcomes::default(),
+        totals: tract_totals_ref,
+    };
+    let call_locus =
         |worker: &mut RoundCallScratch<'_, S>,
          observation: CohortObservation,
          reads: &crate::run::cohort_merge::build::LocusReads<'_, '_>| {
@@ -7704,56 +7698,68 @@ where
                 }
             };
             (outcome, explanation)
-        },
-        &mut |(outcome, explanation): (RoundLocusOutcome<P>, Option<Vec<ExplainRow>>)| {
-            if let Some(rows) = explanation {
-                explanations.extend(rows);
+        };
+    let mut take = |(outcome, explanation): (RoundLocusOutcome<P>, Option<Vec<ExplainRow>>)| {
+        if let Some(rows) = explanation {
+            explanations.extend(rows);
+        }
+        match outcome {
+            RoundLocusOutcome::NobodyToCall(region) => {
+                loci_with_nobody_to_call.push(region);
+                progress.locus_passed(region, records_written);
             }
-            match outcome {
-                RoundLocusOutcome::NobodyToCall(region) => {
-                    loci_with_nobody_to_call.push(region);
-                    progress.locus_passed(region, records_written);
-                }
-                RoundLocusOutcome::CountedInside(region) => {
-                    progress.locus_passed(region, records_written);
-                }
-                RoundLocusOutcome::CalledNotWritten(region) => {
-                    loci_called_but_not_written += 1;
-                    progress.locus_passed(region, records_written);
-                }
-                RoundLocusOutcome::CalledBelowMinimumSiteQuality(region) => {
-                    loci_below_minimum_site_quality += 1;
-                    progress.locus_passed(region, records_written);
-                }
-                RoundLocusOutcome::CalledFailed(error) => {
-                    if stopped.is_none() {
-                        stopped = Some(error);
-                    }
-                }
-                RoundLocusOutcome::CalledRecord(ready, windows, region) => {
-                    if stopped.is_some() {
-                        return;
-                    }
-                    progress.locus_passed(region, records_written);
-                    record_the_windows_at(
-                        GenomePosition {
-                            contig: region.contig,
-                            position: region.start,
-                        },
-                        &windows,
-                    );
-                    match hand_over(ready, &windows) {
-                        Ok(()) => records_written += 1,
-                        Err(source) => {
-                            stopped = Some(RunError::RecordNotWritten {
-                                locus: region,
-                                source: Box::new(source),
-                            });
-                        }
-                    }
+            RoundLocusOutcome::CountedInside(region) => {
+                progress.locus_passed(region, records_written);
+            }
+            RoundLocusOutcome::CalledNotWritten(region) => {
+                loci_called_but_not_written += 1;
+                progress.locus_passed(region, records_written);
+            }
+            RoundLocusOutcome::CalledBelowMinimumSiteQuality(region) => {
+                loci_below_minimum_site_quality += 1;
+                progress.locus_passed(region, records_written);
+            }
+            RoundLocusOutcome::CalledFailed(error) => {
+                if stopped.is_none() {
+                    stopped = Some(error);
                 }
             }
-        },
+            RoundLocusOutcome::CalledRecord(ready, windows, region) => {
+                if stopped.is_some() {
+                    return;
+                }
+                progress.locus_passed(region, records_written);
+                record_the_windows_at(
+                    GenomePosition {
+                        contig: region.contig,
+                        position: region.start,
+                    },
+                    &windows,
+                );
+                match hand_over(ready, &windows) {
+                    Ok(()) => records_written += 1,
+                    Err(source) => {
+                        stopped = Some(RunError::RecordNotWritten {
+                            locus: region,
+                            source: Box::new(source),
+                        });
+                    }
+                }
+            }
+        }
+    };
+    // **The stream of regions** ([`stream`](crate::run::cohort_merge::stream)): the next rounds'
+    // ground is read while earlier rounds' regions are built.
+    let merged = crate::run::cohort_merge::stream::merge_and_call_streaming(
+        segmentation.analysed_regions(),
+        &mut cache,
+        merge_parameters.cohort_locus_builder_regions_len,
+        merge_parameters.cohort_locus_builder_regions_in_flight,
+        merge_parameters.max_cohort_locus_span,
+        merge_parameters.min_alt_reads,
+        make_scratch,
+        call_locus,
+        &mut take,
         &mut loci_too_wide_to_assemble,
     );
     if let Some(stopped) = stopped {

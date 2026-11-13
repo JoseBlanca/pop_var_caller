@@ -42,6 +42,7 @@ pub mod organise;
 pub mod recorded_windows;
 pub mod rounds;
 pub mod serial;
+pub mod stream;
 
 /// The fixtures the module's test suites share — the coordinates every test writes and the
 /// failure every fake source yields.
@@ -202,6 +203,41 @@ pub(super) mod fixtures {
             body: core::ops::Range<usize>,
         ) -> Result<SampleLocusObservations, Self::Error> {
             Ok(self.records[body.start].clone())
+        }
+
+        /// **Seals only what a real source could still build**: the records drawn so far, from
+        /// `from_body` on. A driver that asked a seal for a body before its round, or one not
+        /// drawn yet, gets a panic rather than a record.
+        fn seal(
+            &mut self,
+            from_body: usize,
+        ) -> Option<std::sync::Arc<dyn observation_cache::BuildsKeptEvidence<SourceFailed>>>
+        {
+            let records = self
+                .records
+                .iter()
+                .enumerate()
+                .map(|(at, record)| {
+                    (at >= from_body && at < self.handed_out).then(|| record.clone())
+                })
+                .collect();
+            Some(std::sync::Arc::new(SealedKeeping { records }))
+        }
+    }
+
+    /// What a [`KeepingSource`] sealed: its records drawn by then from the seal's first body on.
+    struct SealedKeeping {
+        records: Vec<Option<SampleLocusObservations>>,
+    }
+
+    impl observation_cache::BuildsKeptEvidence<SourceFailed> for SealedKeeping {
+        fn build(
+            &self,
+            body: core::ops::Range<usize>,
+        ) -> Result<SampleLocusObservations, SourceFailed> {
+            Ok(self.records[body.start]
+                .clone()
+                .unwrap_or_else(|| panic!("body {body:?} was not sealed with this round")))
         }
     }
 

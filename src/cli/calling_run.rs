@@ -435,6 +435,11 @@ pub fn round_width_for(samples: usize) -> CohortLocusBuilderRegionsLen {
 ///
 /// # How narrow, and how many, reading stored files
 ///
+/// **A run over stored files streams its rounds**
+/// ([`stream`](crate::run::cohort_merge::stream)), holding
+/// [`ROUNDS_HELD`](crate::run::cohort_merge::stream::ROUNDS_HELD) of them at once, so each round
+/// gets that share of `ground` and the run holds about `ground`, as before.
+///
 /// **Up to [`REGIONS_A_WORKER`] regions for every thread**, so that a thread whose region finishes
 /// early takes another rather than waiting for the round's slowest. A round cannot start until the
 /// one before has finished, so with one region a thread the round lasts as long as its slowest
@@ -480,10 +485,16 @@ pub fn round_shape_for(
     CohortLocusBuilderRegionsLen,
     CohortLocusBuilderRegionsInFlight,
 ) {
-    let ground = ground.get();
-    let (floor, regions_a_worker) = match read_from {
-        ObservationsReadFrom::StoredFiles => (narrowest_round_region(samples), REGIONS_A_WORKER),
-        ObservationsReadFrom::Alignments => (DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 1),
+    let (ground, floor, regions_a_worker) = match read_from {
+        // The stream holds `ROUNDS_HELD` rounds at once, so each gets that share of the ground.
+        ObservationsReadFrom::StoredFiles => (
+            ground.get() / crate::run::cohort_merge::stream::ROUNDS_HELD as u32,
+            narrowest_round_region(samples),
+            REGIONS_A_WORKER,
+        ),
+        ObservationsReadFrom::Alignments => {
+            (ground.get(), DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 1)
+        }
     };
     let workers = rayon::current_num_threads().max(1);
     // PANIC-FREE: the clamp's floor is one, so the division is by at least one, and `workers` is
