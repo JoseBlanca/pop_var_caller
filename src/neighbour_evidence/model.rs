@@ -887,12 +887,12 @@ fn walk_with_draw(
     // Forward: each site's state distribution given the sites up to it, normalised; the scales
     // multiply to the window's likelihood. Two slots, the site's and the one before.
     let mut log_likelihood = 0.0;
-    for index in 0..sites.len() {
+    for (index, site) in sites.iter().enumerate() {
         terms.push(site_terms(
-            &sites[index],
+            site,
             k,
             parameters.mismatch,
-            genotype_pairs.of(sites[index].allele_count),
+            genotype_pairs.of(site.allele_count),
             emissions.site_mut(0),
             &mut scratch,
         ));
