@@ -270,3 +270,50 @@ fn the_read_alleles_the_cap_removed_are_counted() {
     }
     assert_eq!(keeper.counts().read_alleles_over_the_cap, 8);
 }
+
+/// **A keeper for a run whose output reads no fragments holds nothing and keeps nothing**: each
+/// record leaves the moment it arrives, in the order it came, its read alleles taken off it and no
+/// fragment beside it — the same three records the keeping keeper holds and links in the first
+/// test above. Its counts stay at zero, so the driver has nothing to log.
+#[test]
+fn a_passing_through_keeper_releases_each_record_at_once_with_no_fragments() {
+    let mut keeper: FragmentKeeper<u32> = FragmentKeeper::for_a_run(false);
+    assert!(!keeper.keeps_fragments());
+    let mut released = Vec::new();
+    for (payload, record) in [
+        snp_at(0, 100, &[(0, 1, 1), (0, 2, 0), (0, 3, 1)]),
+        snp_at(0, 600, &[(0, 1, 0), (0, 3, 0)]),
+        snp_at(0, 1_200, &[(0, 3, 1)]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        keeper.accept(record, payload as u32, &mut released);
+        assert_eq!(
+            released.len(),
+            payload + 1,
+            "the record leaves as it arrives, with nothing held behind it"
+        );
+    }
+    keeper.finish(&mut released);
+    assert_eq!(released.len(), 3, "finishing releases nothing more");
+    for (index, (record, payload, fragments)) in released.iter().enumerate() {
+        assert_eq!(*payload as usize, index, "in the order they came");
+        assert!(
+            fragments.is_empty(),
+            "no fragment at {}",
+            record.region().start.get()
+        );
+        assert!(
+            record.read_alleles().is_empty(),
+            "the read alleles are taken off, as the keeping keeper takes them"
+        );
+    }
+    assert_eq!(keeper.counts(), KeeperCounts::default());
+
+    let keeping: FragmentKeeper<()> = FragmentKeeper::for_a_run(true);
+    assert!(
+        keeping.keeps_fragments(),
+        "a run that reads fragments keeps them"
+    );
+}

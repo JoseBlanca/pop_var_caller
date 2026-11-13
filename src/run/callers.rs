@@ -54,6 +54,7 @@ use crate::read::input::read_groups::{ReadGroups, SampleReadGroups};
 use crate::read::input::reference::OpenReference;
 use crate::read::input::{AssemblyMismatch, check_assembly};
 use crate::read_phase::fragments::RecordFragments;
+use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
 use crate::run::cohort_merge::build::CohortObservation;
@@ -270,6 +271,9 @@ pub struct AlignedFilesVariantCaller {
     min_site_quality: Phred,
     /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
     low_base_quality_weight: f64,
+    /// Whether the run gathers fragments for the output (read phase spec §2.4); see
+    /// [`Self::with_fragments_gathered`]. On unless the run turns it off.
+    gathers_fragments: bool,
 }
 
 impl AlignedFilesVariantCaller {
@@ -370,7 +374,24 @@ impl AlignedFilesVariantCaller {
                 .expect("the default threshold is a valid quality"),
             low_base_quality_weight:
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+            gathers_fragments: true,
         })
+    }
+
+    /// **The same run, gathering fragments only if `gathered`** — each record's reads that also
+    /// reach another record, which only the output's phase-writing stages read (read phase spec
+    /// §2.4). Pass [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header
+    /// the output is written under.
+    ///
+    /// With it off, no written locus asks the merge which allele each read showed, the fragment
+    /// keeper releases each record as it arrives instead of holding it until the reads after it
+    /// are in, and every record is handed over with empty fragments — so a spill parks none. The
+    /// records are otherwise the same, so an output that reads no fragments is the same file.
+    /// The default is on: a run that leaves it alone gathers them, as every run did before.
+    #[must_use]
+    pub fn with_fragments_gathered(mut self, gathered: bool) -> Self {
+        self.gathers_fragments = gathered;
+        self
     }
 
     /// The same run, charging the low-base-quality penalty at `weight` times its tail
@@ -804,6 +825,7 @@ impl AlignedFilesVariantCaller {
         let explain = self.explain.clone();
         let min_site_quality = self.min_site_quality;
         let low_base_quality_weight = self.low_base_quality_weight;
+        let gathers_fragments = self.gathers_fragments;
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -826,6 +848,7 @@ impl AlignedFilesVariantCaller {
             explain: explain.as_ref(),
             min_site_quality,
             low_base_quality_weight,
+            gathers_fragments,
         };
         let CohortCallingOutcome {
             calling,
@@ -836,8 +859,10 @@ impl AlignedFilesVariantCaller {
             // (`str_edge_deletion_alleles.md` §6), as in psp mode.
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
-            // Then the fragment keeper (read phase spec §2.4), as in psp mode.
-            let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
+            // Then the fragment keeper (read phase spec §2.4), as in psp mode: one that keeps
+            // nothing where the output reads no fragments.
+            let mut keeper =
+                crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
             let mut kept = Vec::new();
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
@@ -859,7 +884,9 @@ impl AlignedFilesVariantCaller {
                 keeper.accept(record, windows, &mut released);
             }
             keeper.finish(&mut released);
-            crate::run::fragment_keeper::log_counts(keeper.counts());
+            if keeper.keeps_fragments() {
+                crate::run::fragment_keeper::log_counts(keeper.counts());
+            }
             for (record, windows, fragments) in released {
                 hand_over(&record, &windows, fragments).map_err(|source| {
                     RunError::RecordNotWritten {
@@ -913,6 +940,12 @@ pub(crate) struct CohortCallingInputs<'a> {
     /// How many times its tail the low-base-quality penalty charges; zero leaves it off
     /// (`--low-base-quality-weight`, `doc/devel/ng/spec/low_base_quality.md`).
     pub low_base_quality_weight: f64,
+    /// **Whether each written locus asks the merge which allele every read showed** (read phase
+    /// spec §2.2) — the read alleles the fragment keeper turns into fragments. Off where the
+    /// output will read no fragments ([`writer_reads_fragments`](crate::vcf::writer_reads_fragments)):
+    /// asking derives the locus's alleles a second time, on the thread that called it, for
+    /// nothing. A record written with it off carries no read alleles and is otherwise the same.
+    pub gathers_fragments: bool,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -1019,6 +1052,7 @@ where
         explain,
         min_site_quality,
         low_base_quality_weight,
+        gathers_fragments,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -1165,8 +1199,13 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
-                    // Asked only now, for a locus that is written (read phase spec §2.2).
-                    let read_alleles = read_alleles_for_record(remap, reads);
+                    // Asked only now, for a locus that is written (read phase spec §2.2), and only
+                    // where the output reads fragments.
+                    let read_alleles = if gathers_fragments {
+                        read_alleles_for_record(remap, reads)
+                    } else {
+                        RecordReadAlleles::default()
+                    };
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -6087,6 +6126,7 @@ mod records_handed_over_as_the_run_finishes_them {
             explain: None,
             min_site_quality: Phred::ZERO,
             low_base_quality_weight: 0.0,
+            gathers_fragments: true,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -6139,6 +6179,68 @@ mod records_handed_over_as_the_run_finishes_them {
             )
             .expect("the fixture cohort calls and every record is taken");
         (records, written)
+    }
+
+    /// Every record a run hands over, with the fragments handed beside it.
+    fn records_with_fragments_of(
+        caller: AlignedFilesVariantCaller,
+    ) -> Vec<(VcfRecord, RecordFragments)> {
+        let mut handed = Vec::new();
+        caller
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage, fragments| {
+                    handed.push((record.clone(), fragments));
+                    Ok::<(), std::io::Error>(())
+                },
+            )
+            .expect("the fixture cohort calls and every record is taken");
+        handed
+    }
+
+    /// **A run told its output reads no fragments hands over the records a gathering run does,
+    /// each with no fragments; a run told it does hands them over with the reads that link them**
+    /// (read phase spec §2.4).
+    ///
+    /// Every one of zeta's three reads covers both its variants, at `chr1:15` and `chr1:30`, so a
+    /// gathering run finds three fragments at each. The records are compared whole: they leave the
+    /// keeper with their read alleles taken off either way, so a record that differed in anything
+    /// else — a genotype, a count, the order — would show here. What the hidden-duplication
+    /// filter's spill parks is exactly what is handed over, so this is also what reaches the spill.
+    #[test]
+    fn a_run_that_gathers_no_fragments_hands_over_the_same_records_with_none() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let (_zeta_dir, zeta) = sample_showing("zeta", "zeta.bam", &[5, 20]);
+        let paths = std::slice::from_ref(&zeta);
+
+        let gathered =
+            records_with_fragments_of(open_over(paths, &reference).with_fragments_gathered(true));
+        let not_gathered =
+            records_with_fragments_of(open_over(paths, &reference).with_fragments_gathered(false));
+
+        assert_eq!(gathered.len(), 2, "the two positions zeta varies at");
+        for (record, fragments) in &gathered {
+            assert_eq!(
+                fragments.len(),
+                3,
+                "each of the three reads links {:?} to the other record",
+                record.region()
+            );
+        }
+        assert!(
+            not_gathered
+                .iter()
+                .all(|(_, fragments)| fragments.is_empty()),
+            "a run that gathers none hands over none"
+        );
+        let records = |handed: &[(VcfRecord, RecordFragments)]| -> Vec<VcfRecord> {
+            handed.iter().map(|(record, _)| record.clone()).collect()
+        };
+        assert_eq!(
+            records(&not_gathered),
+            records(&gathered),
+            "the records themselves are the same either way"
+        );
     }
 
     /// **The records are the loci `call_cohort` calls, less the ones that establish no
@@ -7404,6 +7506,7 @@ where
         explain,
         min_site_quality,
         low_base_quality_weight,
+        gathers_fragments,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -7547,8 +7650,13 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
-                    // Asked only now, for a locus that is written (read phase spec §2.2).
-                    let read_alleles = read_alleles_for_record(remap, reads);
+                    // Asked only now, for a locus that is written (read phase spec §2.2), and only
+                    // where the output reads fragments.
+                    let read_alleles = if gathers_fragments {
+                        read_alleles_for_record(remap, reads)
+                    } else {
+                        RecordReadAlleles::default()
+                    };
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));

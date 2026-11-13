@@ -110,6 +110,34 @@ enum LineStage {
     ReadsAlone(Box<ReadPhaseStage>),
 }
 
+/// **Whether the writer this run opens will read the fragments handed to it** — each record's
+/// reads that also reach another record (read phase spec §2.4).
+///
+/// Fragments are read by the two stages that write phase, and by nothing else. The
+/// neighbour-evidence pass, where the run decided to run it, orients each sample's haplotypes
+/// with them; phase from reads alone, where the pass does not run and the ploidy is two, links
+/// records with them. With neither, [`VcfWriter::write_line`] writes each line as it comes and
+/// drops its fragments unread. So this asks "will the writer's stage be anything but
+/// `LineStage::None`?", of the same two facts [`VcfWriter::create`] chooses the stage from, and
+/// the writer's tests hold the two answers to each other.
+///
+/// **What a `false` buys is not gathering them.** Fragments cost work on two kinds of thread —
+/// each written locus asks the merge which allele every read showed, and the one thread that puts
+/// records in genome order holds each record until the reads a few hundred bases on have
+/// arrived — and space wherever a record is parked, the hidden-duplication filter's spill above
+/// all. A run that gathers none where this is `false` writes the same file.
+///
+/// **It is `true` on every diploid run, whichever way `--refine-genotypes` went**, because phase
+/// from reads alone takes over wherever refinement does not run. It is `false` only at another
+/// ploidy, where neither stage runs.
+#[must_use]
+pub fn writer_reads_fragments(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> bool {
+    metadata
+        .neighbour_evidence()
+        .is_some_and(|decision| decision.ran)
+        || writes_phase_from_reads_alone(metadata, ploidy)
+}
+
 /// **What a finished file holds**: the records written, and what the neighbour-evidence pass did
 /// when it ran.
 #[derive(Clone, Debug, PartialEq, Eq)]

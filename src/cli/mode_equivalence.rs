@@ -556,6 +556,56 @@ mod tests {
         );
     }
 
+    /// **At ploidy four no stage reads fragments, so none is gathered, and both routes write one
+    /// VCF with the hidden-duplication filter off or on** (read phase spec §2.4, §2.6).
+    ///
+    /// The cohort is the phased pair's: at ploidy two its reads phase the first sample's two
+    /// sites, as the test above pins. At four neither refinement nor phase from reads alone runs,
+    /// so the run gathers no fragments — no read alleles at calling, no records held for the reads
+    /// after them, an empty fragments section in every spill entry. This runs that path end to end
+    /// through both routes and the spill, and checks the file holds no `PS`. That the records are
+    /// the same with fragments gathered or not is pinned by the drivers' own tests.
+    #[test]
+    fn at_ploidy_four_no_fragments_are_gathered_and_both_routes_and_the_filter_agree() {
+        let cohort = a_varying_cohort_with_a_phased_pair_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let mut tetraploid = alignments_args(&cohort, &output);
+        tetraploid.ploidy = Some(4);
+        run_call_from_alignments(&tetraploid).expect("the cohort calls at ploidy four");
+        let from_alignments = comparable(&output);
+        assert!(records(&from_alignments) > 0, "{from_alignments:?}");
+        assert!(
+            first_samples_phase(&from_alignments)
+                .iter()
+                .all(|(_, genotype, phase_set)| !genotype.contains('|') && phase_set.is_empty()),
+            "nothing phases at ploidy four: {from_alignments:?}"
+        );
+
+        std::fs::remove_file(&output).expect("the first route wrote the file this one replaces");
+        let psps = walked_into_psps(&cohort);
+        let mut from_psps = psps_args(&cohort, &output, &psps, &["one", "two"]);
+        from_psps.ploidy = Some(4);
+        run_call_from_psps(&from_psps).expect("the stored cohort calls at ploidy four");
+        assert_eq!(
+            comparable(&output),
+            from_alignments,
+            "both routes write one VCF at ploidy four"
+        );
+
+        let mut filtered = tetraploid;
+        filtered.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        run_call_from_alignments(&filtered).expect("the cohort calls at ploidy four, filtered");
+        assert_eq!(
+            without_the_filters_info_fields(&without_the_filters_header_lines(&comparable(
+                &output
+            ))),
+            from_alignments,
+            "the filter, flagging nothing, writes the records the unfiltered run does, through a \
+             spill that parks no fragments",
+        );
+    }
+
     /// **With more than 32 reads a sample at the linked records, so the read cap decides which
     /// reads phase, both routes write one VCF, and a `--regions` run over one walked region writes
     /// that region's records as the whole-contig run does** (read phase spec §2.4, §7.5).

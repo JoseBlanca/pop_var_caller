@@ -452,6 +452,9 @@ pub struct PspVariantCaller {
     min_site_quality: Phred,
     /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
     low_base_quality_weight: f64,
+    /// Whether the run gathers fragments for the output (read phase spec §2.4); see
+    /// [`Self::with_fragments_gathered`]. On unless the run turns it off.
+    gathers_fragments: bool,
 }
 
 impl PspVariantCaller {
@@ -550,7 +553,19 @@ impl PspVariantCaller {
                 .expect("the default threshold is a valid quality"),
             low_base_quality_weight:
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+            gathers_fragments: true,
         })
+    }
+
+    /// **The same caller, gathering fragments only if `gathered`** — direct mode's
+    /// [`with_fragments_gathered`](super::callers::AlignedFilesVariantCaller::with_fragments_gathered),
+    /// which says what turning it off changes, and why the file does not. Pass
+    /// [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header the output is
+    /// written under.
+    #[must_use]
+    pub fn with_fragments_gathered(mut self, gathered: bool) -> Self {
+        self.gathers_fragments = gathered;
+        self
     }
 
     /// The same caller, charging the low-base-quality penalty at `weight` times its tail
@@ -708,6 +723,7 @@ impl PspVariantCaller {
             explain,
             min_site_quality,
             low_base_quality_weight,
+            gathers_fragments,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -773,6 +789,7 @@ impl PspVariantCaller {
             explain: explain.as_ref(),
             min_site_quality,
             low_base_quality_weight,
+            gathers_fragments,
         };
         let CohortCallingOutcome {
             calling,
@@ -794,8 +811,10 @@ impl PspVariantCaller {
             let mut gathering =
                 crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
             // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
-            // the same order, with only the read alleles of reads seen at two records or more.
-            let mut keeper = crate::run::fragment_keeper::FragmentKeeper::default();
+            // the same order, with only the read alleles of reads seen at two records or more —
+            // or, where the output reads no fragments, at once and with none.
+            let mut keeper =
+                crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
             let mut kept = Vec::new();
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
@@ -837,7 +856,9 @@ impl PspVariantCaller {
                 keeper.accept(record, windows, &mut released);
             }
             keeper.finish(&mut released);
-            crate::run::fragment_keeper::log_counts(keeper.counts());
+            if keeper.keeps_fragments() {
+                crate::run::fragment_keeper::log_counts(keeper.counts());
+            }
             for (record, windows, fragments) in released {
                 let locus = record.region();
                 prepare(record, &windows, fragments)
@@ -2436,6 +2457,85 @@ mod tests {
         assert!(
             handed.windows(2).all(|pair| pair[0].start <= pair[1].start),
             "records leave in genome order: {handed:?}",
+        );
+    }
+
+    /// **A run told its output reads no fragments hands over the records a gathering run does,
+    /// each with no fragments; a run told it does hands them over with the reads that link them**
+    /// (read phase spec §2.4) — direct mode's
+    /// `a_run_that_gathers_no_fragments_hands_over_the_same_records_with_none`, through the
+    /// stored files.
+    ///
+    /// Both samples store the same three reads at their two variants, 20 and 30, so a gathering
+    /// run finds a fragment for each read of each sample at both. What the hidden-duplication
+    /// filter's spill parks is exactly what is handed over, so this is also what reaches the spill.
+    #[test]
+    fn a_run_that_gathers_no_fragments_hands_over_the_same_records_with_none() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let read_by_the_same_three = |start| {
+            let mut record = a_variant_at(start);
+            record.observations[0].chain_ids = vec![0, 1, 2];
+            record
+        };
+        let both = vec![read_by_the_same_three(20), read_by_the_same_three(30)];
+        let paths = vec![
+            a_psp_holding(&dir, "alpha", &segmentation, &both),
+            a_psp_holding(&dir, "beta", &segmentation, &both),
+        ];
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let handed_over = |gathered: bool| {
+            let cohort = OpenPspCohort::open(&paths).expect("the two files agree");
+            let parameters = parameters_for(cohort.read_groups());
+            let caller = open_the_caller(
+                cohort,
+                &reference,
+                Arc::try_unwrap(a_segmentation(ground(false))).expect("one handle"),
+                parameters,
+            )
+            .expect("the cohort matches the run")
+            // Three reads a sample are too few to pass the shipped site-quality gate, and
+            // this is about what a written record carries beside it.
+            .with_min_site_quality(crate::types::Phred::ZERO)
+            .with_fragments_gathered(gathered);
+            let mut handed = Vec::new();
+            caller
+                .call_cohort_handing_each_record_over(
+                    &the_shipped_genotyper(),
+                    &mut |record: &VcfRecord, _window_coverage: &[WindowCoverage], fragments| {
+                        handed.push((record.clone(), fragments));
+                        Ok::<(), std::io::Error>(())
+                    },
+                )
+                .expect("a cohort of two stored samples calls");
+            handed
+        };
+
+        let gathered = handed_over(true);
+        let not_gathered = handed_over(false);
+
+        assert_eq!(gathered.len(), 2, "the two variants: {gathered:?}");
+        for (record, fragments) in &gathered {
+            assert_eq!(
+                fragments.len(),
+                6,
+                "three reads in each of two samples link {:?} to the other record",
+                record.region()
+            );
+        }
+        assert!(
+            not_gathered
+                .iter()
+                .all(|(_, fragments)| fragments.is_empty()),
+            "a run that gathers none hands over none"
+        );
+        let records = |handed: &[(VcfRecord, RecordFragments)]| -> Vec<VcfRecord> {
+            handed.iter().map(|(record, _)| record.clone()).collect()
+        };
+        assert_eq!(
+            records(&not_gathered),
+            records(&gathered),
+            "the records themselves are the same either way"
         );
     }
 

@@ -667,6 +667,12 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
             ploidy,
             args.phase_min_path_agreement,
         ));
+    // **Fragments are gathered only where the output will read them**, which the header just
+    // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.
+    // Elsewhere — any other ploidy — gathering them would cost the calling threads, the ordered
+    // thread and the spill, and change no byte of the file.
+    let caller =
+        caller.with_fragments_gathered(crate::vcf::writer_reads_fragments(&metadata, ploidy));
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what
     // makes `--hidden-dup-fdr 0` byte-identical by construction rather than by hope. With it on, the
