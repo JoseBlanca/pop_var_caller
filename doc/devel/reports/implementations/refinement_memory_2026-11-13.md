@@ -86,9 +86,24 @@ change what is written and are the owner's to rule on:
 
 - the five phasing rounds, each after the first drawing nine paths;
 - the pair states, ordered — each pair of templates held twice, `(k₁, k₂)` and `(k₂, k₁)`, though
-  the model is symmetric in the two copies; summing them once would halve most of the walk's
-  arithmetic and change the last bits of the posteriors;
+  the model is symmetric in the two copies. **Tried and dropped** (below);
 - a reference panel: all rounds on a panel of samples, the rest solved once against it.
+
+**Each pair counted once: slower.** The emissions and the forward and backward pair steps computed
+only the pairs with `k₂ ≥ k₁` and copied them across the diagonal, every reader left as it was
+(patch kept as `tmp/refine_scale/fold.patch`). On the 200-sample run above it executed 4.5 T
+instructions against 3.8 T and took 1.95 and 2.12 T cycles against 1.63 and 1.52 T, the two builds
+run alternately. The pair arithmetic was already vectorised and cheap; copying half a 17 × 17 matrix
+across its diagonal, one strided number at a time, cost more than the arithmetic it saved. Storing
+each pair once with no copy would also need the draw and the posterior rewritten over the packed
+pairs, for at most about a seventh of the instructions; not attempted.
+
+**How much the calls move from sampling noise alone.** The same comparison gave a yardstick for any
+change that alters the arithmetic. Of the 5.2 million sample-records of that run, the folded
+arithmetic changed the genotype (`GT`) of 17,096 — about 3 in 1,000 — mostly samples with no reads
+crossing the threshold between `./.` and `0/0`. The folded build with another seed for the phasing
+draws changed 144,258, about 8 times as many. A change that moves the calls less than a new seed does
+is below the pass's own sampling noise on this data.
 
 **Not measured here.** Every figure is from chromosome 0, the unplaced-scaffold bin, where a sample
 carried about 22 read alleles a record — likely collapsed repeats; elsewhere the read alleles, the
