@@ -165,10 +165,56 @@ pub fn decide(
     }
 }
 
+/// **How many held lines are compressed together**, on the pool, once that many have arrived
+/// since the last batch: compressing each as it arrives would put the work on the one thread every
+/// line passes through.
+const LINES_COMPRESSED_TOGETHER: usize = 1_024;
+
+/// **The zstd level held lines are compressed at.** On 800 tomato samples level 1 shrank a line
+/// about 5.4 times at about 440 MB/s a thread; levels −3 and 3 gave about the same.
+const LINE_COMPRESSION_LEVEL: i32 = 1;
+
+/// **A held line's text**: as it arrived, or compressed. A window holds every line it spans until
+/// its core is written, and at 45 bytes a sample a line, uncompressed text was a tenth of a window's
+/// memory (pass spec §6).
+enum HeldText {
+    Plain(Vec<u8>),
+    Compressed { bytes: Vec<u8>, length: usize },
+}
+
+impl HeldText {
+    /// Compresses a plain line; a compressed line, or one already taken, stays as it is.
+    fn compress(&mut self) {
+        let Self::Plain(line) = self else {
+            return;
+        };
+        if line.is_empty() {
+            return;
+        }
+        // PANIC-FREE: compressing a buffer in memory fails only where allocation does.
+        let bytes = zstd::bulk::compress(line, LINE_COMPRESSION_LEVEL)
+            .expect("a line in memory compresses");
+        *self = Self::Compressed {
+            bytes,
+            length: line.len(),
+        };
+    }
+
+    /// The line as it arrived, leaving the text empty.
+    fn take(&mut self) -> Vec<u8> {
+        match std::mem::replace(self, Self::Plain(Vec::new())) {
+            Self::Plain(line) => line,
+            // PANIC-FREE: the bytes are this stage's own compression of a line of that length.
+            Self::Compressed { bytes, length } => zstd::bulk::decompress(&bytes, length)
+                .expect("a line this stage compressed inflates"),
+        }
+    }
+}
+
 /// One line the stage holds.
 struct HeldLine {
     place: RecordPlace,
-    line: Vec<u8>,
+    text: HeldText,
     /// The line's walk record, as an index counted from the run's first site.
     site: Option<usize>,
 }
@@ -208,6 +254,8 @@ pub struct NeighbourEvidenceStage {
     next_site: usize,
     /// The first held line not yet written.
     core_start: usize,
+    /// Held lines before this one are compressed or written.
+    compressed_up_to: usize,
     tally: RewriteTally,
     /// Each sample's fill check, summed over the cores solved so far.
     fill_checks: Vec<FillCheck>,
@@ -240,6 +288,7 @@ impl NeighbourEvidenceStage {
             first_site: 0,
             next_site: 0,
             core_start: 0,
+            compressed_up_to: 0,
             tally: RewriteTally::default(),
             fill_checks: vec![FillCheck::default(); decision.inbreeding_by_sample.len()],
             read_counts: vec![PassReadCounts::default(); decision.inbreeding_by_sample.len()],
@@ -286,7 +335,18 @@ impl NeighbourEvidenceStage {
             self.next_site - 1
         });
         self.positions.push(place.at.position.0);
-        self.held.push(HeldLine { place, line, site });
+        self.held.push(HeldLine {
+            place,
+            text: HeldText::Plain(line),
+            site,
+        });
+        self.compressed_up_to = self.compressed_up_to.max(self.core_start);
+        if self.held.len() - self.compressed_up_to >= LINES_COMPRESSED_TOGETHER {
+            self.held[self.compressed_up_to..]
+                .par_iter_mut()
+                .for_each(|held| held.text.compress());
+            self.compressed_up_to = self.held.len();
+        }
         self.release(false, ready);
     }
 
@@ -295,6 +355,7 @@ impl NeighbourEvidenceStage {
     pub fn finish(&mut self, ready: &mut Vec<(RecordPlace, Vec<u8>)>) {
         self.release(true, ready);
         self.held.clear();
+        self.compressed_up_to = 0;
         self.positions.clear();
         self.sites.clear();
         self.first_site = self.next_site;
@@ -388,7 +449,7 @@ impl NeighbourEvidenceStage {
                 [plan.core_start..plan.core_end]
                 .par_iter_mut()
                 .map_init(GenotypePairs::default, |pairs, held| {
-                    let line = std::mem::take(&mut held.line);
+                    let line = held.text.take();
                     let mut tally = RewriteTally::default();
                     let written = match held.site {
                         Some(site) => rewrite_line(
@@ -482,6 +543,7 @@ impl NeighbourEvidenceStage {
             .filter(|held| held.site.is_some())
             .count();
         self.held.drain(..keep_from);
+        self.compressed_up_to = self.compressed_up_to.saturating_sub(keep_from);
         self.positions.drain(..keep_from);
         self.sites.drop_first(sites_dropped);
         self.first_site += sites_dropped;
