@@ -448,9 +448,11 @@ struct Forward {
     columns: Vec<f64>,
 }
 
-/// **Every site's emissions, in one array of each kind** as [`Forward`] holds its probabilities:
-/// site `i`'s `K` autozygous emissions at `autozygous[i·K..]` and its `K²` pair emissions, row
-/// `k₁`, at `pairs[i·K²..]`.
+/// **Some sites' emissions, in one array of each kind** as [`Forward`] holds its probabilities:
+/// slot `i`'s `K` autozygous emissions at `autozygous[i·K..]` and its `K²` pair emissions, row
+/// `k₁`, at `pairs[i·K²..]`. A walk holds [`EMISSION_SLOTS`] of them, site `i` in slot
+/// `i mod EMISSION_SLOTS`: the window's every site, at `K + K²` numbers each, was a third of the
+/// pass's memory on 400 tomato samples and 48 threads (pass spec §6).
 #[derive(Default)]
 struct Emissions {
     k: usize,
@@ -485,7 +487,10 @@ impl Emissions {
     }
 }
 
-/// A walk's window-long arrays.
+/// **How many sites' emissions a walk holds**: the site it is at and the one after it.
+const EMISSION_SLOTS: usize = 2;
+
+/// A walk's window-long arrays, and its two sites of emissions.
 #[derive(Default)]
 struct WalkArrays {
     emissions: Emissions,
@@ -560,28 +565,26 @@ fn walk_with_draw(
         mut emissions,
         mut forward,
     } = WALK_ARRAYS.take();
-    emissions.resize(sites.len(), k);
+    // Two sites' emissions, not the window's: the forward walk reads a site's own, the backward
+    // walk a site's and the next one's, so each site's are computed where the forward walk reaches
+    // it and again where the backward walk does, by the same function from the same inputs.
+    emissions.resize(EMISSION_SLOTS, k);
     let (mut weighted, mut by_allele) = (Vec::new(), Vec::new());
-    let terms: Vec<SiteTerms> = sites
-        .iter()
-        .enumerate()
-        .map(|(index, site)| {
-            site_terms(
-                site,
-                k,
-                parameters.mismatch,
-                genotype_pairs.of(site.allele_count),
-                emissions.site_mut(index),
-                (&mut weighted, &mut by_allele),
-            )
-        })
-        .collect();
+    let mut terms: Vec<SiteTerms> = Vec::with_capacity(sites.len());
 
     // Forward: each site's state distribution given the sites up to it, normalised; the scales
     // multiply to the window's likelihood.
     forward.resize(sites.len(), k);
     let mut log_likelihood = 0.0;
     for index in 0..sites.len() {
+        terms.push(site_terms(
+            &sites[index],
+            k,
+            parameters.mismatch,
+            genotype_pairs.of(sites[index].allele_count),
+            emissions.site_mut(index % EMISSION_SLOTS),
+            (&mut weighted, &mut by_allele),
+        ));
         let (done_autozygous, autozygous) = forward.autozygous.split_at_mut(index * k);
         let autozygous = &mut autozygous[..k];
         let (done_pairs, pairs) = forward.pairs.split_at_mut(index * k * k);
@@ -622,10 +625,16 @@ fn walk_with_draw(
                 pairs,
             );
         }
-        for (value, emission) in autozygous.iter_mut().zip(emissions.autozygous(index)) {
+        for (value, emission) in autozygous
+            .iter_mut()
+            .zip(emissions.autozygous(index % EMISSION_SLOTS))
+        {
             *value *= emission;
         }
-        for (value, emission) in pairs.iter_mut().zip(emissions.pairs(index)) {
+        for (value, emission) in pairs
+            .iter_mut()
+            .zip(emissions.pairs(index % EMISSION_SLOTS))
+        {
             *value *= emission;
         }
         let scale: f64 = autozygous.iter().sum::<f64>() + lane_sum(pairs);
@@ -700,14 +709,14 @@ fn walk_with_draw(
             for ((weighted, value), emission) in weighted_autozygous
                 .iter_mut()
                 .zip(&backward_autozygous)
-                .zip(emissions.autozygous(index + 1))
+                .zip(emissions.autozygous((index + 1) % EMISSION_SLOTS))
             {
                 *weighted = value * emission;
             }
             for ((weighted, value), emission) in weighted_pairs
                 .iter_mut()
                 .zip(&backward_pairs)
-                .zip(emissions.pairs(index + 1))
+                .zip(emissions.pairs((index + 1) % EMISSION_SLOTS))
             {
                 *weighted = value * emission;
             }
@@ -742,6 +751,18 @@ fn walk_with_draw(
             scale_by(&mut backward_pairs, inverse);
         }
         let site = &sites[index];
+        if index + 1 < sites.len() {
+            // The forward walk's emissions at this site were overwritten two sites on; the terms
+            // computed again are the same as `terms[index]`, and dropped.
+            site_terms(
+                site,
+                k,
+                parameters.mismatch,
+                pairs_of_alleles.of(site.allele_count),
+                emissions.site_mut(index % EMISSION_SLOTS),
+                (&mut weighted, &mut by_allele),
+            );
+        }
         let site_terms = &terms[index];
         let alleles = site.allele_count;
 
@@ -759,7 +780,7 @@ fn walk_with_draw(
         for (state, value) in state_autozygous.iter_mut().enumerate() {
             *value = without_emission(
                 forward_autozygous[state] * backward_autozygous[state],
-                emissions.autozygous(index)[state],
+                emissions.autozygous(index % EMISSION_SLOTS)[state],
             );
         }
         // Column by column, `[second][first]`, for the spreading over alleles below.
@@ -767,7 +788,7 @@ fn walk_with_draw(
         for (state, ((&forward, &backward), &emission)) in forward_pairs
             .iter()
             .zip(&backward_pairs)
-            .zip(emissions.pairs(index))
+            .zip(emissions.pairs(index % EMISSION_SLOTS))
             .enumerate()
         {
             by_second[(state % k) * k + state / k] = without_emission(forward * backward, emission);
