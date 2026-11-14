@@ -578,7 +578,7 @@ threads.
 - **Per sample and record**, for every record the window spans: the record's VCF line, held
   compressed; its likelihoods and shares (`L` and `q`, as `f32`); each sample's read alleles, seven
   bytes each (`PackedRecordFragments`); and each sample's two haplotypes, the templates they
-  followed and its phase across the rounds. For each record of the core, besides: each sample's sums
+  followed, its phase across the rounds and the positions of its records with reads. For each record of the core, besides: each sample's sums
   over the averaged rounds and what it writes. *Measured 2026-11-13* on 400 tomato25 samples
   (chromosome 0, about 22 read alleles a sample a record there), about 140 bytes a sample a record
   held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
@@ -596,6 +596,9 @@ threads.
 the per-sample part exactly as the records arrive — each line as it arrived, though most are held
 compressed, so the count does not depend on when its batch was compressed. It does not count the
 per-thread part: that would make the windows, and so the output, depend on the thread count (§2.3).
+For the same reason it counts arrays by their lengths, not the allocator's capacities, and types
+whose layout the compiler chooses (an option, a tuple) at fixed sizes, not `size_of`: a compiler
+that laid one out differently must not move a window.
 At 2,176 samples and about 250 bytes a sample a record, 32 GB holds a window of about 58,000
 records, 2.2 Mb at 26 records a kilobase; the 500-kb floor is reached at about 3,000 samples, and
 past it the run stops (§2.2).

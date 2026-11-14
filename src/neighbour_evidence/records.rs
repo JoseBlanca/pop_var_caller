@@ -146,12 +146,14 @@ impl SiteRecord {
     }
 
     /// **The bytes the record holds on the heap** — what a window pays for it besides its line and
-    /// its reads (pass spec §6).
+    /// its reads (pass spec §6). Counted from the arrays' lengths, not their capacities, and a row
+    /// at one byte: the count places the windows, so it must not depend on how the allocator or
+    /// the compiler sized anything.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        self.background_shares.capacity() * std::mem::size_of::<f32>()
-            + self.rows.capacity() * std::mem::size_of::<SampleRow>()
-            + (self.likelihoods.capacity() + self.shares.capacity()) * std::mem::size_of::<f32>()
+        (self.background_shares.len() + self.likelihoods.len() + self.shares.len())
+            * std::mem::size_of::<f32>()
+            + self.rows.len()
     }
 
     /// How many samples the record has a column for.

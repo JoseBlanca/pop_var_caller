@@ -400,7 +400,8 @@ At 3,000 samples the window is already at its floor (pass §6: about 39,000 reco
 sample-records), so a smaller budget cannot shrink it: the window holds about 117 million × 56 bytes
 ≈ 6.6 GB, the accumulators about 1.1 GB over a 13,000-record core, and the walks 6.2 GB — about
 14 GB, against about 4.7 + 6.2 GB without phasing. Below about 2,000 samples, lowering
-`budget_sample_records` (`windows.rs`) to 70% of its value keeps a window's memory as it is now.
+the window budget to 70% of its value keeps a window's memory as it is now. (Written when the budget
+counted sample-records; since 2026-11-13 it counts bytes, `--refine-window-bytes`, pass §6.)
 
 **Determinism.** The draw is random. Each sample's path in each round reads uniforms from a
 SplitMix64 generator (the crate has no random-number dependency; it already uses hand-written

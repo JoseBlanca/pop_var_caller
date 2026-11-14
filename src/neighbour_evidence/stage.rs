@@ -28,8 +28,8 @@ use super::phase::{
 use super::records::SiteRecord;
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
-    PHASING_ROUNDS, Phasing, RefinedRecord, core_solve_bytes, held_solve_bytes,
-    refine_window_with_reads, window_key,
+    PHASING_ROUNDS, Phasing, RefinedRecord, record_window_bytes, refine_window_with_reads,
+    window_key,
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowBytes, WindowSizes, plan_window};
@@ -212,30 +212,64 @@ enum HeldText {
     Compressed { bytes: Vec<u8>, length: usize },
 }
 
+/// **One thread's compressor and the buffer it compresses into**, made once a batch a thread
+/// rather than once a line.
+struct LineCompressor {
+    compressor: zstd::bulk::Compressor<'static>,
+    scratch: Vec<u8>,
+}
+
+impl LineCompressor {
+    fn new() -> Self {
+        Self {
+            // PANIC-FREE: a context at a valid level fails only where allocation does.
+            compressor: zstd::bulk::Compressor::new(LINE_COMPRESSION_LEVEL)
+                .expect("a zstd context at level 1"),
+            scratch: Vec::new(),
+        }
+    }
+}
+
+/// One thread's decompression context, made once a core a thread rather than once a line.
+fn line_decompressor() -> zstd::bulk::Decompressor<'static> {
+    // PANIC-FREE: making a context fails only where allocation does.
+    zstd::bulk::Decompressor::new().expect("a zstd context")
+}
+
 impl HeldText {
     /// Compresses a plain line; a compressed line, or one already taken, stays as it is.
-    fn compress(&mut self) {
+    ///
+    /// **The compressed bytes are copied out at their own length.** zstd compresses into a buffer
+    /// of its worst case, at least the line's own length, and a vector keeps its capacity: held as
+    /// zstd returns it, a compressed line would hold as much memory as the plain one.
+    fn compress(&mut self, with: &mut LineCompressor) {
         let Self::Plain(line) = self else {
             return;
         };
         if line.is_empty() {
             return;
         }
-        // PANIC-FREE: compressing a buffer in memory fails only where allocation does.
-        let bytes = zstd::bulk::compress(line, LINE_COMPRESSION_LEVEL)
+        with.scratch.clear();
+        with.scratch
+            .reserve(zstd::zstd_safe::compress_bound(line.len()));
+        // PANIC-FREE: the buffer holds zstd's bound for the line, so compressing fails only where
+        // allocation does.
+        with.compressor
+            .compress_to_buffer(line.as_slice(), &mut with.scratch)
             .expect("a line in memory compresses");
         *self = Self::Compressed {
-            bytes,
+            bytes: with.scratch.as_slice().to_vec(),
             length: line.len(),
         };
     }
 
     /// The line as it arrived, leaving the text empty.
-    fn take(&mut self) -> Vec<u8> {
+    fn take(&mut self, with: &mut zstd::bulk::Decompressor<'static>) -> Vec<u8> {
         match std::mem::replace(self, Self::Plain(Vec::new())) {
             Self::Plain(line) => line,
             // PANIC-FREE: the bytes are this stage's own compression of a line of that length.
-            Self::Compressed { bytes, length } => zstd::bulk::decompress(&bytes, length)
+            Self::Compressed { bytes, length } => with
+                .decompress(&bytes, length)
                 .expect("a line this stage compressed inflates"),
         }
     }
@@ -380,11 +414,10 @@ impl NeighbourEvidenceStage {
         let mut held = line.len() as u64;
         let mut core = 0;
         let site = site_of(&line, self.samples).map(|record| {
-            let samples = record.sample_count() as u64;
             let fragments = PackedRecordFragments::from(fragments);
-            held += (record.heap_bytes() + fragments.heap_bytes()) as u64
-                + samples * held_solve_bytes(record.allele_count);
-            core = samples * core_solve_bytes(record.allele_count);
+            let (record_held, record_core) = record_window_bytes(&record);
+            held += record_held + fragments.heap_bytes() as u64;
+            core = record_core;
             self.sites.push(record, fragments);
             self.next_site += 1;
             self.next_site - 1
@@ -402,7 +435,7 @@ impl NeighbourEvidenceStage {
         if self.held.len() - self.compressed_up_to >= LINES_COMPRESSED_TOGETHER {
             self.held[self.compressed_up_to..]
                 .par_iter_mut()
-                .for_each(|held| held.text.compress());
+                .for_each_init(LineCompressor::new, |with, held| held.text.compress(with));
             self.compressed_up_to = self.held.len();
         }
         self.release(false, ready)
@@ -535,20 +568,23 @@ impl NeighbourEvidenceStage {
             let rewritten: Vec<(RecordPlace, Option<Vec<u8>>, RewriteTally)> = self.held
                 [plan.core_start..plan.core_end]
                 .par_iter_mut()
-                .map_init(GenotypePairs::default, |pairs, held| {
-                    let line = held.text.take();
-                    let mut tally = RewriteTally::default();
-                    let written = match held.site {
-                        Some(site) => rewrite_line(
-                            &line,
-                            &refined[site - core_sites.start],
-                            pairs,
-                            &mut tally,
-                        ),
-                        None => Some(line),
-                    };
-                    (held.place, written, tally)
-                })
+                .map_init(
+                    || (GenotypePairs::default(), line_decompressor()),
+                    |(pairs, decompressor), held| {
+                        let line = held.text.take(decompressor);
+                        let mut tally = RewriteTally::default();
+                        let written = match held.site {
+                            Some(site) => rewrite_line(
+                                &line,
+                                &refined[site - core_sites.start],
+                                pairs,
+                                &mut tally,
+                            ),
+                            None => Some(line),
+                        };
+                        (held.place, written, tally)
+                    },
+                )
                 .collect();
             for (place, written, tally) in rewritten {
                 self.tally.add(tally);

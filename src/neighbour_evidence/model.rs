@@ -98,16 +98,80 @@ pub struct WalkSite<'a> {
     pub emission_shares: Option<&'a [f64]>,
 }
 
+/// **A run of numbers at each site, every site's in one array**: site `i`'s at
+/// `values[starts[i]..starts[i + 1]]`. A walk returns two of these; as a vector a site they were
+/// two allocations a site a walk, the cost the drawn paths' one array removed (2026-11-13).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PerSite {
+    values: Vec<f64>,
+    starts: Vec<usize>,
+}
+
+impl PerSite {
+    /// Zeros, `lengths` numbers at each site in turn.
+    fn zeroed(lengths: impl Iterator<Item = usize>) -> Self {
+        let mut starts = vec![0];
+        for length in lengths {
+            let last = starts.last().copied().unwrap_or(0);
+            starts.push(last + length);
+        }
+        Self {
+            values: vec![0.0; starts.last().copied().unwrap_or(0)],
+            starts,
+        }
+    }
+
+    /// How many sites it holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.starts.len().saturating_sub(1)
+    }
+
+    /// Whether it holds no site.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Each site's numbers, in order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &[f64]> + '_ {
+        self.starts
+            .windows(2)
+            .map(|bounds| &self.values[bounds[0]..bounds[1]])
+    }
+
+    fn site_mut(&mut self, site: usize) -> &mut [f64] {
+        &mut self.values[self.starts[site]..self.starts[site + 1]]
+    }
+}
+
+impl std::ops::Index<usize> for PerSite {
+    type Output = [f64];
+
+    fn index(&self, site: usize) -> &[f64] {
+        &self.values[self.starts[site]..self.starts[site + 1]]
+    }
+}
+
+impl<'a> IntoIterator for &'a PerSite {
+    type Item = &'a [f64];
+    type IntoIter = Box<dyn ExactSizeIterator<Item = &'a [f64]> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
 /// **What a walk gives back**, one entry per site.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WalkResult {
     /// The sample's genotype posterior at each site, in the genotype table's order.
-    pub posteriors: Vec<Vec<f64>>,
+    pub posteriors: PerSite,
     /// **What the sample's neighbours alone say at each site**: the genotype distribution the
     /// states give before the sample's own likelihood is multiplied in (§3.6), normalised. At a
     /// site where the sample has no reads it is the posterior; where it has reads, comparing the
     /// two measures how well the neighbours predict this sample.
-    pub neighbour_predictions: Vec<Vec<f64>>,
+    pub neighbour_predictions: PerSite,
     /// The probability the sample is autozygous at each site.
     pub autozygous: Vec<f64>,
     /// **The probability that a copy copies the last template** at each site — at least one of the
@@ -594,15 +658,15 @@ pub(crate) fn walk_and_draw_paths(
     )
 }
 
-/// **The forward walk's probabilities, every site's in one array of each kind** rather than a
-/// vector a site: site `i`'s `K` autozygous states at `autozygous[i·K..]`, its `K²` pairs row by
+/// **The forward walk's probabilities, a few sites' in one array of each kind** rather than a
+/// vector a site: slot `i`'s `K` autozygous states at `autozygous[i·K..]`, its `K²` pairs row by
 /// row at `pairs[i·K²..]`, and those pairs' row and column sums at `rows[i·K..]` and
-/// `columns[i·K..]`.
+/// `columns[i·K..]`. **A slot is not a window's site**: the forward pass uses two slots, the site and
+/// the one before, and the backward walk one slot a site of the block it recomputes
+/// ([`FORWARD_BLOCK`]), slot 0 at the block's first site.
 ///
 /// **Every number is written before it is read**, so a walk takes the arrays as the last walk on
-/// its thread left them ([`WALK_ARRAYS`]): a window's arrays run to megabytes, and allocating them
-/// afresh each walk held 160 MB more at the pass's peak (59 tomato samples) than the vectors a
-/// site they replaced.
+/// its thread left them ([`WALK_ARRAYS`]) rather than allocating them afresh each walk.
 #[derive(Default)]
 struct Forward {
     k: usize,
@@ -877,12 +941,17 @@ fn walk_with_draw(
     checkpoints.resize(blocks, k);
     let mut scratch = EmissionScratch::default();
     let mut terms: Vec<SiteTerms> = Vec::with_capacity(sites.len());
-    let transition = |index: usize| {
-        persistence(
-            (sites[index].position - sites[index - 1].position) as f64,
-            &parameters,
+    // Each site's persistence from the site before, entry 0 unused: read by the forward step, the
+    // block's recomputation, the draw and the backward step, so computed once rather than four
+    // times — three `exp`s each.
+    let persistences: Vec<(f64, f64, f64)> = std::iter::once((1.0, 1.0, 1.0))
+        .chain(
+            sites
+                .windows(2)
+                .map(|pair| persistence((pair[1].position - pair[0].position) as f64, &parameters)),
         )
-    };
+        .collect();
+    let transition = |index: usize| persistences[index];
 
     // Forward: each site's state distribution given the sites up to it, normalised; the scales
     // multiply to the window's likelihood. Two slots, the site's and the one before.
@@ -931,8 +1000,12 @@ fn walk_with_draw(
     let mut state_paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
-    let mut posteriors = vec![Vec::new(); sites.len()];
-    let mut neighbour_predictions = vec![Vec::new(); sites.len()];
+    let mut posteriors = PerSite::zeroed(
+        sites
+            .iter()
+            .map(|site| genotype_pairs.of(site.allele_count).len()),
+    );
+    let mut neighbour_predictions = posteriors.clone();
     let mut autozygous_probability = vec![0.0; sites.len()];
     let mut last_template_copy = vec![0.0; sites.len()];
     let mut backward_autozygous = vec![1.0; k];
@@ -1002,8 +1075,7 @@ fn walk_with_draw(
                 }
             }
             if index + 1 < sites.len() {
-                let gap = (sites[index + 1].position - sites[index].position) as f64;
-                let (keep, stay_autozygous, stay_other) = persistence(gap, &parameters);
+                let (keep, stay_autozygous, stay_other) = transition(index + 1);
                 for ((weighted, value), emission) in weighted_autozygous
                     .iter_mut()
                     .zip(&backward_autozygous)
@@ -1144,34 +1216,32 @@ fn walk_with_draw(
                     *value += weight * share;
                 }
             }
-            let mut prediction: Vec<f64> = pairs_of_alleles
-                .of(alleles)
-                .iter()
-                .map(|&(a, b)| {
-                    let mut weight = pair_weight[a * alleles + b];
-                    if a == b {
-                        weight += autozygous_weight[a];
-                    } else {
-                        weight += pair_weight[b * alleles + a];
-                    }
-                    weight
-                })
-                .collect();
-            let mut posterior: Vec<f64> = prediction
-                .iter()
+            let prediction = neighbour_predictions.site_mut(index);
+            for (value, &(a, b)) in prediction.iter_mut().zip(pairs_of_alleles.of(alleles)) {
+                let mut weight = pair_weight[a * alleles + b];
+                if a == b {
+                    weight += autozygous_weight[a];
+                } else {
+                    weight += pair_weight[b * alleles + a];
+                }
+                *value = weight;
+            }
+            let posterior = posteriors.site_mut(index);
+            for ((value, weight), likelihood) in posterior
+                .iter_mut()
+                .zip(prediction.iter())
                 .zip(site.likelihoods)
-                .map(|(weight, likelihood)| weight * likelihood)
-                .collect();
+            {
+                *value = weight * likelihood;
+            }
             let total: f64 = posterior.iter().sum();
-            for value in &mut posterior {
+            for value in posterior.iter_mut() {
                 *value /= total;
             }
             let total: f64 = prediction.iter().sum();
-            for value in &mut prediction {
+            for value in prediction.iter_mut() {
                 *value /= total;
             }
-            posteriors[index] = posterior;
-            neighbour_predictions[index] = prediction;
         }
         emissions.carry(0, FORWARD_BLOCK);
     }

@@ -746,3 +746,19 @@ fn a_window_over_budget_at_the_floor_stops_the_stage() {
         "{over:?}"
     );
 }
+
+/// **A compressed line holds its compressed bytes and no more**, and inflates to the line: zstd
+/// compresses into a buffer of its worst case, at least the line's length, and a line held in that
+/// buffer saved no memory.
+#[test]
+fn a_compressed_line_holds_only_its_compressed_bytes() {
+    let line: Vec<u8> = b"0/1:12,3:30:0,15,200\t".repeat(2_000);
+    let mut text = HeldText::Plain(line.clone());
+    text.compress(&mut LineCompressor::new());
+    let HeldText::Compressed { bytes, .. } = &text else {
+        panic!("a plain line compresses");
+    };
+    assert!(bytes.len() < line.len() / 10, "{} bytes", bytes.len());
+    assert_eq!(bytes.capacity(), bytes.len());
+    assert_eq!(text.take(&mut line_decompressor()), line);
+}
