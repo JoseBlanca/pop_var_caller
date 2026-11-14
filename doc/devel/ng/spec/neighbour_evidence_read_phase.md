@@ -621,8 +621,8 @@ alleles × 8 bytes = 18 to 36 MB.
 
 **The pass** holds a whole window's lines, so it holds their fragments too. Read alleles per sample per
 record are min(depth, 32) × `k`. Two window sizes apply. At 3,000 samples the window is the phase
-output spec's floor of 39,000 records (§4 there). At 50 samples the record budget
-(`budget_sample_records` = 120 million, `src/neighbour_evidence/windows.rs:37`) does not bind, so the
+output spec's floor of 39,000 records (§4 there). At 50 samples the window budget (then
+120 million sample-records; since 2026-11-13 `--refine-window-bytes`, pass §6) does not bind, so the
 window is its full 4 Mb (2 Mb core and 1 Mb margins); at the tomato cohort's density, about 25 records
 a kilobase, that is about 100,000 records. Records at both scales are dense, so `k` ≈ 1:
 

@@ -961,7 +961,7 @@ fn same_as_full_forward_backward(
             assert!(
                 (walked - expected).abs() < 1e-9,
                 "site {site}: walked {:?}, expected {posterior:?}",
-                result.posteriors[site]
+                &result.posteriors[site]
             );
         }
     }

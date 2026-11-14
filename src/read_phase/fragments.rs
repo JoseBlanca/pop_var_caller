@@ -139,11 +139,12 @@ impl PackedRecordFragments {
         self.entries.is_empty()
     }
 
-    /// The bytes it holds on the heap.
+    /// The bytes it holds on the heap, from the arrays' lengths: the count places refinement's
+    /// windows, so it must not depend on how the allocator sized them.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        self.samples.capacity() * std::mem::size_of::<(u32, u32)>()
-            + self.entries.capacity() * std::mem::size_of::<ReadAllele>()
+        self.samples.len() * 2 * std::mem::size_of::<u32>()
+            + self.entries.len() * std::mem::size_of::<ReadAllele>()
     }
 }
 

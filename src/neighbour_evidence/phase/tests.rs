@@ -46,7 +46,7 @@ fn positions(n: usize) -> Vec<u64> {
 #[test]
 fn the_alignment_swaps_a_stretch_back_exactly() {
     let pairs = layout(20);
-    let mut phase = SamplePhase::new(&[2; 20], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&[2; 20]), &pairs);
     phase.add_round(&flat(&path(20, |_| false)));
     let round = path(20, |site| (8..14).contains(&site));
     let swapped = phase.align(&flat(&round));
@@ -65,7 +65,7 @@ fn the_alignment_swaps_a_stretch_back_exactly() {
 #[test]
 fn the_alignment_keeps_an_isolated_disagreement() {
     let pairs = layout(20);
-    let mut phase = SamplePhase::new(&[2; 20], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&[2; 20]), &pairs);
     phase.add_round(&flat(&path(20, |_| false)));
     assert_eq!(
         phase.align(&flat(&path(20, |site| site == 10))),
@@ -76,7 +76,7 @@ fn the_alignment_keeps_an_isolated_disagreement() {
 /// One round a path, each path's bits recorded and the path added to the consensus.
 fn rounds(n: usize, paths: &[Vec<HaplotypePair>]) -> (PairLayout, SamplePhase) {
     let pairs = layout(n);
-    let mut phase = SamplePhase::new(&vec![2; n], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&vec![2; n]), &pairs);
     for path in paths {
         phase.record_path(&pairs, &flat(path));
         phase.add_round(&flat(path));
@@ -234,7 +234,7 @@ fn a_multi_allelic_pair_is_phased_on_its_own_alleles() {
         site(0.95, 0.05),
     ];
     let pairs = PairLayout::new([2, 3, 2].into_iter());
-    let mut phase = SamplePhase::new(&[2, 3, 2], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&[2, 3, 2]), &pairs);
     phase.record_path(&pairs, &flat(&path));
     phase.add_round(&flat(&path));
     let phased = phase
@@ -453,7 +453,7 @@ fn a_link_breaks_where_one_path_does_not_lean() {
 fn a_share_asks_for_whole_paths_rounded_up() {
     let n = 2;
     let pairs = layout(n);
-    let mut phase = SamplePhase::new(&[2; 2], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&[2; 2]), &pairs);
     for _ in 0..3 {
         let agreeing = path(n, |_| false);
         phase.record_path(&pairs, &flat(&agreeing));
@@ -501,7 +501,7 @@ fn a_path_agreement_is_a_share() {
 #[test]
 fn the_alignment_resolves_a_tie_to_kept() {
     let pairs = layout(2);
-    let mut phase = SamplePhase::new(&[2; 2], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&[2; 2]), &pairs);
     phase.add_round(&flat(&path(2, |_| false)));
     assert_eq!(
         phase.align(&flat(&path(2, |site| site == 1))),
@@ -514,7 +514,7 @@ fn the_alignment_resolves_a_tie_to_kept() {
 #[test]
 fn the_alignment_ignores_sites_where_the_round_does_not_lean() {
     let pairs = layout(20);
-    let mut phase = SamplePhase::new(&[2; 20], &pairs);
+    let mut phase = SamplePhase::new(&SamplePhase::offsets(&[2; 20]), &pairs);
     phase.add_round(&flat(&path(20, |_| false)));
     let round: Vec<HaplotypePair> = (0..20)
         .map(|index| {

@@ -173,25 +173,32 @@ pub(super) struct SamplePhase {
     /// alleles then copy 1's, as `f32` — the store's layout; the last allele's is the count less the
     /// rest.
     sums: Vec<f32>,
-    /// Where each site's `2·(A − 1)` sums start; one past the last at the end.
-    sum_offsets: Vec<usize>,
+    /// Where each site's `2·(A − 1)` sums start; one past the last at the end. The same for every
+    /// sample of a window, so shared: a copy each was eight bytes a sample a record (pass spec §6).
+    sum_offsets: std::sync::Arc<[usize]>,
     rounds_added: u32,
     bits: Vec<PathBits>,
     paths: u32,
 }
 
 impl SamplePhase {
-    /// A sample's phase over sites of these allele counts, before any round.
-    pub(super) fn new(allele_counts: &[usize], pairs: &PairLayout) -> Self {
+    /// **Where each site's sums start** over sites of these allele counts, one past the last at
+    /// the end: what [`Self::new`] takes, made once a window.
+    pub(super) fn offsets(allele_counts: &[usize]) -> std::sync::Arc<[usize]> {
         let mut sum_offsets = Vec::with_capacity(allele_counts.len() + 1);
         sum_offsets.push(0);
         for &alleles in allele_counts {
             let last = sum_offsets.last().copied().unwrap_or(0);
             sum_offsets.push(last + 2 * (alleles - 1));
         }
+        sum_offsets.into()
+    }
+
+    /// A sample's phase over the sites `sum_offsets` ([`Self::offsets`]) lays out, before any round.
+    pub(super) fn new(sum_offsets: &std::sync::Arc<[usize]>, pairs: &PairLayout) -> Self {
         Self {
             sums: vec![0.0; sum_offsets.last().copied().unwrap_or(0)],
-            sum_offsets,
+            sum_offsets: std::sync::Arc::clone(sum_offsets),
             rounds_added: 0,
             bits: vec![PathBits::default(); pairs.entries()],
             paths: 0,

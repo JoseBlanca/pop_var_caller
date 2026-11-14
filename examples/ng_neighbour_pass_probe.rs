@@ -21,8 +21,7 @@ use std::process::ExitCode;
 use pop_var_caller::neighbour_evidence::fit::SampleFit;
 use pop_var_caller::neighbour_evidence::records::{SampleColumns, SampleRow, SiteRecord};
 use pop_var_caller::neighbour_evidence::refine::{
-    BACKGROUND_LANDING_SHARE, MISMATCH, NoReadRule, Outcome, core_solve_bytes, held_solve_bytes,
-    refine_window,
+    BACKGROUND_LANDING_SHARE, MISMATCH, NoReadRule, Outcome, record_window_bytes, refine_window,
 };
 use pop_var_caller::neighbour_evidence::templates::MAX_TEMPLATES;
 use pop_var_caller::neighbour_evidence::windows::{WindowBytes, WindowSizes, plan_window};
@@ -203,11 +202,8 @@ fn main() -> ExitCode {
                 }))
                 .collect()
         };
-        let samples_u64 = samples.len() as u64;
-        let held = running(&|record| {
-            record.heap_bytes() as u64 + samples_u64 * held_solve_bytes(record.allele_count)
-        });
-        let core = running(&|record| samples_u64 * core_solve_bytes(record.allele_count));
+        let held = running(&|record| record_window_bytes(record).0);
+        let core = running(&|record| record_window_bytes(record).1);
         let mut core_start = 0;
         while core_start < records.len() {
             let bytes = WindowBytes {

@@ -394,15 +394,45 @@ pub fn refine_window(
     )
 }
 
+/// **The bytes a written phase is counted at**, `Option<WrittenPhase>`: two allele indices and a
+/// phase set, and the option's tag, as the 64-bit targets lay it out.
+///
+/// **The accounting's sizes are written out, not read from `size_of`**, wherever the compiler
+/// chooses the layout (enums, options, tuples): the budget places the windows, the windows shape
+/// the output, and a compiler that packed a tuple differently must not move a genotype.
+const WRITTEN_PHASE_BYTES: usize = 32;
+
+/// **The bytes one sample's row of a solved record is counted at**, `(usize, Outcome, usize, f64)`:
+/// its record, its outcome, where its posterior starts, and its background share.
+const SOLVED_ROW_BYTES: usize = 32;
+
+/// **The bytes an [`Outcome`] is counted at.**
+const OUTCOME_BYTES: usize = 1;
+
 /// **The bytes the solve holds for one sample at every record of a window**, at a record of
 /// `alleles` alleles, over the window's rounds (pass spec §6): its two haplotypes in the round read
-/// and the round written, the templates they followed, and its phase. Counted at every record,
-/// whether a walk uses it or not.
+/// and the round written, the templates they followed, its phase, and the record's position among
+/// its informative ones (an upper bound: a record it has no reads at holds none). Counted at every
+/// record, whether a walk uses it or not.
 #[must_use]
 pub fn held_solve_bytes(alleles: usize) -> u64 {
     let stored = 2 * (alleles - 1) * std::mem::size_of::<f32>();
     let followed = std::mem::size_of::<[u8; 2]>();
-    (2 * (stored + followed) + phase_bytes(alleles)) as u64
+    let informative_position = std::mem::size_of::<u64>();
+    (2 * (stored + followed) + phase_bytes(alleles) + informative_position) as u64
+}
+
+/// **What one record adds to a window's two running totals** (pass spec §6), `samples` samples of
+/// it: what it holds while the window spans it, its own arrays and every sample's solve, then what
+/// its core adds. The line's text and the read alleles are the caller's to add: the stage holds
+/// them, the neighbour pass probe does not.
+#[must_use]
+pub fn record_window_bytes(record: &SiteRecord) -> (u64, u64) {
+    let samples = record.sample_count() as u64;
+    (
+        record.heap_bytes() as u64 + samples * held_solve_bytes(record.allele_count),
+        samples * core_solve_bytes(record.allele_count),
+    )
 }
 
 /// **The bytes the solve holds for one sample at a record of a window's core** besides
@@ -412,14 +442,11 @@ pub fn held_solve_bytes(alleles: usize) -> u64 {
 pub fn core_solve_bytes(alleles: usize) -> u64 {
     let genotypes = alleles * (alleles + 1) / 2;
     let sums = (2 * genotypes + 1) * std::mem::size_of::<f64>();
-    let phase = std::mem::size_of::<Option<WrittenPhase>>();
-    let result = genotypes * std::mem::size_of::<f64>()
-        + std::mem::size_of::<(usize, Outcome, usize, f64)>()
-        + phase;
+    let result = genotypes * std::mem::size_of::<f64>() + SOLVED_ROW_BYTES + WRITTEN_PHASE_BYTES;
     let written = genotypes * std::mem::size_of::<f64>()
-        + std::mem::size_of::<Outcome>()
+        + OUTCOME_BYTES
         + std::mem::size_of::<f64>()
-        + phase;
+        + WRITTEN_PHASE_BYTES;
     (sums + result + written) as u64
 }
 
@@ -833,6 +860,7 @@ pub fn refine_window_with_reads(
     }
     let draws_with_reads = phasing.draws_with_reads(fragments);
 
+    let sum_offsets = SamplePhase::offsets(&allele_counts);
     let mut states: Vec<SampleRounds> = (0..samples)
         .into_par_iter()
         .map(|sample| {
@@ -862,7 +890,7 @@ pub fn refine_window_with_reads(
                 parameters: None,
                 sums: Vec::new(),
                 phase: (phasing.is_on() && templates.is_some())
-                    .then(|| SamplePhase::new(&allele_counts, &pairs)),
+                    .then(|| SamplePhase::new(&sum_offsets, &pairs)),
                 templates,
             }
         })
@@ -1359,7 +1387,7 @@ fn solve_round(
     state.previous_posteriors = state
         .compared
         .iter()
-        .map(|&record| posteriors[layout.site(record)].clone())
+        .map(|&record| posteriors[layout.site(record)].to_vec())
         .collect();
     if phasing.averages(round) {
         if state.sums.is_empty() {
