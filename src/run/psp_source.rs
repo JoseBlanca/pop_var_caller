@@ -310,7 +310,11 @@ pub struct PspSummarySource<'a> {
     /// decoded more than once (for the coverage measurement and again for its locus) and must
     /// be counted once. Behind a lock because builds run on several threads at once; it is only
     /// taken where a record was actually thinned.
-    thinned: std::sync::Mutex<ThinnedSoFar>,
+    thinned: std::sync::Arc<std::sync::Mutex<ThinnedSoFar>>,
+    /// **Stretches of the arena sealed by [`seal`](ObservationSource::seal)**, oldest first, each
+    /// shared with the rounds that still read it. `kept`, `heads` and `live` are the stretch being
+    /// drawn into, which begins where the newest of these ends.
+    sealed: std::collections::VecDeque<std::sync::Arc<SealedArena>>,
     /// The run's depth ceiling, or `None` for a walk that keeps every record
     /// ([`depth_ceiling`](super::depth_ceiling)). A record over it is dropped as it is read.
     depth_ceiling: Option<DepthCeiling>,
@@ -418,7 +422,8 @@ impl<'a> PspSummarySource<'a> {
             heads: Vec::new(),
             live: HeldLiveSets::default(),
             read_cap: None,
-            thinned: std::sync::Mutex::new(ThinnedSoFar::default()),
+            thinned: std::sync::Arc::new(std::sync::Mutex::new(ThinnedSoFar::default())),
+            sealed: std::collections::VecDeque::new(),
             depth_ceiling: None,
             last_region: None,
             read: StoredSampleTallies::default(),
@@ -434,6 +439,16 @@ impl<'a> PspSummarySource<'a> {
     #[must_use]
     pub fn sample_name(&self) -> &str {
         &self.sample
+    }
+
+    /// The stretch of the arena being drawn into.
+    fn open_arena(&self) -> Arena<'_> {
+        Arena {
+            kept: &self.kept,
+            released: self.released,
+            heads: &self.heads,
+            live: &self.live,
+        }
     }
 
     /// What this sample contributed to the run — **counted from the heads**, which is where
@@ -902,76 +917,62 @@ impl ObservationSource for PspSummarySource<'_> {
     /// plausible body. **It is rebuilt here** from the changes the source kept
     /// ([`held_live_sets`]), into a buffer this thread reuses for every build.
     fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, RunError> {
-        let kept = self
-            .heads
-            .binary_search_by_key(&body.start, |kept| kept.body.start)
-            .map(|at| &self.heads[at])
-            .expect("a body range this source handed out");
-        let head = RecordHead {
-            region: kept.summary.region(),
-            non_reference_reads: kept.summary.non_reference_reads,
-            reads_compared_with_reference: kept.summary.reads_compared_with_reference,
-            reads_discarded_by_cap: kept.summary.reads_discarded_by_cap,
-            chain_id_base: kept.chain_id_base,
-            body_bytes: u32::try_from(body.len()).expect("a body this source wrote down"),
+        let with = BuildingWith {
+            sample: &self.sample,
+            reached: self.reached,
+            layout: &self.layout,
+            read_groups: &self.read_groups,
+            read_cap: self.read_cap,
+            thinned: &self.thinned,
         };
-        let found = LocatedRecord {
-            head,
-            body: self.body_bytes(&body),
-            record_bytes: body.len(),
-        };
-        // **Rebuilt into a buffer this thread keeps, not a fresh one.** Builds run on several
-        // threads at once, so the buffer cannot be the source's; and an allocation per build
-        // was measured once already, as a copy into a fresh `LiveSet`: 19% of the calling
-        // thread at 63 accessions.
-        let decoded = LIVE_SET_SCRATCH.with_borrow_mut(|live| {
-            self.live.rebuild(kept.ordinal, live);
-            decode_the_body_of(&found, live.ids(), &self.layout)
-        });
-        let mut record = decoded.map_err(|source| self.refuse(source))?.record;
-        // One reference base a position, which the merge pads every allele from and asserts.
-        let spans = record
-            .region
-            .end
-            .get()
-            .saturating_sub(record.region.start.get())
-            .saturating_add(1);
-        if record.reference_bases.len() as u64 != spans {
-            return Err(
-                self.refuse(PspSourceError::ReferenceBasesDoNotSpanTheRecord {
-                    at: record.region,
-                    carries: record.reference_bases.len(),
-                    spans,
-                }),
-            );
+        if body.start >= self.released {
+            return build_kept(self.open_arena(), &with, body);
         }
-        // **The same renumbering the building source makes, for the same reason**: every
-        // sample numbers its read groups from zero, so without it every sample's first group
-        // would reach the merge as identifier 0 and the cohort would score them as one lane.
-        for observation in &mut record.observations {
-            let walk_local = observation.read_group.get() as usize;
-            let Some(run_wide) = self.read_groups.get(walk_local).copied() else {
-                return Err(self.refuse(PspSourceError::ReadGroupNotInThisFilesTable {
-                    at: record.region,
-                    names: observation.read_group.get(),
-                    in_the_table: self.read_groups.len(),
-                }));
-            };
-            observation.read_group = run_wide;
+        let sealed = self
+            .sealed
+            .iter()
+            .find(|sealed| sealed.holds(body.start))
+            .expect("a body the merge still holds was released");
+        build_kept(sealed.arena(), &with, body)
+    }
+
+    /// **Seal the stretch drawn since the last seal**, and hand back what reads every sealed
+    /// stretch holding a body at or after `from_body`.
+    ///
+    /// The stretch is moved, not copied: the source starts a new one where it ended, so a body's
+    /// range means the same in both. Its live sets are split with it, and the new stretch's first
+    /// record is stored whole, so each stretch rebuilds its records' reads on its own.
+    fn seal(
+        &mut self,
+        from_body: usize,
+    ) -> Option<
+        std::sync::Arc<dyn super::cohort_merge::observation_cache::BuildsKeptEvidence<RunError>>,
+    > {
+        if !self.heads.is_empty() || !self.kept.is_empty() {
+            let released = self.released;
+            let kept = std::mem::take(&mut self.kept);
+            self.released += kept.len();
+            self.sealed.push_back(std::sync::Arc::new(SealedArena {
+                kept,
+                released,
+                heads: std::mem::take(&mut self.heads),
+                live: self.live.split_off(),
+            }));
         }
-        if let Some(cap) = self.read_cap {
-            let thinned = read_cap::thin_to_read_cap(&mut record, cap);
-            if thinned.reads > 0 {
-                let mut so_far = self
-                    .thinned
-                    .lock()
-                    .expect("a thinning tally no build panicked holding");
-                if so_far.records.insert(kept.ordinal) {
-                    so_far.reads += thinned.reads;
-                }
-            }
-        }
-        Ok(record)
+        Some(std::sync::Arc::new(SealedBodies {
+            stretches: self
+                .sealed
+                .iter()
+                .filter(|sealed| sealed.end() > from_body)
+                .cloned()
+                .collect(),
+            sample: self.sample.clone(),
+            reached: self.reached,
+            layout: self.layout.clone(),
+            read_groups: self.read_groups.clone(),
+            read_cap: self.read_cap,
+            thinned: std::sync::Arc::clone(&self.thinned),
+        }))
     }
 
     /// Drop every kept body and head the merge has passed.
@@ -986,6 +987,15 @@ impl ObservationSource for PspSummarySource<'_> {
     /// the end form is used because it is the one that is true by definition rather than by the
     /// layout.
     fn release_before(&mut self, body_start: usize) {
+        // **A sealed stretch goes whole**, once every body in it lies before the edge; a round
+        // still reading it keeps its own share until the round is done.
+        while self
+            .sealed
+            .front()
+            .is_some_and(|sealed| sealed.end() <= body_start)
+        {
+            self.sealed.pop_front();
+        }
         let Some(bytes) = body_start.checked_sub(self.released) else {
             // The merge evicts forward, so a request behind the edge is a repeat and not a
             // rewind. Nothing to do rather than an underflow.
@@ -1005,6 +1015,186 @@ impl ObservationSource for PspSummarySource<'_> {
             .map_or(u64::MAX, |surviving| surviving.ordinal);
         self.live.release_before(first_held);
         self.heads.drain(..past);
+    }
+}
+
+/// **What building a kept body needs besides the arena it sits in**: the sample's name and how far
+/// its walk had got, to name a failure, and the file's layout, read groups and read cap. Borrowed
+/// from the source, or from a sealed stretch's copy ([`SealedBodies`]).
+struct BuildingWith<'c> {
+    sample: &'c str,
+    reached: WalkProgress,
+    layout: &'c RecordLayout,
+    read_groups: &'c [ReadGroupId],
+    read_cap: Option<u32>,
+    thinned: &'c std::sync::Mutex<ThinnedSoFar>,
+}
+
+impl BuildingWith<'_> {
+    fn refuse(&self, cause: impl std::error::Error + Send + Sync + 'static) -> RunError {
+        source_failed(self.sample, self.reached, cause)
+    }
+}
+
+/// **A stretch of a source's arena**: the kept bodies' bytes, laid back to back from `released`
+/// in the file's terms, their heads, and the live sets their reads are rebuilt from.
+#[derive(Clone, Copy)]
+struct Arena<'k> {
+    kept: &'k [u8],
+    released: usize,
+    heads: &'k [KeptRecord],
+    live: &'k HeldLiveSets,
+}
+
+impl Arena<'_> {
+    fn body_bytes(&self, body: &core::ops::Range<usize>) -> &[u8] {
+        let from = body
+            .start
+            .checked_sub(self.released)
+            .expect("a body the merge still holds was released");
+        &self.kept[from..from + body.len()]
+    }
+}
+
+/// Build the body kept at `body` in `arena` (the doc of [`ObservationSource::build`] on
+/// [`PspSummarySource`] says how and why).
+fn build_kept(
+    arena: Arena<'_>,
+    with: &BuildingWith<'_>,
+    body: core::ops::Range<usize>,
+) -> Result<SampleLocusObservations, RunError> {
+    let kept = arena
+        .heads
+        .binary_search_by_key(&body.start, |kept| kept.body.start)
+        .map(|at| &arena.heads[at])
+        .expect("a body range this source handed out");
+    let head = RecordHead {
+        region: kept.summary.region(),
+        non_reference_reads: kept.summary.non_reference_reads,
+        reads_compared_with_reference: kept.summary.reads_compared_with_reference,
+        reads_discarded_by_cap: kept.summary.reads_discarded_by_cap,
+        chain_id_base: kept.chain_id_base,
+        body_bytes: u32::try_from(body.len()).expect("a body this source wrote down"),
+    };
+    let found = LocatedRecord {
+        head,
+        body: arena.body_bytes(&body),
+        record_bytes: body.len(),
+    };
+    // **Rebuilt into a buffer this thread keeps, not a fresh one.** Builds run on several
+    // threads at once, so the buffer cannot be the source's; and an allocation per build
+    // was measured once already, as a copy into a fresh `LiveSet`: 19% of the calling
+    // thread at 63 accessions.
+    let decoded = LIVE_SET_SCRATCH.with_borrow_mut(|live| {
+        arena.live.rebuild(kept.ordinal, live);
+        decode_the_body_of(&found, live.ids(), with.layout)
+    });
+    let mut record = decoded.map_err(|source| with.refuse(source))?.record;
+    // One reference base a position, which the merge pads every allele from and asserts.
+    let spans = record
+        .region
+        .end
+        .get()
+        .saturating_sub(record.region.start.get())
+        .saturating_add(1);
+    if record.reference_bases.len() as u64 != spans {
+        return Err(
+            with.refuse(PspSourceError::ReferenceBasesDoNotSpanTheRecord {
+                at: record.region,
+                carries: record.reference_bases.len(),
+                spans,
+            }),
+        );
+    }
+    // **The same renumbering the building source makes, for the same reason**: every
+    // sample numbers its read groups from zero, so without it every sample's first group
+    // would reach the merge as identifier 0 and the cohort would score them as one lane.
+    for observation in &mut record.observations {
+        let walk_local = observation.read_group.get() as usize;
+        let Some(run_wide) = with.read_groups.get(walk_local).copied() else {
+            return Err(with.refuse(PspSourceError::ReadGroupNotInThisFilesTable {
+                at: record.region,
+                names: observation.read_group.get(),
+                in_the_table: with.read_groups.len(),
+            }));
+        };
+        observation.read_group = run_wide;
+    }
+    if let Some(cap) = with.read_cap {
+        let thinned = read_cap::thin_to_read_cap(&mut record, cap);
+        if thinned.reads > 0 {
+            let mut so_far = with
+                .thinned
+                .lock()
+                .expect("a thinning tally no build panicked holding");
+            if so_far.records.insert(kept.ordinal) {
+                so_far.reads += thinned.reads;
+            }
+        }
+    }
+    Ok(record)
+}
+
+/// **A stretch of a source's arena, sealed**: nothing is added to it again, so it can be read from
+/// several threads while the source draws on into a new one ([`PspSummarySource`]'s `seal`).
+#[derive(Debug)]
+struct SealedArena {
+    kept: Vec<u8>,
+    released: usize,
+    heads: Vec<KeptRecord>,
+    live: HeldLiveSets,
+}
+
+impl SealedArena {
+    fn arena(&self) -> Arena<'_> {
+        Arena {
+            kept: &self.kept,
+            released: self.released,
+            heads: &self.heads,
+            live: &self.live,
+        }
+    }
+
+    /// Whether the body starting at `body_start` lies in this stretch.
+    fn holds(&self, body_start: usize) -> bool {
+        (self.released..self.end()).contains(&body_start)
+    }
+
+    /// Where this stretch ends, in the file's terms.
+    fn end(&self) -> usize {
+        self.released + self.kept.len()
+    }
+}
+
+/// **What a source's sealed stretches are read through** once the source has drawn on: the
+/// stretches a round's bodies lie in, shared with the source and with other rounds rather than
+/// copied, and what building needs besides ([`BuildingWith`]).
+pub struct SealedBodies {
+    stretches: Vec<std::sync::Arc<SealedArena>>,
+    sample: String,
+    reached: WalkProgress,
+    layout: RecordLayout,
+    read_groups: Vec<ReadGroupId>,
+    read_cap: Option<u32>,
+    thinned: std::sync::Arc<std::sync::Mutex<ThinnedSoFar>>,
+}
+
+impl super::cohort_merge::observation_cache::BuildsKeptEvidence<RunError> for SealedBodies {
+    fn build(&self, body: core::ops::Range<usize>) -> Result<SampleLocusObservations, RunError> {
+        let sealed = self
+            .stretches
+            .iter()
+            .find(|sealed| sealed.holds(body.start))
+            .expect("a body the round holds was sealed with it");
+        let with = BuildingWith {
+            sample: &self.sample,
+            reached: self.reached,
+            layout: &self.layout,
+            read_groups: &self.read_groups,
+            read_cap: self.read_cap,
+            thinned: &self.thinned,
+        };
+        build_kept(sealed.arena(), &with, body)
     }
 }
 

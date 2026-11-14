@@ -189,6 +189,23 @@ impl HeldLiveSets {
         self.restarts.drain(..restarts);
     }
 
+    /// **Hand over everything held and go on as an empty set of the same walk**: ordinals and
+    /// identifier offsets carry on from where these end, and the next push is stored whole, so the
+    /// two halves each rebuild their own records with nothing from the other.
+    pub(super) fn split_off(&mut self) -> Self {
+        let carried_on = Self {
+            entries: Vec::new(),
+            entries_released: self.next_ordinal(),
+            ids: Vec::new(),
+            ids_released: self.ids_released + self.ids.len() as u64,
+            restarts: Vec::new(),
+            changes_since_restart: 0,
+            blocks_begun: self.blocks_begun,
+            skipped_since_last_push: true,
+        };
+        std::mem::replace(self, carried_on)
+    }
+
     /// The walk passed a record without pushing it: the next push is stored whole, since the
     /// changes it carries are a step from the skipped record's set and not from the last one held.
     pub(super) fn skip(&mut self) {
@@ -266,6 +283,48 @@ mod tests {
             }
             held.release_before(sets.len() as u64);
             assert_eq!(held.held_ids(), 0, "a full release holds nothing");
+        }
+    }
+
+    /// **Every record rebuilds from the piece it was split off into**, whatever the depth, with
+    /// splits falling mid-block and on a block's first record: the piece holds a whole set at its
+    /// first record, so it needs nothing from the piece before it.
+    #[test]
+    fn each_piece_split_off_rebuilds_its_own_records() {
+        for depth in [0u64, 3, 40, 3_000] {
+            let sets = sliding_sets(2_000, depth);
+            let mut held = HeldLiveSets::default();
+            let mut pieces: Vec<(u64, u64, HeldLiveSets)> = Vec::new();
+            let mut piece_from = 0u64;
+            let mut blocks = 1;
+            let mut previous: Vec<ChainId> = Vec::new();
+            for (r, now) in sets.iter().enumerate() {
+                if r > 0 && r % 700 == 0 {
+                    blocks += 1;
+                    previous.clear();
+                }
+                if r > 0 && (r % 333 == 0 || r == 1_400) {
+                    pieces.push((piece_from, r as u64, held.split_off()));
+                    piece_from = r as u64;
+                }
+                let (departed, arrived) = changes_between(&previous, now);
+                let changes = LiveSetChanges::for_tests(departed, arrived);
+                let live = LiveSet::from_sorted_slice(now);
+                assert_eq!(held.push(&live, &changes, blocks), r as u64);
+                previous.clone_from(now);
+            }
+            pieces.push((piece_from, sets.len() as u64, held.split_off()));
+            let mut rebuilt = LiveSet::new();
+            for (from, to, piece) in &pieces {
+                for ordinal in *from..*to {
+                    piece.rebuild(ordinal, &mut rebuilt);
+                    assert_eq!(
+                        rebuilt.ids(),
+                        &sets[ordinal as usize][..],
+                        "depth {depth}, record {ordinal}"
+                    );
+                }
+            }
         }
     }
 
