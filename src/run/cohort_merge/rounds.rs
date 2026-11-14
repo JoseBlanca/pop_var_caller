@@ -108,32 +108,12 @@ where
     let beside_the_builders = rayon::current_num_threads() > 1;
     let mut regions_in_round: Vec<GenomeRegion> = Vec::new();
     let mut graveyard: Vec<SampleLocusObservations> = Vec::new();
-    let mut owned_through: Option<GenomePosition> = None;
-    let mut displaced: u64 = 0;
-    // **The frontier rule, on the calling thread, in region order** — spec §6.1's, the
-    // organiser's `resolve_and_release` with the failed spans and the calls interleaved by first
-    // base. Nothing a healthy run produces reaches the drop.
+    // **The frontier rule, on the calling thread, in region order** ([`Frontier`]). Nothing a
+    // healthy run produces reaches the drop.
+    let mut frontier = Frontier::default();
     let mut hand_over = |outcomes: Vec<CalledRegion<T>>| {
-        for CalledRegion { calls, failed } in outcomes {
-            let mut calls = calls.into_iter().peekable();
-            for span in failed {
-                let span_first = first_base_of(span);
-                while let Some((locus, made)) =
-                    calls.next_if(|(locus, _)| first_base_of(*locus) <= span_first)
-                {
-                    if claim(&mut owned_through, &mut displaced, locus) {
-                        take(made);
-                    }
-                }
-                if claim(&mut owned_through, &mut displaced, span) {
-                    refused.push(span);
-                }
-            }
-            for (locus, made) in calls {
-                if claim(&mut owned_through, &mut displaced, locus) {
-                    take(made);
-                }
-            }
+        for outcome in outcomes {
+            frontier.hand_over(outcome, take, refused);
         }
     };
     // **The last round's calls, handed over while the pool works the next round.** The hand-over
@@ -177,7 +157,7 @@ where
     }
     hand_over(handed_next);
 
-    Ok(displaced)
+    Ok(frontier.displaced)
 }
 
 /// **One round's regions and what a worker does with each locus**, everything a round needs
@@ -278,18 +258,61 @@ impl<MK, CL> Round<'_, MK, CL> {
     }
 }
 
-/// Claim `span`'s ground, or refuse it to whatever got there first.
-pub(super) fn claim(
-    owned_through: &mut Option<GenomePosition>,
-    displaced: &mut u64,
-    span: GenomeRegion,
-) -> bool {
-    if owned_through.is_some_and(|owned| first_base_of(span) <= owned) {
-        *displaced = displaced.saturating_add(1);
-        return false;
+/// **Spec §6.1's frontier rule**, the organiser's `resolve_and_release`, for the drivers that
+/// build regions in parallel: each region's calls and refused spans, handed over in region order,
+/// are interleaved by first base, and a span that begins on ground an earlier one owns is dropped
+/// and counted.
+#[derive(Default)]
+pub(super) struct Frontier {
+    /// The last base claimed so far.
+    owned_through: Option<GenomePosition>,
+    /// How many spans were dropped, which is `Organiser::displaced_locus_count`'s number.
+    pub(super) displaced: u64,
+}
+
+impl Frontier {
+    /// Hand one region's outcome over: each call that claims its ground to `take`, each refused
+    /// span that does to `refused`.
+    pub(super) fn hand_over<T>(
+        &mut self,
+        region: CalledRegion<T>,
+        take: &mut impl FnMut(T),
+        refused: &mut Vec<GenomeRegion>,
+    ) {
+        let CalledRegion { calls, failed } = region;
+        let mut calls = calls.into_iter().peekable();
+        for span in failed {
+            let span_first = first_base_of(span);
+            while let Some((locus, made)) =
+                calls.next_if(|(locus, _)| first_base_of(*locus) <= span_first)
+            {
+                if self.claim(locus) {
+                    take(made);
+                }
+            }
+            if self.claim(span) {
+                refused.push(span);
+            }
+        }
+        for (locus, made) in calls {
+            if self.claim(locus) {
+                take(made);
+            }
+        }
     }
-    *owned_through = Some(last_base_of(span));
-    true
+
+    /// Claim `span`'s ground, or refuse it to whatever got there first.
+    fn claim(&mut self, span: GenomeRegion) -> bool {
+        if self
+            .owned_through
+            .is_some_and(|owned| first_base_of(span) <= owned)
+        {
+            self.displaced = self.displaced.saturating_add(1);
+            return false;
+        }
+        self.owned_through = Some(last_base_of(span));
+        true
+    }
 }
 
 #[cfg(test)]

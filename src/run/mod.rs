@@ -47,6 +47,7 @@ pub mod psp_writer_line;
 pub mod records;
 pub mod report;
 pub mod segments;
+mod side_pool;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 #[cfg(test)]

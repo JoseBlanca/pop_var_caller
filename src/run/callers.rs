@@ -167,12 +167,12 @@ pub struct MergeParameters {
     pub cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
     /// How many of those regions are built and called at once.
     ///
-    /// **One means the streaming driver**, which is what direct mode uses and what psp mode
-    /// used before the round driver: a region is built, its loci are called and written, and
-    /// only then is the next region covered. More than one means
-    /// [`rounds::merge_and_call_in_rounds`](super::cohort_merge::rounds::merge_and_call_in_rounds),
-    /// where a round's regions are built and genotyped on the pool and the records fold back
-    /// in genome order.
+    /// **One means one region at a time**, which is what direct mode uses: a region is built,
+    /// its loci are called and written, and only then is the next region covered. More than one
+    /// means, in psp mode, the stream of regions
+    /// ([`stream::merge_and_call_streaming`](super::cohort_merge::stream::merge_and_call_streaming)),
+    /// where a round's regions are built and genotyped on the pool while later rounds are read,
+    /// and the records fold back in genome order.
     ///
     /// **It is the second half of one memory decision, not a thread count.** A round holds
     /// every sample's observations over `regions_in_flight × cohort_locus_builder_regions_len`

@@ -290,14 +290,16 @@ pub struct PspSummarySource<'a> {
     /// How many arena bytes have been dropped from the front — the offset every body range is
     /// measured against.
     released: usize,
-    /// The individual this file holds, so a failure names them.
-    sample: String,
+    /// The individual this file holds, so a failure names them. **This, the layout and the
+    /// read groups are shared** with every round sealed from this source, which would otherwise
+    /// copy all three for every sample in every round.
+    sample: std::sync::Arc<str>,
     /// How far the walk has got — the other half of locating a failure.
     reached: WalkProgress,
     /// This file's own record layout, kept so a body can be built later without the walk.
-    layout: RecordLayout,
+    layout: std::sync::Arc<RecordLayout>,
     /// Walk-local read-group identifier `i` is this run's `read_groups[i]` (spec §6.2).
-    read_groups: Vec<ReadGroupId>,
+    read_groups: std::sync::Arc<[ReadGroupId]>,
     /// The heads handed over so far, so a body can be located and described when it is built.
     heads: Vec<KeptRecord>,
     /// The reads live at each record still held, stored as what changed from one record to the
@@ -407,7 +409,7 @@ impl<'a> PspSummarySource<'a> {
         let sample = psp.header().sample.clone();
         let layout = RecordLayout::from_manifest(&psp.header().manifest)
             .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
-        let read_groups = read_groups.to_vec();
+        let read_groups = read_groups.into();
         let walk = psp
             .records()
             .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
@@ -415,9 +417,9 @@ impl<'a> PspSummarySource<'a> {
             walk,
             kept: Vec::new(),
             released: 0,
-            sample,
+            sample: sample.into(),
             reached: WalkProgress::NothingYet,
-            layout,
+            layout: std::sync::Arc::new(layout),
             read_groups,
             heads: Vec::new(),
             live: HeldLiveSets::default(),
@@ -966,10 +968,10 @@ impl ObservationSource for PspSummarySource<'_> {
                 .filter(|sealed| sealed.end() > from_body)
                 .cloned()
                 .collect(),
-            sample: self.sample.clone(),
+            sample: std::sync::Arc::clone(&self.sample),
             reached: self.reached,
-            layout: self.layout.clone(),
-            read_groups: self.read_groups.clone(),
+            layout: std::sync::Arc::clone(&self.layout),
+            read_groups: std::sync::Arc::clone(&self.read_groups),
             read_cap: self.read_cap,
             thinned: std::sync::Arc::clone(&self.thinned),
         }))
@@ -1171,10 +1173,10 @@ impl SealedArena {
 /// copied, and what building needs besides ([`BuildingWith`]).
 pub struct SealedBodies {
     stretches: Vec<std::sync::Arc<SealedArena>>,
-    sample: String,
+    sample: std::sync::Arc<str>,
     reached: WalkProgress,
-    layout: RecordLayout,
-    read_groups: Vec<ReadGroupId>,
+    layout: std::sync::Arc<RecordLayout>,
+    read_groups: std::sync::Arc<[ReadGroupId]>,
     read_cap: Option<u32>,
     thinned: std::sync::Arc<std::sync::Mutex<ThinnedSoFar>>,
 }

@@ -54,6 +54,7 @@ use crate::read_phase::fragments::RecordFragments;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
 use crate::run::fragment_keeper::KeptRecord;
+use crate::run::side_pool::SidePool;
 use crate::types::{Bp, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
@@ -833,9 +834,9 @@ impl PspVariantCaller {
             // already held records back.
             let mut kept = Vec::new();
             let mut gathered = Vec::new();
-            // **Both on threads of their own** ([`HandOverPool`]), so their tasks do not queue
+            // **Both on threads of their own** ([`hand_over_pool`]), so their tasks do not queue
             // behind the region builds the merge's pool is running.
-            let hand_over_pool = HandOverPool::beside(rayon::current_num_threads());
+            let hand_over_pool = hand_over_pool(rayon::current_num_threads());
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
                 Ok::<_, E>((record, windows.to_vec()))
             };
@@ -1386,7 +1387,7 @@ where
 /// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there.
 fn prepare_and_hand_over<P, E>(
     waiting: &mut Vec<KeptRecord<Vec<WindowCoverage>>>,
-    pool: &HandOverPool,
+    pool: &SidePool,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
     hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<(), E>
@@ -1416,33 +1417,11 @@ where
 /// waits for them — so taking them out of the merge's pool would cost the merge their share all
 /// the time to save it in bursts. Measured at 2,176 samples over 300 kb: 48 merge threads and 8
 /// hand-over threads called it in 58 s, 44 + 4 in 64 s, 40 + 8 in 63 s.
-struct HandOverPool(Option<rayon::ThreadPool>);
-
-impl HandOverPool {
-    /// The pool beside `workers` merge threads, or none — the hand-over then shares the merge's
-    /// pool, as it did before — when [`hand_over_threads`] gives none or the threads cannot be
-    /// started.
-    fn beside(workers: usize) -> Self {
-        let threads = hand_over_threads(workers);
-        if threads == 0 {
-            return Self(None);
-        }
-        Self(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .thread_name(|at| format!("pvc-hand-over-{at}"))
-                .build()
-                .ok(),
-        )
-    }
-
-    /// Run `work` on the pool, or on the calling thread's pool when there is none.
-    fn run<R: Send>(&self, work: impl FnOnce() -> R + Send) -> R {
-        match &self.0 {
-            Some(pool) => pool.install(work),
-            None => work(),
-        }
-    }
+///
+/// None — the hand-over then shares the merge's pool, as it did before — when
+/// [`hand_over_threads`] gives none or the threads cannot be started.
+fn hand_over_pool(workers: usize) -> SidePool {
+    SidePool::of(hand_over_threads(workers), "pvc-hand-over")
 }
 
 /// **How many hand-over threads a run of `workers` merge threads gets**: one for every six, at most
