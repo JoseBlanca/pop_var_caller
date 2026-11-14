@@ -1,6 +1,12 @@
 //! **A round of building regions, each region built *and called* on a worker**, with the
 //! results folded back in genome order.
 //!
+//! **No calling run uses this driver now; it is kept as the stream's reference.** Calling from
+//! stored files moved to [`super::stream`] on 2026-11-13, and calling from alignments merges one
+//! region at a time. The stream's tests compare what it hands over, and the error it ends with,
+//! against this driver's, which is simpler to check by reading: a round is read, then built,
+//! then handed over, with nothing overlapping. The [`Frontier`] both use lives here.
+//!
 //! This is `merge_cohort_in_parallel`'s round
 //! structure with one difference, and the difference is what the arrangement is for: the
 //! worker does not stop at a [`CohortObservation`]. It hands
@@ -60,6 +66,8 @@ pub struct CalledRegion<T> {
 }
 
 /// Merge and call the cohort over `analysed`, `regions_in_flight` regions at a time.
+///
+/// The stream's reference (see the module): no calling run reaches it.
 ///
 /// `make_scratch` builds one worker's mutable state; rayon calls it once per task split, not
 /// once per locus. `call_locus` is what a worker does with a locus. `take` is the sink, on the
