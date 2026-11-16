@@ -924,13 +924,12 @@ def perf_duration(seconds):
     return f"{h} h {m} min" if m else f"{h} h"
 
 
-def performance_bars(rows, benchmark, samples, depth, title, subtitle, out, name, leave_out=()):
-    """Two panels side by side: each tool's wall time and its peak memory, as bars; the tools
-    whose labels are in `leave_out` are not drawn."""
+def performance_bars(rows, benchmark, samples, depth, title, subtitle, out, name):
+    """Two panels side by side: each tool's wall time and its peak memory, as bars."""
     with plt.rc_context({"font.family": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
                          "svg.fonttype": "none"}):
         tools = [(label, colour, perf_measure(rows, benchmark, samples, depth, caller, stages))
-                 for label, caller, stages, colour in PERF_TOOLS if label not in leave_out]
+                 for label, caller, stages, colour in PERF_TOOLS]
         tools = [(label, colour, m) for label, colour, m in tools if m]
         if not tools:
             return None
@@ -969,10 +968,14 @@ def performance_bars(rows, benchmark, samples, depth, title, subtitle, out, name
         return save(fig, out, name)
 
 
-def performance_by_samples(rows, out, name, leave_out=()):
-    """Wall time against the number of samples on the tomato cohort, one line a tool; a run that
-    did not finish is an open mark at the time it was stopped. The tools whose labels are in
-    `leave_out` are not drawn."""
+def performance_by_samples(rows, out, name, leave_out=(), metric="time"):
+    """Wall time (`metric` "time") or peak memory ("memory") against the number of samples on the
+    tomato cohort, one line a tool. A run that did not finish is, for time, an open mark at the
+    time it was stopped; for memory, which it did not record, it is left out. The tools whose
+    labels are in `leave_out` are not drawn."""
+    def value(m):
+        return m[0] / 3600 if metric == "time" else m[1]
+
     with plt.rc_context({"font.family": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
                          "svg.fonttype": "none"}):
         sizes = sorted({int(r["samples"]) for r in rows if r["benchmark"] == "speed"})
@@ -986,31 +989,36 @@ def performance_by_samples(rows, out, name, leave_out=()):
                 continue
             pts = [(n, perf_measure(rows, "speed", str(n), "about 3x", caller, stages)) for n in sizes]
             pts = [(n, m) for n, m in pts if m]
-            if not pts:
+            done = [(n, value(m)) for n, m in pts if not m[2] and value(m) is not None]
+            if not done:
                 continue
-            done = [(n, m[0] / 3600) for n, m in pts if not m[2]]
-            ax.plot([n for n, _ in done], [h for _, h in done], color=colour, linewidth=1.8,
-                    marker="o", markersize=4.5, zorder=3)
+            # psp mode dashed, with square marks, where it shares pvc's blue with another line.
+            psp = label == "pvc\npsp mode"
+            ax.plot([n for n, _ in done], [v for _, v in done], color=colour, linewidth=1.8,
+                    linestyle=(0, (4, 2)) if psp else "-", marker="s" if psp else "o",
+                    markersize=4.5, zorder=3)
             name_at = done[-1]
             for n, m in pts:
-                if m[2]:
-                    ax.plot([done[-1][0], n], [done[-1][1], m[0] / 3600], color=colour,
+                if m[2] and metric == "time":
+                    ax.plot([done[-1][0], n], [done[-1][1], value(m)], color=colour,
                             linewidth=1.2, linestyle=(0, (2, 2)), zorder=2)
-                    ax.plot(n, m[0] / 3600, marker="o", markersize=6, markerfacecolor=SURFACE,
+                    ax.plot(n, value(m), marker="o", markersize=6, markerfacecolor=SURFACE,
                             markeredgecolor=colour, markeredgewidth=1.5, zorder=4)
                     ax.annotate(f"stopped after {perf_duration(m[0])},\nnot finished",
-                                (n, m[0] / 3600), xytext=(-8, 0), textcoords="offset points",
+                                (n, value(m)), xytext=(-8, 0), textcoords="offset points",
                                 ha="right", va="center", color=TEXT_2, fontsize=8.5)
-                    name_at = (n, m[0] / 3600)
-            ax.annotate(label.replace("pvc\n", "pvc, ").replace("\n", " "), name_at, xytext=(8, 0), textcoords="offset points",
-                        va="center", color=TEXT, fontsize=9, gid="caller")
+                    name_at = (n, value(m))
+            ax.annotate(label.replace("pvc\n", "pvc, ").replace("\n", " "), name_at, xytext=(8, 0),
+                        textcoords="offset points", va="center", color=TEXT, fontsize=9, gid="caller")
         ax.set_xlim(0, max(sizes) * 1.32)
         ax.set_ylim(0, None)
         ax.set_xticks([s for s in sizes if s != 2])
         ax.set_xlabel("samples", color=TEXT_2, fontsize=10)
-        ax.set_ylabel("wall time (hours)", color=TEXT_2, fontsize=10)
-        fig.text(0.01, 0.985, "Wall time and the number of samples", color=TEXT, fontsize=13,
-                 fontweight="semibold", va="top")
+        ax.set_ylabel("wall time (hours)" if metric == "time" else "peak memory (GB)", color=TEXT_2,
+                      fontsize=10)
+        fig.text(0.01, 0.985, ("Wall time" if metric == "time" else "Peak memory")
+                 + " and the number of samples", color=TEXT, fontsize=13, fontweight="semibold",
+                 va="top")
         fig.text(0.01, 0.925, "Tomato cohort, about 3 reads a position over 91 Mb of chromosome 1",
                  color=TEXT_2, fontsize=9.5, va="top")
         fig.subplots_adjust(left=0.09, right=0.98, top=0.83, bottom=0.12)
@@ -1031,6 +1039,12 @@ def main():
         # No subtitle: doc/user/accuracy.md explains the figure in its caption.
         snps_other_scatter_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20", out,
                                   "errors_giab_chr20", from_data=("SNPs",)),
+        # The whole genome, which doc/user/accuracy.md shows in place of chromosome 20 (owner,
+        # 16 November 2026).
+        # Both panels from the data: over a genome every count is in the hundreds or more.
+        snps_other_scatter_figure(rows, "giab_genome", "Errors — HG002, chromosomes 1 to 22", out,
+                                  "errors_giab_genome",
+                                  from_data=tuple(name for name, _ in SNPS_OTHER_PANELS)),
         *vcfeval_benchmark_figure(rows, "giab_panel", "Errors — GIAB HG002, HG003, HG004 panel",
                                  "100 confident regions per sample, each sample called alone, "
                                  "summed over the three; scored by pvc_eval", out,
@@ -1056,17 +1070,18 @@ def main():
         performance_bars(rows, "giab_chr20", "1", "30x",
                          "Speed and memory — one human sample",
                          "GIAB HG002, chromosome 20 (64 Mb), 30×", out, "performance_giab_chr20"),
-        # 50 samples, the largest cohort every tool finished; pvc as its 3-segment run, set up as
-        # GATK's and freebayes' runs are, and in psp mode (owner, 12 November 2026).
-        performance_bars(rows, "speed", "50", "about 3x",
-                         "Speed and memory — 50 tomato samples",
-                         "About 3 reads a position over 91 Mb of chromosome 1", out,
-                         "performance_tomato",
-                         leave_out=("pvc\ndirect mode",)),
+        performance_bars(rows, "giab_genome", "1", "30x",
+                         "Speed and memory — one human genome",
+                         "GIAB HG002, chromosomes 1 to 22 (2.9 Gb), 30×", out,
+                         "performance_giab_genome"),
         # pvc as its 3-segment run alone: its three lines lay too close together (owner,
         # 12 November 2026).
         performance_by_samples(rows, out, "performance_tomato_samples",
                                leave_out=("pvc\ndirect mode", "pvc\npsp mode")),
+        # Memory with psp mode too, whose line lies clear of the 3-segment run's (owner,
+        # 12 November 2026).
+        performance_by_samples(rows, out, "performance_tomato_samples_memory",
+                               leave_out=("pvc\ndirect mode",), metric="memory"),
     ]
     for m in made:
         if m:

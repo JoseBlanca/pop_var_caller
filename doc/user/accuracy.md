@@ -14,42 +14,43 @@ The tools used in the comparison were:
 - HipSTR 0.6.2;
 - Beagle 4.1 and STITCH 1.8.5.
 
-## HG002, chromosome 20
+## HG002, whole genome
 
-GIAB sample HG002 over the whole of chromosome 20, scored against GIAB's v4.2.1 truth set in
-its confident regions. The reads were downsampled at random from the full data, about 60×, to
-each lower depth. pvc version 909ea135.
+GIAB sample HG002 over chromosomes 1 to 22 (2.9 Gb), scored against GIAB's v4.2.1 truth set in
+its confident regions. The reads were downsampled at random from GIAB's 300× data to 5×, 10×, 30×
+and 50×. pvc version 909ea135.
 
-![False positives against false negatives in HG002 over chromosome 20, 5× to ~60×: SNPs, and indels, STRs and complex variants together](figures/errors_giab_chr20_scatter_snps_other.svg)
+![False positives against false negatives in HG002 over chromosomes 1 to 22, 5× to 50×: SNPs, and indels, STRs and complex variants together](figures/errors_giab_genome_scatter_snps_other.svg)
 
-*Each line corresponds to one caller, joining its results from 5× to ~60×; the size of each mark
+*Each line corresponds to one caller, joining its results from 5× to 50×; the size of each mark
 is the read depth. The axes are on a log scale. The bottom-left corner is the best.*
 
 **SNPs**
 
 | depth | pvc: false · missed | GATK: false · missed | freebayes: false · missed | DeepVariant: false · missed |
 |---|---|---|---|---|
-| 5× | 516 · 18,117 | 151 · 18,601 | 127 · 23,346 | 199 · 17,698 |
-| 10× | 335 · 4,383 | 227 · 4,083 | 90 · 8,247 | 183 · 3,427 |
-| 30× | 114 · 429 | 318 · 332 | 130 · 519 | 81 · 251 |
-| ~60× | 80 · 290 | 362 · 254 | 165 · 280 | 58 · 206 |
+| 5× | 15,236 · 792,885 | 6,674 · 805,833 | 4,726 · 1,025,646 | 8,239 · 764,125 |
+| 10× | 10,078 · 194,707 | 10,409 · 174,078 | 4,056 · 352,568 | 9,194 · 146,913 |
+| 30× | 4,869 · 24,421 | 13,936 · 18,921 | 5,882 · 28,065 | 5,235 · 16,151 |
+| 50× | 4,174 · 18,892 | 15,830 · 15,696 | 6,854 · 18,649 | 3,691 · 13,741 |
 
 **Other variants**
 
 | depth | pvc: false · missed | GATK: false · missed | freebayes: false · missed | DeepVariant: false · missed |
 |---|---|---|---|---|
-| 5× | 106 · 5,475 | 62 · 5,798 | 38 · 6,902 | 82 · 5,311 |
-| 10× | 129 · 1,898 | 72 · 2,172 | 37 · 3,398 | 100 · 1,621 |
-| 30× | 39 · 225 | 65 · 254 | 46 · 617 | 19 · 119 |
-| ~60× | 26 · 130 | 82 · 99 | 70 · 283 | 5 · 61 |
+| 5× | 3,119 · 244,409 | 2,343 · 254,179 | 1,335 · 314,752 | 2,924 · 235,614 |
+| 10× | 3,811 · 81,070 | 3,219 · 89,740 | 1,302 · 148,283 | 3,869 · 68,083 |
+| 30× | 1,403 · 10,960 | 2,474 · 11,388 | 1,786 · 26,988 | 842 · 6,018 |
+| 50× | 1,009 · 6,977 | 2,904 · 5,522 | 2,227 · 14,520 | 520 · 3,418 |
 
 *A false variant is a variant called where the truth is reference; a missed variant is one where
-the truth has a variant and the call does not give its genotype. There were about 63,700 true
-SNPs and about 14,800 other true variants: indels, STRs and complex variants (15,500 for
-freebayes, which writes nearby SNPs and indels as one complex record).*
+the truth has a variant and the call does not give its genotype. There were about 2,984,000 true
+SNPs and about 708,000 other true variants: indels, STRs and complex variants (740,000 to 758,000
+for freebayes, which writes nearby SNPs and indels as one complex record).*
 
-DeepVariant makes the fewest mistakes at 30× and ~60×, and pvc the next fewest. At 5× and 10× pvc
-calls the most false variants.
+DeepVariant makes the fewest mistakes at 30× and 50×, and pvc the next fewest. At 5× pvc calls
+the most false variants. At 10× it calls about as many as GATK and DeepVariant, but misses more
+SNPs than both.
 
 ## The GIAB trio
 
@@ -186,26 +187,27 @@ genotypes right, compared as repeat lengths:
 
 freebayes's calls are kept at QUAL ≥ 20, as in the simulated STRs.
 
-### HG002, chromosome 20
+### HG002, whole genome
 
-The STRs of the chromosome 20 benchmark above, of about 11,150 true STR variants:
+The STRs of the whole-genome benchmark above, of about 532,600 true STR variants:
 
 | depth | pvc: false · missed | GATK: false · missed | freebayes: false · missed | DeepVariant: false · missed |
 |---|---|---|---|---|
-| 5× | 102 · 4,287 | 29 · 4,658 | 22 · 5,321 | 59 · 4,184 |
-| 10× | 122 · 1,551 | 37 · 1,899 | 22 · 2,727 | 81 · 1,358 |
-| 30× | 34 · 166 | 50 · 216 | 26 · 485 | 17 · 85 |
-| ~60× | 22 · 83 | 70 · 72 | 39 · 184 | 5 · 35 |
+| 5× | 2,876 · 191,098 | 1,051 · 204,515 | 745 · 242,144 | 1,922 · 185,459 |
+| 10× | 3,487 · 64,801 | 1,447 · 77,050 | 712 · 117,273 | 2,922 · 55,838 |
+| 30× | 1,136 · 7,584 | 1,784 · 9,538 | 895 · 21,150 | 590 · 4,310 |
+| 50× | 759 · 4,406 | 2,145 · 4,072 | 1,143 · 10,359 | 341 · 2,069 |
 
 pvc calls the most false STR variants at 5× and 10×. DeepVariant makes the fewest mistakes at
-30× and ~60×.
+30× and 50×.
 
 At 5× and 10× most of the missed STR variants are heterozygotes: few reads cross the STR, so
-often only one of the two alleles is seen. Of the 11,150 true STR variants, about 7,200 are
-heterozygous and 3,900 homozygous. At 5× every caller misses about half of the heterozygotes
-(49% to 65%), but only 14% to 17% of the homozygotes, and 85% to 88% of each caller's missed
-STR variants are heterozygotes. Three in four of these are called homozygous for the reference allele.
-At 10× the callers miss 16% to 34% of the heterozygotes and 3% to 6% of the homozygotes.
+often only one of the two alleles is seen. Of the 532,600 true STR variants, about 341,300 are
+heterozygous and 191,300 homozygous. At 5× every caller misses about half of the heterozygotes
+(47% to 63%), but only 12% to 15% of the homozygotes, and 86% to 89% of each caller's missed STR
+variants are heterozygotes. About three in four of these (73% to 79%) are called homozygous for
+the reference allele. At 10× the callers miss 14% to 31% of the heterozygotes and 3% to 5% of
+the homozygotes.
 
 ## Imputation: genotype refinement and filling
 

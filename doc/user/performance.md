@@ -3,7 +3,7 @@
 pvc's run time and memory have been compared with those of other tools on:
 
 - a tomato cohort, from 1 sample to 100;
-- one human sample, GIAB's HG002, from 5× to about 60×.
+- one human genome, GIAB's HG002, from 5× to 50×.
 
 The tools used in the comparison were:
 
@@ -117,12 +117,12 @@ parameters and calling again over all the samples: about 138 hours. The psp file
 already in the cohort, 80 hours of work, are not written again. In direct mode the whole cohort
 would be called again from the alignments.
 
-## One human sample, HG002 chromosome 20
+## One human genome, HG002
 
-GIAB's HG002 over the whole of chromosome 20 (64 Mb), with its reads drawn down to 5×, 10× and
-30×, and at their full depth of about 60×.
+GIAB's HG002 over chromosomes 1 to 22 (2.9 Gb), with its reads drawn down at random from GIAB's
+300× data to 5×, 10×, 30× and 50×.
 
-![Wall time and peak memory on HG002 chromosome 20 at 30×, for pvc in direct mode and in psp mode, GATK, freebayes and DeepVariant](figures/performance_giab_chr20.svg)
+![Wall time and peak memory on the HG002 genome at 30×, for pvc in direct mode and in psp mode, GATK, freebayes and DeepVariant](figures/performance_giab_genome.svg)
 
 *Wall time and peak memory at 30×.*
 
@@ -130,22 +130,24 @@ Wall time / memory:
 
 | depth | pvc, direct mode | pvc, psp mode | GATK | freebayes | DeepVariant | floor: reading only |
 |---|---|---|---|---|---|---|
-| 5× | 59 s / 0.2 GB | 2 min 46 s / 0.3 GB | 8 min 2 s / 1.1 GB | 15 s / 4.1 GB | 5 min 5 s / 32 GB | 0.2 s |
-| 10× | 1 min 29 s / 0.2 GB | 3 min 17 s / 0.3 GB | 11 min / 1.4 GB | 24 s / 4.2 GB | 4 min 42 s / 32 GB | 0.5 s |
-| 30× | 4 min 2 s / 0.2 GB | 5 min 55 s / 0.3 GB | 19 min / 2.1 GB | 1 min 2 s / 4.2 GB | 5 min 21 s / 32 GB | 1.5 s |
-| ~60× | 9 min 12 s / 0.2 GB | 11 min / 0.3 GB | 30 min / 1.6 GB | 1 min 50 s / 4.1 GB | 6 min 45 s / 32 GB | 3.1 s |
+| 5× | 37 min / 0.9 GB | 1 h 20 min / 1.1 GB | 5 h 6 min / 2.7 GB | 6 min 28 s / 15 GB | 2 h 50 min / 48 GB | 26 s |
+| 10× | 59 min / 0.9 GB | 1 h 45 min / 1.1 GB | 7 h / 3.0 GB | 11 min / 15 GB | 3 h 4 min / 49 GB | 46 s |
+| 30× | 2 h 56 min / 1.3 GB | 3 h 49 min / 1.3 GB | 11 h 29 min / 3.0 GB | 33 min / 15 GB | 3 h 16 min / 49 GB | 1 min 56 s |
+| 50× | 5 h 46 min / 1.8 GB | 6 h 42 min / 2.3 GB | 16 h 3 min / 3.0 GB | 50 min / 18 GB | 3 h 50 min / 50 GB | 3 min 3 s |
 
-- **freebayes is the fastest on one sample, 4 to 5 times as fast as pvc in direct mode.** It
-  keeps about 20 cores busy, where pvc's direct mode keeps 1.
-- **pvc uses the least memory, 0.2 to 0.3 GB,** against 1 to 2 GB for GATK, 4 GB for freebayes
-  and 32 GB for DeepVariant.
-- **pvc's direct mode uses a single core on one sample.** At 30× it spends 4 min 10 s of CPU
-  time in 4 min 2 s. Its time therefore grows with depth: 59 s at 5×, 9 min 12 s at about 60×.
+- **freebayes is the fastest on one sample, about 6 to 7 times as fast as pvc in direct mode.** It
+  keeps about 24 cores busy, where pvc's direct mode keeps 1.3.
+- **pvc uses the least memory, 0.9 to 2.3 GB,** against 3 GB for GATK, 15 to 18 GB for freebayes
+  and 48 to 50 GB for DeepVariant.
+- **pvc's direct mode uses about one core on one sample.** At 30× it spends 3 h 41 min of CPU
+  time in 2 h 56 min. Its time therefore grows with depth: 37 min at 5×, 5 h 46 min at 50×.
+- **DeepVariant's time barely grows with depth,** from 2 h 50 min at 5× to 3 h 50 min at 50×. From
+  30× up it is faster than pvc.
 - **pvc's psp mode is slower than direct mode on one sample.** It writes the psp file before
-  calling, and it estimates the parameters, which takes 34 to 42 s at every depth.
+  calling, and it estimates the parameters, which takes 3 to 4 minutes at every depth.
 
 CPU time at 30×, with the average number of busy cores in brackets:
 
 | pvc, direct mode | pvc, psp mode | GATK | freebayes | DeepVariant |
 |---|---|---|---|---|
-| 4 min 10 s (1.0) | 14 min 41 s (2.5) | 4 h 26 min (13.8) | 21 min (20.6) | 2 h 25 min (27.1) |
+| 3 h 41 min (1.3) | 7 h 22 min (1.9) | 159 h (13.9) | 13 h 15 min (23.9) | 96 h (29.5) |

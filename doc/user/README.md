@@ -28,7 +28,7 @@ statistical models behind the calls, see [doc/methods/](../methods/) *(in prepar
 - [Accuracy](accuracy.md): how pvc's genotypes compare with GATK's, freebayes', DeepVariant's
   and other tools' on real and simulated data, from one sample to 400 and from 1× to about 300×.
 - [Performance](performance.md): pvc's run time and memory against GATK's, freebayes' and
-  DeepVariant's, on a tomato cohort of 1 to 100 samples and on one human sample at 5× to 60×.
+  DeepVariant's, on a tomato cohort of 1 to 100 samples and on one human genome at 5× to 50×.
 
 `pvc <command> --help` lists every option of a command with its default.
 
