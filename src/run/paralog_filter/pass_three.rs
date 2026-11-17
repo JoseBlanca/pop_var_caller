@@ -6,10 +6,11 @@
 //! the operator asked to see them, writing them on the `hiddenDup` filter instead.
 //!
 //! **The *i*th record read here is the *i*th ratio pass two kept**, and that pairing is the whole
-//! of how a verdict reaches a record: the ratios carry no contig and no position. So this walks
-//! the spill front to back beside the ratio vector and never indexes into it — a read that
-//! filtered, chunked or sharded would give every record its neighbour's verdict, with nothing
-//! about the file looking wrong.
+//! of how a verdict reaches a record: the ratios carry no contig and no position. So the one
+//! index a ratio is looked up at is the count of entries the reading thread copied before the
+//! record — never a number derived from the record — and the batches come back in the order they
+//! were read. A read that filtered, chunked or sharded would give every record its neighbour's
+//! verdict, with nothing about the file looking wrong.
 //!
 //! **A record that is written comes out byte for byte as pass one encoded it, except for the two
 //! columns the verdict touches.** That is what makes spec §10's oracle checkable rather than
@@ -24,8 +25,18 @@ use crate::vcf::{
     VcfWriteError, VcfWriter,
 };
 
-use super::{LinePatchError, ParalogVerdicts, SpillFile, SpillFileError, rewrite_filter_and_info};
+use std::io::BufRead;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+
+use rayon::prelude::*;
+
+use super::{
+    CompressedSpillEntry, LinePatchError, ParalogVerdicts, SpillEntryDecoder, SpillError,
+    SpillFile, SpillFileError, SpillReaderWithFragments, rewrite_filter_and_info,
+};
+use crate::read_phase::fragments::RecordFragments;
 use crate::run::explain::{ParalogExplanations, ParalogVerdictAt};
+use crate::types::ContigId;
 
 /// **What the filter did to the run's records**, for the run report and spec §3.5's lines.
 ///
@@ -149,13 +160,6 @@ pub fn write_the_records_the_filter_kept_explaining(
         });
     }
 
-    // The one reader of the fragments: they go to the writer beside each line.
-    let entries = spill.read_with_fragments().map_err(PassThreeError::Spill)?;
-    let mut did = WhatTheFilterDid::default();
-    // **Taken front to back, never indexed.** The pairing is positional and this is what makes
-    // it hold: the iterator advances once per record, in step with the read.
-    let mut ratios = verdicts.ratios.iter();
-    // The windowed probabilities, one a record in the same order, where the run used a window.
     if let Some(windowed) = &verdicts.windowed
         && windowed.posteriors.len() != verdicts.ratios.len()
     {
@@ -164,61 +168,236 @@ pub fn write_the_records_the_filter_kept_explaining(
             ratios: windowed.posteriors.len(),
         });
     }
-    let mut windowed_posteriors = verdicts
-        .windowed
-        .as_ref()
-        .map(|windowed| windowed.posteriors.iter());
 
-    for (read_so_far, entry) in entries.enumerate() {
-        let (entry, fragments) =
-            entry.map_err(|source| PassThreeError::Spill(spill.naming_this_file(source)))?;
-        // Counting from one, because it is a place in a file a person will look for.
-        let ordinal = read_so_far as u64 + 1;
-        // PANIC-FREE: the counts were compared above and both are walked once per record.
-        let ratio = *ratios
-            .next()
-            .expect("the spill and the ratios were counted equal before the walk");
+    // The one reader of the fragments: they go to the writer beside each line.
+    let entries = spill.read_with_fragments().map_err(PassThreeError::Spill)?;
+    let mut did = WhatTheFilterDid::default();
 
-        // **The verdict and the probability**: the window's where the run used one, or the
-        // run-wide rate's at a window of 0. Either way a record with no finite ratio has
-        // no probability and is not flagged.
-        let (flagged, posterior) = match (&verdicts.windowed, windowed_posteriors.as_mut()) {
-            (Some(windowed), Some(posteriors)) => {
-                // PANIC-FREE: the lengths were compared above and both are walked once a record.
-                let posterior = *posteriors
-                    .next()
-                    .expect("one windowed probability a record, counted before the walk");
-                (
-                    ratio.is_finite() && windowed.flags(posterior),
-                    (ratio.is_finite() && posterior.is_finite()).then_some(posterior),
-                )
+    // **Three threads, each doing what only it can.** The spill has no index, so one thread walks
+    // it — and only copies each entry's two compressed frames off the stream. A second hands each
+    // batch to the pool, which unpacks the record and its fragments, reaches its verdict and puts
+    // it on the line. This thread keeps what depends on the order: the counts, the explained loci
+    // and the writer, whose own stage runs on the same pool. Before, this thread did all of it,
+    // and the pool waited on the unpacking while the reading waited on the writer.
+    //
+    // **The *i*th record still meets the *i*th ratio.** The reading thread numbers every entry as
+    // it copies it, and that number — the count of entries read before it — is the one index
+    // the verdict is looked up at. Nothing filters, reorders or skips between the read and the
+    // lookup, and the batches come back here in the order they were read, so the pairing is the
+    // serial walk's.
+    std::thread::scope(|scope| -> Result<(), PassThreeError> {
+        let (read_batches, batches_to_prepare) = mpsc::sync_channel::<ReadBatch>(1);
+        let (emptied_batches, batches_to_refill) = mpsc::channel::<Vec<CompressedSpillEntry>>();
+        let (prepared_batches, batches_to_write) = mpsc::sync_channel::<PreparedBatch>(1);
+        scope.spawn(move || read_ahead(entries, read_batches, batches_to_refill));
+        scope.spawn(move || {
+            prepare_ahead(
+                spill,
+                verdicts,
+                tag_instead_of_dropping,
+                batches_to_prepare,
+                emptied_batches,
+                prepared_batches,
+            );
+        });
+
+        for batch in batches_to_write {
+            for record in batch.records {
+                let record = record?;
+                write_one(
+                    record,
+                    tag_instead_of_dropping,
+                    writer,
+                    explained.as_deref_mut(),
+                    &mut did,
+                )?;
             }
-            _ => (
-                verdicts.calibration.flags(ratio),
-                if ratio.is_finite() {
-                    verdicts.calibration.posterior(ratio)
-                } else {
-                    None
-                },
-            ),
-        };
-        if let Some(explained) = explained.as_deref_mut()
-            && explained.wants(entry.contig, entry.position.get())
-        {
-            explained.record(ParalogVerdictAt {
-                contig: entry.contig,
-                written_at: entry.position.get(),
-                ratio,
-                posterior,
-                flagged,
-                dropped: flagged && !tag_instead_of_dropping,
-            });
+            if let Some(source) = batch.ended_with {
+                return Err(PassThreeError::Spill(spill.naming_this_file(source)));
+            }
         }
-        if flagged && !tag_instead_of_dropping {
-            did.dropped += 1;
-            continue;
-        }
+        Ok(())
+    })?;
 
+    Ok(did)
+}
+
+/// How many entries the pool prepares at once. **Smaller than pass two's batch** because a prepared
+/// record holds its whole line and its fragments — about 450 kB at 4,352 samples — and up to three
+/// prepared batches are in flight, so about 350 MB there.
+const PREPARING_BATCH: usize = 256;
+
+/// **A batch of compressed entries, as the reading thread hands it over.** The first `filled` are
+/// this batch's, the first of them the spill's entry number `first`, counting from 0; the rest are
+/// buffers kept from an earlier, fuller batch. `ended_with` is the reader's failure, when the batch
+/// stopped short because of one.
+struct ReadBatch {
+    entries: Vec<CompressedSpillEntry>,
+    filled: usize,
+    first: usize,
+    ended_with: Option<SpillError>,
+}
+
+/// **A batch the pool has prepared**, one item a record in spill order, then the reader's
+/// failure, if the batch stopped short because of one.
+struct PreparedBatch {
+    records: Vec<Result<PreparedRecord, PassThreeError>>,
+    ended_with: Option<SpillError>,
+}
+
+/// **One record with its verdict reached and, unless it is dropped, its line patched** — all a
+/// pure function of the record and its ratio, so it is done on the pool.
+struct PreparedRecord {
+    place: RecordPlace,
+    contig: ContigId,
+    written_at: u64,
+    ratio: f64,
+    posterior: Option<f64>,
+    flagged: bool,
+    /// The patched line; `None` for a record the cut drops, which is never written.
+    line: Option<Vec<u8>>,
+    fragments: RecordFragments,
+}
+
+/// **The reading thread**: fill batches of compressed entries from `reader`, number them, and hand
+/// each on, until the spill ends, the reader fails, or nothing is listening.
+///
+/// It refills the batches handed back rather than allocating new ones, and never waits for one: a
+/// batch not yet returned is replaced by a fresh one.
+fn read_ahead<R: BufRead>(
+    mut reader: SpillReaderWithFragments<R>,
+    read_batches: SyncSender<ReadBatch>,
+    batches_to_refill: Receiver<Vec<CompressedSpillEntry>>,
+) {
+    let mut first = 0;
+    loop {
+        let mut entries = batches_to_refill.try_recv().unwrap_or_default();
+        if entries.len() < PREPARING_BATCH {
+            entries.resize_with(PREPARING_BATCH, CompressedSpillEntry::default);
+        }
+        let mut filled = 0;
+        let mut ended_with = None;
+        let mut at_the_end = false;
+        while filled < PREPARING_BATCH {
+            match reader.next_compressed_entry(&mut entries[filled]) {
+                Some(Ok(())) => filled += 1,
+                Some(Err(error)) => {
+                    ended_with = Some(error);
+                    at_the_end = true;
+                    break;
+                }
+                None => {
+                    at_the_end = true;
+                    break;
+                }
+            }
+        }
+        if filled == 0 && ended_with.is_none() {
+            return;
+        }
+        let handed_over = read_batches.send(ReadBatch {
+            entries,
+            filled,
+            first,
+            ended_with,
+        });
+        first += filled;
+        if handed_over.is_err() || at_the_end {
+            return;
+        }
+    }
+}
+
+/// **The preparing thread**: unpack each read batch on the pool, reach every record's verdict and
+/// patch its line, hand the prepared batch on in the order it came, and return the emptied buffers
+/// to the reading thread.
+fn prepare_ahead(
+    spill: &SpillFile,
+    verdicts: &ParalogVerdicts,
+    tag_instead_of_dropping: bool,
+    batches_to_prepare: Receiver<ReadBatch>,
+    emptied_batches: Sender<Vec<CompressedSpillEntry>>,
+    prepared_batches: SyncSender<PreparedBatch>,
+) {
+    for batch in batches_to_prepare {
+        let ReadBatch {
+            entries,
+            filled,
+            first,
+            ended_with,
+        } = batch;
+        let mut records = Vec::with_capacity(filled);
+        entries[..filled]
+            .par_iter()
+            .enumerate()
+            .map_init(SpillEntryDecoder::new, |decoder, (offset, entry)| {
+                prepare_one(
+                    spill,
+                    decoder,
+                    entry,
+                    first + offset,
+                    verdicts,
+                    tag_instead_of_dropping,
+                )
+            })
+            .collect_into_vec(&mut records);
+        // The reading thread may already have finished; a batch it no longer wants is dropped.
+        let _ = emptied_batches.send(entries);
+        if prepared_batches
+            .send(PreparedBatch {
+                records,
+                ended_with,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// **The verdict on the spill's entry number `index`, and its line patched.**
+///
+/// `index` counts from 0 and is the position of the record's ratio in `verdicts`: the count of
+/// entries read before it, which is the whole of the pairing (see the module's notes).
+fn prepare_one(
+    spill: &SpillFile,
+    decoder: &mut SpillEntryDecoder,
+    entry: &CompressedSpillEntry,
+    index: usize,
+    verdicts: &ParalogVerdicts,
+    tag_instead_of_dropping: bool,
+) -> Result<PreparedRecord, PassThreeError> {
+    let (entry, fragments) = decoder
+        .decode_with_fragments(entry)
+        .map_err(|source| PassThreeError::Spill(spill.naming_this_file(source)))?;
+    // PANIC-FREE: the lengths were compared with the spill's count before the walk, and the
+    // reader refuses a spill holding any other number of entries, so `index` is below both.
+    let ratio = verdicts.ratios[index];
+
+    // **The verdict and the probability**: the window's where the run used one, or the run-wide
+    // rate's at a window of 0. Either way a record with no finite ratio has no probability and is
+    // not flagged.
+    let (flagged, posterior) = match &verdicts.windowed {
+        Some(windowed) => {
+            let posterior = windowed.posteriors[index];
+            (
+                ratio.is_finite() && windowed.flags(posterior),
+                (ratio.is_finite() && posterior.is_finite()).then_some(posterior),
+            )
+        }
+        None => (
+            verdicts.calibration.flags(ratio),
+            if ratio.is_finite() {
+                verdicts.calibration.posterior(ratio)
+            } else {
+                None
+            },
+        ),
+    };
+
+    let line = if flagged && !tag_instead_of_dropping {
+        None
+    } else {
         // **What decides the fields is whether the record was scored — a finite ratio** (spec
         // §3.5). An unscored record gets neither, because it has nothing to report.
         let mut info_to_add: Vec<String> = Vec::new();
@@ -234,37 +413,83 @@ pub fn write_the_records_the_filter_kept_explaining(
                     PARALOG_POSTERIOR_DECIMALS, posterior
                 ));
             }
-        } else {
-            did.unscored += 1;
         }
+        let filter_to_add = flagged.then_some(HIDDEN_PARALOG_FILTER_ID);
+        Some(
+            rewrite_filter_and_info(&entry.line, filter_to_add, &info_to_add).map_err(
+                |source| PassThreeError::Patch {
+                    contig: entry.contig.get(),
+                    position: entry.position.get(),
+                    // Counting from one, because it is a place in a file a person will look for.
+                    ordinal: index as u64 + 1,
+                    source,
+                },
+            )?,
+        )
+    };
 
-        let filter_to_add = if flagged {
-            did.tagged += 1;
-            Some(HIDDEN_PARALOG_FILTER_ID)
-        } else {
-            None
-        };
+    Ok(PreparedRecord {
+        place: RecordPlace::from(&entry),
+        contig: entry.contig,
+        written_at: entry.position.get(),
+        ratio,
+        posterior,
+        flagged,
+        line,
+        fragments,
+    })
+}
 
-        let line = rewrite_filter_and_info(&entry.line, filter_to_add, &info_to_add).map_err(
-            |source| PassThreeError::Patch {
-                contig: entry.contig.get(),
-                position: entry.position.get(),
-                ordinal,
-                source,
-            },
-        )?;
-
-        writer
-            .write_line(RecordPlace::from(&entry), line, fragments)
-            .map_err(|source| PassThreeError::Write {
-                contig: entry.contig.get(),
-                position: entry.position.get(),
-                source,
-            })?;
-        did.written += 1;
+/// **What only the writing thread can do with a prepared record**, in spill order: keep its
+/// verdict where `--explain-loci` asked, count it, and write it unless the cut dropped it.
+fn write_one(
+    record: PreparedRecord,
+    tag_instead_of_dropping: bool,
+    writer: &mut VcfWriter,
+    explained: Option<&mut ParalogExplanations>,
+    did: &mut WhatTheFilterDid,
+) -> Result<(), PassThreeError> {
+    let PreparedRecord {
+        place,
+        contig,
+        written_at,
+        ratio,
+        posterior,
+        flagged,
+        line,
+        fragments,
+    } = record;
+    if let Some(explained) = explained
+        && explained.wants(contig, written_at)
+    {
+        explained.record(ParalogVerdictAt {
+            contig,
+            written_at,
+            ratio,
+            posterior,
+            flagged,
+            dropped: flagged && !tag_instead_of_dropping,
+        });
     }
-
-    Ok(did)
+    let Some(line) = line else {
+        did.dropped += 1;
+        return Ok(());
+    };
+    if !ratio.is_finite() {
+        did.unscored += 1;
+    }
+    if flagged {
+        did.tagged += 1;
+    }
+    writer
+        .write_line(place, line, fragments)
+        .map_err(|source| PassThreeError::Write {
+            contig: contig.get(),
+            position: written_at,
+            source,
+        })?;
+    did.written += 1;
+    Ok(())
 }
 
 #[cfg(test)]

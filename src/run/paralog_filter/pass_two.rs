@@ -40,7 +40,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use rayon::prelude::*;
 
 use super::{
-    CohortSizeMismatch, CompressedSpillBody, ParalogScoringContext, SpillBodyDecoder, SpillError,
+    CohortSizeMismatch, CompressedSpillBody, ParalogScoringContext, SpillEntryDecoder, SpillError,
     SpillFile, SpillFileError, SpillReader,
 };
 
@@ -412,7 +412,7 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
                 .map_init(
                     || {
                         (
-                            SpillBodyDecoder::new(),
+                            SpillEntryDecoder::new(),
                             Vec::with_capacity(context.sample_count()),
                         )
                     },

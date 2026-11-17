@@ -577,7 +577,7 @@ impl<R: BufRead> SpillReader<R> {
     /// **What it is for**: unpacking a body is most of what reading an entry costs, and it
     /// depends on nothing but the body's own bytes. So pass two's reading thread does only this —
     /// the length, then a copy — and the pool's threads turn each body into its entry with a
-    /// [`SpillBodyDecoder`], many at once. Measured on 4,352 tomato samples, the unpacking on
+    /// [`SpillEntryDecoder`], many at once. Measured on 4,352 tomato samples, the unpacking on
     /// the reading thread was what held the pass to 153 MB/s with the pool three-quarters idle.
     ///
     /// The checks that need the stream stay here: the count, a stream that ends inside an entry,
@@ -668,7 +668,7 @@ impl<R: BufRead> SpillReader<R> {
 }
 
 /// **One entry's body frame, still compressed**, as [`SpillReader::next_compressed_body`] copied
-/// it off the stream. Only a [`SpillBodyDecoder`] can read it, so a body cannot be handed on as
+/// it off the stream. Only a [`SpillEntryDecoder`] can read it, so a body cannot be handed on as
 /// anything but bytes still to be checked.
 ///
 /// Reused: refilling it keeps its buffer, so a batch of these allocates once for its largest
@@ -678,15 +678,27 @@ pub struct CompressedSpillBody {
     bytes: Vec<u8>,
 }
 
+/// **One whole entry, still compressed**: its body frame and its fragments frame, as
+/// [`SpillReaderWithFragments::next_compressed_entry`] copied them off the stream — pass three's
+/// counterpart of [`CompressedSpillBody`]. Only a [`SpillEntryDecoder`] can read it.
+///
+/// Reused as a [`CompressedSpillBody`] is: refilling it keeps both buffers.
+#[derive(Debug, Default)]
+pub struct CompressedSpillEntry {
+    body: CompressedSpillBody,
+    /// Empty where the record has no fragments: the frame's length was 0.
+    fragments: Vec<u8>,
+}
+
 /// **Turns a [`CompressedSpillBody`] into its [`SpillEntry`]**, with every refusal the reader's
 /// own [`SpillReader::next_entry`] makes on the same bytes. One a thread: it holds a
 /// decompression context and the inflated body, both reused across entries.
-pub struct SpillBodyDecoder {
+pub struct SpillEntryDecoder {
     context: zstd::zstd_safe::DCtx<'static>,
     inflated: Vec<u8>,
 }
 
-impl SpillBodyDecoder {
+impl SpillEntryDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -711,9 +723,35 @@ impl SpillBodyDecoder {
         )?;
         entry_from_inflated_body(&self.inflated)
     }
+
+    /// The entry `entry` holds and the record's fragments, with every refusal
+    /// [`SpillReaderWithFragments`] makes on the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode`], and if the fragments frame is damaged or names a sample, allele or
+    /// Phred no entry can carry.
+    pub fn decode_with_fragments(
+        &mut self,
+        entry: &CompressedSpillEntry,
+    ) -> Result<(SpillEntry, RecordFragments), SpillError> {
+        let decoded = self.decode(&entry.body)?;
+        if entry.fragments.is_empty() {
+            return Ok((decoded, RecordFragments::default()));
+        }
+        inflate_frame(
+            &mut self.context,
+            &entry.fragments,
+            &mut self.inflated,
+            field::FRAGMENTS,
+            MAX_FRAGMENTS_BYTES,
+        )?;
+        let fragments = decode_fragments(&self.inflated, decoded.samples.len())?;
+        Ok((decoded, fragments))
+    }
 }
 
-impl Default for SpillBodyDecoder {
+impl Default for SpillEntryDecoder {
     fn default() -> Self {
         Self::new()
     }
@@ -742,6 +780,55 @@ impl<R: BufRead> SpillReaderWithFragments<R> {
             entries_expected,
             FragmentsSection::Read,
         ))
+    }
+
+    /// **The next entry, still compressed, copied into `entry`**: its body frame and its
+    /// fragments frame, neither inflated. `None` at a clean end of stream, and `None` for ever
+    /// after a failure, as the iterator does.
+    ///
+    /// Pass three's reading thread does only this, and the pool turns each entry into the record
+    /// and its fragments with a [`SpillEntryDecoder`] — the split
+    /// [`SpillReader::next_compressed_body`] makes for pass two. The checks that need the stream
+    /// stay here; the ones that need the inflated bytes are the decoder's.
+    ///
+    /// # Errors
+    ///
+    /// If the stream fails, ends inside an entry, holds a frame length past its bound, or ends
+    /// on a boundary before the count pass one wrote.
+    pub fn next_compressed_entry(
+        &mut self,
+        entry: &mut CompressedSpillEntry,
+    ) -> Option<Result<(), SpillError>> {
+        let reader = &mut self.0;
+        if let Err(at_the_end) = reader.an_entry_follows() {
+            return at_the_end.map(Err);
+        }
+        let read = read_frame(
+            &mut reader.source,
+            field::BODY_BYTES,
+            field::BODY,
+            max_frame_bytes(MAX_BODY_BYTES),
+            &mut entry.body.bytes,
+        )
+        .and_then(|()| {
+            read_frame(
+                &mut reader.source,
+                field::FRAGMENTS_BYTES,
+                field::FRAGMENTS,
+                max_frame_bytes(MAX_FRAGMENTS_BYTES),
+                &mut entry.fragments,
+            )
+        });
+        match read {
+            Ok(()) => {
+                reader.entries_read += 1;
+                Some(Ok(()))
+            }
+            Err(error) => {
+                reader.failed = true;
+                Some(Err(error))
+            }
+        }
     }
 }
 
@@ -1043,7 +1130,7 @@ impl Inflating {
 
 /// Inflate the frame `compressed` into `inflated`, refusing one that claims more than `max` bytes
 /// before anything is allocated for it. The one inflation both the entry reader and
-/// [`SpillBodyDecoder`] go through, so the two cannot refuse different frames.
+/// [`SpillEntryDecoder`] go through, so the two cannot refuse different frames.
 fn inflate_frame(
     context: &mut zstd::zstd_safe::DCtx<'static>,
     compressed: &[u8],

@@ -26,7 +26,7 @@ use crate::run::paralog_filter::{
     LrHistogramShape, ParalogVerdicts, SpillEntry, SpillFile, SpilledSample, WindowCoverage,
 };
 use crate::types::{ContigId, Ploidy, Position};
-use crate::vcf::{HeaderContig, VcfHeaderMetadata, VcfWriter};
+use crate::vcf::{HeaderContig, PARALOG_RATIO_DECIMALS, VcfHeaderMetadata, VcfWriter};
 
 // ---------------------------------------------------------------- the records
 
@@ -652,4 +652,83 @@ fn a_windowed_rate_decides_the_verdict_and_the_probability_written() {
     assert_eq!(lines[1].split('\t').nth(6), Some("PASS"));
     assert!(lines[1].contains("PARALOG_POST=0.250000"), "{}", lines[1]);
     assert!(!lines[2].contains("PARALOG_"), "{}", lines[2]);
+}
+
+// ---------------------------------------------------------------- the reading and preparing threads
+
+/// **Across several batches, each written line carries its own record's ratio, in spill order.**
+/// The reading thread numbers entries as it copies them and the verdict is looked up at that
+/// number, so a batch numbered from the wrong start, prepared twice, skipped or handed back out
+/// of order would put a neighbour's ratio on a line. Every ratio here is distinct, and the
+/// positions say which record each line is.
+#[test]
+fn ratios_across_several_batches_land_on_their_own_records() {
+    let records = 2 * super::PREPARING_BATCH + 7;
+    let entries: Vec<SpillEntry> = (0..records)
+        .map(|index| a_record(0, 100 + index as u64, "PASS"))
+        .collect();
+    let ratios: Vec<f64> = (0..records)
+        .map(|index| -1.0 - index as f64 / 64.0)
+        .collect();
+    let (spill, output) = a_spill_and_an_output(
+        "ratios_across_several_batches_land_on_their_own_records",
+        entries,
+    );
+
+    let (did, lines) = write_and_read_back(
+        &spill,
+        &output,
+        &verdicts_that_remove_nothing(ratios.clone()),
+        false,
+    );
+
+    assert_eq!(did.written, records as u64);
+    assert_eq!(lines.len(), records);
+    for (index, line) in lines.iter().enumerate() {
+        let position: u64 = line
+            .split('\t')
+            .nth(1)
+            .expect("a POS")
+            .parse()
+            .expect("a number");
+        assert_eq!(position, 100 + index as u64, "line {index} is out of order");
+        let expected = format!("PARALOG_LR={:.*}", PARALOG_RATIO_DECIMALS, ratios[index]);
+        assert!(
+            line.contains(&expected),
+            "line {index} should carry {expected}: {line}"
+        );
+    }
+}
+
+/// **A record refused early is reported ahead of a read failure later in the same batch.** The
+/// preparing thread prepares the entries the reader did copy before handing on the reader's
+/// failure, and the writing thread meets them in order — so the unpatchable line at the head of
+/// the file is the failure, not the cut near its end.
+#[test]
+fn the_first_refusal_in_file_order_is_the_one_reported() {
+    let mut malformed = a_record(0, 100, "PASS");
+    malformed.line = b"chr0\t100\t.\tA\tG".to_vec();
+    let mut entries = vec![malformed];
+    entries.extend((1..10).map(|index| a_record(0, 100 + index, "PASS")));
+    let (spill, output) = a_spill_and_an_output(
+        "the_first_refusal_in_file_order_is_the_one_reported",
+        entries,
+    );
+    let whole = fs::metadata(spill.path()).expect("the spill exists").len();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(spill.path())
+        .expect("the spill opens")
+        .set_len(whole - 3)
+        .expect("the spill is truncated");
+
+    let verdicts = verdicts_that_remove_nothing(vec![-1.0; 10]);
+    let mut writer = a_writer(&output);
+    let failure = write_the_records_the_filter_kept(&spill, &verdicts, false, &mut writer)
+        .expect_err("an unpatchable line and a cut file are both refusals");
+
+    let PassThreeError::Patch { ordinal, .. } = failure else {
+        panic!("expected the first record's patch failure, got {failure:?}")
+    };
+    assert_eq!(ordinal, 1);
 }

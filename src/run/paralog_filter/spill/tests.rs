@@ -23,9 +23,10 @@ use std::io::Cursor;
 use proptest::prelude::*;
 
 use super::{
-    CompressedSpillBody, EncodedSpillEntry, MAX_BODY_BYTES, MAX_FRAGMENTS_BYTES, SpillBodyDecoder,
-    SpillEntry, SpillError, SpillReader, SpillReaderWithFragments, SpillWriter, SpilledSample,
-    encode_body, encode_fragments, max_frame_bytes,
+    CompressedSpillBody, CompressedSpillEntry, EncodedSpillEntry, MAX_BODY_BYTES,
+    MAX_FRAGMENTS_BYTES, SpillEntry, SpillEntryDecoder, SpillError, SpillReader,
+    SpillReaderWithFragments, SpillWriter, SpilledSample, encode_body, encode_fragments,
+    max_frame_bytes,
 };
 use crate::psp::varint::encode_u64_leb128;
 use crate::read_phase::capture::LARGEST_ERROR_PHRED;
@@ -1596,11 +1597,11 @@ fn read_in_one_step(bytes: Vec<u8>, expected: u64) -> Vec<Outcome> {
 }
 
 /// Read `bytes` as pass two does: each body copied off by
-/// [`SpillReader::next_compressed_body`] and decoded by a [`SpillBodyDecoder`], **up to the first
+/// [`SpillReader::next_compressed_body`] and decoded by a [`SpillEntryDecoder`], **up to the first
 /// refusal** — the pass stops there, so what the reader would have yielded after it is never seen.
 fn read_in_two_steps(bytes: Vec<u8>, expected: u64) -> Vec<Outcome> {
     let mut reader = SpillReader::new(Cursor::new(bytes), expected);
-    let mut decoder = SpillBodyDecoder::new();
+    let mut decoder = SpillEntryDecoder::new();
     let mut body = CompressedSpillBody::default();
     let mut outcomes = Vec::new();
     while let Some(read) = reader.next_compressed_body(&mut body) {
@@ -1673,5 +1674,85 @@ fn reading_in_two_steps_refuses_what_one_step_refuses() {
             &[Ok(a_tiny_record()), Ok(a_snp_two_samples_covered())]
         ),
         "the whole file reads back as the two entries written"
+    );
+}
+
+/// What pass three's reader made of one entry: the entry and its fragments, or a refusal.
+type OutcomeWithFragments = Result<(SpillEntry, RecordFragments), String>;
+
+/// Read `bytes` as [`SpillReaderWithFragments`] does, every entry in one step.
+fn read_with_fragments_in_one_step(bytes: Vec<u8>, expected: u64) -> Vec<OutcomeWithFragments> {
+    SpillReaderWithFragments::new(Cursor::new(bytes), expected)
+        .map(|read| read.map_err(|error| format!("{error:?}")))
+        .collect()
+}
+
+/// Read `bytes` as pass three does: each entry copied off by
+/// [`SpillReaderWithFragments::next_compressed_entry`] and decoded by a [`SpillEntryDecoder`], up
+/// to the first refusal.
+fn read_with_fragments_in_two_steps(bytes: Vec<u8>, expected: u64) -> Vec<OutcomeWithFragments> {
+    let mut reader = SpillReaderWithFragments::new(Cursor::new(bytes), expected);
+    let mut decoder = SpillEntryDecoder::new();
+    let mut entry = CompressedSpillEntry::default();
+    let mut outcomes = Vec::new();
+    while let Some(read) = reader.next_compressed_entry(&mut entry) {
+        let outcome = read
+            .and_then(|()| decoder.decode_with_fragments(&entry))
+            .map_err(|error| format!("{error:?}"));
+        let refused = outcome.is_err();
+        outcomes.push(outcome);
+        if refused {
+            break;
+        }
+    }
+    outcomes
+}
+
+/// **Pass three's two-step reading refuses the files its one-step reader refuses, at the same
+/// entry, and yields the same entries and fragments before it** — the same files as
+/// [`reading_in_two_steps_refuses_what_one_step_refuses`]. A refusal matches a refusal whatever
+/// it says, for the reason [`the_same_outcomes`] gives: one step inflates the body before it reads
+/// the fragments' length, two steps read both lengths first.
+#[test]
+fn reading_with_fragments_in_two_steps_refuses_what_one_step_refuses() {
+    let written = [
+        (a_tiny_record(), a_tiny_records_fragments()),
+        (a_snp_two_samples_covered(), RecordFragments::default()),
+    ];
+    let whole = encoded_bytes_with_fragments(&written);
+    let mut files: Vec<(Vec<u8>, u64)> =
+        vec![(whole.clone(), 2), (whole.clone(), 1), (whole.clone(), 3)];
+    files.extend((0..whole.len()).map(|cut| (whole[..cut].to_vec(), 2)));
+    files.extend((0..whole.len()).map(|at| {
+        let mut flipped = whole.clone();
+        flipped[at] ^= 0x5A;
+        (flipped, 2)
+    }));
+    let same = |left: &[OutcomeWithFragments], right: &[OutcomeWithFragments]| {
+        left.len() == right.len()
+            && left.iter().zip(right).all(|pair| match pair {
+                (Ok((left, left_fragments)), Ok((right, right_fragments))) => {
+                    holds_the_same_bits(left, right) && left_fragments == right_fragments
+                }
+                (Err(_), Err(_)) => true,
+                _ => false,
+            })
+    };
+
+    let mut refused = 0;
+    for (bytes, expected) in files {
+        let one = read_with_fragments_in_one_step(bytes.clone(), expected);
+        let two = read_with_fragments_in_two_steps(bytes, expected);
+        assert!(
+            same(&one, &two),
+            "one step read {one:?}; two steps read {two:?}"
+        );
+        refused += usize::from(one.iter().any(Result::is_err));
+    }
+    assert!(refused > whole.len(), "{refused} damaged files refused");
+    let read_back: Vec<OutcomeWithFragments> = written.iter().cloned().map(Ok).collect();
+    assert!(
+        same(&read_with_fragments_in_two_steps(whole, 2), &read_back),
+        "the whole file reads back as the two entries written, with their fragments"
     );
 }
