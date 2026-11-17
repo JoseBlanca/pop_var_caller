@@ -1172,3 +1172,91 @@ fn a_window_gives_each_scored_record_a_probability_in_spill_order() {
     .expect("the spill is readable");
     assert!(run_wide.windowed.is_none());
 }
+
+// ---------------------------------------------------------------- the reading thread
+
+/// **Across several batches, every record's ratio is the one scoring it alone gives, in spill
+/// order.** The reading thread hands batches over one ahead of the pool and reuses their buffers,
+/// so a batch scored twice, skipped, reordered, or scored on a buffer still holding an earlier
+/// batch's bodies would each show here as a ratio at the wrong index. Two full batches and a
+/// partial third, with the evidence changing from record to record so no two neighbours agree.
+#[test]
+fn ratios_across_several_batches_are_each_records_own_in_spill_order() {
+    let n = 4;
+    let context = a_context_over(n);
+    let records: Vec<SpillEntry> = (0..2 * super::SCORING_BATCH + 3)
+        .map(|index| a_record_with_carriers(100 + index as u64, n, index % (n + 1)))
+        .collect();
+    let spill = a_spill_holding(
+        "ratios_across_several_batches_are_each_records_own_in_spill_order",
+        records.clone(),
+    );
+
+    let verdicts = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect("the spill is readable");
+
+    let mut observations = Vec::new();
+    let alone: Vec<u64> = records
+        .iter()
+        .map(|record| {
+            context
+                .score(record, &mut observations)
+                .expect("the record is the run's cohort")
+                .to_bits()
+        })
+        .collect();
+    let in_the_pass: Vec<u64> = verdicts
+        .ratios
+        .iter()
+        .map(|ratio| ratio.to_bits())
+        .collect();
+    assert_eq!(in_the_pass.len(), records.len());
+    assert!(
+        in_the_pass == alone,
+        "the first index where the pass and scoring alone disagree: {:?}",
+        in_the_pass
+            .iter()
+            .zip(&alone)
+            .position(|(left, right)| left != right)
+    );
+}
+
+/// **A record refused early in a batch is reported ahead of a read failure later in it.** The
+/// reading thread stops at the cut and hands over the bodies it did read with the failure behind
+/// them; those are scored first, so the error is the first one in file order — here the narrow
+/// record at the head of the file, not the cut near its end.
+#[test]
+fn the_first_refusal_in_file_order_is_the_one_reported() {
+    let context = a_context_over(3);
+    let mut records = vec![a_record_shaped_like_a_variant(100, 2)];
+    records.extend((1..10).map(|index| a_record_shaped_like_a_variant(100 + index, 3)));
+    let spill = a_spill_holding(
+        "the_first_refusal_in_file_order_is_the_one_reported",
+        records,
+    );
+    let whole = fs::metadata(spill.path()).expect("the spill exists").len();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(spill.path())
+        .expect("the spill opens")
+        .set_len(whole - 3)
+        .expect("the spill is truncated");
+
+    let failure = score_the_parked_records_and_resolve_the_cut(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+    )
+    .expect_err("a narrow record and a cut file are both refusals");
+
+    let PassTwoError::CohortSize(mismatch) = failure else {
+        panic!("expected the narrow record's refusal, got {failure:?}")
+    };
+    assert_eq!(mismatch.position, 100);
+}
