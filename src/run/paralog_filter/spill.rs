@@ -570,16 +570,84 @@ impl<R: BufRead> SpillReader<R> {
             .map(|decoded| decoded.map(|(entry, _)| entry))
     }
 
+    /// **The next entry's body, still compressed, copied into `body`** — and its fragments
+    /// stepped over unread, whatever this reader was built to do with them. `None` at a clean end
+    /// of stream, and `None` for ever after a failure, exactly as [`Self::next_entry`].
+    ///
+    /// **What it is for**: unpacking a body is most of what reading an entry costs, and it
+    /// depends on nothing but the body's own bytes. So pass two's reading thread does only this —
+    /// the length, then a copy — and the pool's threads turn each body into its entry with a
+    /// [`SpillEntryDecoder`], many at once. Measured on 4,352 tomato samples, the unpacking on
+    /// the reading thread was what held the pass to 153 MB/s with the pool three-quarters idle.
+    ///
+    /// The checks that need the stream stay here: the count, a stream that ends inside an entry,
+    /// and a frame length past the bound. The ones that need the inflated bytes — a damaged frame,
+    /// a value no entry can carry, a body longer than its fields — are the decoder's.
+    ///
+    /// # Errors
+    ///
+    /// If the stream fails, ends inside an entry, holds a frame length past the bound, or ends
+    /// on a boundary before the count pass one wrote.
+    pub fn next_compressed_body(
+        &mut self,
+        body: &mut CompressedSpillBody,
+    ) -> Option<Result<(), SpillError>> {
+        if let Err(at_the_end) = self.an_entry_follows() {
+            return at_the_end.map(Err);
+        }
+        let read = read_frame(
+            &mut self.source,
+            field::BODY_BYTES,
+            field::BODY,
+            max_frame_bytes(MAX_BODY_BYTES),
+            &mut body.bytes,
+        )
+        .and_then(|()| {
+            // Skipping reads no sample, so the count it is handed is never looked at.
+            read_fragments(
+                &mut self.source,
+                FragmentsSection::Skip,
+                0,
+                &mut self.inflating,
+            )
+        });
+        match read {
+            Ok(_) => {
+                self.entries_read += 1;
+                Some(Ok(()))
+            }
+            Err(error) => {
+                self.failed = true;
+                Some(Err(error))
+            }
+        }
+    }
+
     /// The next entry and its fragments — empty unless this reader reads them.
     fn next_decoded(&mut self) -> Option<Result<(SpillEntry, RecordFragments), SpillError>> {
+        if let Err(at_the_end) = self.an_entry_follows() {
+            return at_the_end.map(Err);
+        }
+        let decoded = decode_entry(&mut self.source, self.fragments, &mut self.inflating);
+        match &decoded {
+            Ok(_) => self.entries_read += 1,
+            Err(_) => self.failed = true,
+        }
+        Some(decoded)
+    }
+
+    /// `Ok` when the stream sits at the first byte of another entry. Otherwise what the caller
+    /// returns: `None` at a clean end, or after an earlier failure; the error for a read that
+    /// failed or a stream that ended on a boundary short of the count, which also ends the reader.
+    fn an_entry_follows(&mut self) -> Result<(), Option<SpillError>> {
         if self.failed {
-            return None;
+            return Err(None);
         }
         let at_an_entry_boundary_and_out_of_bytes = match self.source.fill_buf() {
             Ok(buffered) => buffered.is_empty(),
             Err(source) => {
                 self.failed = true;
-                return Some(Err(SpillError::Read {
+                return Err(Some(SpillError::Read {
                     field: field::BODY_BYTES,
                     source,
                 }));
@@ -588,19 +656,104 @@ impl<R: BufRead> SpillReader<R> {
         if at_an_entry_boundary_and_out_of_bytes {
             if self.entries_read != self.entries_expected {
                 self.failed = true;
-                return Some(Err(SpillError::TheWrongNumberOfRecords {
+                return Err(Some(SpillError::TheWrongNumberOfRecords {
                     expected: self.entries_expected,
                     read: self.entries_read,
                 }));
             }
-            return None;
+            return Err(None);
         }
-        let decoded = decode_entry(&mut self.source, self.fragments, &mut self.inflating);
-        match &decoded {
-            Ok(_) => self.entries_read += 1,
-            Err(_) => self.failed = true,
+        Ok(())
+    }
+}
+
+/// **One entry's body frame, still compressed**, as [`SpillReader::next_compressed_body`] copied
+/// it off the stream. Only a [`SpillEntryDecoder`] can read it, so a body cannot be handed on as
+/// anything but bytes still to be checked.
+///
+/// Reused: refilling it keeps its buffer, so a batch of these allocates once for its largest
+/// bodies rather than once a record.
+#[derive(Debug, Default)]
+pub struct CompressedSpillBody {
+    bytes: Vec<u8>,
+}
+
+/// **One whole entry, still compressed**: its body frame and its fragments frame, as
+/// [`SpillReaderWithFragments::next_compressed_entry`] copied them off the stream — pass three's
+/// counterpart of [`CompressedSpillBody`]. Only a [`SpillEntryDecoder`] can read it.
+///
+/// Reused as a [`CompressedSpillBody`] is: refilling it keeps both buffers.
+#[derive(Debug, Default)]
+pub struct CompressedSpillEntry {
+    body: CompressedSpillBody,
+    /// Empty where the record has no fragments: the frame's length was 0.
+    fragments: Vec<u8>,
+}
+
+/// **Turns a [`CompressedSpillBody`] into its [`SpillEntry`]**, with every refusal the reader's
+/// own [`SpillReader::next_entry`] makes on the same bytes. One a thread: it holds a
+/// decompression context and the inflated body, both reused across entries.
+pub struct SpillEntryDecoder {
+    context: zstd::zstd_safe::DCtx<'static>,
+    inflated: Vec<u8>,
+}
+
+impl SpillEntryDecoder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            context: zstd::zstd_safe::DCtx::create(),
+            inflated: Vec::new(),
         }
-        Some(decoded)
+    }
+
+    /// The entry `body` holds.
+    ///
+    /// # Errors
+    ///
+    /// If the frame is damaged, holds a value no entry can carry, or holds bytes past the
+    /// entry's last field.
+    pub fn decode(&mut self, body: &CompressedSpillBody) -> Result<SpillEntry, SpillError> {
+        inflate_frame(
+            &mut self.context,
+            &body.bytes,
+            &mut self.inflated,
+            field::BODY,
+            MAX_BODY_BYTES,
+        )?;
+        entry_from_inflated_body(&self.inflated)
+    }
+
+    /// The entry `entry` holds and the record's fragments, with every refusal
+    /// [`SpillReaderWithFragments`] makes on the same bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode`], and if the fragments frame is damaged or names a sample, allele or
+    /// Phred no entry can carry.
+    pub fn decode_with_fragments(
+        &mut self,
+        entry: &CompressedSpillEntry,
+    ) -> Result<(SpillEntry, RecordFragments), SpillError> {
+        let decoded = self.decode(&entry.body)?;
+        if entry.fragments.is_empty() {
+            return Ok((decoded, RecordFragments::default()));
+        }
+        inflate_frame(
+            &mut self.context,
+            &entry.fragments,
+            &mut self.inflated,
+            field::FRAGMENTS,
+            MAX_FRAGMENTS_BYTES,
+        )?;
+        let fragments = decode_fragments(&self.inflated, decoded.samples.len())?;
+        Ok((decoded, fragments))
+    }
+}
+
+impl Default for SpillEntryDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -627,6 +780,55 @@ impl<R: BufRead> SpillReaderWithFragments<R> {
             entries_expected,
             FragmentsSection::Read,
         ))
+    }
+
+    /// **The next entry, still compressed, copied into `entry`**: its body frame and its
+    /// fragments frame, neither inflated. `None` at a clean end of stream, and `None` for ever
+    /// after a failure, as the iterator does.
+    ///
+    /// Pass three's reading thread does only this, and the pool turns each entry into the record
+    /// and its fragments with a [`SpillEntryDecoder`] — the split
+    /// [`SpillReader::next_compressed_body`] makes for pass two. The checks that need the stream
+    /// stay here; the ones that need the inflated bytes are the decoder's.
+    ///
+    /// # Errors
+    ///
+    /// If the stream fails, ends inside an entry, holds a frame length past its bound, or ends
+    /// on a boundary before the count pass one wrote.
+    pub fn next_compressed_entry(
+        &mut self,
+        entry: &mut CompressedSpillEntry,
+    ) -> Option<Result<(), SpillError>> {
+        let reader = &mut self.0;
+        if let Err(at_the_end) = reader.an_entry_follows() {
+            return at_the_end.map(Err);
+        }
+        let read = read_frame(
+            &mut reader.source,
+            field::BODY_BYTES,
+            field::BODY,
+            max_frame_bytes(MAX_BODY_BYTES),
+            &mut entry.body.bytes,
+        )
+        .and_then(|()| {
+            read_frame(
+                &mut reader.source,
+                field::FRAGMENTS_BYTES,
+                field::FRAGMENTS,
+                max_frame_bytes(MAX_FRAGMENTS_BYTES),
+                &mut entry.fragments,
+            )
+        });
+        match read {
+            Ok(()) => {
+                reader.entries_read += 1;
+                Some(Ok(()))
+            }
+            Err(error) => {
+                reader.failed = true;
+                Some(Err(error))
+            }
+        }
     }
 }
 
@@ -894,7 +1096,14 @@ fn decode_entry<R: BufRead>(
         &mut inflating.compressed,
     )?;
     inflating.inflate(field::BODY, MAX_BODY_BYTES)?;
-    let mut body = inflating.inflated.as_slice();
+    let entry = entry_from_inflated_body(&inflating.inflated)?;
+    let fragments = read_fragments(source, fragments, entry.samples.len(), inflating)?;
+    Ok((entry, fragments))
+}
+
+/// The entry an inflated body holds, refusing a body with bytes past its last field.
+fn entry_from_inflated_body(inflated: &[u8]) -> Result<SpillEntry, SpillError> {
+    let mut body = inflated;
     let entry = decode_body(&mut body)?;
     if !body.is_empty() {
         return Err(SpillError::SectionLongerThanItsEntries {
@@ -902,50 +1111,68 @@ fn decode_entry<R: BufRead>(
             unread: body.len() as u64,
         });
     }
-    let fragments = read_fragments(source, fragments, entry.samples.len(), inflating)?;
-    Ok((entry, fragments))
+    Ok(entry)
 }
 
 impl Inflating {
     /// Inflate the frame in `compressed` into `inflated`, refusing one that claims more than `max`
     /// bytes before anything is allocated for it.
     fn inflate(&mut self, field: &'static str, max: usize) -> Result<(), SpillError> {
-        let size = match zstd::zstd_safe::get_frame_content_size(&self.compressed) {
-            Ok(Some(size)) => size,
-            Ok(None) => {
-                return Err(SpillError::NotAFrame {
-                    field,
-                    reason: "the frame does not record its size",
-                });
-            }
-            Err(_) => {
-                return Err(SpillError::NotAFrame {
-                    field,
-                    reason: "the bytes do not begin a zstd frame",
-                });
-            }
-        };
-        if size > max as u64 {
-            return Err(SpillError::OutOfRange { field, value: size });
+        inflate_frame(
+            &mut self.context,
+            &self.compressed,
+            &mut self.inflated,
+            field,
+            max,
+        )
+    }
+}
+
+/// Inflate the frame `compressed` into `inflated`, refusing one that claims more than `max` bytes
+/// before anything is allocated for it. The one inflation both the entry reader and
+/// [`SpillEntryDecoder`] go through, so the two cannot refuse different frames.
+fn inflate_frame(
+    context: &mut zstd::zstd_safe::DCtx<'static>,
+    compressed: &[u8],
+    inflated: &mut Vec<u8>,
+    field: &'static str,
+    max: usize,
+) -> Result<(), SpillError> {
+    let size = match zstd::zstd_safe::get_frame_content_size(compressed) {
+        Ok(Some(size)) => size,
+        Ok(None) => {
+            return Err(SpillError::NotAFrame {
+                field,
+                reason: "the frame does not record its size",
+            });
         }
-        self.inflated.clear();
-        // The size is under `max`, so this fits a `usize`.
-        self.inflated.reserve(size as usize);
-        let written = self
-            .context
-            .decompress(&mut self.inflated, &self.compressed)
+        Err(_) => {
+            return Err(SpillError::NotAFrame {
+                field,
+                reason: "the bytes do not begin a zstd frame",
+            });
+        }
+    };
+    if size > max as u64 {
+        return Err(SpillError::OutOfRange { field, value: size });
+    }
+    inflated.clear();
+    // The size is under `max`, so this fits a `usize`.
+    inflated.reserve(size as usize);
+    let written =
+        context
+            .decompress(inflated, compressed)
             .map_err(|code| SpillError::NotAFrame {
                 field,
                 reason: zstd::zstd_safe::get_error_name(code),
             })?;
-        if written as u64 != size {
-            return Err(SpillError::NotAFrame {
-                field,
-                reason: "the frame inflated to a size other than the one it records",
-            });
-        }
-        Ok(())
+    if written as u64 != size {
+        return Err(SpillError::NotAFrame {
+            field,
+            reason: "the frame inflated to a size other than the one it records",
+        });
     }
+    Ok(())
 }
 
 /// Read a frame's length, as `length_field`, and then that many bytes into `out`.

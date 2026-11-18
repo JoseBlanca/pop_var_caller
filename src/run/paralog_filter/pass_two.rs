@@ -34,9 +34,15 @@ use crate::paralog::{
     ParalogCalibration, ParalogLrHistogram, calibrate_from_the_ratio_histogram,
 };
 
+use std::io::BufRead;
+use std::sync::mpsc::{self, Receiver, SyncSender};
+
 use rayon::prelude::*;
 
-use super::{CohortSizeMismatch, ParalogScoringContext, SpillEntry, SpillFile, SpillFileError};
+use super::{
+    CohortSizeMismatch, CompressedSpillBody, ParalogScoringContext, SpillEntryDecoder, SpillError,
+    SpillFile, SpillFileError, SpillReader,
+};
 
 /// **The operator's target false-discovery rate**, checked once at the boundary.
 ///
@@ -243,9 +249,80 @@ pub enum PassTwoError {
     CohortSize(#[source] CohortSizeMismatch),
 }
 
-/// How many decoded entries are scored on the pool at once. Big enough that the fork-join is
-/// lost beside the scoring, small enough that the batch's lines are a bounded amount of memory.
+/// How many entries are unpacked and scored on the pool at once. Big enough that the fork-join is
+/// lost beside the scoring, small enough that the batches in flight are a bounded amount of
+/// memory: three of them — one being filled, one waiting, one being scored — each about 50 kB
+/// a record on 4,352 samples, so about 300 MB.
 const SCORING_BATCH: usize = 2048;
+
+/// **A batch of compressed bodies, as the reading thread hands it over.** The first `filled`
+/// bodies are this batch's; the rest are buffers kept from an earlier, fuller one. `ended_with`
+/// is the reader's failure, when the batch stopped short because of one.
+struct ReadBatch {
+    bodies: Vec<CompressedSpillBody>,
+    filled: usize,
+    ended_with: Option<SpillError>,
+}
+
+/// What one pool thread made of one body.
+struct ScoredRecord {
+    ratio: f64,
+    contig: u32,
+    position: u64,
+}
+
+/// Why one body produced no ratio.
+enum ScoringFailure {
+    Spill(SpillError),
+    CohortSize(CohortSizeMismatch),
+}
+
+/// **The reading thread**: fill batches of compressed bodies from `reader` and hand each to the
+/// scoring side, until the spill ends, the reader fails, or the scoring side stops listening.
+///
+/// It refills the batches the scoring side hands back rather than allocating new ones, so after
+/// the first few batches the thread allocates nothing. It never waits for one: a batch not yet
+/// returned is replaced by a fresh one, which is at most one extra.
+fn read_ahead<R: BufRead>(
+    mut reader: SpillReader<R>,
+    full_batches: SyncSender<ReadBatch>,
+    batches_to_refill: Receiver<Vec<CompressedSpillBody>>,
+) {
+    loop {
+        let mut bodies = batches_to_refill.try_recv().unwrap_or_default();
+        if bodies.len() < SCORING_BATCH {
+            bodies.resize_with(SCORING_BATCH, CompressedSpillBody::default);
+        }
+        let mut filled = 0;
+        let mut ended_with = None;
+        let mut at_the_end = false;
+        while filled < SCORING_BATCH {
+            match reader.next_compressed_body(&mut bodies[filled]) {
+                Some(Ok(())) => filled += 1,
+                Some(Err(error)) => {
+                    ended_with = Some(error);
+                    at_the_end = true;
+                    break;
+                }
+                None => {
+                    at_the_end = true;
+                    break;
+                }
+            }
+        }
+        if filled == 0 && ended_with.is_none() {
+            return;
+        }
+        let handed_over = full_batches.send(ReadBatch {
+            bodies,
+            filled,
+            ended_with,
+        });
+        if handed_over.is_err() || at_the_end {
+            return;
+        }
+    }
+}
 
 #[cfg(test)]
 /// **Score every record pass one parked, and resolve the target false-discovery rate to a cut.**
@@ -305,53 +382,83 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
     // duplication rate needs it — 12 bytes a record.
     let mut contigs: Vec<u32> = Vec::new();
     let mut positions: Vec<u64> = Vec::new();
-    // **Read serially, score concurrently, fold serially.** The spill is a stream of
-    // variable-length entries with no index, so nothing can seek into it — the decode stays on
-    // this thread. Scoring is what costs, and it is a pure function of one entry
-    // (`ParalogScoringContext::score` takes `&self` and a scratch buffer), so a batch of decoded
-    // entries is scored on the pool and the ratios come back **in the batch's own order**. The
-    // histogram is then folded and `ratios` extended on this thread, in that order, so both are
-    // what a serial walk would have produced, value for value — which the run's output being
-    // identical at 1, 3, 4, 5, 7, 8 and 18 threads is the check on.
+    // **Copy on one thread, unpack and score on the pool, fold on this thread.** The spill is a
+    // stream of variable-length entries with no index, so nothing can seek into it: one thread
+    // walks it. But that thread only copies each entry's compressed body off the stream, one
+    // batch ahead of the pool, while the pool unpacks and scores the batch before. Unpacking was
+    // the walk's own cost — on 4,352 tomato samples it held the pass to 153 MB/s with the pool
+    // three-quarters idle — and it depends on nothing but the body's bytes, so it belongs with
+    // the scoring. The ratios come back **in the batch's own order**, and the histogram is folded
+    // and `ratios` extended here in that order, so both are what a serial walk would have
+    // produced, value for value.
     //
-    // **One shape, not two.** A serial arm beside this one was measured and dropped: on a pool of
-    // one thread this loop costs what the plain `for` cost (769 ms against 773 over 8 accessions
-    // and 2 Mb), so the second copy bought nothing and was a second place for the fold's order to
-    // be got wrong.
-    let mut batch: Vec<SpillEntry> = Vec::with_capacity(SCORING_BATCH);
-    let mut scored: Vec<Result<f64, CohortSizeMismatch>> = Vec::with_capacity(SCORING_BATCH);
-    let mut entries = entries;
-    loop {
-        batch.clear();
-        for entry in entries.by_ref().take(SCORING_BATCH) {
-            let entry =
-                entry.map_err(|source| PassTwoError::Spill(spill.naming_this_file(source)))?;
-            batch.push(entry);
+    // **The first failure in file order is the one returned.** A batch the reader cut short
+    // carries the reader's error behind the bodies it did read; those are unpacked and scored
+    // first, so a record refused earlier in the file is the error reported, ahead of a read
+    // failure later in the same batch.
+    //
+    // **One shape, not two.** A serial arm beside the pooled one was measured and dropped: on a
+    // pool of one thread the pooled loop cost what the plain `for` cost (769 ms against 773 over
+    // 8 accessions and 2 Mb), so a second copy buys nothing and is a second place for the fold's
+    // order to be got wrong.
+    let mut scored: Vec<Result<ScoredRecord, ScoringFailure>> = Vec::with_capacity(SCORING_BATCH);
+    std::thread::scope(|scope| -> Result<(), PassTwoError> {
+        let (full_batches, batches_to_score) = mpsc::sync_channel::<ReadBatch>(1);
+        let (empty_batches, batches_to_refill) = mpsc::channel::<Vec<CompressedSpillBody>>();
+        scope.spawn(move || read_ahead(entries, full_batches, batches_to_refill));
+        for batch in batches_to_score {
+            batch.bodies[..batch.filled]
+                .par_iter()
+                .map_init(
+                    || {
+                        (
+                            SpillEntryDecoder::new(),
+                            Vec::with_capacity(context.sample_count()),
+                        )
+                    },
+                    |(decoder, observations), body| {
+                        let entry = decoder.decode(body).map_err(ScoringFailure::Spill)?;
+                        let ratio = context
+                            .score(&entry, observations)
+                            .map_err(ScoringFailure::CohortSize)?;
+                        Ok(ScoredRecord {
+                            ratio,
+                            contig: entry.contig.0,
+                            position: entry.position.0,
+                        })
+                    },
+                )
+                .collect_into_vec(&mut scored);
+            // **One binding, pushed to both.** The histogram drops a non-finite ratio and the
+            // vector keeps it, which is the whole difference between "did not enter the fit" and
+            // "kept, never flagged" — but they are the same number, so no rule can apply to one
+            // and not the other (spec §6 trap 4).
+            for record in scored.drain(..) {
+                let ScoredRecord {
+                    ratio,
+                    contig,
+                    position,
+                } = record.map_err(|failure| match failure {
+                    ScoringFailure::Spill(source) => {
+                        PassTwoError::Spill(spill.naming_this_file(source))
+                    }
+                    ScoringFailure::CohortSize(mismatch) => PassTwoError::CohortSize(mismatch),
+                })?;
+                histogram.push(ratio);
+                ratios.push(ratio);
+                if windowed.is_some() {
+                    contigs.push(contig);
+                    positions.push(position);
+                }
+            }
+            if let Some(source) = batch.ended_with {
+                return Err(PassTwoError::Spill(spill.naming_this_file(source)));
+            }
+            // The reader may already have finished; a batch it no longer wants is simply dropped.
+            let _ = empty_batches.send(batch.bodies);
         }
-        if batch.is_empty() {
-            break;
-        }
-        batch
-            .par_iter()
-            .map_init(
-                || Vec::with_capacity(context.sample_count()),
-                |observations, entry| context.score(entry, observations),
-            )
-            .collect_into_vec(&mut scored);
-        if windowed.is_some() {
-            contigs.extend(batch.iter().map(|entry| entry.contig.0));
-            positions.extend(batch.iter().map(|entry| entry.position.0));
-        }
-        // **One binding, pushed to both.** The histogram drops a non-finite ratio and the vector
-        // keeps it, which is the whole difference between "did not enter the fit" and "kept,
-        // never flagged" — but they are the same number, so no rule can apply to one and not the
-        // other (spec §6 trap 4).
-        for ratio in scored.drain(..) {
-            let ratio = ratio.map_err(PassTwoError::CohortSize)?;
-            histogram.push(ratio);
-            ratios.push(ratio);
-        }
-    }
+        Ok(())
+    })?;
 
     // The reader refuses a file holding a different number of records than pass one counted, in
     // either direction, so arriving here with a different length would be a defect in the reader
