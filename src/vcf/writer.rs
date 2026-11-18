@@ -669,7 +669,8 @@ pub enum VcfWriteError {
     #[error(
         "genotype refinement cannot go on: its smallest window, from contig {} position {}, \
          holds {} records of {} samples, {:.1} GB, and --refine-window-bytes allows {:.1} GB. \
-         Raise --refine-window-bytes to at least {}.",
+         Raise --refine-window-bytes to at least {}, or shorten the smallest window with \
+         --refine-window-floor.",
         .0.contig,
         .0.position,
         .0.records,

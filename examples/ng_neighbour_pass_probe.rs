@@ -251,7 +251,7 @@ fn main() -> ExitCode {
                         } else {
                             "withheld"
                         };
-                        (text, genotype_text(best), posterior[best])
+                        (text, genotype_text(best), f64::from(posterior[best]))
                     };
                     writeln!(
                         out,

@@ -97,13 +97,26 @@ impl NeighbourEvidenceDecision {
         }
     }
 
+    /// The same decision, no window's margins (nor, then, its core) shorter than `bases`
+    /// (`--refine-window-floor`).
+    #[must_use]
+    pub fn with_window_floor(self, bases: u64) -> Self {
+        Self {
+            sizes: WindowSizes {
+                margin_floor_bases: bases,
+                ..self.sizes
+            },
+            ..self
+        }
+    }
+
     /// The value of the `##neighbourEvidence=` header line.
     #[must_use]
     pub fn as_header_value(&self) -> String {
         let why = self.why.replace('"', "'");
         if self.ran {
             format!(
-                "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},window_bytes={},\
+                "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},margin_floor={},window_bytes={},\
                  rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES},\
                  hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
                  hidden_share={MAX_HIDDEN_SHARE},extra_paths={EXTRA_PATHS_PER_ROUND},\
@@ -113,6 +126,7 @@ impl NeighbourEvidenceDecision {
                  read_reach={},read_cap={}>",
                 self.sizes.core_bases,
                 self.sizes.margin_bases,
+                self.sizes.margin_floor_bases,
                 self.sizes.budget_bytes,
                 self.path_agreement.get(),
                 crate::read_phase::link::LINK_MIN,
@@ -179,7 +193,7 @@ pub fn decide(
     }
 }
 
-/// **A window the pass cannot solve within its budget** (pass spec §6): at the 500-kb floor it
+/// **A window the pass cannot solve within its budget** (pass spec §6): at the floor it
 /// still holds more bytes than `--refine-window-bytes` allows. The run stops here rather than
 /// switch refinement off or go on past the budget (owner, 2026-11-13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,10 +423,13 @@ impl NeighbourEvidenceStage {
             self.finish(ready)?;
         }
         self.contig = Some(place.at.contig);
-        // Counted as the line arrived, though most lines are held compressed: what a record costs
-        // must not depend on when its batch was compressed.
+        // **A line is counted at its compressed length** over every window that spans it, and at
+        // its length again in a core, whose lines are handed back rewritten and whole. Until it is
+        // compressed it counts at the length it arrived at, which only overstates, and no window is
+        // planned on a line not yet compressed (`release`), so what a record costs does not depend
+        // on when its batch was compressed.
         let mut held = line.len() as u64;
-        let mut core = 0;
+        let mut core = line.len() as u64;
         let site = site_of(&line, self.samples).map(|record| {
             let fragments = PackedRecordFragments::from(fragments);
             let (record_held, record_core) = record_window_bytes(&record);
@@ -431,14 +448,30 @@ impl NeighbourEvidenceStage {
             text: HeldText::Plain(line),
             site,
         });
-        self.compressed_up_to = self.compressed_up_to.max(self.core_start);
-        if self.held.len() - self.compressed_up_to >= LINES_COMPRESSED_TOGETHER {
-            self.held[self.compressed_up_to..]
-                .par_iter_mut()
-                .for_each_init(LineCompressor::new, |with, held| held.text.compress(with));
-            self.compressed_up_to = self.held.len();
+        if self.held.len() - self.compressed_up_to.max(self.core_start) >= LINES_COMPRESSED_TOGETHER
+        {
+            self.compress_held_lines();
         }
         self.release(false, ready)
+    }
+
+    /// **Compresses every held line not yet compressed**, on the pool, and counts each at its
+    /// compressed length from then on.
+    fn compress_held_lines(&mut self) {
+        let from = self.compressed_up_to.max(self.core_start);
+        self.held[from..]
+            .par_iter_mut()
+            .for_each_init(LineCompressor::new, |with, held| held.text.compress(with));
+        // The running totals from the first compressed line on, less what each line saved.
+        let mut saved: i64 = 0;
+        for (index, held) in self.held.iter().enumerate().skip(from) {
+            if let HeldText::Compressed { bytes, length } = &held.text {
+                saved += *length as i64 - bytes.len() as i64;
+            }
+            let total = &mut self.held_bytes[index + 1];
+            *total = (*total as i64 - saved) as u64;
+        }
+        self.compressed_up_to = self.held.len();
     }
 
     /// **Finishes the current contig**: solves its remaining windows and appends their lines to
@@ -486,6 +519,12 @@ impl NeighbourEvidenceStage {
             ) else {
                 return Ok(());
             };
+            if self.compressed_up_to < self.held.len() {
+                // Lines not yet compressed count at the length they arrived at, more than they will
+                // hold; counted compressed, the window may be larger, or need lines not yet read.
+                self.compress_held_lines();
+                continue;
+            }
             if plan.over_budget > 0 {
                 return Err(WindowOverBudget {
                     contig: self.contig.map_or(0, |contig| contig.0),
@@ -608,7 +647,7 @@ impl NeighbourEvidenceStage {
                 .iter()
                 .enumerate()
                 .filter_map(|(offset, record)| {
-                    record.phases[sample].map(|phase| {
+                    record.phase(sample).map(|phase| {
                         let site = first_site + offset;
                         WrittenRecord {
                             site,

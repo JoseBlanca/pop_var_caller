@@ -267,7 +267,7 @@ pub struct CallFromPspsArgs {
 
     /// The most memory, in bytes, one window of genotype refinement may hold: its records' lines,
     /// numbers and reads, and each sample's state while it is solved. Windows shrink to fit it,
-    /// down to 500 kb of core and margins; a cohort whose smallest window still does not fit stops
+    /// down to --refine-window-floor; a cohort whose smallest window still does not fit stops
     /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
     /// walk's arrays, a few kilobytes a window record.
     #[arg(
@@ -276,6 +276,18 @@ pub struct CallFromPspsArgs {
         help_heading = "Advanced"
     )]
     pub refine_window_bytes: u64,
+
+    /// The shortest each margin of a genotype refinement window may become when windows shrink to
+    /// fit --refine-window-bytes, in bases; the core shrinks with them. Shorter margins hold less
+    /// memory but may cut off evidence: a sample copies stretches of up to about 300 kb.
+    #[arg(
+        long,
+        value_name = "BASES",
+        default_value_t = crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_window_floor: u64,
 
     /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
     ///
@@ -680,6 +692,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
             ploidy,
             args.phase_min_path_agreement,
             args.refine_window_bytes,
+            args.refine_window_floor,
         ));
     // **Fragments are gathered only where the output will read them**, which the header just
     // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.

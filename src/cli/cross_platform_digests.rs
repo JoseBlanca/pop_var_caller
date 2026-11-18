@@ -1328,6 +1328,7 @@ mod tests {
             refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
             phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,

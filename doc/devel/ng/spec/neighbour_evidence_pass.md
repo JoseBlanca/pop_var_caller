@@ -576,10 +576,13 @@ grows with the cohort, and what each thread's walk holds at every record, which 
 threads.
 
 - **Per sample and record**, for every record the window spans: the record's VCF line, held
-  compressed; its likelihoods and shares (`L` and `q`, as `f32`); each sample's read alleles, seven
-  bytes each (`PackedRecordFragments`); and each sample's two haplotypes, the templates they
-  followed, its phase across the rounds and the positions of its records with reads. For each record of the core, besides: each sample's sums
-  over the averaged rounds and what it writes. *Measured 2026-11-13* on 400 tomato25 samples
+  compressed; its likelihoods and shares (`L` and `q`, as `f32`); each sample's read alleles, four
+  bytes each where a record's fit, seven where they do not (`PackedRecordFragments`); and each
+  sample's two haplotypes, the templates they followed and its phase across the rounds. For each
+  record of the core, besides: each sample's sums over the averaged rounds and its written result,
+  both `f32`, and the line again, handed back rewritten and whole. Each sample's own result is
+  made from its sums a few hundred samples at a time, as its state is let go, and copied into the
+  records (2026-11-18, `refine_memory_2026-11-18.md`). *Measured 2026-11-13* on 400 tomato25 samples
   (chromosome 0, about 22 read alleles a sample a record there), about 140 bytes a sample a record
   held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
   of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
@@ -593,8 +596,10 @@ threads.
   37.7 GB when every record's were kept.
 
 **The window is sized to a budget in bytes**, `--refine-window-bytes`, 32 GB by default. It counts
-the per-sample part exactly as the records arrive — each line as it arrived, though most are held
-compressed, so the count does not depend on when its batch was compressed. It does not count the
+the per-sample part exactly as the records arrive, each line at its compressed length: a window is
+planned only once every line it spans is compressed, so the count does not depend on when its
+batch was compressed. The shortest window, `--refine-window-floor`, is 500 kb of margin by
+default. It does not count the
 per-thread part: that would make the windows, and so the output, depend on the thread count (§2.3).
 For the same reason it counts arrays by their lengths, not the allocator's capacities, and types
 whose layout the compiler chooses (an option, a tuple) at fixed sizes, not `size_of`: a compiler
