@@ -209,6 +209,7 @@ pub(crate) fn rewrite_line(
 
     // The genotype every column will carry: the pass's argmax where it called, `./.` where it
     // withheld, calling's own elsewhere.
+    let mut posterior = Vec::with_capacity(genotype_count);
     let genotypes: Vec<Option<(usize, usize)>> = columns
         .iter()
         .zip(&refined.outcomes)
@@ -217,9 +218,8 @@ pub(crate) fn rewrite_line(
             Outcome::Unchanged => parse_genotype(&column[genotype_at]),
             Outcome::Withheld => None,
             Outcome::Called => {
-                let posterior =
-                    &refined.posteriors[sample * genotype_count..(sample + 1) * genotype_count];
-                let (best, _) = score_best_genotype(posterior);
+                refined.posterior_into(sample, genotype_count, &mut posterior);
+                let (best, _) = score_best_genotype(&posterior);
                 Some(old_pairs[best.0 as usize])
             }
         })
@@ -261,7 +261,7 @@ pub(crate) fn rewrite_line(
         let outcome = refined.outcomes[sample];
         let recalled = outcome != Outcome::Unchanged;
         // The phase, where the pass wrote one for this very genotype: copy 0's allele first.
-        let phase = refined.phases[sample].filter(|phase| {
+        let phase = refined.phase(sample).filter(|phase| {
             outcome == Outcome::Called
                 && genotypes[sample]
                     == Some((
@@ -287,9 +287,8 @@ pub(crate) fn rewrite_line(
         column[phase_set_at] =
             phase.map_or_else(|| ".".to_string(), |phase| phase.phase_set.to_string());
         let posteriors: Option<Vec<f64>> = if recalled {
-            Some(
-                refined.posteriors[sample * genotype_count..(sample + 1) * genotype_count].to_vec(),
-            )
+            refined.posterior_into(sample, genotype_count, &mut posterior);
+            Some(posterior.clone())
         } else if subsetting && column[posterior_at] != "." {
             column[posterior_at]
                 .split(',')

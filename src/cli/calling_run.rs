@@ -831,7 +831,8 @@ pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
 /// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
 /// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
 /// header is written, and stated in it either way. `path_agreement` is
-/// `--phase-min-path-agreement`, `window_bytes` `--refine-window-bytes`.
+/// `--phase-min-path-agreement`, `window_bytes` `--refine-window-bytes`, `window_floor`
+/// `--refine-window-floor`.
 #[must_use]
 pub fn neighbour_evidence_decision(
     asked: RefineGenotypesArg,
@@ -839,6 +840,7 @@ pub fn neighbour_evidence_decision(
     ploidy: Ploidy,
     path_agreement: PathAgreement,
     window_bytes: u64,
+    window_floor: u64,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
         RefineGenotypesArg::Auto => NeighbourEvidenceSwitch::Auto,
@@ -848,7 +850,8 @@ pub fn neighbour_evidence_decision(
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
     let decision = decide(switch, &inbreeding, ploidy)
         .with_path_agreement(path_agreement)
-        .with_window_bytes(window_bytes);
+        .with_window_bytes(window_bytes)
+        .with_window_floor(window_floor);
     tracing::info!(
         "neighbour-evidence pass: {} ({})",
         if decision.ran { "runs" } else { "off" },

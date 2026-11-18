@@ -33,6 +33,14 @@ pub struct WindowSizes {
     pub budget_bytes: u64,
 }
 
+/// **The default shortest margin**, and with it the shortest core (`--refine-window-floor`): §4.2's
+/// `S` is at most 300 kb, and a margin shorter than the walk's reach cuts off evidence a record's
+/// genotype is read from.
+pub const DEFAULT_MARGIN_FLOOR_BASES: u64 = 500_000;
+
+/// **The longest a margin is**, and so the most `--refine-window-floor` may be.
+pub const DEFAULT_MARGIN_BASES: u64 = 1_000_000;
+
 /// **The default window budget**: 32 GB. At about 250 bytes a sample a record (400 tomato samples,
 /// pass spec §6), 2,176 samples fit a window of about 58,000 records, 2.2 Mb at 26 records a kb.
 pub const DEFAULT_WINDOW_BYTES: u64 = 32_000_000_000;
@@ -51,8 +59,8 @@ impl Default for WindowSizes {
     fn default() -> Self {
         Self {
             core_bases: 2_000_000,
-            margin_bases: 1_000_000,
-            margin_floor_bases: 500_000,
+            margin_bases: DEFAULT_MARGIN_BASES,
+            margin_floor_bases: DEFAULT_MARGIN_FLOOR_BASES,
             budget_bytes: DEFAULT_WINDOW_BYTES,
         }
     }

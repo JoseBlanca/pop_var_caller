@@ -11,7 +11,7 @@
 use std::sync::OnceLock;
 
 use super::capture::LARGEST_ERROR_PHRED;
-use super::fragments::{FragmentAllele, ReadAllele};
+use super::fragments::{FragmentAllele, ReadAllele, SampleReadAlleles};
 
 /// **`T_link`, ln 199, in natural-log odds**: reads make or keep a link at odds of at least 199 to 1, one wrong link in
 /// 200 if the error model holds (§2.5). With the error floor at 0.01 one fragment is worth at most
@@ -218,6 +218,36 @@ impl LinkAllele for ReadAllele {
     }
 }
 
+/// **A sample's read alleles at one record, as a link reads them**, in fragment order: a slice of
+/// either form, or what a [`PackedRecordFragments`](super::fragments::PackedRecordFragments) holds.
+pub trait ReadAlleleList: Copy {
+    type Allele: LinkAllele;
+    /// How many there are.
+    fn count(self) -> usize;
+    /// The `index`th.
+    fn at(self, index: usize) -> Self::Allele;
+}
+
+impl<A: LinkAllele> ReadAlleleList for &[A] {
+    type Allele = A;
+    fn count(self) -> usize {
+        self.len()
+    }
+    fn at(self, index: usize) -> A {
+        self[index]
+    }
+}
+
+impl ReadAlleleList for SampleReadAlleles<'_> {
+    type Allele = ReadAllele;
+    fn count(self) -> usize {
+        self.len()
+    }
+    fn at(self, index: usize) -> ReadAllele {
+        self.get(index)
+    }
+}
+
 /// **`L` for one sample's link between two records**, from that sample's fragments at each, both
 /// in fragment order as [`RecordFragments::of_sample`](super::fragments::RecordFragments::of_sample)
 /// gives them.
@@ -230,13 +260,24 @@ pub fn score_read_link<A: LinkAllele, B: LinkAllele>(
     at_other: &[B],
     other: Heterozygote,
 ) -> ReadLink {
+    score_read_lists(at_one, one, at_other, other)
+}
+
+/// [`score_read_link`] over any [`ReadAlleleList`]s.
+#[must_use]
+pub fn score_read_lists<A: ReadAlleleList, B: ReadAlleleList>(
+    at_one: A,
+    one: Heterozygote,
+    at_other: B,
+    other: Heterozygote,
+) -> ReadLink {
     let mut link = ReadLink {
         log_odds: 0.0,
         fragments: 0,
     };
     let (mut i, mut j) = (0, 0);
-    while i < at_one.len() && j < at_other.len() {
-        let (x, y) = (at_one[i], at_other[j]);
+    while i < at_one.count() && j < at_other.count() {
+        let (x, y) = (at_one.at(i), at_other.at(j));
         match x.fragment().cmp(&y.fragment()) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
