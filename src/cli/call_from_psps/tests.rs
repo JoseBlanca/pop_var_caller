@@ -219,6 +219,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         force: true,
         log: None,
         tmp_dir: None,
+        keep_tmp_on_error: false,
         parameters: None,
         defaults: true,
         ploidy: None,
@@ -384,6 +385,7 @@ fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
         output: cohort.directory.path().join("pure.vcf"),
         log: Some(cohort.directory.path().join("pure.log")),
         tmp_dir: None,
+        keep_tmp_on_error: false,
         ..args
     };
     run_call_from_psps(&args).expect("the psps' own settings are the run's");

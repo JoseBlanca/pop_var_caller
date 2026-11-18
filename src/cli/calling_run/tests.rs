@@ -206,11 +206,13 @@ fn the_scratch_directory_is_made_where_asked_and_removed_after() {
     let output = parent.path().join("out").join("calls.vcf.gz");
     std::fs::create_dir_all(output.parent().expect("a parent")).expect("the output directory");
 
-    let beside = scratch_directory_for(&output, None).expect("made beside the VCF");
+    let beside = scratch_directory_for(&output, None, ScratchOnFailure::Removed)
+        .expect("made beside the VCF");
     assert_eq!(beside.path().parent(), output.parent());
     let given = parent.path().join("scratch");
     std::fs::create_dir_all(&given).expect("the --tmp-dir");
-    let inside = scratch_directory_for(&output, Some(&given)).expect("made inside --tmp-dir");
+    let inside = scratch_directory_for(&output, Some(&given), ScratchOnFailure::Removed)
+        .expect("made inside --tmp-dir");
     assert_eq!(inside.path().parent(), Some(given.as_path()));
     assert!(
         inside
@@ -225,11 +227,90 @@ fn the_scratch_directory_is_made_where_asked_and_removed_after() {
     assert!(given.is_dir(), "the user's --tmp-dir itself is left alone");
 }
 
+/// A scratch directory holding one file, made in its own directory under the project's `tmp/`,
+/// returned with the path of that file.
+fn a_scratch_directory_holding_a_file(on_failure: ScratchOnFailure) -> (RunScratch, PathBuf) {
+    std::fs::create_dir_all("tmp").expect("the project's tmp directory");
+    let parent = tempfile::tempdir_in("tmp")
+        .expect("a directory to work in")
+        .keep();
+    let output = parent.join("calls.vcf.gz");
+    let scratch = scratch_directory_for(&output, None, on_failure).expect("made");
+    let file = scratch.path().join("hidden-dup-spill.tmp");
+    std::fs::write(&file, b"parked records").expect("a file in the scratch directory");
+    (scratch, file)
+}
+
+/// **`--keep-tmp-on-error`: a run that did not finish leaves its scratch directory, and what is
+/// in it, on disk.**
+#[test]
+fn a_run_that_failed_keeps_its_scratch_directory_when_asked() {
+    let (scratch, file) = a_scratch_directory_holding_a_file(ScratchOnFailure::Kept);
+    let directory = scratch.path().to_path_buf();
+
+    drop(scratch);
+
+    assert_eq!(
+        std::fs::read(&file).expect("the file is still there"),
+        b"parked records"
+    );
+    std::fs::remove_dir_all(directory.parent().expect("a parent")).expect("the test's to remove");
+}
+
+/// **A run that finished removes its scratch directory even with `--keep-tmp-on-error`**: the
+/// flag is about failures only.
+#[test]
+fn a_run_that_succeeded_removes_its_scratch_directory_even_when_asked_to_keep_it() {
+    let (mut scratch, _) = a_scratch_directory_holding_a_file(ScratchOnFailure::Kept);
+    let directory = scratch.path().to_path_buf();
+
+    scratch.the_run_succeeded();
+    drop(scratch);
+
+    assert!(
+        !directory.exists(),
+        "the scratch directory outlived a finished run"
+    );
+    std::fs::remove_dir_all(directory.parent().expect("a parent")).expect("the test's to remove");
+}
+
+/// **Without the flag a run that failed removes its scratch directory**, as before the flag
+/// existed.
+#[test]
+fn a_run_that_failed_removes_its_scratch_directory_by_default() {
+    let (scratch, _) = a_scratch_directory_holding_a_file(ScratchOnFailure::Removed);
+    let directory = scratch.path().to_path_buf();
+
+    drop(scratch);
+
+    assert!(
+        !directory.exists(),
+        "the scratch directory outlived a failed run"
+    );
+    std::fs::remove_dir_all(directory.parent().expect("a parent")).expect("the test's to remove");
+}
+
+#[test]
+fn the_keep_flag_chooses_what_a_failure_does() {
+    assert_eq!(
+        ScratchOnFailure::from_keep_flag(true),
+        ScratchOnFailure::Kept
+    );
+    assert_eq!(
+        ScratchOnFailure::from_keep_flag(false),
+        ScratchOnFailure::Removed
+    );
+}
+
 /// A `--tmp-dir` that is not there is refused, naming it.
 #[test]
 fn a_tmp_dir_that_is_not_there_is_refused() {
-    let refused = scratch_directory_for(Path::new("calls.vcf"), Some(Path::new("no/such/dir")))
-        .expect_err("there is nowhere to make it");
+    let refused = scratch_directory_for(
+        Path::new("calls.vcf"),
+        Some(Path::new("no/such/dir")),
+        ScratchOnFailure::Removed,
+    )
+    .expect_err("there is nowhere to make it");
     assert!(matches!(refused, CallingRunError::ScratchDirectory { .. }));
 }
 

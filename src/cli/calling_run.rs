@@ -923,11 +923,12 @@ pub fn refuse_a_tmp_dir_that_is_not_a_directory(
 
 /// **The run's own scratch directory**, `pvc_tmp_<random>` inside `--tmp-dir`, or inside the
 /// VCF's directory when no `--tmp-dir` was given (the working directory for a VCF on standard
-/// output) (`doc/devel/ng/spec/command_line.md` §7.5). Removed when the returned value is
-/// dropped.
+/// output) (`doc/devel/ng/spec/command_line.md` §7.5).
 ///
 /// **A directory of its own**, so several runs can share one `--tmp-dir` without colliding, and
 /// removing it never touches anything the user put there.
+///
+/// What happens to it when the run ends is [`RunScratch`]'s, and `on_failure` says which way.
 ///
 /// # Errors
 ///
@@ -935,7 +936,8 @@ pub fn refuse_a_tmp_dir_that_is_not_a_directory(
 pub fn scratch_directory_for(
     output: &Path,
     tmp_dir: Option<&Path>,
-) -> Result<tempfile::TempDir, CallingRunError> {
+    on_failure: ScratchOnFailure,
+) -> Result<RunScratch, CallingRunError> {
     let directory = match tmp_dir {
         Some(directory) => directory.to_path_buf(),
         None => match output.parent() {
@@ -951,7 +953,103 @@ pub fn scratch_directory_for(
             source,
         })?;
     tracing::debug!("scratch directory: {}", made.path().display());
-    Ok(made)
+    Ok(RunScratch {
+        directory: Some(made),
+        on_failure,
+        the_run_succeeded: false,
+    })
+}
+
+/// What becomes of a run's scratch directory when the run ends in an error —
+/// `--keep-tmp-on-error`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScratchOnFailure {
+    /// Removed, as on success. The default: a failed run with the hidden-duplication filter on
+    /// can leave a spill several terabytes long on a cohort of thousands.
+    Removed,
+    /// Left on disk, with everything in it, and its path logged — for looking at what the run
+    /// had made before it stopped.
+    Kept,
+}
+
+impl ScratchOnFailure {
+    /// The choice `--keep-tmp-on-error` makes.
+    #[must_use]
+    pub fn from_keep_flag(keep_tmp_on_error: bool) -> Self {
+        if keep_tmp_on_error {
+            Self::Kept
+        } else {
+            Self::Removed
+        }
+    }
+}
+
+/// **A run's scratch directory and the one decision about it: removed or kept when the run
+/// ends.**
+///
+/// The directory is removed when this is dropped, unless the run never said it succeeded and
+/// [`ScratchOnFailure::Kept`] was asked for. A run says so with [`Self::the_run_succeeded`] as
+/// its last step, so **every way out that is not that step counts as a failure**: an error
+/// returned through `?` from anywhere in the run drops this without it.
+///
+/// **It is the one owner of what is inside.** The hidden-duplication filter's spill lives here
+/// and does not remove itself (`SpillFile::in_directory`), so keeping the directory keeps the
+/// spill, and removing it removes the spill. A panic in a release build aborts, so no `Drop`
+/// runs and the directory stays whatever was asked; in a debug build it unwinds through here and
+/// counts as a failure.
+#[derive(Debug)]
+pub struct RunScratch {
+    /// `None` only once `Drop` has taken it.
+    directory: Option<tempfile::TempDir>,
+    on_failure: ScratchOnFailure,
+    the_run_succeeded: bool,
+}
+
+impl RunScratch {
+    /// Where the directory is.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.directory
+            .as_ref()
+            // PANIC-FREE: `directory` is `Some` from construction until `Drop` takes it.
+            .expect("the scratch directory is there until it is dropped")
+            .path()
+    }
+
+    /// Record that the run finished and wrote its output, so the directory is removed whatever
+    /// `--keep-tmp-on-error` said.
+    pub fn the_run_succeeded(&mut self) {
+        self.the_run_succeeded = true;
+    }
+}
+
+impl Drop for RunScratch {
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        if !self.the_run_succeeded && self.on_failure == ScratchOnFailure::Kept {
+            let kept = directory.keep();
+            tracing::warn!(
+                "the run did not finish; its scratch directory is kept, as --keep-tmp-on-error \
+                 asked: {} — remove it once it is no longer needed",
+                kept.display()
+            );
+            return;
+        }
+        let path = directory.path().to_path_buf();
+        if let Err(source) = directory.close() {
+            // A directory left on disk, possibly terabytes of spill, is worth a line; a `Drop`
+            // must not panic, and a second message while a panic unwinds would bury the first.
+            if !std::thread::panicking() {
+                tracing::warn!(
+                    "the run's scratch directory `{}` could not be removed and is still on \
+                     disk: {source}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 /// Where the calls went, as a person reads it: the file, or `standard output`.

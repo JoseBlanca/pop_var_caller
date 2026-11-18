@@ -53,8 +53,10 @@ const BUFFER_BYTES: usize = 64 * 1024;
 /// **The spill file: `<output>.paralog-spill.tmp`, beside the output on the same filesystem.**
 ///
 /// One of these exists for one run. Pass one appends to it; [`Self::finish_writing`] flushes it;
-/// passes two and three each open their own cursor over it with [`Self::read`]. Dropping it
-/// unlinks the file.
+/// passes two and three each open their own cursor over it with [`Self::read`]. Dropping one
+/// named with [`Self::beside`] unlinks the file; one named with [`Self::in_directory`] is left to
+/// the run's scratch directory, which removes it or, after a failed run with
+/// `--keep-tmp-on-error`, keeps it.
 ///
 /// The name follows the convention the VCF writer already uses for `<output>.tmp`: beside the
 /// output rather than in a scratch directory anywhere else, so that the spill lands on the
@@ -82,6 +84,20 @@ pub struct SpillFile {
     /// unlink and whether another record may still be appended.
     stage: Stage,
     entries_written: u64,
+    /// Whether dropping this unlinks the file, or the directory it lives in owns that.
+    removal: SpillRemoval,
+}
+
+/// Who removes the spill's file once the run is done with it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SpillRemoval {
+    /// The spill itself, when it is dropped. Only [`SpillFile::beside`] names one, and only tests
+    /// call that: every run's spill lives in the run's scratch directory.
+    #[cfg(test)]
+    WhenDropped,
+    /// The directory it lives in — the run's scratch directory, which decides whether a failed
+    /// run's spill is kept (`RunScratch`).
+    WithItsDirectory,
 }
 
 /// Where a spill is in its one life: named, being written, or finished.
@@ -106,11 +122,11 @@ impl SpillFile {
     /// when the first entry is appended.
     #[must_use]
     pub fn beside(output: &Path) -> Self {
-        Self::at(spill_path_beside(output))
+        Self::at(spill_path_beside(output), SpillRemoval::WhenDropped)
     }
 
     /// Name the spill at `path`. Creates nothing.
-    fn at(path: PathBuf) -> Self {
+    fn at(path: PathBuf, removal: SpillRemoval) -> Self {
         Self {
             path,
             named_at: Instant::now(),
@@ -118,14 +134,22 @@ impl SpillFile {
             writer: None,
             stage: Stage::NotYetCreated,
             entries_written: 0,
+            removal,
         }
     }
 
     /// Name the spill inside `directory` — the run's own temporary directory
     /// (`doc/devel/ng/spec/command_line.md` §7.5). **Creates nothing**, as `Self::beside`.
+    ///
+    /// **Dropping it leaves the file**: the directory is removed with everything in it when the
+    /// run ends, unless the run failed and asked to keep it, and a spill that unlinked itself
+    /// would empty a directory kept to look at.
     #[must_use]
     pub fn in_directory(directory: &Path) -> Self {
-        Self::at(directory.join(SPILL_FILE_NAME))
+        Self::at(
+            directory.join(SPILL_FILE_NAME),
+            SpillRemoval::WithItsDirectory,
+        )
     }
 
     #[cfg(test)]
@@ -336,7 +360,8 @@ impl SpillFile {
 }
 
 impl Drop for SpillFile {
-    /// Close the handle, then unlink the file.
+    /// Close the handle, then unlink the file — unless its directory owns that
+    /// ([`Self::in_directory`]).
     ///
     /// **Nothing is reported if the removal fails.** A `Drop` that runs while a panic is
     /// unwinding cannot return an error and must not panic itself, and the failure it would be
@@ -347,13 +372,14 @@ impl Drop for SpillFile {
             path,
             writer,
             stage,
+            removal,
             named_at: _,
             bytes_on_disk: _,
             entries_written: _,
         } = self;
         // Closing the handle before unlinking is not needed on Unix and is on Windows.
         *writer = None;
-        if *stage == Stage::NotYetCreated {
+        if *stage == Stage::NotYetCreated || *removal == SpillRemoval::WithItsDirectory {
             return;
         }
         if let Err(source) = fs::remove_file(&*path) {

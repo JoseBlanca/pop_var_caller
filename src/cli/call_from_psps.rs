@@ -174,11 +174,20 @@ pub struct CallFromPspsArgs {
     /// working directory when the VCF goes to standard output.
     ///
     /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
-    /// it ends, whether it succeeded or failed; a run that is killed, or stops on an internal
-    /// error, leaves it behind. While the hidden-dup filter is on, every call waits there until
-    /// the whole genome is called: several times the compressed VCF's size.
+    /// it ends, whether it succeeded or failed, unless --keep-tmp-on-error; a run that is
+    /// killed, or stops on an internal error, leaves it behind. While the hidden-dup filter is
+    /// on, every call waits there until the whole genome is called: several times the
+    /// compressed VCF's size.
     #[arg(long)]
     pub tmp_dir: Option<PathBuf>,
+
+    /// Keep the run's scratch directory, and the hidden-dup filter's spill in it, when the run
+    /// stops on an error. Its path is logged. A run that finishes removes it as usual.
+    ///
+    /// The spill holds every called record, so on a large cohort the kept directory can take
+    /// terabytes: remove it once it is no longer needed.
+    #[arg(long)]
+    pub keep_tmp_on_error: bool,
 
     /// A locus where any sample has a read group deeper than this is not called, for any sample.
     ///
@@ -695,12 +704,14 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // decided nothing.
     // **The run's own scratch directory, made only where something will be parked in it**, and
     // removed when `scratch` is dropped — at the end of this function, on its success or on any
-    // error that returns through it.
+    // error that returns through it, unless the run failed with `--keep-tmp-on-error`: only the
+    // last step, `the_run_succeeded`, counts as success.
     calling_run::warn_of_read_phase_without_the_duplication_filter(asked_for.is_some(), ploidy);
-    let scratch = match asked_for {
+    let mut scratch = match asked_for {
         Some(_) => Some(calling_run::scratch_directory_for(
             &args.output,
             args.tmp_dir.as_deref(),
+            calling_run::ScratchOnFailure::from_keep_flag(args.keep_tmp_on_error),
         )?),
         None => None,
     };
@@ -843,6 +854,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         run_output::elapsed_text(started.elapsed())
     );
     tracing::info!("log: {}", log.display());
+    if let Some(scratch) = &mut scratch {
+        scratch.the_run_succeeded();
+    }
     Ok(())
 }
 

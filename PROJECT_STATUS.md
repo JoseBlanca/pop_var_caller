@@ -22,7 +22,12 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-10):** **the hidden-duplication filter scores STR records from their
+> - **Last completed task (2026-11-18):** **`--keep-tmp-on-error`** (branch `keep-tmp-on-error`,
+> [report](doc/devel/reports/implementations/keep_tmp_on_error_2026-11-18.md)): both calling
+> commands keep a failed run's scratch directory, the hidden-dup filter's spill with it, and log its
+> path; a run that finishes removes it as before. Status: implemented, not reviewed.
+>
+> - **Earlier (2026-10-10):** **the hidden-duplication filter scores STR records from their
 > read split** (branch `str-filter-read-split`, from `segmenter-and-stutter-bench`; spec
 > `hidden_paralog_filter.md` §3.2). Ported alone from `tract-ceiling` (797bbbcc/0b098573): an STR
 > record is scored on coverage and `AD[0]` against the other alleles' reads, as SNP/indel records are.

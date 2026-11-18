@@ -1310,6 +1310,7 @@ mod tests {
             force: false,
             log: None,
             tmp_dir: None,
+            keep_tmp_on_error: false,
             parameters: Some(parameters.clone()),
             defaults: false,
             ploidy: None,
