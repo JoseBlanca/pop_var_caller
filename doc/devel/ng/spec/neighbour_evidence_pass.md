@@ -576,19 +576,23 @@ grows with the cohort, and what each thread's walk holds at every record, which 
 threads.
 
 - **Per sample and record**, for every record the window spans: the record's VCF line, held
-  compressed; its likelihoods and shares (`L` and `q`, as `f32`); each sample's read alleles, four
-  bytes each where a record's fit, seven where they do not (`PackedRecordFragments`); and each
-  sample's two haplotypes, the templates they followed and its phase across the rounds. For each
-  record of the core, besides: each sample's sums over the averaged rounds and its written result,
-  both `f32`, and the line again, handed back rewritten and whole. Each sample's own result is
+  compressed; its likelihoods, as `PL` above the sample's lowest in a `u16` read back as the `f32`
+  `10^(−PL/10)`, and its shares (`q`, `f32`); each sample's read alleles, three bytes each where a
+  record's alleles are at most 3, four or seven where they do not fit (`PackedRecordFragments`);
+  and each sample's two haplotypes, the templates they followed and its phase across the rounds,
+  each allele pair's path bits packed in `⌈2·paths/8⌉` bytes. For each record of the core,
+  besides: each sample's sums over the averaged rounds and its written result, both `f32`. A
+  core's lines are rewritten and written a chunk at a time (2026-11-22,
+  `refine_memory_exact_2026-11-22.md`). Each sample's own result is
   made from its sums a few hundred samples at a time, as its state is let go, and copied into the
   records (2026-11-18, `refine_memory_2026-11-18.md`). *Measured 2026-11-13* on 400 tomato25 samples
   (chromosome 0, about 22 read alleles a sample a record there), about 140 bytes a sample a record
   held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
   of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
   bytes, counted only the likelihoods and shares.
-- **Per thread and record**: a walk's terms for the backward sweep, the round's inputs and, from
-  round 2, the nine drawn paths. Its forward probabilities (`K² + 3K` numbers a record) and
+- **Per thread and record**: the round's inputs (the drawn definite alleles a byte each) and, from
+  round 2, the nine drawn paths; a site's blurred shares and likelihood matrix are computed where
+  they are read, not kept (2026-11-22). Its forward probabilities (`K² + 3K` numbers a record) and
   emissions (`K² + K`) are kept for one block of 64 records, the forward probabilities also at
   every block's first record, and computed again block by block in the backward sweep (2026-11-13;
   the same bits, and about three times fewer cycles, since the walk had been waiting on memory).

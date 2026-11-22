@@ -209,6 +209,35 @@ pub struct WindowOverBudget {
     pub budget: u64,
 }
 
+/// **Why the stage stopped handing lines on**: a window over its budget, or the writer refusing a
+/// line it was handed ([`NeighbourEvidenceStage::push_writing`]).
+#[derive(Debug)]
+pub enum StageStop<E> {
+    /// A window holds more than the budget even at the smallest size.
+    OverBudget(WindowOverBudget),
+    /// Writing a line failed.
+    Write(E),
+}
+
+impl<E> From<WindowOverBudget> for StageStop<E> {
+    fn from(over: WindowOverBudget) -> Self {
+        Self::OverBudget(over)
+    }
+}
+
+/// What a stage that hands its lines to a vector can stop on: only the budget.
+fn over_budget(stop: StageStop<std::convert::Infallible>) -> WindowOverBudget {
+    match stop {
+        StageStop::OverBudget(over) => over,
+        StageStop::Write(never) => match never {},
+    }
+}
+
+/// **How many of a core's lines are rewritten together**, on the pool, and handed on before the
+/// next ones are: a core's rewritten lines were all held at once before the first was written —
+/// on 2,176 tomato samples about 9 GB at the smallest window — and a chunk is a few hundred MB.
+const LINES_REWRITTEN_TOGETHER: usize = 1_024;
+
 /// **How many held lines are compressed together**, on the pool, once that many have arrived
 /// since the last batch: compressing each as it arrives would put the work on the one thread every
 /// line passes through.
@@ -419,17 +448,39 @@ impl NeighbourEvidenceStage {
         fragments: RecordFragments,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) -> Result<(), WindowOverBudget> {
+        self.push_writing(place, line, fragments, &mut |place, line| {
+            ready.push((place, line));
+            Ok(())
+        })
+        .map_err(over_budget)
+    }
+
+    /// **Takes one line, as [`Self::push`], and hands each line it completes to `write`** in the
+    /// order they arrived, a chunk of a core at a time ([`LINES_REWRITTEN_TOGETHER`]) — so a core's
+    /// rewritten lines are never all held at once.
+    ///
+    /// # Errors
+    ///
+    /// If a window this line completed holds more than the budget even at the smallest size, or
+    /// `write` refuses a line.
+    pub fn push_writing<E>(
+        &mut self,
+        place: RecordPlace,
+        line: Vec<u8>,
+        fragments: RecordFragments,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
         if self.contig.is_some_and(|contig| contig != place.at.contig) {
-            self.finish(ready)?;
+            self.finish_writing(write)?;
         }
         self.contig = Some(place.at.contig);
-        // **A line is counted at its compressed length** over every window that spans it, and at
-        // its length again in a core, whose lines are handed back rewritten and whole. Until it is
-        // compressed it counts at the length it arrived at, which only overstates, and no window is
-        // planned on a line not yet compressed (`release`), so what a record costs does not depend
-        // on when its batch was compressed.
+        // **A line is counted at its compressed length** over every window that spans it. Until it
+        // is compressed it counts at the length it arrived at, which only overstates, and no window
+        // is planned on a line not yet compressed (`release`), so what a record costs does not
+        // depend on when its batch was compressed. A core's lines are rewritten and handed on a
+        // chunk at a time, which the budget does not count, as it does not count the walks' arrays.
         let mut held = line.len() as u64;
-        let mut core = line.len() as u64;
+        let mut core = 0;
         let site = site_of(&line, self.samples).map(|record| {
             let fragments = PackedRecordFragments::from(fragments);
             let (record_held, record_core) = record_window_bytes(&record);
@@ -452,7 +503,7 @@ impl NeighbourEvidenceStage {
         {
             self.compress_held_lines();
         }
-        self.release(false, ready)
+        self.release(false, write)
     }
 
     /// **Compresses every held line not yet compressed**, on the pool, and counts each at its
@@ -484,7 +535,23 @@ impl NeighbourEvidenceStage {
         &mut self,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) -> Result<(), WindowOverBudget> {
-        self.release(true, ready)?;
+        self.finish_writing(&mut |place, line| {
+            ready.push((place, line));
+            Ok(())
+        })
+        .map_err(over_budget)
+    }
+
+    /// **Finishes the current contig, as [`Self::finish`], handing its lines to `write`.**
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::push_writing`].
+    pub fn finish_writing<E>(
+        &mut self,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
+        self.release(true, write)?;
         self.held.clear();
         self.held_bytes = vec![0];
         self.core_bytes = vec![0];
@@ -501,11 +568,11 @@ impl NeighbourEvidenceStage {
 
     /// Solves every window whose lines have all arrived (or all of them, when the contig is
     /// complete), hands back their cores, and forgets what no later window reads.
-    fn release(
+    fn release<E>(
         &mut self,
         contig_complete: bool,
-        ready: &mut Vec<(RecordPlace, Vec<u8>)>,
-    ) -> Result<(), WindowOverBudget> {
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
         while self.core_start < self.held.len() {
             let Some(plan) = plan_window(
                 &self.positions,
@@ -526,17 +593,18 @@ impl NeighbourEvidenceStage {
                 continue;
             }
             if plan.over_budget > 0 {
-                return Err(WindowOverBudget {
+                return Err(StageStop::OverBudget(WindowOverBudget {
                     contig: self.contig.map_or(0, |contig| contig.0),
                     position: self.positions[plan.core_start],
                     records: plan.records(),
                     samples: self.samples,
                     bytes: plan.bytes,
                     budget: self.sizes.budget_bytes,
-                });
+                }));
             }
             #[cfg(test)]
             self.core_starts.push(self.positions[plan.core_start]);
+            let began = std::time::Instant::now();
             let window_sites = self.site_span(plan.context_start..plan.context_end);
             let core_sites = self.site_span(plan.core_start..plan.core_end);
             let refined = if core_sites.is_empty() {
@@ -599,38 +667,59 @@ impl NeighbourEvidenceStage {
                 self.remember_last_blocks(core_sites.start, &solved.records);
                 solved.records
             };
-            // **The core's lines are rewritten on the pool and handed back in their own order.**
-            // Each rewrite reads only its line and its refined record, so the lines are
-            // independent; done on this thread it was a quarter of the writing pass on 59 tomato
-            // accessions over 32 Mb, with every other thread waiting for the next window. The
-            // tallies are counts, so summing them in any order gives the serial total.
-            let rewritten: Vec<(RecordPlace, Option<Vec<u8>>, RewriteTally)> = self.held
-                [plan.core_start..plan.core_end]
-                .par_iter_mut()
-                .map_init(
-                    || (GenotypePairs::default(), line_decompressor()),
-                    |(pairs, decompressor), held| {
-                        let line = held.text.take(decompressor);
-                        let mut tally = RewriteTally::default();
-                        let written = match held.site {
-                            Some(site) => rewrite_line(
-                                &line,
-                                &refined[site - core_sites.start],
-                                pairs,
-                                &mut tally,
-                            ),
-                            None => Some(line),
-                        };
-                        (held.place, written, tally)
-                    },
-                )
-                .collect();
-            for (place, written, tally) in rewritten {
-                self.tally.add(tally);
-                if let Some(line) = written {
-                    ready.push((place, line));
+            // **The core's lines are rewritten on the pool and handed on in their own order**, a
+            // chunk at a time. Each rewrite reads only its line and its refined record, so the lines
+            // are independent; done on this thread it was a quarter of the writing pass on 59
+            // tomato accessions over 32 Mb, with every other thread waiting for the next window.
+            // The tallies are counts, so summing them in any order gives the serial total.
+            let mut chunk_start = plan.core_start;
+            while chunk_start < plan.core_end {
+                let chunk_end = (chunk_start + LINES_REWRITTEN_TOGETHER).min(plan.core_end);
+                let rewritten: Vec<(RecordPlace, Option<Vec<u8>>, RewriteTally)> = self.held
+                    [chunk_start..chunk_end]
+                    .par_iter_mut()
+                    .map_init(
+                        || (GenotypePairs::default(), line_decompressor()),
+                        |(pairs, decompressor), held| {
+                            let line = held.text.take(decompressor);
+                            let mut tally = RewriteTally::default();
+                            let written = match held.site {
+                                Some(site) => rewrite_line(
+                                    &line,
+                                    &refined[site - core_sites.start],
+                                    pairs,
+                                    &mut tally,
+                                ),
+                                None => Some(line),
+                            };
+                            (held.place, written, tally)
+                        },
+                    )
+                    .collect();
+                for (place, written, tally) in rewritten {
+                    self.tally.add(tally);
+                    if let Some(line) = written {
+                        write(place, line).map_err(StageStop::Write)?;
+                    }
                 }
+                chunk_start = chunk_end;
             }
+            // **One line a window in the run's log**: where it was, what it held by the budget's
+            // count and how long it took — what a run that slows or runs short of memory is read
+            // back from.
+            tracing::debug!(
+                "refinement window: contig {} core {}..{}, {} records ({} in the core), {} \
+                 samples, {:.2} GB of a {:.2} GB budget, {:.1} s",
+                self.contig.map_or(0, |contig| contig.0),
+                self.positions[plan.core_start],
+                self.positions[plan.core_end - 1],
+                plan.records(),
+                plan.core_end - plan.core_start,
+                self.samples,
+                plan.bytes as f64 / 1e9,
+                self.sizes.budget_bytes as f64 / 1e9,
+                began.elapsed().as_secs_f64()
+            );
             self.core_start = plan.core_end;
             self.forget_what_no_window_reads();
         }

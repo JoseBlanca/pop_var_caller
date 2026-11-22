@@ -57,3 +57,39 @@ fn frequencies_past_one_are_rescaled() {
     background_shares(&[0.6, 0.6], &mut shares);
     assert_eq!(shares, vec![0.0, 0.5, 0.5]);
 }
+
+/// **A likelihood held as its `PL` above the lowest reads back as the `f32` the expression gives**,
+/// bit for bit, at every `u16`, and a `PL` past `u16::MAX` reads as the zero it is.
+#[test]
+fn a_likelihood_held_in_two_bytes_is_the_f32_it_stands_for() {
+    for phred in 0..=u16::MAX {
+        let expected = crate::float::powf(10.0, -f64::from(phred) / 10.0) as f32;
+        assert_eq!(
+            likelihood_of(phred).to_bits(),
+            expected.to_bits(),
+            "PL {phred}"
+        );
+    }
+    let far = crate::float::powf(10.0, -f64::from(70_000_u32) / 10.0) as f32;
+    assert_eq!(far.to_bits(), likelihood_of(u16::MAX).to_bits());
+    let record = SiteRecord::new(
+        10,
+        &[0.5],
+        &[
+            biallelic(&[0, 70_000, 455], &[1.0, 0.0, 0.0]),
+            biallelic(&[30, 0, 300], &[0.0, 1.0, 0.0]),
+        ],
+    );
+    let read: Vec<u32> = record
+        .likelihoods(0)
+        .map(|l| (l as f32).to_bits())
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            1.0_f32.to_bits(),
+            0.0_f32.to_bits(),
+            likelihood_of(455).to_bits()
+        ]
+    );
+}
