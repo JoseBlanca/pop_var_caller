@@ -22,7 +22,13 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-18):** **refinement's window memory cut** (branch `refine-memory`;
+> - **Last completed task (2026-11-22):** **refinement's memory, second cut, the same output**
+> (branch `refine-memory-2`, [report](doc/devel/reports/implementations/refine_memory_exact_2026-11-22.md)):
+> likelihoods as `u16` `PL`, path bits packed, read alleles in three bytes, a core's lines written a
+> chunk at a time, a walk's per-site terms computed where read. On 2,176 tomato25 samples over
+> 1.5 Mb: byte-identical VCF, peak 62.5 → 51.6 GB, wall time 1,705 → 1,174 s. Status: implemented,
+> not reviewed.
+> - **Earlier (2026-11-18):** **refinement's window memory cut** (branch `refine-memory`;
 > `doc/devel/reports/implementations/refine_memory_2026-11-18.md`): sums and results in `f32`,
 > results made 256 samples at a time as each state is let go, read alleles in four bytes where they
 > fit, lines counted compressed, phases in 12 bytes; `--refine-window-floor`. On 100 tomato25

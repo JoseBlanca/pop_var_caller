@@ -1009,10 +1009,10 @@ fn an_even_landing_share_is_no_landing_share() {
 #[test]
 fn the_emissions_and_the_prediction_read_their_own_shares() {
     static UNSURE: [f64; 2] = [0.5, 0.5];
-    static DEFINITE: [f64; 2] = [0.0, 1.0];
+    static DEFINITE: [u8; 2] = [0, 1];
     static ALTERNATIVE_READ: [f64; 3] = [0.01, 0.5, 1.0];
     static FLAT: [f64; 3] = [1.0, 1.0, 1.0];
-    let sites = |emission: Option<&'static [f64]>| -> Vec<WalkSite<'static>> {
+    let sites = |emission: Option<&'static [u8]>| -> Vec<WalkSite<'static>> {
         [(1_000_u64, &ALTERNATIVE_READ), (2_000, &FLAT)]
             .iter()
             .map(|&(position, likelihoods)| WalkSite {

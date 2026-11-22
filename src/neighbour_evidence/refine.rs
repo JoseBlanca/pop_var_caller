@@ -350,6 +350,10 @@ pub struct Phasing {
     reads_in_draw: bool,
 }
 
+/// **How many paths a run's window draws**, at [`PHASING_ROUNDS`]: what the window budget counts
+/// each allele pair's packed bits at.
+pub(super) const PHASED_PATHS: usize = (PHASING_ROUNDS - 1) * (1 + EXTRA_PATHS_PER_ROUND);
+
 // The default rounds' paths fit the link test's masks.
 const _: () = assert!((PHASING_ROUNDS - 1) * (1 + EXTRA_PATHS_PER_ROUND) <= MAX_PATHS);
 
@@ -415,6 +419,11 @@ impl Phasing {
             path_agreement: agreement,
             ..self
         }
+    }
+
+    /// How many paths the window's averaged rounds draw: each round's own and its extra ones.
+    fn paths(self) -> usize {
+        (self.rounds - 1) * (1 + self.extra_paths)
     }
 
     fn is_on(self) -> bool {
@@ -1002,7 +1011,7 @@ pub fn refine_window_with_reads(
                 parameters: None,
                 sums: Vec::new(),
                 phase: (phasing.is_on() && templates.is_some())
-                    .then(|| SamplePhase::new(&sum_offsets, &pairs)),
+                    .then(|| SamplePhase::new(&sum_offsets, &pairs, phasing.paths())),
                 templates,
             }
         })
@@ -1320,7 +1329,7 @@ fn solve_round(
     // what the prediction and the drawn haplotypes read.
     let mut definite = (round > 1).then(|| {
         (
-            Vec::<f64>::new(),
+            Vec::<u8>::new(),
             Uniforms::new(
                 StreamPurpose::DefiniteAlleles,
                 phasing.window_key,
@@ -1356,7 +1365,7 @@ fn solve_round(
         if let Some((drawn, uniforms)) = definite.as_mut() {
             for template_shares in shares[share_start..].chunks_exact(record.allele_count) {
                 let allele = pick(template_shares, uniforms.next_uniform());
-                drawn.extend((0..record.allele_count).map(|a| f64::from(u8::from(a == allele))));
+                drawn.extend((0..record.allele_count).map(|a| u8::from(a == allele)));
             }
         }
         spans.push((
