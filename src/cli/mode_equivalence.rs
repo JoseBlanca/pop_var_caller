@@ -500,12 +500,85 @@ mod tests {
             name.starts_with("pvc_tmp_"),
             "kept under the run's own name: {name}"
         );
-        assert_eq!(inside, &vec!["hidden-dup-spill.tmp".to_owned()]);
+        assert_eq!(
+            inside,
+            &vec![
+                crate::run::paralog_filter::resume::HISTOGRAMS_FILE_NAME.to_owned(),
+                "hidden-dup-spill.tmp".to_owned(),
+                crate::run::paralog_filter::resume::RESUME_FILE_NAME.to_owned(),
+            ],
+            "the spill, and what resuming the run needs beside it"
+        );
         let spill = tmp_dir.join(name).join("hidden-dup-spill.tmp");
         assert!(
             std::fs::metadata(&spill).expect("the spill is there").len() > 0,
             "the kept spill holds the parked records"
         );
+        drop(cohort);
+    }
+
+    /// **`pvc resume-calling` finishes a run that failed in the writing pass from the scratch
+    /// directory it kept, and writes the records a run that never failed writes** — the tomato25
+    /// failure of 2026-11-22, resumed with a budget refinement fits, against the same run made at
+    /// that budget from the start. The header differs only in the command line and the log it
+    /// names, which are the failed run's, the run that called; the refinement line states the
+    /// budget the resumed run used. The directory is gone once the resumed run has finished.
+    #[test]
+    fn a_run_resumed_from_its_kept_scratch_writes_what_an_unbroken_run_writes() {
+        let (cohort, args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(true);
+        run_call_from_psps(&args).expect_err("refinement cannot fit a one-byte window");
+        let held = what_the_tmp_dir_holds(&tmp_dir);
+        assert_eq!(held.len(), 1, "one scratch directory is kept: {held:?}");
+        let scratch = tmp_dir.join(&held[0].0);
+
+        let resumed_output = cohort.directory.path().join("resumed.vcf");
+        crate::cli::resume_calling::run_resume_calling(
+            &crate::cli::resume_calling::ResumeCallingArgs {
+                scratch_dir: scratch.clone(),
+                output: resumed_output.clone(),
+                threads: 0,
+                force: false,
+                log: Some(cohort.directory.path().join("resumed.log")),
+                keep_tmp_on_error: false,
+                refine_window_bytes: Some(crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES),
+                refine_window_floor: None,
+                phase_min_path_agreement: None,
+            },
+        )
+        .expect("the run resumes and finishes");
+        assert!(
+            !scratch.exists(),
+            "a resumed run that finishes removes the directory"
+        );
+
+        let mut unbroken = args.clone();
+        unbroken.refine_window_bytes = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
+        unbroken.keep_tmp_on_error = false;
+        unbroken.output = cohort.directory.path().join("unbroken.vcf");
+        unbroken.log = Some(cohort.directory.path().join("unbroken.log"));
+        run_call_from_psps(&unbroken).expect("the same run at a budget refinement fits");
+
+        let without_the_command_line = |lines: Vec<String>| -> Vec<String> {
+            lines
+                .into_iter()
+                .filter(|line| {
+                    !line.starts_with("##commandline=") && !line.starts_with("##pvcLog=")
+                })
+                .collect()
+        };
+        let resumed = without_the_command_line(comparable(&resumed_output));
+        let unbroken = without_the_command_line(comparable(&unbroken.output));
+        assert!(
+            records(&unbroken) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the run must call something for the comparison to claim anything"
+        );
+        assert!(
+            unbroken
+                .iter()
+                .any(|line| line.starts_with("##neighbourEvidence=<ran=yes")),
+            "refinement must run, or this does not test resuming it"
+        );
+        assert_eq!(resumed, unbroken);
         drop(cohort);
     }
 

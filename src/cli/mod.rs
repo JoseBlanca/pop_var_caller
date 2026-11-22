@@ -21,6 +21,7 @@ pub mod parsers;
 pub(crate) mod provenance;
 pub mod psp_inputs;
 pub mod repeat_catalog;
+pub mod resume_calling;
 pub mod run_ground;
 pub mod run_output;
 #[cfg(test)]
@@ -41,4 +42,5 @@ pub use estimate_parameters::{
 pub use generate_psps::{GeneratePspsArgs, GeneratePspsCliError, run_generate_psps};
 pub use inspect_psp::{InspectPspArgs, InspectPspCliError, run_inspect_psp};
 pub use repeat_catalog::{RepeatCatalogArgs, RepeatCatalogCliError, run_repeat_catalog};
+pub use resume_calling::{ResumeCallingArgs, ResumeCallingCliError, run_resume_calling};
 pub use typed_regions::{TypedRegionsArgs, TypedRegionsCliError, run_typed_regions};

@@ -626,6 +626,21 @@ cluster's scratch disk for example, without colliding. The log records where the
 directory was and how much the run put in it at most, so a user can size the scratch space for the
 next run.
 
+**`--keep-tmp-on-error` keeps the directory of a run that fails**, and a run that fails after
+calling has ended can be finished from it: **`pvc resume-calling --scratch-dir <dir> --output
+<vcf>`** (2026-11-22). When calling ends, the run keeps beside its spill what the
+hidden-duplication filter's passes take besides it — each sample's coverage histogram
+(`coverage-histograms.tsv`, every cell, the bin width by its bit pattern) and a manifest
+(`resume.json`: the spill's entry count and layout number, the ploidy, each sample's inbreeding by
+bit pattern, what was asked of the filter, the header's metadata and the refinement decision),
+the manifest written last so that its presence means the point is complete. `resume-calling`
+reads them back and runs passes two and three through the function a run calls, so it writes what
+the run would have written; it may change only what the writing does — refinement's window budget
+and smallest window, the path agreement, the threads, the output and the log. A spill whose
+layout number differs from the build's is refused. The VCF's header states the stopped run's
+command line and log, the runs that called. What a resumed run cannot report is calling's own
+report, which the stopped run logged.
+
 ### 7.6 The VCF header
 
 The VCF already records `##source` and `##commandline`. **It also names its log and the

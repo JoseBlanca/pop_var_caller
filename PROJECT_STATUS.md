@@ -22,7 +22,13 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-18):** **refinement's window memory cut** (branch `refine-memory`;
+> - **Last completed task (2026-11-22):** **`pvc resume-calling`** (branch `resume-from-scratch`,
+> [report](doc/devel/reports/implementations/resume_calling_2026-11-22.md)): a run with the
+> hidden-dup filter keeps, once calling ends, each sample's coverage histogram and a manifest beside
+> its spill; `pvc resume-calling --scratch-dir` scores and writes from them, refinement settings
+> changeable, without calling again. A resumed run writes the records an unbroken run writes.
+> Status: implemented, not reviewed.
+> - **Earlier (2026-11-18):** **refinement's window memory cut** (branch `refine-memory`;
 > `doc/devel/reports/implementations/refine_memory_2026-11-18.md`): sums and results in `f32`,
 > results made 256 samples at a time as each state is let go, read alleles in four bytes where they
 > fit, lines counted compressed, phases in 12 bytes; `--refine-window-floor`. On 100 tomato25

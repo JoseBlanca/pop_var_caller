@@ -323,9 +323,149 @@ pub fn write_the_histogram(sample: usize, histogram: &SampleHistogram, into: &mu
     }
 }
 
+/// **One line [`write_the_histogram`] wrote, read back**: the sample's index and its histogram,
+/// the same value bit for bit — the bin width comes back from its bit pattern, and every cell
+/// from its own column.
+///
+/// **What a resumed run fits the hidden-duplication filter from**
+/// ([`crate::run::paralog_filter::resume`]): the histograms are finished when calling ends and
+/// nothing else can rebuild them without reading every sample's reads again, so a run that stops
+/// later keeps them in this form beside its spill.
+///
+/// # Errors
+///
+/// A line whose kind is not one of the four, whose fields are missing or will not parse, or whose
+/// cells are not the count its scheme describes — naming what was wrong.
+pub fn read_the_histogram(line: &str) -> Result<(usize, SampleHistogram), String> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let [sample, kind, rest @ ..] = &fields[..] else {
+        return Err(format!("expected a sample and a kind, got {line:?}"));
+    };
+    let number = |column: &str, field: &str| -> Result<u64, String> {
+        field
+            .parse()
+            .map_err(|_| format!("{column} is not a number: {field:?}"))
+    };
+    let small = |column: &str, field: &str| -> Result<u32, String> {
+        u32::try_from(number(column, field)?)
+            .map_err(|_| format!("{column} is too large: {field:?}"))
+    };
+    let sample = usize::try_from(number("the sample", sample)?)
+        .map_err(|_| format!("the sample is too large: {sample:?}"))?;
+    let silent = |histogram: SampleHistogram| -> Result<(usize, SampleHistogram), String> {
+        if rest.is_empty() {
+            Ok((sample, histogram))
+        } else {
+            Err(format!(
+                "a {kind} line carries nothing after its kind: {line:?}"
+            ))
+        }
+    };
+    match *kind {
+        "no-window-finalised" => silent(SampleHistogram::NoWindowFinalised),
+        "every-window-under-the-floor" => silent(SampleHistogram::EveryWindowUnderTheFloor),
+        "median-depth-not-positive" => silent(SampleHistogram::MedianDepthNotPositive),
+        "fitted" => {
+            let [
+                window_bp,
+                gc_bins,
+                width_bits,
+                depth_bins,
+                windows_folded,
+                windows_under_the_floor,
+                depth_summed,
+                depth_rises,
+                cells @ ..,
+            ] = rest
+            else {
+                return Err(format!("a fitted line needs eight scheme fields: {line:?}"));
+            };
+            let gc_bins = small("the GC bins", gc_bins)?;
+            let depth_bins = small("the depth bins", depth_bins)?;
+            let expected = u64::from(gc_bins) * (u64::from(depth_bins) + 1);
+            if cells.len() as u64 != expected {
+                return Err(format!(
+                    "sample {sample}'s line holds {} cells and its scheme describes {expected}",
+                    cells.len()
+                ));
+            }
+            let counts = cells
+                .iter()
+                .map(|cell| small("a cell", cell))
+                .collect::<Result<Vec<u32>, String>>()?;
+            Ok((
+                sample,
+                SampleHistogram::Fitted(CoverageByGcHistogram {
+                    window_bp: small("the window length", window_bp)?,
+                    gc_bins,
+                    depth_bin_width: f64::from_bits(number("the bin width's bits", width_bits)?),
+                    depth_bins,
+                    windows_folded: number("the windows folded", windows_folded)?,
+                    windows_under_the_floor: number(
+                        "the windows under the floor",
+                        windows_under_the_floor,
+                    )?,
+                    depth_summed: number("the depth summed", depth_summed)?,
+                    depth_rises: number("the depth rises", depth_rises)?,
+                    counts,
+                }),
+            ))
+        }
+        other => Err(format!("unknown histogram kind {other:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A histogram comes back from its line as the value that was written**, for each of the
+    /// four kinds — the fitted one with a bin width whose last bits a decimal rendering would
+    /// round, and empty cells among the full ones.
+    #[test]
+    fn a_histogram_survives_being_written_and_read_back() {
+        let fitted = SampleHistogram::Fitted(CoverageByGcHistogram {
+            window_bp: 1_000,
+            gc_bins: 2,
+            depth_bin_width: 0.1 + 0.2,
+            depth_bins: 2,
+            windows_folded: 17,
+            windows_under_the_floor: 3,
+            depth_summed: 412,
+            depth_rises: 9,
+            counts: vec![0, 4, 0, 7, 6, 0],
+        });
+        let cases = [
+            fitted,
+            SampleHistogram::NoWindowFinalised,
+            SampleHistogram::EveryWindowUnderTheFloor,
+            SampleHistogram::MedianDepthNotPositive,
+        ];
+        for (sample, histogram) in cases.into_iter().enumerate() {
+            let mut written = String::new();
+            write_the_histogram(sample, &histogram, &mut written);
+            let read =
+                read_the_histogram(written.trim_end_matches('\n')).expect("its own line parses");
+            if let (SampleHistogram::Fitted(back), SampleHistogram::Fitted(sent)) =
+                (&read.1, &histogram)
+            {
+                assert_eq!(
+                    back.depth_bin_width.to_bits(),
+                    sent.depth_bin_width.to_bits()
+                );
+            }
+            assert_eq!(read, (sample, histogram), "from {written:?}");
+        }
+    }
+
+    /// **A line cut short, or with a cell too many, is refused** rather than read as a histogram
+    /// of another shape.
+    #[test]
+    fn a_histogram_line_whose_cells_do_not_match_its_scheme_is_refused() {
+        assert!(read_the_histogram("0\tfitted\t1000\t2\t0\t2\t1\t0\t1\t0\t1\t2\t3").is_err());
+        assert!(read_the_histogram("0\tno-window-finalised\t5").is_err());
+        assert!(read_the_histogram("0\tsomething-else").is_err());
+    }
 
     /// **The two halves of the format, held together.** They are compiled into two different
     /// crate targets and a column reordered on one side alone still parses on the other, so this

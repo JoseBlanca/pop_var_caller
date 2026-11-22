@@ -152,11 +152,44 @@ impl SpillFile {
         )
     }
 
-    #[cfg(test)]
+    /// **A spill an earlier run finished, in that run's kept directory**, ready to be read: what a
+    /// resumed run scores and writes from (`resume`). `entries` is how many the run appended, which
+    /// the readers check the file against.
+    ///
+    /// **Dropping it leaves the file**, as for [`Self::in_directory`]: the directory decides.
+    ///
+    /// # Errors
+    ///
+    /// If there is no spill in `directory`.
+    pub fn finished_in(directory: &Path, entries: u64) -> Result<Self, SpillFileError> {
+        let path = directory.join(SPILL_FILE_NAME);
+        let bytes = fs::metadata(&path).map_err(|source| SpillFileError::Open {
+            path: path.clone(),
+            source,
+        })?;
+        let mut spill = Self::at(path, SpillRemoval::WithItsDirectory);
+        spill.stage = Stage::Finished;
+        spill.entries_written = entries;
+        spill.bytes_on_disk = Some(bytes.len());
+        Ok(spill)
+    }
+
     /// Where the file is, or would be.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// **The run's scratch directory the spill is in**, where a run that may be resumed keeps what
+    /// resuming needs beside it; `None` for a spill named beside an output, which has no directory
+    /// of its own.
+    #[must_use]
+    pub fn directory(&self) -> Option<&Path> {
+        match self.removal {
+            SpillRemoval::WithItsDirectory => self.path.parent(),
+            #[cfg(test)]
+            SpillRemoval::WhenDropped => None,
+        }
     }
 
     /// How many entries have been appended.

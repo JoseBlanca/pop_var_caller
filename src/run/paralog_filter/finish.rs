@@ -253,6 +253,16 @@ pub fn fit_score_and_write_the_calls_explaining(
     ploidy: Ploidy,
     explained: Option<&mut ParalogExplanations>,
 ) -> Result<FilteredRun, ParalogFilterError> {
+    // **What a later run needs to finish this one from its spill, kept before anything here can
+    // fail** (`resume`): calling has ended, and the histograms exist nowhere else. A run that
+    // cannot keep them goes on — it only loses the chance to be resumed, which it says.
+    match super::resume::save(spill, &histograms, inbreeding, asked_for, &metadata, ploidy) {
+        Ok(()) => tracing::debug!("resume point kept beside the spill"),
+        Err(why) => tracing::warn!(
+            "this run could not keep what resuming it would need, and goes on without: {}",
+            crate::error_render::format_error_chain(&why)
+        ),
+    }
     let WhatTheOperatorAskedFor {
         target_fdr,
         tag_instead_of_dropping,

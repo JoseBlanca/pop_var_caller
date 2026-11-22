@@ -181,6 +181,16 @@ pub enum CallingRunError {
         source: std::io::Error,
     },
 
+    /// The scratch directory a resumed run was pointed at is not there.
+    #[error(
+        "`{}` is not a directory: point --scratch-dir at the scratch directory a failed run kept",
+        directory.display()
+    )]
+    ScratchDirectoryNotFound {
+        /// What was given.
+        directory: PathBuf,
+    },
+
     /// `--ploidy` was typed and disagrees with the parameters file's own.
     ///
     /// **A file's numbers were fitted at one ploidy and mean nothing at another**
@@ -955,9 +965,34 @@ pub fn scratch_directory_for(
             directory: directory.clone(),
             source,
         })?;
-    tracing::debug!("scratch directory: {}", made.path().display());
+    let made = made.keep();
+    tracing::debug!("scratch directory: {}", made.display());
     Ok(RunScratch {
         directory: Some(made),
+        on_failure,
+        the_run_succeeded: false,
+    })
+}
+
+/// **The scratch directory an earlier run kept, taken over by a run that resumes it**
+/// (`pvc resume-calling`): removed when this run succeeds, kept when it fails and `on_failure`
+/// asks for that, as the run that made it would have.
+///
+/// # Errors
+///
+/// [`CallingRunError::ScratchDirectoryNotFound`] when `directory` is not a directory.
+pub fn kept_scratch_directory(
+    directory: &Path,
+    on_failure: ScratchOnFailure,
+) -> Result<RunScratch, CallingRunError> {
+    if !directory.is_dir() {
+        return Err(CallingRunError::ScratchDirectoryNotFound {
+            directory: directory.to_path_buf(),
+        });
+    }
+    tracing::debug!("scratch directory, resumed: {}", directory.display());
+    Ok(RunScratch {
+        directory: Some(directory.to_path_buf()),
         on_failure,
         the_run_succeeded: false,
     })
@@ -1003,7 +1038,7 @@ impl ScratchOnFailure {
 #[derive(Debug)]
 pub struct RunScratch {
     /// `None` only once `Drop` has taken it.
-    directory: Option<tempfile::TempDir>,
+    directory: Option<PathBuf>,
     on_failure: ScratchOnFailure,
     the_run_succeeded: bool,
 }
@@ -1016,7 +1051,6 @@ impl RunScratch {
             .as_ref()
             // PANIC-FREE: `directory` is `Some` from construction until `Drop` takes it.
             .expect("the scratch directory is there until it is dropped")
-            .path()
     }
 
     /// Record that the run finished and wrote its output, so the directory is removed whatever
@@ -1032,16 +1066,26 @@ impl Drop for RunScratch {
             return;
         };
         if !self.the_run_succeeded && self.on_failure == ScratchOnFailure::Kept {
-            let kept = directory.keep();
+            // A run that stopped after calling left what resuming needs; one that stopped before
+            // left a spill nothing can finish.
+            let resumable = crate::run::paralog_filter::resume::is_resumable(&directory);
             tracing::warn!(
                 "the run did not finish; its scratch directory is kept, as --keep-tmp-on-error \
-                 asked: {} — remove it once it is no longer needed",
-                kept.display()
+                 asked: {} — remove it once it is no longer needed{}",
+                directory.display(),
+                if resumable {
+                    format!(
+                        ", or finish the run from it with `pvc resume-calling --scratch-dir {}`",
+                        directory.display()
+                    )
+                } else {
+                    String::new()
+                }
             );
             return;
         }
-        let path = directory.path().to_path_buf();
-        if let Err(source) = directory.close() {
+        let path = directory;
+        if let Err(source) = std::fs::remove_dir_all(&path) {
             // A directory left on disk, possibly terabytes of spill, is worth a line; a `Drop`
             // must not panic, and a second message while a panic unwinds would bury the first.
             if !std::thread::panicking() {
