@@ -849,6 +849,24 @@ fn a_ploidy_of_zero_is_refused() {
     );
 }
 
+/// **A ploidy other than 2 is refused before the fit**, by its own error naming `--defaults`,
+/// rather than after every psp has been read.
+#[test]
+fn a_ploidy_other_than_two_is_refused() {
+    let (cohort, psps) = a_walked_cohort();
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let mut args = args_over(&cohort, &psps, output);
+    args.ploidy = 4;
+
+    let error = fit_and_assemble(&args).expect_err("the fit is diploid only");
+
+    assert!(
+        matches!(&error, EstimateParametersCliError::NotDiploid { ploidy: 4 }),
+        "{error:?}",
+    );
+    assert!(error.to_string().contains("--defaults"), "{error}");
+}
+
 /// **A directory of psps is expanded in name order**, so two runs naming one directory read the
 /// same cohort in the same order however the filesystem answers.
 #[test]

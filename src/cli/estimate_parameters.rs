@@ -117,7 +117,8 @@ pub struct EstimateParametersArgs {
     #[arg(long)]
     pub log: Option<std::path::PathBuf>,
 
-    /// Copies of each chromosome in every sample.
+    /// Copies of each chromosome in every sample. Only 2 is fitted; for another ploidy, call with
+    /// `--defaults`.
     #[arg(long, default_value_t = 2)]
     pub ploidy: u8,
 
@@ -323,6 +324,18 @@ pub enum EstimateParametersCliError {
         value: String,
     },
 
+    /// A ploidy other than 2 was asked for. The fit models diploid genotypes only.
+    ///
+    /// **Refused before a psp is opened**, so the run does not read the whole cohort to find out.
+    #[error(
+        "--ploidy {ploidy}: estimate-parameters fits diploid samples only; \
+         call at another ploidy with --defaults instead"
+    )]
+    NotDiploid {
+        /// What was typed.
+        ploidy: u8,
+    },
+
     /// An option this command no longer has was given.
     ///
     /// **Refused rather than ignored**, so that a run cannot believe it chose something that no
@@ -481,6 +494,11 @@ fn fit_and_assemble(
             what: "--ploidy",
             value: args.ploidy.to_string(),
         })?;
+    if ploidy.get() != 2 {
+        return Err(EstimateParametersCliError::NotDiploid {
+            ploidy: ploidy.get(),
+        });
+    }
     let declared = match args.inbreeding {
         None => DeclaredInbreeding::nothing_said(),
         Some(coefficient) => DeclaredInbreeding::one_value_for_every_sample(

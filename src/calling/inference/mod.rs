@@ -470,7 +470,8 @@ pub struct CallingLoopConfig {
     pub max_passes: NonZeroU32,
     /// Whether the locus may re-fit its own slippage numbers. Frozen by default.
     pub slippage_refit: SlippageRefitConfig,
-    /// Whether the loop may add alleles it decides the first pass missed. Off by default.
+    /// Whether candidate selection runs the STR discovery pre-pass. On by default
+    /// ([`DiscoveryConfig::DEFAULT`]).
     pub discovery: DiscoveryConfig,
 }
 

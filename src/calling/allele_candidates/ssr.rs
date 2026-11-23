@@ -20,7 +20,8 @@
 //! [`select_ssr`] (D2, whose periodicity verdict was removed on 2026-10-22, spec §7), and the
 //! repeat counts that entry point hands the genotype prior (D3). **`select_ssr` is complete** and the run driver dispatches to it
 //! (`src/run/callers.rs`). The STR loop plan's Milestone E added one more pass to it: the
-//! **discovery pre-pass** ([`nominate_discovered_sequences`]), off by default, which admits the
+//! **discovery pre-pass** ([`nominate_discovered_sequences`]), on in every run (the calling loop's
+//! default hands selection its bar; this module's own constructor leaves it off), which admits the
 //! tract sequences one sample showed too often for the model to book as slippage — wired here
 //! rather than around the calling loop because the eligible set is a function of the
 //! observations and the candidate table alone
@@ -1521,7 +1522,7 @@ pub struct SsrBundleSelection {
 ///   ([`RungNeighbours::OneCopyEitherSideInEachRun`]);
 /// - **the tie-break toward the purest spelling** counts the parse's edited bases.
 ///
-/// **The discovery pre-pass is not run on bundles**, which is off by default for segments too; its
+/// **The discovery pre-pass is not run on bundles**, though every run uses it on segments; its
 /// bar is written in a segment's repeat counts and nothing has measured it on a bundle.
 ///
 /// # Panics
@@ -3414,8 +3415,9 @@ mod tests {
         )
     }
 
-    /// **Discovery ships off**: the constructor of the defaults runs no pre-pass, so a run that
-    /// never asks for it selects byte-identically to the path before discovery was wired.
+    /// **Selection's own defaults run no pre-pass**: discovery is switched on by the calling
+    /// loop's defaults, which hand selection its bar, so a caller of selection alone selects
+    /// byte-identically to the path before discovery was wired.
     #[test]
     fn the_defaults_run_no_discovery_pre_pass() {
         assert!(SsrSelectionConfig::at_ploidy(diploid()).discovery.is_none());

@@ -670,8 +670,8 @@ impl AlignedFilesVariantCaller {
         let mut tract_shaping = SsrEvidenceScratch::default();
         // The discovery pre-pass is a *selection* pass (research doc
         // tract_genotype_accuracy_2026-09-03 §6.5), so the loop configuration's discovery
-        // setting is honoured by handing selection its bar — `None`, the shipped default,
-        // runs no pre-pass and selects byte-identically.
+        // setting is honoured by handing selection its bar — on by default; `None`, where a
+        // run switched discovery off, runs no pre-pass.
         let tract_selection = SsrSelectionConfig {
             discovery: calling_loop_config.discovery.pre_pass_bar(),
             ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
