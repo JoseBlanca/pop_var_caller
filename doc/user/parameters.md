@@ -9,12 +9,12 @@ inbred each sample is, how often a repeat stutters. pvc estimates them from your
 | Quantity | For each | What it changes |
 |---|---|---|
 | Base-quality calibration: a correction to the error rates the sequencer reports | read group | how much a base that disagrees with the genotype counts against it |
-| Contamination: the share of reads that came from another individual | read group (a read group with too little data gets its sample's value) | a few reads of another allele are less likely to be called a heterozygote |
+| Contamination: the share of reads that came from another individual | read group (a read group with too little data gets 0) | a few reads of another allele are less likely to be called a heterozygote |
 | Inbreeding coefficient F | sample | how likely a homozygote is compared with a heterozygote |
 | Population diversity | run | how likely a site is to be variable before the reads are seen |
 | Stutter rates | class of repeat (unit length × number of copies) | how many reads a unit short or long a genotype is expected to produce |
 | Spread of allele lengths between repeats | class of repeat | how likely a repeat is to carry an allele of a new length |
-| Substitution rate inside repeats | read group × class of repeat | how much a base difference inside a repeat counts |
+| Substitution rate inside repeats | class of repeat (the same value is written for every read group) | how much a base difference inside a repeat counts |
 
 **Inbreeding, and how much allele lengths spread between repeats, need a cohort.** One genome
 alone cannot show whether it carries too few heterozygotes, so with one sample F is set to 0 and
@@ -23,7 +23,8 @@ marked as such in the file. If you prefer another value, state it with
 
 With one sample, pvc estimates which lengths each class of repeat carries, but not how much that
 varies from one repeat to the next; it holds those lengths at a between-repeat share of 1/2,
-marked `defaulted`. A class with no estimate at all gets an even spread at 1/11, as with
+marked `defaulted`. A class with no estimate at all gets the median of the run's other classes,
+or, when the run estimated none (as with one sample), an even spread at 1/11, as with
 `--defaults`.
 
 ## The built-in values (`--defaults`)
@@ -47,9 +48,8 @@ substitution rate inside repeats, and the weight of a read that fits no allele a
 | `warrant` | Meaning |
 |---|---|
 | `fitted_here` | estimated from this cohort's reads |
-| `borrowed` | this read group had too little data, so the mean of the same sample's other read groups was taken |
 | `supplied` | given by you, for example with `--inbreeding` |
-| `defaulted` | a built-in value, because nothing could be estimated |
+| `defaulted` | a built-in value, because nothing could be estimated; a read group with no usable data gets an error rate of 1 in 1,000 |
 
 Contamination appears only for read groups where it was estimated. A read group with no row is
 treated as uncontaminated.

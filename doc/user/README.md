@@ -1,7 +1,7 @@
 # pvc user guide
 
 For what pvc is and how to install it, see the [project README](../../README.md). For the
-statistical models behind the calls, see [doc/methods/](../methods/) *(in preparation)*.
+statistical models behind the calls, see [Methods](methods.md).
 
 ## Contents
 
@@ -22,6 +22,10 @@ statistical models behind the calls, see [doc/methods/](../methods/) *(in prepar
 - [Overlapping variants](overlapping_variants.md): how variants that overlap, such as a SNP
   inside a deletion, are written in a VCF, how population-genetics tools can misread them, and
   what pvc writes.
+- [Methods](methods.md): the statistical models and the data architecture: how reads are
+  filtered and corrected, what a psp file holds, how the parameters are estimated, how genotypes
+  are called, scored, filtered, refined and phased, and how each method behaves from one sample
+  to thousands.
 - [Limits and refusals](limits.md): what pvc does not call, its hard limits, why a run can refuse
   to start, and what a failed run leaves behind.
 - [Estimating contamination](../help/estimate_contamination.md).

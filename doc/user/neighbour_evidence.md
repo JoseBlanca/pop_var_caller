@@ -53,7 +53,7 @@ imputation tool that phases, such as Beagle or GLIMPSE.
 **A `./.` stays `./.`**, with the pass's posterior as its `GP`, when:
 
 - the sample has no reads at sites on both sides within about one copied stretch (30 to 300 kb);
-- the filled genotype's `GQ` would be below 10; or
+- the filled genotype's `GQ` would be below 9; or
 - the sample is probably copying no other sample there — its haplotype is not carried by anyone
   else in the cohort — so the genotype would only be the cohort's allele frequency.
 
@@ -71,7 +71,7 @@ left unphased when the pass is not sure which copy carries which allele, when it
 relates to its neighbours, or when it would be a phase set of one.
 
 Phase sets are short and many by design. A link between two neighbouring heterozygotes is written
-only when every one of the pass's 36 drawn estimates of the haplotypes agrees on it. On simulated
+only when at least 29 of the pass's 36 drawn estimates of the haplotypes agree on it. On simulated
 cohorts at 3× (some samples at 30×), counting SNPs only:
 
 | simulated cohort | true heterozygotes phased | links inside phase sets that are wrong |
@@ -125,7 +125,8 @@ Every run reports, for each sample, how often its fills would be wrong, measured
 At the sites where the sample's own evidence settles its genotype, pvc asks what the pass would
 have written had the sample had no reads there, and compares that with the genotype its reads
 gave. It is the usual test of an imputation — hide genotypes you know and see whether they come
-back — done at every such site.
+back — done on a sample of such sites: at most 50 a sample in each window, and at most 1 in 20 of
+the sample's informative sites.
 
 The result is written beside the VCF as `<name>.fill_check.tsv`:
 

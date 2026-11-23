@@ -71,7 +71,7 @@ At ploidy two, pvc writes the phase the reads show. A read pair comes from one m
 covers two heterozygous sites of a sample, the alleles it shows there lie on one chromosome copy.
 Two heterozygous genotypes are written phased together, `0|1` or `1|0` with one `PS`, when at least
 two read pairs that cover both agree on how, at odds of 199 to 1 or more. The odds allow for each
-base's quality and for a further 1 error in 100 that no quality shows. Only `PASS` genotypes with
+base's quality, and never take a base's error to be below 1 in 100, whatever its quality says. Only `PASS` genotypes with
 `GQ` 30 or more are phased this way, because a genotype that is wrongly heterozygous gives a
 confident link in a random direction. **Genotypes of one sample with the same `PS` are phased
 together**; nothing is said about two different `PS` values. A genotype linked to nothing is left

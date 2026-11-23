@@ -10,8 +10,8 @@ says otherwise.
 
 | Option | Default | Change it when |
 |---|---|---|
-| `--ploidy` | 2 | your samples are haploid or polyploid. At most 16. In psp mode set it on `estimate-parameters`; the calling step takes it from the parameters file. |
-| `estimate-parameters --inbreeding` | estimated per sample | you know the samples' inbreeding coefficient, for example `1` for fully inbred lines. It applies the same value to every sample. |
+| `--ploidy` | 2 | your samples are haploid or polyploid. At most 16. `estimate-parameters` fits diploid samples only, so at any other ploidy call with `--defaults` and `--ploidy`, in either mode. |
+| `estimate-parameters --inbreeding` | estimated per sample | you know the samples' inbreeding coefficient, for example `0.99` for fully inbred lines. It must be below 1: at 1 no heterozygote could be called, whatever the reads show. It applies the same value to every sample. |
 | `estimate-parameters --skip-contamination` | contamination estimated | the samples are known to be clean. |
 
 ## Which sites are written
