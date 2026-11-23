@@ -79,6 +79,26 @@ pub struct ResumeCallingArgs {
     )]
     pub refine_window_floor: Option<u64>,
 
+    /// The shortest a refinement window's core may become, in bases, in place of the stopped
+    /// run's. See `pvc call-from-psps --help`.
+    #[arg(
+        long,
+        value_name = "BASES",
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_core_floor: Option<u64>,
+
+    /// The most records a kb walked in each refinement window's margins beyond 50 kb of its core,
+    /// in place of the stopped run's; 0 walks every record. See `pvc call-from-psps --help`.
+    #[arg(
+        long,
+        value_name = "RECORDS",
+        value_parser = calling_run::parse_margin_density,
+        help_heading = "Advanced"
+    )]
+    pub refine_margin_density: Option<calling_run::MarginDensity>,
+
     /// The share of drawn paths that must agree to phase two neighbouring sites together, in
     /// place of the stopped run's. See `pvc call-from-psps --help`.
     #[arg(long, value_parser = calling_run::parse_path_agreement, help_heading = "Advanced")]
@@ -160,6 +180,14 @@ pub fn run_resume_calling(args: &ResumeCallingArgs) -> Result<(), ResumeCallingC
         };
         let decision = match args.refine_window_floor {
             Some(bases) => decision.with_window_floor(bases),
+            None => decision,
+        };
+        let decision = match args.refine_core_floor {
+            Some(bases) => decision.with_core_floor(bases),
+            None => decision,
+        };
+        let decision = match args.refine_margin_density {
+            Some(density) => decision.with_margin_thinning(density.0),
             None => decision,
         };
         let decision = match args.phase_min_path_agreement {

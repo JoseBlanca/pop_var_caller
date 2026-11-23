@@ -22,13 +22,20 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-22):** **refinement's memory, second cut, the same output**
+> - **Last completed task (2026-11-23):** **thinned and packed refinement margins**
+> (branch `margin-density`, [report](doc/devel/reports/implementations/margin_thinning_2026-11-23.md)):
+> beyond 50 kb of the core, margins walk at most `--refine-margin-density` records a kb (default 5),
+> the others held zstd-compressed; templates chosen over walked records; `--refine-core-floor`
+> (default the 500-kb margin floor). On 2,176 tomato25 samples' densest 1.5 Mb: fill check 0.0648%
+> against 0.0649%, peak 52.1 → 30.7 GB, wall 1,680 → 821 s; simulations unchanged at 5 a kb.
+> Status: implemented, not reviewed.
+> - **Also 2026-11-22:** **refinement's memory, second cut, the same output**
 > (branch `refine-memory-2`, [report](doc/devel/reports/implementations/refine_memory_exact_2026-11-22.md)):
 > likelihoods as `u16` `PL`, path bits packed, read alleles in three bytes, a core's lines written a
 > chunk at a time, a walk's per-site terms computed where read. On 2,176 tomato25 samples over
 > 1.5 Mb: byte-identical VCF, peak 62.5 → 51.6 GB, wall time 1,705 → 1,174 s. Status: implemented,
 > not reviewed.
-> - **Also 2026-11-22:** **`pvc resume-calling`** (branch `resume-from-scratch`,
+> - **And 2026-11-22:** **`pvc resume-calling`** (branch `resume-from-scratch`,
 > [report](doc/devel/reports/implementations/resume_calling_2026-11-22.md)): a run with the
 > hidden-dup filter keeps, once calling ends, each sample's coverage histogram and a manifest beside
 > its spill; `pvc resume-calling --scratch-dir` scores and writes from them, refinement settings

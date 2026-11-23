@@ -33,7 +33,7 @@ use super::spill::SPILL_FORMAT;
 use super::spill_file::{SpillFile, SpillFileError};
 use crate::neighbour_evidence::phase::PathAgreement;
 use crate::neighbour_evidence::stage::NeighbourEvidenceDecision;
-use crate::neighbour_evidence::windows::WindowSizes;
+use crate::neighbour_evidence::windows::{MarginThinning, WindowSizes};
 use crate::run::cohort_merge::recorded_windows::{read_the_histogram, write_the_histogram};
 use crate::types::{InbreedingF, Ploidy};
 use crate::vcf::header::{HeaderContig, VcfHeaderMetadata};
@@ -355,7 +355,15 @@ struct RefinementParts {
     core_bases: u64,
     margin_bases: u64,
     margin_floor_bases: u64,
+    /// The shortest core (`--refine-core-floor`); absent in a manifest written before cores could
+    /// be shorter than the margin floor, which is then the core floor too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core_floor_bases: Option<u64>,
     budget_bytes: u64,
+    /// The far margins' walked records a kb, in thousandths (`--refine-margin-density`); absent
+    /// where every record is walked, as in a manifest written before margins could be thinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    margin_density_thousandths: Option<u32>,
     path_agreement_bits: u64,
     reads_in_draw: bool,
 }
@@ -368,7 +376,12 @@ impl RefinementParts {
             core_bases: decision.sizes.core_bases,
             margin_bases: decision.sizes.margin_bases,
             margin_floor_bases: decision.sizes.margin_floor_bases,
+            core_floor_bases: Some(decision.sizes.core_floor_bases),
             budget_bytes: decision.sizes.budget_bytes,
+            margin_density_thousandths: decision
+                .sizes
+                .thinning
+                .map(|thinning| thinning.thousandths_per_kb.get()),
             path_agreement_bits: decision.path_agreement.get().to_bits(),
             reads_in_draw: decision.reads_in_draw,
         }
@@ -392,7 +405,12 @@ impl RefinementParts {
                 core_bases: self.core_bases,
                 margin_bases: self.margin_bases,
                 margin_floor_bases: self.margin_floor_bases,
+                core_floor_bases: self.core_floor_bases.unwrap_or(self.margin_floor_bases),
                 budget_bytes: self.budget_bytes,
+                thinning: self
+                    .margin_density_thousandths
+                    .and_then(std::num::NonZeroU32::new)
+                    .map(|thousandths_per_kb| MarginThinning { thousandths_per_kb }),
             },
             path_agreement,
             reads_in_draw: self.reads_in_draw,

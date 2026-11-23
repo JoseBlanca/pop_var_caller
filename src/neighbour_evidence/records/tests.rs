@@ -93,3 +93,38 @@ fn a_likelihood_held_in_two_bytes_is_the_f32_it_stands_for() {
         ]
     );
 }
+
+/// **A record's numbers, taken out and written to bytes, read back and put back as they were**,
+/// and the record keeps its rows while they are out (pass spec §6, thinned margins).
+#[test]
+fn a_records_numbers_taken_out_and_written_come_back_the_same() {
+    let mut record = SiteRecord::new(
+        100,
+        &[0.25, 0.1],
+        &[
+            Some(SampleColumns {
+                phred_likelihoods: &[0, 10, 20, 30, 40, 50],
+                genotype_posteriors: &[0.5, 0.2, 0.1, 0.1, 0.05, 0.05],
+            }),
+            None,
+            Some(SampleColumns {
+                phred_likelihoods: &[7, 0, 9, 70_000, 3, 1],
+                genotype_posteriors: &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            }),
+        ],
+    );
+    let before = format!("{record:?}");
+    let heap = record.heap_bytes();
+    let numbers = record.take_numbers();
+    assert_eq!(record.heap_bytes(), record.sample_count());
+    assert_eq!((record.row(0), record.row(1)), (SampleRow::Informative, SampleRow::Absent));
+    assert!(record.is_site());
+    let mut bytes = Vec::new();
+    numbers.write_to(&mut bytes);
+    bytes.push(99);
+    let mut reading = bytes.as_slice();
+    record.put_numbers(RecordNumbers::read_from(&mut reading));
+    assert_eq!(reading, &[99]);
+    assert_eq!(format!("{record:?}"), before);
+    assert_eq!(record.heap_bytes(), heap);
+}

@@ -158,6 +158,25 @@ impl SiteRecord {
             + self.rows.len()
     }
 
+    /// **Takes the record's numbers out** — its likelihoods and allele shares, the background's
+    /// and each sample's — and leaves its position, allele count and rows, all a window whose walks
+    /// skip the record reads of it (pass spec §6, thinned margins). [`Self::put_numbers`] puts
+    /// them back.
+    pub fn take_numbers(&mut self) -> RecordNumbers {
+        RecordNumbers {
+            background_shares: std::mem::take(&mut self.background_shares),
+            likelihoods: std::mem::take(&mut self.likelihoods),
+            shares: std::mem::take(&mut self.shares),
+        }
+    }
+
+    /// Puts back the numbers [`Self::take_numbers`] took.
+    pub fn put_numbers(&mut self, numbers: RecordNumbers) {
+        self.background_shares = numbers.background_shares;
+        self.likelihoods = numbers.likelihoods;
+        self.shares = numbers.shares;
+    }
+
     /// How many samples the record has a column for.
     #[must_use]
     pub fn sample_count(&self) -> usize {
@@ -217,6 +236,63 @@ impl SiteRecord {
     /// The background template's allele shares (§3.3).
     pub fn background_shares(&self) -> impl Iterator<Item = f64> + '_ {
         self.background_shares.iter().map(|&share| f64::from(share))
+    }
+}
+
+/// **A record's numbers, taken out of it** ([`SiteRecord::take_numbers`]) to be held as bytes
+/// while no walk reads them.
+#[derive(Debug, Default)]
+pub struct RecordNumbers {
+    background_shares: Vec<f32>,
+    likelihoods: Vec<u16>,
+    shares: Vec<f32>,
+}
+
+impl RecordNumbers {
+    /// Appends the numbers to `out`, each array its length and then its values, little-endian.
+    pub fn write_to(&self, out: &mut Vec<u8>) {
+        let length = |out: &mut Vec<u8>, length: usize| {
+            out.extend_from_slice(&u32::try_from(length).expect("a record's array fits u32").to_le_bytes());
+        };
+        length(out, self.background_shares.len());
+        for value in &self.background_shares {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        length(out, self.likelihoods.len());
+        for value in &self.likelihoods {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        length(out, self.shares.len());
+        for value in &self.shares {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    /// Reads back what [`Self::write_to`] wrote at the start of `bytes`, and moves `bytes` past it.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` does not start with what [`Self::write_to`] writes: the stage reads only what it
+    /// wrote.
+    #[must_use]
+    pub fn read_from(bytes: &mut &[u8]) -> Self {
+        fn take<const N: usize>(bytes: &mut &[u8]) -> [u8; N] {
+            let (head, rest) = bytes.split_at(N);
+            *bytes = rest;
+            head.try_into().expect("N bytes")
+        }
+        let length = |bytes: &mut &[u8]| u32::from_le_bytes(take(bytes)) as usize;
+        let count = length(bytes);
+        let background_shares = (0..count).map(|_| f32::from_le_bytes(take(bytes))).collect();
+        let count = length(bytes);
+        let likelihoods = (0..count).map(|_| u16::from_le_bytes(take(bytes))).collect();
+        let count = length(bytes);
+        let shares = (0..count).map(|_| f32::from_le_bytes(take(bytes))).collect();
+        Self {
+            background_shares,
+            likelihoods,
+            shares,
+        }
     }
 }
 
