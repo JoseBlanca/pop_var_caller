@@ -209,6 +209,7 @@ fn main() -> ExitCode {
             let bytes = WindowBytes {
                 held: &held,
                 core: &core,
+                skipped: None,
             };
             let plan = plan_window(&positions, bytes, core_start, true, &sizes)
                 .expect("a whole contig always plans");

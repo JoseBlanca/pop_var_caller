@@ -41,7 +41,9 @@ use super::phase::{
 };
 use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
-use super::templates::{ChosenTemplate, choose_haplotypes, choose_templates, compared_records};
+use super::templates::{
+    ChosenTemplate, choose_haplotypes, choose_templates_where, compared_records_where,
+};
 use crate::calling::quality::score_best_genotype;
 use crate::read_phase::fragments::{PackedRecordFragments, SampleReadAlleles};
 use crate::read_phase::link::{Heterozygote, ReadAlleleList, score_read_lists};
@@ -584,9 +586,13 @@ struct WindowLayout {
 }
 
 impl WindowLayout {
-    fn new(records: &[SiteRecord], core: &Range<usize>) -> Self {
+    /// The layout of a window whose walks read every site `walked` admits (every site, if `None`;
+    /// pass spec §6, thinned margins).
+    fn new(records: &[SiteRecord], core: &Range<usize>, walked: Option<&[bool]>) -> Self {
         let record_of_site: Vec<usize> = (0..records.len())
-            .filter(|&index| records[index].is_site())
+            .filter(|&index| {
+                records[index].is_site() && walked.is_none_or(|walked| walked[index])
+            })
             .collect();
         let mut site_of_record = vec![None; records.len()];
         for (site, &index) in record_of_site.iter().enumerate() {
@@ -921,6 +927,7 @@ pub fn refine_window_joined(
     refine_window_with_reads(
         records,
         None,
+        None,
         core,
         contig_length,
         fits,
@@ -936,14 +943,20 @@ pub fn refine_window_joined(
 /// without reads, which phases as the population alone does. An empty list is not "no reads":
 /// it is a list of the wrong length, and refused.
 ///
+/// `walked`, one entry a record, says which records the walks read (pass spec §6, thinned margins, thinned
+/// margins); `None` reads every site. It must admit every core record and every record of
+/// `last_blocks`.
+///
 /// # Panics
 ///
-/// As [`refine_window_joined`]; and if `fragments` is given and not one entry a record.
+/// As [`refine_window_joined`]; if `fragments` or `walked` is given and not one entry a record;
+/// and if `walked` leaves out a core site.
 #[allow(clippy::too_many_arguments)] // the window, its reads, the run's settings, what came before
 #[must_use]
 pub fn refine_window_with_reads(
     records: &[SiteRecord],
     fragments: Option<&[PackedRecordFragments]>,
+    walked: Option<&[bool]>,
     core: Range<usize>,
     contig_length: Option<u64>,
     fits: &mut [SampleFit],
@@ -955,6 +968,12 @@ pub fn refine_window_with_reads(
     assert!(
         fragments.is_none_or(|fragments| fragments.len() == records.len()),
         "one fragment list a record, or none"
+    );
+    assert!(
+        walked.is_none_or(|walked| walked.len() == records.len() && walked[core.clone()]
+            .iter()
+            .all(|&walked| walked)),
+        "one walked flag a record, every core record walked"
     );
     let fragments = fragments.unwrap_or(&[]);
     assert!(
@@ -969,7 +988,7 @@ pub fn refine_window_with_reads(
         last_blocks.is_empty() || last_blocks.len() == samples,
         "one last block a sample, or none"
     );
-    let layout = WindowLayout::new(records, &core);
+    let layout = WindowLayout::new(records, &core, walked);
     let allele_counts: Vec<usize> = layout
         .record_of_site
         .iter()
@@ -986,7 +1005,9 @@ pub fn refine_window_with_reads(
     let mut states: Vec<SampleRounds> = (0..samples)
         .into_par_iter()
         .map(|sample| {
-            let templates = choose_templates(records, sample, max_templates);
+            let templates = choose_templates_where(records, sample, max_templates, |record| {
+                walked.is_none_or(|walked| walked[record])
+            });
             let informative_sites = layout
                 .record_of_site
                 .iter()
@@ -1003,7 +1024,9 @@ pub fn refine_window_with_reads(
                 Vec::new()
             };
             SampleRounds {
-                compared: compared_records(records, sample),
+                compared: compared_records_where(records, sample, |record| {
+                    layout.site_of_record[record].is_some()
+                }),
                 previous_posteriors: Vec::new(),
                 hidden,
                 read_check,

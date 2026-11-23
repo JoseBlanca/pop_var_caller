@@ -16,6 +16,9 @@
 //! `position line line_compressed is_site record_heap solve_held read_alleles_heap read_alleles
 //! core alleles` — to be summed over any window.
 //!
+//! `REPLAY_FIXED=<core>,<margin>` plans every window at that size; `REPLAY_MARGIN_DENSITY=<n>`
+//! thins the margins as `--refine-margin-density n`. The fill check's totals go to stderr.
+//!
 //! `header.vcf` is the run's header, through `#CHROM`; `entries` is what `spill_slice` printed.
 use std::collections::HashMap;
 use std::fs::File;
@@ -172,8 +175,20 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
         decision.sizes.core_bases = core;
         decision.sizes.margin_bases = margin;
         decision.sizes.margin_floor_bases = margin;
+        decision.sizes.core_floor_bases = core.min(margin);
         decision.sizes.budget_bytes = u64::MAX;
         eprintln!("every window: core {core}, margins {margin}");
+    }
+    // `REPLAY_CORE_FLOOR=<bases>`: `--refine-core-floor`.
+    if let Ok(bases) = std::env::var("REPLAY_CORE_FLOOR") {
+        decision = decision.with_core_floor(bases.parse()?);
+    }
+    // `REPLAY_MARGIN_DENSITY=<records a kb>`: `--refine-margin-density`.
+    if let Ok(density) = std::env::var("REPLAY_MARGIN_DENSITY") {
+        decision = decision.with_margin_thinning(
+            pop_var_caller::neighbour_evidence::windows::MarginThinning::parse(&density)?,
+        );
+        eprintln!("far margins walked at {density} records a kb");
     }
     eprintln!("decision: {}", decision.why);
     let mut stage = NeighbourEvidenceStage::new(&decision, lengths);
@@ -233,6 +248,16 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
     }
     written += out.lines_now;
     out.file.flush()?;
+    let (mut filled, mut checked, mut disagreed) = (0_u64, 0_u64, 0_u64);
+    for check in stage.fill_checks() {
+        filled += u64::from(check.filled);
+        checked += u64::from(check.checked);
+        disagreed += u64::from(check.disagreed);
+    }
+    eprintln!(
+        "fill check: {filled} filled, {checked} checked, {disagreed} disagreed ({:.4}% of checked)",
+        100.0 * disagreed as f64 / checked.max(1) as f64
+    );
     eprintln!(
         "done: {pushed} pushed, {written} written, peak {:.1} GB, {:.0} s",
         peak_gb(),

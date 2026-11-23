@@ -838,19 +838,56 @@ pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
     PathAgreement::try_new(share).ok_or_else(|| format!("`{text}` is not a share in (0, 1]"))
 }
 
+/// **`--refine-margin-density`'s parser**: records a kb to three decimals; 0, no thinning.
+///
+/// # Errors
+///
+/// As [`MarginThinning::parse`](crate::neighbour_evidence::windows::MarginThinning::parse).
+pub fn parse_margin_density(
+    text: &str,
+) -> Result<MarginDensity, String> {
+    crate::neighbour_evidence::windows::MarginThinning::parse(text).map(MarginDensity)
+}
+
+/// **`--refine-margin-density`'s value**: the far margins' thinning, or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarginDensity(pub Option<crate::neighbour_evidence::windows::MarginThinning>);
+
+impl std::fmt::Display for MarginDensity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(thinning) => write!(f, "{thinning}"),
+            None => write!(f, "0"),
+        }
+    }
+}
+
+/// **The refinement window options a calling run was given** (`--refine-window-bytes`,
+/// `--refine-window-floor`, `--refine-core-floor`, `--refine-margin-density` and the hidden
+/// `--refine-window-max` and `--refine-core-max`), as [`neighbour_evidence_decision`] reads them.
+#[derive(Clone, Copy, Debug)]
+pub struct RefineWindowArgs {
+    pub window_bytes: u64,
+    pub window_floor: u64,
+    /// The window floor where not given.
+    pub core_floor: Option<u64>,
+    /// 0 walks every record.
+    pub margin_density: MarginDensity,
+    pub window_max: Option<u64>,
+    pub core_max: Option<u64>,
+}
+
 /// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
 /// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
 /// header is written, and stated in it either way. `path_agreement` is
-/// `--phase-min-path-agreement`, `window_bytes` `--refine-window-bytes`, `window_floor`
-/// `--refine-window-floor`.
+/// `--phase-min-path-agreement`, `windows` the window options.
 #[must_use]
 pub fn neighbour_evidence_decision(
     asked: RefineGenotypesArg,
     inbreeding_by_sample: &[InbreedingF],
     ploidy: Ploidy,
     path_agreement: PathAgreement,
-    window_bytes: u64,
-    window_floor: u64,
+    windows: RefineWindowArgs,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
         RefineGenotypesArg::Auto => NeighbourEvidenceSwitch::Auto,
@@ -860,8 +897,18 @@ pub fn neighbour_evidence_decision(
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
     let decision = decide(switch, &inbreeding, ploidy)
         .with_path_agreement(path_agreement)
-        .with_window_bytes(window_bytes)
-        .with_window_floor(window_floor);
+        .with_window_bytes(windows.window_bytes)
+        .with_window_floor(windows.window_floor)
+        .with_core_floor(windows.core_floor.unwrap_or(windows.window_floor))
+        .with_margin_thinning(windows.margin_density.0);
+    let decision = match windows.window_max {
+        Some(bases) => decision.with_window_max(bases),
+        None => decision,
+    };
+    let decision = match windows.core_max {
+        Some(bases) => decision.with_core_max(bases),
+        None => decision,
+    };
     tracing::info!(
         "neighbour-evidence pass: {} ({})",
         if decision.ran { "runs" } else { "off" },

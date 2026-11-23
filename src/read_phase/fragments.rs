@@ -327,6 +327,117 @@ impl PackedRecordFragments {
     }
 }
 
+impl PackedRecordFragments {
+    /// Appends the record's read alleles to `out`: its samples, then which form its entries take
+    /// and the entries, little-endian. For holding a record's reads as bytes while no walk reads
+    /// them (pass spec §6, thinned margins).
+    pub fn write_to(&self, out: &mut Vec<u8>) {
+        let count = |out: &mut Vec<u8>, count: usize| {
+            out.extend_from_slice(&u32::try_from(count).expect("a record's reads fit u32").to_le_bytes());
+        };
+        count(out, self.samples.len());
+        for sample in &self.samples {
+            out.extend_from_slice(&sample.sample.to_le_bytes());
+            out.extend_from_slice(&sample.start.to_le_bytes());
+            out.extend_from_slice(&sample.first_fragment.to_le_bytes());
+        }
+        match &self.entries {
+            PackedEntries::Tight(entries) => {
+                out.push(0);
+                count(out, entries.len());
+                for entry in entries {
+                    out.extend_from_slice(&entry.fragment_offset);
+                    out.push(entry.allele_and_phred);
+                }
+            }
+            PackedEntries::Compact(entries) => {
+                out.push(1);
+                count(out, entries.len());
+                for entry in entries {
+                    out.extend_from_slice(&entry.fragment_offset.to_le_bytes());
+                    out.push(entry.allele);
+                    out.push(entry.error_phred);
+                }
+            }
+            PackedEntries::Whole(entries) => {
+                out.push(2);
+                count(out, entries.len());
+                for entry in entries {
+                    let ReadAllele {
+                        fragment,
+                        allele,
+                        error_phred,
+                    } = *entry;
+                    out.extend_from_slice(&fragment.to_le_bytes());
+                    out.extend_from_slice(&allele.to_le_bytes());
+                    out.push(error_phred);
+                }
+            }
+        }
+    }
+
+    /// Reads back what [`Self::write_to`] wrote at the start of `bytes`, and moves `bytes` past it.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` does not start with what [`Self::write_to`] writes: its callers read only what
+    /// they wrote.
+    #[must_use]
+    pub fn read_from(bytes: &mut &[u8]) -> Self {
+        fn take<const N: usize>(bytes: &mut &[u8]) -> [u8; N] {
+            let (head, rest) = bytes.split_at(N);
+            *bytes = rest;
+            head.try_into().expect("N bytes")
+        }
+        let u32_at = |bytes: &mut &[u8]| u32::from_le_bytes(take(bytes));
+        let samples = (0..u32_at(bytes))
+            .map(|_| PackedSample {
+                sample: u32_at(bytes),
+                start: u32_at(bytes),
+                first_fragment: u32_at(bytes),
+            })
+            .collect();
+        let form = take::<1>(bytes)[0];
+        let count = u32_at(bytes);
+        let entries = match form {
+            0 => PackedEntries::Tight(
+                (0..count)
+                    .map(|_| {
+                        let [low, high, allele_and_phred] = take::<3>(bytes);
+                        TightReadAllele {
+                            fragment_offset: [low, high],
+                            allele_and_phred,
+                        }
+                    })
+                    .collect(),
+            ),
+            1 => PackedEntries::Compact(
+                (0..count)
+                    .map(|_| {
+                        let [low, high, allele, error_phred] = take::<4>(bytes);
+                        CompactReadAllele {
+                            fragment_offset: u16::from_le_bytes([low, high]),
+                            allele,
+                            error_phred,
+                        }
+                    })
+                    .collect(),
+            ),
+            2 => PackedEntries::Whole(
+                (0..count)
+                    .map(|_| ReadAllele {
+                        fragment: u32_at(bytes),
+                        allele: u16::from_le_bytes(take(bytes)),
+                        error_phred: take::<1>(bytes)[0],
+                    })
+                    .collect(),
+            ),
+            other => panic!("read alleles written in form {other}, which `write_to` never writes"),
+        };
+        Self { samples, entries }
+    }
+}
+
 impl From<RecordFragments> for PackedRecordFragments {
     fn from(fragments: RecordFragments) -> Self {
         let mut samples: Vec<PackedSample> = Vec::new();
@@ -392,6 +503,40 @@ impl From<RecordFragments> for PackedRecordFragments {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A record's read alleles read back as written**, in each of the three forms they are held
+    /// in: written to bytes and read back, they are the same, and the reading ends where the
+    /// writing did.
+    #[test]
+    fn read_alleles_written_to_bytes_read_back_the_same() {
+        let entry = |sample: u32, fragment: u32, allele: u16, error_phred: u8| FragmentAllele {
+            sample,
+            fragment,
+            allele,
+            error_phred,
+        };
+        let forms = [
+            vec![entry(7, 3, 1, 20), entry(2, 9, 0, 30), entry(7, 1, 3, 40)],
+            vec![entry(7, 3, 5, 20), entry(2, 9, 0, 30)],
+            vec![entry(7, 3, 300, 20), entry(2, 9, 0, 30), entry(2, 100_000, 1, 9)],
+            Vec::new(),
+        ];
+        let mut tight_compact_whole = Vec::new();
+        for entries in forms {
+            let packed = PackedRecordFragments::from(RecordFragments::from_entries(entries));
+            tight_compact_whole.push((packed.is_tight(), packed.is_compact()));
+            let mut bytes = Vec::new();
+            packed.write_to(&mut bytes);
+            bytes.push(99);
+            let mut reading = bytes.as_slice();
+            assert_eq!(PackedRecordFragments::read_from(&mut reading), packed);
+            assert_eq!(reading, &[99]);
+        }
+        assert_eq!(
+            tight_compact_whole,
+            [(true, true), (false, true), (false, false), (true, true)]
+        );
+    }
 
     /// **Packing keeps every sample's entries, in order, and loses nothing else**: each sample's
     /// packed read alleles are its unpacked ones less the sample, a sample with none gets none,

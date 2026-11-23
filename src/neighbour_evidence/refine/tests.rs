@@ -603,7 +603,7 @@ fn hidden_records_respect_both_limits() {
             depth: 30.0,
             ..SHAPE
         });
-        let layout = WindowLayout::new(&cohort.records, &(0..records));
+        let layout = WindowLayout::new(&cohort.records, &(0..records), None);
         let hidden = draw_hidden_records(&cohort.records, &layout, 0, 5);
         assert_eq!(hidden.len(), expected, "{records} records");
         assert!(hidden.windows(2).all(|pair| pair[0] < pair[1]));
@@ -854,7 +854,7 @@ fn read_check_records_are_one_in_twenty_and_never_hidden() {
         depth: 30.0,
         ..SHAPE
     });
-    let layout = WindowLayout::new(&cohort.records, &(0..records));
+    let layout = WindowLayout::new(&cohort.records, &(0..records), None);
     let fragments: Vec<PackedRecordFragments> = (0..records)
         .map(|index| {
             let entry = |sample: u32| FragmentAllele {
@@ -927,7 +927,7 @@ fn a_copy_that_followed_the_reader_is_read_without_it() {
     let cohort = test_cohort(shape);
     let records = &cohort.records;
     let core = 0..records.len();
-    let layout = WindowLayout::new(records, &core);
+    let layout = WindowLayout::new(records, &core, None);
     let mut store = HaplotypeStore::new(records, &layout, shape.samples);
     let mut genotype_pairs = GenotypePairs::default();
     let pairs = genotype_pairs.of(2).to_vec();

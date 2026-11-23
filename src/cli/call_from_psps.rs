@@ -298,6 +298,45 @@ pub struct CallFromPspsArgs {
     )]
     pub refine_window_floor: u64,
 
+    /// The shortest a genotype refinement window's core may become, in bases, when a window with
+    /// margins at --refine-window-floor is still over --refine-window-bytes. The margins keep their
+    /// length, so no record loses the evidence around it; a shorter core only makes more windows,
+    /// each solving its margins again. Defaults to --refine-window-floor.
+    #[arg(
+        long,
+        value_name = "BASES",
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_core_floor: Option<u64>,
+
+    /// Walk at most this many records a kb, evenly spaced, in each genotype refinement window's
+    /// margins farther than 50 kb from its core; 0 walks every record. Stretches no denser than
+    /// that are walked in full. The core and the 50 kb next to it are always walked in full, so
+    /// every record is refined as before but sees fewer of the far records when choosing which
+    /// samples it resembles; the records not walked are held compressed. A window then holds
+    /// less memory and takes less time: on 2,176 tomato samples, 5 a kb held 41% less and took
+    /// half the time, with as many genotypes wrong.
+    #[arg(
+        long,
+        value_name = "RECORDS",
+        default_value = crate::neighbour_evidence::windows::DEFAULT_MARGIN_DENSITY,
+        value_parser = calling_run::parse_margin_density,
+        help_heading = "Advanced"
+    )]
+    pub refine_margin_density: calling_run::MarginDensity,
+
+    /// The longest a refinement window's core and each margin may be, in bases, before the budget
+    /// shrinks them (at most 1 Mb, the default margin; the default core is 2 Mb). For measurements
+    /// on short contigs, where a default window would span the contig with no margin.
+    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
+    pub refine_window_max: Option<u64>,
+
+    /// The longest a refinement window's core may be, in bases, before the budget shrinks it. For
+    /// measuring how core length alone changes the output.
+    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
+    pub refine_core_max: Option<u64>,
+
     /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
     ///
     /// A psp holding more is thinned to this as it is read: each allele keeps its share of the
@@ -700,8 +739,14 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
             &inbreeding_by_sample,
             ploidy,
             args.phase_min_path_agreement,
-            args.refine_window_bytes,
-            args.refine_window_floor,
+            calling_run::RefineWindowArgs {
+                window_bytes: args.refine_window_bytes,
+                window_floor: args.refine_window_floor,
+                core_floor: args.refine_core_floor,
+                margin_density: args.refine_margin_density,
+                window_max: args.refine_window_max,
+                core_max: args.refine_core_max,
+            },
         ));
     // **Fragments are gathered only where the output will read them**, which the header just
     // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.
