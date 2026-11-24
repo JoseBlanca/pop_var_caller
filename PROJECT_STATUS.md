@@ -22,7 +22,11 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-23):** **thinned and packed refinement margins**
+> - **Last completed task (2026-11-24):** **fixes from the refinement-memory review**
+> (branch `refine-review-fixes`, [report](doc/devel/reports/implementations/refine_review_fixes_2026-11-24.md),
+> [review](doc/devel/reports/reviews/refine_memory_2026-11-24.md)): B1, M1, M2, M3, Mi1, Mi2 and the
+> nit fixed; Mi3 (zstd lengths place windows) left for the owner. Not merged.
+> - **Before that (2026-11-23):** **thinned and packed refinement margins**
 > (branch `margin-density`, [report](doc/devel/reports/implementations/margin_thinning_2026-11-23.md)):
 > beyond 50 kb of the core, margins walk at most `--refine-margin-density` records a kb (default 5),
 > the others held zstd-compressed; templates chosen over walked records; `--refine-core-floor`
