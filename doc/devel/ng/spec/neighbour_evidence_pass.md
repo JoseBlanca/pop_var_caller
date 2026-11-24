@@ -112,7 +112,12 @@ solved, with *margins* either side read for context and written by the neighbour
 - **Sizes are set by length and by a memory budget in bytes** (§6): the core starts at 2 Mb and each
   margin at 1 Mb, and both shrink as the cohort grows, the margin never below 500 kb. The core
   shrinks first, down to the margins' length; then core and margins shrink together, in steps of
-  50 kb, to the floor. A window's size is chosen from the bytes its records would hold, so a window
+  50 kb, to the floor; then, if `--refine-core-floor` is set below it, the core alone, its margins
+  at the floor (2026-11-23). A short core cuts off no evidence, since every record keeps its
+  margins, but it makes more windows, each solving its margins again; it is off by default because
+  a simulated F2 lost up to a fifth more genotypes with 50- to 125-kb cores, though 2,176 tomato
+  samples did not
+  (`doc/devel/reports/implementations/margin_thinning_2026-11-23.md`). A window's size is chosen from the bytes its records would hold, so a window
   waits until the records its largest affordable size reaches have arrived
   (`src/neighbour_evidence/windows.rs`).
 - **A window over budget even at the floor stops the run** with an error naming the window, its
@@ -576,16 +581,23 @@ grows with the cohort, and what each thread's walk holds at every record, which 
 threads.
 
 - **Per sample and record**, for every record the window spans: the record's VCF line, held
-  compressed; its likelihoods and shares (`L` and `q`, as `f32`); each sample's read alleles, seven
-  bytes each (`PackedRecordFragments`); and each sample's two haplotypes, the templates they
-  followed, its phase across the rounds and the positions of its records with reads. For each record of the core, besides: each sample's sums
-  over the averaged rounds and what it writes. *Measured 2026-11-13* on 400 tomato25 samples
+  compressed; its likelihoods, as `PL` above the sample's lowest in a `u16` read back as the `f32`
+  `10^(−PL/10)`, and its shares (`q`, `f32`); each sample's read alleles, three bytes each where a
+  record's alleles are at most 3, four or seven where they do not fit (`PackedRecordFragments`);
+  and each sample's two haplotypes, the templates they followed and its phase across the rounds,
+  each allele pair's path bits packed in `⌈2·paths/8⌉` bytes. For each record of the core,
+  besides: each sample's sums over the averaged rounds and its written result, both `f32`. A
+  core's lines are rewritten and written a chunk at a time (2026-11-22,
+  `refine_memory_exact_2026-11-22.md`). Each sample's own result is
+  made from its sums a few hundred samples at a time, as its state is let go, and copied into the
+  records (2026-11-18, `refine_memory_2026-11-18.md`). *Measured 2026-11-13* on 400 tomato25 samples
   (chromosome 0, about 22 read alleles a sample a record there), about 140 bytes a sample a record
   held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
   of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
   bytes, counted only the likelihoods and shares.
-- **Per thread and record**: a walk's terms for the backward sweep, the round's inputs and, from
-  round 2, the nine drawn paths. Its forward probabilities (`K² + 3K` numbers a record) and
+- **Per thread and record**: the round's inputs (the drawn definite alleles a byte each) and, from
+  round 2, the nine drawn paths; a site's blurred shares and likelihood matrix are computed where
+  they are read, not kept (2026-11-22). Its forward probabilities (`K² + 3K` numbers a record) and
   emissions (`K² + K`) are kept for one block of 64 records, the forward probabilities also at
   every block's first record, and computed again block by block in the backward sweep (2026-11-13;
   the same bits, and about three times fewer cycles, since the walk had been waiting on memory).
@@ -593,8 +605,10 @@ threads.
   37.7 GB when every record's were kept.
 
 **The window is sized to a budget in bytes**, `--refine-window-bytes`, 32 GB by default. It counts
-the per-sample part exactly as the records arrive — each line as it arrived, though most are held
-compressed, so the count does not depend on when its batch was compressed. It does not count the
+the per-sample part exactly as the records arrive, each line at its compressed length: a window is
+planned only once every line it spans is compressed, so the count does not depend on when its
+batch was compressed. The shortest window, `--refine-window-floor`, is 500 kb of margin by
+default, and of core unless `--refine-core-floor` is set lower (§2.2). It does not count the
 per-thread part: that would make the windows, and so the output, depend on the thread count (§2.3).
 For the same reason it counts arrays by their lengths, not the allocator's capacities, and types
 whose layout the compiler chooses (an option, a tuple) at fixed sizes, not `size_of`: a compiler
@@ -602,6 +616,35 @@ that laid one out differently must not move a window.
 At 2,176 samples and about 250 bytes a sample a record, 32 GB holds a window of about 58,000
 records, 2.2 Mb at 26 records a kilobase; the 500-kb floor is reached at about 3,000 samples, and
 past it the run stops (§2.2).
+
+**Thinned margins** (`--refine-margin-density`, 2026-11-23). A margin is read only to tell which
+samples a record's haplotypes follow, and once a stretch has enough records to tell that, more say
+little. With a density `D` set, beyond 50 kb of the core (`NEAR_MARGIN_BASES`) a window's walks read
+at most about `D` records a kb, evenly spaced; the core and the 50 kb either side are read in full,
+and so is every far record a sample's last written block joins at (phase output spec §2.4). Which
+far records are read is decided once for each record as it arrives, not by the window reading it —
+a token bucket of `D` tokens a kb, holding at most a kb's worth, that spends one on each record it
+walks — so a stretch no denser than `D` is read in full, and the choice does not depend on the
+thread count. Templates are chosen (§3.3) over the walked records only.
+
+**A record the far margins skip is held compressed** while no window walks it: its numbers
+(likelihoods and allele shares) and its reads are packed with zstd once its line is compressed,
+leaving its position, allele count and rows, and a window unpacks the records it walks and drops
+the unpacked copy of those it does not. The budget counts a skipped record at its packed size plus
+its line beyond the near margins, and in full within them; its solve state is never made. The
+packed size depends only on the record, so the windows do not depend on the thread count.
+
+**`D` is 5 by default**; `0` reads every record, and the output is as before thinning. *Measured
+2026-11-23* (`doc/devel/reports/implementations/margin_thinning_2026-11-23.md`). On 2,176 tomato25
+samples, chromosome 1 at 44.0–45.5 Mb (87 records a kb), 500-kb windows: at 5 a kb, packed, the
+fill check's errors were 0.0648% of 288,000 hidden genotypes against 0.0649% unthinned, 0.039% of
+genotypes moved (0.026% move from changing the draws' seed alone), the peak fell from 52.1 to
+30.7 GB and the time from 1,680 to 821 s. On chromosome 1 at 40–47 Mb, where the run of
+2026-11-18 stopped over a 90-GB budget, the smallest window cost 72.3 GB thinned to 5 a kb and
+65.9 GB packed; packed, under a 60-GB budget with the core floor at 100 kb, the stretch ran with a
+peak of 69.5 GB. On the refinement benchmark's simulated cohorts with 250-kb windows, sparser than
+5 a kb, 5 a kb changes nothing; at 1 a kb the selfing population wrote 2% more wrong genotypes and
+the F2 6% more no-calls, and at 0.1 a kb the F2 8% more wrong genotypes.
 
 ---
 

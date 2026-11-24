@@ -20,8 +20,8 @@
 use std::collections::BTreeMap;
 
 use super::model::PathHaplotypes;
-use crate::read_phase::fragments::ReadAllele;
-use crate::read_phase::link::{self, Heterozygote, ReadLink, Relation, score_read_link};
+use crate::read_phase::fragments::SampleReadAlleles;
+use crate::read_phase::link::{self, Heterozygote, ReadLink, Relation, score_read_lists};
 
 /// **Paths drawn per averaged round besides the round's own** (spec §2.3): with 8, the 64-founder
 /// simulated cohort's links inside blocks were wrong 0.35% of the time, against 1.43% with 4
@@ -136,11 +136,19 @@ impl PairLayout {
     }
 }
 
-/// **The bytes one sample's phase holds at a site of `alleles` alleles**: its lined-up sums and its
-/// paths' bits at each allele pair (pass spec §6).
+/// **The bytes one sample's phase holds at a site of `alleles` alleles**, in a window of the run's
+/// own rounds: its lined-up sums and its paths' bits at each allele pair, packed
+/// ([`packed_bits_bytes`]; pass spec §6).
 pub(super) fn phase_bytes(alleles: usize) -> usize {
     2 * (alleles - 1) * std::mem::size_of::<f32>()
-        + alleles * (alleles - 1) / 2 * std::mem::size_of::<PathBits>()
+        + alleles * (alleles - 1) / 2 * packed_bits_bytes(super::refine::PHASED_PATHS)
+}
+
+/// **The bytes one allele pair's bits take for `paths` paths**: each path's two bits, the paths'
+/// `towards_lower` bits then their `leans` bits, packed — 9 bytes for the 36 paths a run draws,
+/// where the two masks as `u64`s took 16.
+pub(super) const fn packed_bits_bytes(paths: usize) -> usize {
+    (2 * paths).div_ceil(8)
 }
 
 /// Each path's bits at one pair entry: bit `p` of `towards_lower` says path `p`'s copy 0 leans to
@@ -177,7 +185,11 @@ pub(super) struct SamplePhase {
     /// sample of a window, so shared: a copy each was eight bytes a sample a record (pass spec §6).
     sum_offsets: std::sync::Arc<[usize]>,
     rounds_added: u32,
-    bits: Vec<PathBits>,
+    /// Each pair entry's bits, [`packed_bits_bytes`] of `path_capacity` paths an entry
+    /// ([`Self::bits_at`]).
+    bits: Vec<u8>,
+    /// The most paths the window draws, which sets how the bits are packed.
+    path_capacity: u32,
     paths: u32,
 }
 
@@ -194,14 +206,47 @@ impl SamplePhase {
         sum_offsets.into()
     }
 
-    /// A sample's phase over the sites `sum_offsets` ([`Self::offsets`]) lays out, before any round.
-    pub(super) fn new(sum_offsets: &std::sync::Arc<[usize]>, pairs: &PairLayout) -> Self {
+    /// A sample's phase over the sites `sum_offsets` ([`Self::offsets`]) lays out, before any round,
+    /// for a window that draws at most `path_capacity` paths.
+    ///
+    /// # Panics
+    ///
+    /// If `path_capacity` is more than [`MAX_PATHS`].
+    pub(super) fn new(
+        sum_offsets: &std::sync::Arc<[usize]>,
+        pairs: &PairLayout,
+        path_capacity: usize,
+    ) -> Self {
+        assert!(
+            path_capacity <= MAX_PATHS,
+            "at most {MAX_PATHS} paths a window"
+        );
         Self {
             sums: vec![0.0; sum_offsets.last().copied().unwrap_or(0)],
             sum_offsets: std::sync::Arc::clone(sum_offsets),
             rounds_added: 0,
-            bits: vec![PathBits::default(); pairs.entries()],
+            bits: vec![0; pairs.entries() * packed_bits_bytes(path_capacity)],
+            path_capacity: path_capacity as u32,
             paths: 0,
+        }
+    }
+
+    /// **Pair entry `entry`'s bits, unpacked**: path `p`'s `towards_lower` bit at bit `p` of the
+    /// entry's bytes, its `leans` bit at bit `path_capacity + p`.
+    fn bits_at(&self, entry: usize) -> PathBits {
+        let stride = packed_bits_bytes(self.path_capacity as usize);
+        let mut packed = [0_u8; 16];
+        packed[..stride].copy_from_slice(&self.bits[entry * stride..(entry + 1) * stride]);
+        let all = u128::from_le_bytes(packed);
+        let capacity = self.path_capacity;
+        let mask = if capacity == 64 {
+            u64::MAX
+        } else {
+            (1_u64 << capacity) - 1
+        };
+        PathBits {
+            towards_lower: (all as u64) & mask,
+            leans: ((all >> capacity) as u64) & mask,
         }
     }
 
@@ -213,23 +258,26 @@ impl SamplePhase {
     /// that would.
     pub(super) fn record_path(&mut self, pairs: &PairLayout, haplotypes: &PathHaplotypes) {
         assert!(
-            (self.paths as usize) < MAX_PATHS,
-            "at most {MAX_PATHS} paths a window"
+            self.paths < self.path_capacity,
+            "at most {} paths in this window",
+            self.path_capacity
         );
-        let bit = 1_u64 << self.paths;
+        let stride = packed_bits_bytes(self.path_capacity as usize);
+        let towards_bit = self.paths as usize;
+        let leans_bit = (self.path_capacity + self.paths) as usize;
         for (site, [copy_0, copy_1]) in haplotypes.iter().enumerate() {
             let alleles = copy_0.len();
             // A site's pairs are consecutive entries, in the order the two loops visit them.
             let mut entry = pairs.entry(site, 0, 1, alleles.max(2));
             for a in 0..alleles {
                 for b in a + 1..alleles {
-                    let bits = &mut self.bits[entry];
+                    let bits = &mut self.bits[entry * stride..(entry + 1) * stride];
                     let lean = lean(copy_0, copy_1, a, b);
                     if lean > 0.0 {
-                        bits.towards_lower |= bit;
+                        bits[towards_bit / 8] |= 1 << (towards_bit % 8);
                     }
                     if lean.abs() >= LEAN_MIN {
-                        bits.leans |= bit;
+                        bits[leans_bit / 8] |= 1 << (leans_bit % 8);
                     }
                     entry += 1;
                 }
@@ -400,7 +448,7 @@ impl SamplePhase {
                 (lean.abs() >= LEAN_MIN).then(|| Candidate {
                     site,
                     alleles: (a, b),
-                    bits: self.bits[pairs.entry(site, a, b, consensus_0.len())],
+                    bits: self.bits_at(pairs.entry(site, a, b, consensus_0.len())),
                     towards_lower: lean > 0.0,
                 })
             })
@@ -568,7 +616,7 @@ impl Member {
 /// does.
 #[derive(Default)]
 pub(crate) struct SiteReads<'a> {
-    pub(crate) fragments: Vec<&'a [ReadAllele]>,
+    pub(crate) fragments: Vec<SampleReadAlleles<'a>>,
     pub(crate) genotype_qualities: Vec<Option<u32>>,
     /// Per site, whether the draw kept the sample's reads out there (reads-in-draw spec §2.6); empty
     /// when the draw used no reads anywhere, and then every site counts as kept out.
@@ -584,14 +632,19 @@ impl SiteReads<'_> {
         other: usize,
         other_alleles: (usize, usize),
     ) -> ReadLink {
-        let at = |site: usize| self.fragments.get(site).copied().unwrap_or(&[]);
+        let at = |site: usize| {
+            self.fragments
+                .get(site)
+                .copied()
+                .unwrap_or(SampleReadAlleles::EMPTY)
+        };
         let heterozygote = |(a, b): (usize, usize)| {
             // PANIC-FREE: the alleles index the line's alleles, which calling numbers as
             // `AlleleId`, a `u16`; and the pass phases only a heterozygote, two different alleles.
             let allele = |allele: usize| u16::try_from(allele).expect("an allele index fits a u16");
             Heterozygote::of(allele(a), allele(b)).expect("a heterozygote's two alleles differ")
         };
-        score_read_link(
+        score_read_lists(
             at(one),
             heterozygote(one_alleles),
             at(other),

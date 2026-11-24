@@ -194,11 +194,20 @@ pub struct CallFromAlignmentsArgs {
     /// working directory when the VCF goes to standard output.
     ///
     /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
-    /// it ends, whether it succeeded or failed; a run that is killed, or stops on an internal
-    /// error, leaves it behind. While the hidden-dup filter is on, every call waits there until
-    /// the whole genome is called: several times the compressed VCF's size.
+    /// it ends, whether it succeeded or failed, unless --keep-tmp-on-error; a run that is
+    /// killed, or stops on an internal error, leaves it behind. While the hidden-dup filter is
+    /// on, every call waits there until the whole genome is called: several times the
+    /// compressed VCF's size.
     #[arg(long)]
     pub tmp_dir: Option<PathBuf>,
+
+    /// Keep the run's scratch directory, and the hidden-dup filter's spill in it, when the run
+    /// stops on an error. Its path is logged. A run that finishes removes it as usual.
+    ///
+    /// The spill holds every called record, so on a large cohort the kept directory can take
+    /// terabytes: remove it once it is no longer needed.
+    #[arg(long)]
+    pub keep_tmp_on_error: bool,
 
     /// A locus where any sample has a read group deeper than this is not called, for any sample.
     ///
@@ -288,7 +297,7 @@ pub struct CallFromAlignmentsArgs {
 
     /// The most memory, in bytes, one window of genotype refinement may hold: its records' lines,
     /// numbers and reads, and each sample's state while it is solved. Windows shrink to fit it,
-    /// down to 500 kb of core and margins; a cohort whose smallest window still does not fit stops
+    /// down to --refine-window-floor; a cohort whose smallest window still does not fit stops
     /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
     /// walk's arrays, a few kilobytes a window record.
     #[arg(
@@ -297,6 +306,57 @@ pub struct CallFromAlignmentsArgs {
         help_heading = "Advanced"
     )]
     pub refine_window_bytes: u64,
+
+    /// The shortest each margin of a genotype refinement window may become when windows shrink to
+    /// fit --refine-window-bytes, in bases; the core shrinks with them. Shorter margins hold less
+    /// memory but may cut off evidence: a sample copies stretches of up to about 300 kb.
+    #[arg(
+        long,
+        value_name = "BASES",
+        default_value_t = crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_window_floor: u64,
+
+    /// The shortest a genotype refinement window's core may become, in bases, when a window with
+    /// margins at --refine-window-floor is still over --refine-window-bytes. The margins keep their
+    /// length, so no record loses the evidence around it; a shorter core only makes more windows,
+    /// each solving its margins again. Defaults to --refine-window-floor.
+    #[arg(
+        long,
+        value_name = "BASES",
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_core_floor: Option<u64>,
+
+    /// Walk at most this many records a kb, evenly spaced, in each genotype refinement window's
+    /// margins farther than 50 kb from its core; 0 walks every record. Stretches no denser than
+    /// that are walked in full. The core and the 50 kb next to it are always walked in full, so
+    /// every record is refined as before but sees fewer of the far records when choosing which
+    /// samples it resembles; the records not walked are held compressed. A window then holds
+    /// less memory and takes less time: on 2,176 tomato samples, 5 a kb held 41% less and took
+    /// half the time, with as many genotypes wrong.
+    #[arg(
+        long,
+        value_name = "RECORDS",
+        default_value = crate::neighbour_evidence::windows::DEFAULT_MARGIN_DENSITY,
+        value_parser = calling_run::parse_margin_density,
+        help_heading = "Advanced"
+    )]
+    pub refine_margin_density: calling_run::MarginDensity,
+
+    /// The longest a refinement window's core and each margin may be, in bases, before the budget
+    /// shrinks them (at most 1 Mb, the default margin; the default core is 2 Mb). For measurements
+    /// on short contigs, where a default window would span the contig with no margin.
+    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
+    pub refine_window_max: Option<u64>,
+
+    /// The longest a refinement window's core may be, in bases, before the budget shrinks it. For
+    /// measuring how core length alone changes the output.
+    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
+    pub refine_core_max: Option<u64>,
 
     /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
@@ -797,7 +857,14 @@ pub fn run_call_from_alignments(
             &inbreeding_by_sample,
             ploidy,
             args.phase_min_path_agreement,
-            args.refine_window_bytes,
+            calling_run::RefineWindowArgs {
+                window_bytes: args.refine_window_bytes,
+                window_floor: args.refine_window_floor,
+                core_floor: args.refine_core_floor,
+                margin_density: args.refine_margin_density,
+                window_max: args.refine_window_max,
+                core_max: args.refine_core_max,
+            },
         ));
     // **Fragments are gathered only where the output will read them**, which the header just
     // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.
@@ -813,12 +880,14 @@ pub fn run_call_from_alignments(
     // decided nothing.
     // **The run's own scratch directory, made only where something will be parked in it**, and
     // removed when `scratch` is dropped — at the end of this function, on its success or on any
-    // error that returns through it.
+    // error that returns through it, unless the run failed with `--keep-tmp-on-error`: only the
+    // last step, `the_run_succeeded`, counts as success.
     calling_run::warn_of_read_phase_without_the_duplication_filter(asked_for.is_some(), ploidy);
-    let scratch = match asked_for {
+    let mut scratch = match asked_for {
         Some(_) => Some(calling_run::scratch_directory_for(
             &args.output,
             args.tmp_dir.as_deref(),
+            calling_run::ScratchOnFailure::from_keep_flag(args.keep_tmp_on_error),
         )?),
         None => None,
     };
@@ -956,6 +1025,9 @@ pub fn run_call_from_alignments(
         run_output::elapsed_text(started.elapsed())
     );
     tracing::info!("log: {}", log.display());
+    if let Some(scratch) = &mut scratch {
+        scratch.the_run_succeeded();
+    }
     Ok(())
 }
 

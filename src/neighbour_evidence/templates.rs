@@ -129,7 +129,19 @@ pub fn choose_templates(
     sample: usize,
     max_templates: usize,
 ) -> Option<Vec<ChosenTemplate<usize>>> {
-    let compared = compared_records(records, sample);
+    choose_templates_where(records, sample, max_templates, |_| true)
+}
+
+/// [`choose_templates`] over the records `walked` admits: those a window with thinned margins
+/// walks (pass spec §6, thinned margins), the only ones whose numbers it holds.
+#[must_use]
+pub(crate) fn choose_templates_where(
+    records: &[SiteRecord],
+    sample: usize,
+    max_templates: usize,
+    walked: impl Fn(usize) -> bool,
+) -> Option<Vec<ChosenTemplate<usize>>> {
+    let compared = compared_records_where(records, sample, walked);
     let &first = compared.first()?;
     let samples = records[first].sample_count();
     let others: Vec<usize> = (0..samples).filter(|&other| other != sample).collect();
@@ -174,10 +186,23 @@ pub fn choose_templates(
 /// informative sites, at most [`AGREEMENT_RECORDS`] of them spread evenly by record order (§3.3).
 /// Empty when it has none.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usize> {
+    compared_records_where(records, sample, |_| true)
+}
+
+/// [`compared_records`] among the records `walked` admits: those a window with thinned margins
+/// walks (pass spec §6, thinned margins).
+pub(crate) fn compared_records_where(
+    records: &[SiteRecord],
+    sample: usize,
+    walked: impl Fn(usize) -> bool,
+) -> Vec<usize> {
     let informative: Vec<usize> = (0..records.len())
         .filter(|&index| {
-            records[index].is_site() && records[index].row(sample) == SampleRow::Informative
+            records[index].is_site()
+                && walked(index)
+                && records[index].row(sample) == SampleRow::Informative
         })
         .collect();
     if informative.len() <= AGREEMENT_RECORDS {

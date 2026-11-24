@@ -280,8 +280,15 @@ impl VcfWriter {
         match &mut self.stage {
             LineStage::None => self.write_checked_line(&line),
             LineStage::Refinement(stage) => {
-                stage.push(place, line, fragments, &mut self.released)?;
-                self.write_released()
+                // Each line the stage completes goes straight to the file, a chunk of a core at a
+                // time, rather than the whole core held until the stage returns.
+                let (sink, final_path, written) =
+                    (&mut self.sink, &self.final_path, &mut self.records_written);
+                stage
+                    .push_writing(place, line, fragments, &mut |_, line| {
+                        write_one_line(sink, final_path, written, &line)
+                    })
+                    .map_err(VcfWriteError::from)
             }
             LineStage::ReadsAlone(stage) => {
                 stage.push(place, line, fragments, &mut self.released);
@@ -304,16 +311,12 @@ impl VcfWriter {
 
     /// Writes one line whose place has been checked.
     fn write_checked_line(&mut self, line: &[u8]) -> Result<(), VcfWriteError> {
-        self.sink
-            .write_all(line)
-            .and_then(|()| self.sink.write_all(b"\n"))
-            .map_err(|source| VcfWriteError::Write {
-                tmp_path: tmp_path_for(&self.final_path),
-                source,
-            })?;
-
-        self.records_written += 1;
-        Ok(())
+        write_one_line(
+            &mut self.sink,
+            &self.final_path,
+            &mut self.records_written,
+            line,
+        )
     }
 
     /// The ordering rule, in one place so the refusals cannot disagree with each other.
@@ -404,7 +407,11 @@ impl VcfWriter {
         let mut read_phase_tally = None;
         let mut stage = std::mem::replace(&mut self.stage, LineStage::None);
         if let LineStage::Refinement(stage) = &mut stage {
-            stage.finish(&mut self.released)?;
+            let (sink, final_path, written) =
+                (&mut self.sink, &self.final_path, &mut self.records_written);
+            stage
+                .finish_writing(&mut |_, line| write_one_line(sink, final_path, written, &line))
+                .map_err(VcfWriteError::from)?;
             neighbour_evidence = Some(stage.tally());
             fill_checks = self
                 .metadata
@@ -445,6 +452,24 @@ impl VcfWriter {
 /// ([`written_position`](super::encode::written_position)) rather than from a second copy of the
 /// padding rule. The two used to be spelled separately, so a record's ordering key and its own
 /// `POS` could drift apart under an edit to either.
+/// **Writes one line and its newline to the file**, counting it — what every line the writer
+/// writes goes through, its order already checked.
+fn write_one_line(
+    sink: &mut Sink,
+    final_path: &Path,
+    written: &mut u64,
+    line: &[u8],
+) -> Result<(), VcfWriteError> {
+    sink.write_all(line)
+        .and_then(|()| sink.write_all(b"\n"))
+        .map_err(|source| VcfWriteError::Write {
+            tmp_path: tmp_path_for(final_path),
+            source,
+        })?;
+    *written += 1;
+    Ok(())
+}
+
 fn place_of(record: &VcfRecord) -> RecordPlace {
     RecordPlace {
         at: GenomePosition {
@@ -669,7 +694,8 @@ pub enum VcfWriteError {
     #[error(
         "genotype refinement cannot go on: its smallest window, from contig {} position {}, \
          holds {} records of {} samples, {:.1} GB, and --refine-window-bytes allows {:.1} GB. \
-         Raise --refine-window-bytes to at least {}.",
+         Raise --refine-window-bytes to at least {}, or shorten the smallest window with \
+         --refine-window-floor.",
         .0.contig,
         .0.position,
         .0.records,
@@ -716,6 +742,15 @@ pub enum VcfWriteError {
         /// Whether the arriving record is a repeat tract.
         is_repeat_tract: bool,
     },
+}
+
+impl From<crate::neighbour_evidence::stage::StageStop<VcfWriteError>> for VcfWriteError {
+    fn from(stop: crate::neighbour_evidence::stage::StageStop<VcfWriteError>) -> Self {
+        match stop {
+            crate::neighbour_evidence::stage::StageStop::OverBudget(over) => over.into(),
+            crate::neighbour_evidence::stage::StageStop::Write(error) => error,
+        }
+    }
 }
 
 impl From<crate::neighbour_evidence::stage::WindowOverBudget> for VcfWriteError {

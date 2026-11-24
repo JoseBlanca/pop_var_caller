@@ -11,6 +11,7 @@ use super::estimate_parameters::EstimateParametersArgs;
 use super::generate_psps::GeneratePspsArgs;
 use super::inspect_psp::InspectPspArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
+use super::resume_calling::ResumeCallingArgs;
 use super::typed_regions::TypedRegionsArgs;
 
 /// The `pvc` command line: the top-level parser, whose help is the first thing a user reads.
@@ -88,6 +89,13 @@ pub enum PopVarCallerCommand {
     /// parameters, read from the psps instead of the alignments. The ground called and what
     /// counts as a repeat are the ones the psps were written with.
     CallFromPsps(CallFromPspsArgs),
+
+    /// Finish a calling run from the scratch directory it kept, without calling again.
+    ///
+    /// For a run with the hidden-dup filter on that stopped after calling had ended — refinement
+    /// over its memory budget, a full disk — and kept its scratch directory: scores the parked
+    /// calls and writes the VCF as the run would have.
+    ResumeCalling(ResumeCallingArgs),
 
     /// Tools for developing and debugging the caller.
     #[command(subcommand)]

@@ -181,6 +181,16 @@ pub enum CallingRunError {
         source: std::io::Error,
     },
 
+    /// The scratch directory a resumed run was pointed at is not there.
+    #[error(
+        "`{}` is not a directory: point --scratch-dir at the scratch directory a failed run kept",
+        directory.display()
+    )]
+    ScratchDirectoryNotFound {
+        /// What was given.
+        directory: PathBuf,
+    },
+
     /// `--ploidy` was typed and disagrees with the parameters file's own.
     ///
     /// **A file's numbers were fitted at one ploidy and mean nothing at another**
@@ -823,17 +833,56 @@ pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
     PathAgreement::try_new(share).ok_or_else(|| format!("`{text}` is not a share in (0, 1]"))
 }
 
+/// **`--refine-margin-density`'s parser**: records a kb to three decimals; 0, no thinning.
+///
+/// # Errors
+///
+/// As [`MarginThinning::parse`](crate::neighbour_evidence::windows::MarginThinning::parse).
+pub fn parse_margin_density(
+    text: &str,
+) -> Result<MarginDensity, String> {
+    crate::neighbour_evidence::windows::MarginThinning::parse(text).map(MarginDensity)
+}
+
+/// **`--refine-margin-density`'s value**: the far margins' thinning, or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarginDensity(pub Option<crate::neighbour_evidence::windows::MarginThinning>);
+
+impl std::fmt::Display for MarginDensity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(thinning) => write!(f, "{thinning}"),
+            None => write!(f, "0"),
+        }
+    }
+}
+
+/// **The refinement window options a calling run was given** (`--refine-window-bytes`,
+/// `--refine-window-floor`, `--refine-core-floor`, `--refine-margin-density` and the hidden
+/// `--refine-window-max` and `--refine-core-max`), as [`neighbour_evidence_decision`] reads them.
+#[derive(Clone, Copy, Debug)]
+pub struct RefineWindowArgs {
+    pub window_bytes: u64,
+    pub window_floor: u64,
+    /// The window floor where not given.
+    pub core_floor: Option<u64>,
+    /// 0 walks every record.
+    pub margin_density: MarginDensity,
+    pub window_max: Option<u64>,
+    pub core_max: Option<u64>,
+}
+
 /// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
 /// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
 /// header is written, and stated in it either way. `path_agreement` is
-/// `--phase-min-path-agreement`, `window_bytes` `--refine-window-bytes`.
+/// `--phase-min-path-agreement`, `windows` the window options.
 #[must_use]
 pub fn neighbour_evidence_decision(
     asked: RefineGenotypesArg,
     inbreeding_by_sample: &[InbreedingF],
     ploidy: Ploidy,
     path_agreement: PathAgreement,
-    window_bytes: u64,
+    windows: RefineWindowArgs,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
         RefineGenotypesArg::Auto => NeighbourEvidenceSwitch::Auto,
@@ -843,7 +892,18 @@ pub fn neighbour_evidence_decision(
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
     let decision = decide(switch, &inbreeding, ploidy)
         .with_path_agreement(path_agreement)
-        .with_window_bytes(window_bytes);
+        .with_window_bytes(windows.window_bytes)
+        .with_window_floor(windows.window_floor)
+        .with_core_floor(windows.core_floor.unwrap_or(windows.window_floor))
+        .with_margin_thinning(windows.margin_density.0);
+    let decision = match windows.window_max {
+        Some(bases) => decision.with_window_max(bases),
+        None => decision,
+    };
+    let decision = match windows.core_max {
+        Some(bases) => decision.with_core_max(bases),
+        None => decision,
+    };
     tracing::info!(
         "neighbour-evidence pass: {} ({})",
         if decision.ran { "runs" } else { "off" },
@@ -918,11 +978,12 @@ pub fn refuse_a_tmp_dir_that_is_not_a_directory(
 
 /// **The run's own scratch directory**, `pvc_tmp_<random>` inside `--tmp-dir`, or inside the
 /// VCF's directory when no `--tmp-dir` was given (the working directory for a VCF on standard
-/// output) (`doc/devel/ng/spec/command_line.md` §7.5). Removed when the returned value is
-/// dropped.
+/// output) (`doc/devel/ng/spec/command_line.md` §7.5).
 ///
 /// **A directory of its own**, so several runs can share one `--tmp-dir` without colliding, and
 /// removing it never touches anything the user put there.
+///
+/// What happens to it when the run ends is [`RunScratch`]'s, and `on_failure` says which way.
 ///
 /// # Errors
 ///
@@ -930,7 +991,8 @@ pub fn refuse_a_tmp_dir_that_is_not_a_directory(
 pub fn scratch_directory_for(
     output: &Path,
     tmp_dir: Option<&Path>,
-) -> Result<tempfile::TempDir, CallingRunError> {
+    on_failure: ScratchOnFailure,
+) -> Result<RunScratch, CallingRunError> {
     let directory = match tmp_dir {
         Some(directory) => directory.to_path_buf(),
         None => match output.parent() {
@@ -945,8 +1007,138 @@ pub fn scratch_directory_for(
             directory: directory.clone(),
             source,
         })?;
-    tracing::debug!("scratch directory: {}", made.path().display());
-    Ok(made)
+    let made = made.keep();
+    tracing::debug!("scratch directory: {}", made.display());
+    Ok(RunScratch {
+        directory: Some(made),
+        on_failure,
+        the_run_succeeded: false,
+    })
+}
+
+/// **The scratch directory an earlier run kept, taken over by a run that resumes it**
+/// (`pvc resume-calling`): removed when this run succeeds, kept when it fails and `on_failure`
+/// asks for that, as the run that made it would have.
+///
+/// # Errors
+///
+/// [`CallingRunError::ScratchDirectoryNotFound`] when `directory` is not a directory.
+pub fn kept_scratch_directory(
+    directory: &Path,
+    on_failure: ScratchOnFailure,
+) -> Result<RunScratch, CallingRunError> {
+    if !directory.is_dir() {
+        return Err(CallingRunError::ScratchDirectoryNotFound {
+            directory: directory.to_path_buf(),
+        });
+    }
+    tracing::debug!("scratch directory, resumed: {}", directory.display());
+    Ok(RunScratch {
+        directory: Some(directory.to_path_buf()),
+        on_failure,
+        the_run_succeeded: false,
+    })
+}
+
+/// What becomes of a run's scratch directory when the run ends in an error —
+/// `--keep-tmp-on-error`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScratchOnFailure {
+    /// Removed, as on success. The default: a failed run with the hidden-duplication filter on
+    /// can leave a spill several terabytes long on a cohort of thousands.
+    Removed,
+    /// Left on disk, with everything in it, and its path logged — for looking at what the run
+    /// had made before it stopped.
+    Kept,
+}
+
+impl ScratchOnFailure {
+    /// The choice `--keep-tmp-on-error` makes.
+    #[must_use]
+    pub fn from_keep_flag(keep_tmp_on_error: bool) -> Self {
+        if keep_tmp_on_error {
+            Self::Kept
+        } else {
+            Self::Removed
+        }
+    }
+}
+
+/// **A run's scratch directory and the one decision about it: removed or kept when the run
+/// ends.**
+///
+/// The directory is removed when this is dropped, unless the run never said it succeeded and
+/// [`ScratchOnFailure::Kept`] was asked for. A run says so with [`Self::the_run_succeeded`] as
+/// its last step, so **every way out that is not that step counts as a failure**: an error
+/// returned through `?` from anywhere in the run drops this without it.
+///
+/// **It is the one owner of what is inside.** The hidden-duplication filter's spill lives here
+/// and does not remove itself (`SpillFile::in_directory`), so keeping the directory keeps the
+/// spill, and removing it removes the spill. A panic in a release build aborts, so no `Drop`
+/// runs and the directory stays whatever was asked; in a debug build it unwinds through here and
+/// counts as a failure.
+#[derive(Debug)]
+pub struct RunScratch {
+    /// `None` only once `Drop` has taken it.
+    directory: Option<PathBuf>,
+    on_failure: ScratchOnFailure,
+    the_run_succeeded: bool,
+}
+
+impl RunScratch {
+    /// Where the directory is.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.directory
+            .as_ref()
+            // PANIC-FREE: `directory` is `Some` from construction until `Drop` takes it.
+            .expect("the scratch directory is there until it is dropped")
+    }
+
+    /// Record that the run finished and wrote its output, so the directory is removed whatever
+    /// `--keep-tmp-on-error` said.
+    pub fn the_run_succeeded(&mut self) {
+        self.the_run_succeeded = true;
+    }
+}
+
+impl Drop for RunScratch {
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        if !self.the_run_succeeded && self.on_failure == ScratchOnFailure::Kept {
+            // A run that stopped after calling left what resuming needs; one that stopped before
+            // left a spill nothing can finish.
+            let resumable = crate::run::paralog_filter::resume::is_resumable(&directory);
+            tracing::warn!(
+                "the run did not finish; its scratch directory is kept, as --keep-tmp-on-error \
+                 asked: {} — remove it once it is no longer needed{}",
+                directory.display(),
+                if resumable {
+                    format!(
+                        ", or finish the run from it with `pvc resume-calling --scratch-dir {}`",
+                        directory.display()
+                    )
+                } else {
+                    String::new()
+                }
+            );
+            return;
+        }
+        let path = directory;
+        if let Err(source) = std::fs::remove_dir_all(&path) {
+            // A directory left on disk, possibly terabytes of spill, is worth a line; a `Drop`
+            // must not panic, and a second message while a panic unwinds would bury the first.
+            if !std::thread::panicking() {
+                tracing::warn!(
+                    "the run's scratch directory `{}` could not be removed and is still on \
+                     disk: {source}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 /// Where the calls went, as a person reads it: the file, or `standard output`.

@@ -118,3 +118,13 @@ samples it was estimated on.
   (change with `--tmp-dir`), and take several times the size of the final compressed VCF. For the
   same reason, with `--output -` nothing reaches standard output until the whole genome is called.
   `--hidden-dup-fdr 0` turns the check off, and the scratch space with it.
+- **A run that stops after calling can be finished without calling again.** With
+  `--keep-tmp-on-error`, a run that stops on an error keeps its scratch directory, and its log
+  names it. Once calling has ended, that directory holds everything the check and the writing need,
+  so `pvc resume-calling --scratch-dir <the directory> --output calls.vcf.gz` finishes the run from
+  it, as the stopped run would have. It may set its own `--refine-window-bytes`,
+  `--refine-window-floor`, `--refine-core-floor`, `--refine-margin-density`,
+  `--phase-min-path-agreement` and `--threads`; otherwise it keeps the stopped run's, and a run
+  from before margins could be thinned walks every record unless given `--refine-margin-density`; nothing it does changes
+  what was called. It removes the directory when it finishes. A run killed outside pvc's control
+  leaves its directory behind too, and can be resumed the same way if calling had ended.

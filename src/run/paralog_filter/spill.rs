@@ -213,6 +213,13 @@ const fn max_frame_bytes(inflated: usize) -> usize {
     inflated + inflated / 128 + 4096
 }
 
+/// **The spill's layout, as a number**, recorded in a resume point
+/// ([`super::resume`]): the file itself carries no version, since a run that never stops writes and
+/// reads it in one process, but a run resumed from a kept spill may be a different build. **Raise
+/// it whenever an entry is written or read differently**, so such a build refuses the spill rather
+/// than misreading it.
+pub const SPILL_FORMAT: u32 = 1;
+
 /// The level each frame is compressed at.
 ///
 /// **Level 1, zstd's fastest of its ordinary levels**, because the frames are compressed while

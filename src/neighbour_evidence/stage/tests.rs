@@ -41,7 +41,7 @@ fn the_header_line_states_the_decision() {
     assert_eq!(
         decision.as_header_value(),
         "<ran=yes,why=\"57 samples, median inbreeding 0.98\",templates=16,mismatch=0.01,\
-         core=2000000,margin=1000000,window_bytes=32000000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
+         core=2000000,margin=1000000,margin_floor=500000,window_bytes=32000000000,rounds=5,haplotype_templates=16,hidden_per_window=50,\
          hidden_share=0.05,extra_paths=8,lean_min=0.5,path_agreement=0.8,join_records=3,\
          alignment_costs=1/2,read_link_min=5.29,read_break_min=2.20,read_error_floor=0.01,\
          read_gq_min=30,read_reach=1000,read_cap=32>"
@@ -86,7 +86,9 @@ fn run_stage(threads: usize) -> StageRun {
         core_bases: 300_000,
         margin_bases: 300_000,
         margin_floor_bases: 300_000,
+        core_floor_bases: 300_000,
         budget_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+        thinning: None,
     };
     let mut inputs: Vec<(RecordPlace, String)> = Vec::new();
     for contig in 0..2 {
@@ -303,7 +305,9 @@ const JOIN_WINDOWS: WindowSizes = WindowSizes {
     core_bases: 200_000,
     margin_bases: 200_000,
     margin_floor_bases: 200_000,
+    core_floor_bases: 200_000,
     budget_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+    thinning: None,
 };
 
 /// **Blocks join across windows, and the phase stays right across them** (phase output spec
@@ -371,9 +375,11 @@ fn a_phase_set_carries_through_short_windows() {
         core_bases: 60_000,
         margin_bases: 60_000,
         margin_floor_bases: 20_000,
+        core_floor_bases: 20_000,
         // Small enough that the dense records shrink the windows, large enough that the floor
         // fits them.
         budget_bytes: 2_500_000,
+        thinning: None,
     };
     let (output, core_starts) = join_stage_and_cores(&cohort, position, sizes, 4);
     let score = score_joins(
@@ -722,7 +728,9 @@ fn a_window_over_budget_at_the_floor_stops_the_stage() {
         core_bases: 200_000,
         margin_bases: 200_000,
         margin_floor_bases: 200_000,
+        core_floor_bases: 200_000,
         budget_bytes: 100_000,
+        thinning: None,
     };
     let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
     let mut output = Vec::new();
@@ -761,4 +769,124 @@ fn a_compressed_line_holds_only_its_compressed_bytes() {
     assert!(bytes.len() < line.len() / 10, "{} bytes", bytes.len());
     assert_eq!(bytes.capacity(), bytes.len());
     assert_eq!(text.take(&mut line_decompressor()), line);
+}
+
+/// [`JOIN_WINDOWS`] with the far margins walked at `records_per_kb`.
+fn thinned_join_windows(records_per_kb: &str) -> WindowSizes {
+    WindowSizes {
+        thinning: Some(
+            MarginThinning::parse(records_per_kb)
+                .expect("a density")
+                .expect("not zero"),
+        ),
+        ..JOIN_WINDOWS
+    }
+}
+
+/// **Margins no denser than the thinning are walked in full** (pass spec §6, thinned margins): the join cohort
+/// holds 2 records a kb, so at 3 a kb every record is walked and the output is the unthinned
+/// run's, byte for byte.
+#[test]
+fn margins_sparser_than_the_thinning_write_what_unthinned_margins_write() {
+    let cohort = join_cohort();
+    let position = |index| 1 + index as u64 * 500;
+    let unthinned = join_stage(&cohort, position, JOIN_WINDOWS, 4);
+    assert_eq!(
+        join_stage(&cohort, position, thinned_join_windows("3"), 4),
+        unthinned
+    );
+    // At 1 a kb the far margins walk half the records, and the output moves.
+    assert_ne!(
+        join_stage(&cohort, position, thinned_join_windows("1"), 4),
+        unthinned
+    );
+}
+
+/// **Thinned margins still join blocks across windows, the same at any thread count** (pass spec
+/// §6, thinned margins): the far margins walk every other record, the records a block joins at among them or not.
+#[test]
+fn thinned_margins_join_blocks_the_same_at_any_thread_count() {
+    let cohort = join_cohort();
+    let at = |threads| {
+        join_stage(
+            &cohort,
+            |index| 1 + index as u64 * 500,
+            thinned_join_windows("1"),
+            threads,
+        )
+    };
+    let one = at(1);
+    assert_eq!(one, at(4));
+    assert_eq!(one, at(8));
+    let score = score_joins(
+        &cohort,
+        &one,
+        |position| ((position - 1) / 500) as usize,
+        |position| ((position - 1) / 200_000) as usize,
+    );
+    assert!(score.crossing >= 10, "{score:?}");
+    assert!(score.crossing_flips * 10 <= score.crossing, "{score:?}");
+    assert!(score.flips * 100 <= score.links, "{score:?}");
+}
+
+/// **The thinning walks a stretch no denser than its rate in full, and a denser one at its rate**:
+/// a token bucket of a kb's worth (pass spec §6, thinned margins).
+#[test]
+fn the_thinner_walks_sparse_stretches_in_full_and_dense_ones_at_its_rate() {
+    let thinning = MarginThinning {
+        thousandths_per_kb: std::num::NonZeroU32::new(40_000).expect("not zero"),
+    };
+    // 20 a kb: every record.
+    let mut thinner = MarginThinner::new(thinning);
+    assert!((0..2_000_u64).all(|index| thinner.walks(1 + index * 50)));
+    // 160 a kb over 100 kb, after a full bucket: the first kb's worth, then 40 a kb.
+    let mut thinner = MarginThinner::new(thinning);
+    let walked: Vec<u64> = (0..16_000_u64)
+        .map(|index| 1_000_000 + index * 25 / 4)
+        .filter(|&position| thinner.walks(position))
+        .collect();
+    assert!((4_000..=4_050).contains(&walked.len()), "{}", walked.len());
+    // Past the burst, evenly spaced: 25 bases apart, give or take a record's spacing.
+    let gaps: Vec<u64> = walked[100..]
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect();
+    assert!(gaps.iter().all(|gap| (18..=32).contains(gap)), "{gaps:?}");
+    // Records at one position spend the bucket without refilling it.
+    let mut thinner = MarginThinner::new(thinning);
+    assert_eq!((0..100).filter(|_| thinner.walks(7)).count(), 40);
+}
+
+/// **A thinned run says so in its header**, and an unthinned one's line is as it was.
+#[test]
+fn the_header_states_the_thinning_only_where_there_is_one() {
+    let decision = decide(NeighbourEvidenceSwitch::On, &[0.95; 20], diploid());
+    assert!(!decision.as_header_value().contains("margin_density"));
+    let thinned = decision.with_margin_thinning(Some(MarginThinning {
+        thousandths_per_kb: std::num::NonZeroU32::new(40_000).expect("not zero"),
+    }));
+    assert!(
+        thinned
+            .as_header_value()
+            .contains(",margin_density=40,margin_near=50000>"),
+        "{}",
+        thinned.as_header_value()
+    );
+}
+
+/// **A density under one a kb walks one record every so many kb** in a dense stretch, the bucket
+/// holding a single token.
+#[test]
+fn a_density_under_one_a_kb_walks_a_record_every_few_kb() {
+    let thinning = MarginThinning::parse("0.25")
+        .expect("a density")
+        .expect("not zero");
+    let mut thinner = MarginThinner::new(thinning);
+    let walked: Vec<u64> = (0..100_000_u64)
+        .map(|index| 1 + index * 10)
+        .filter(|&position| thinner.walks(position))
+        .collect();
+    // The first record on a full bucket, then one every 4 kb over the rest of the Mb.
+    assert_eq!(walked.len(), 250);
+    assert!(walked.windows(2).all(|pair| pair[1] - pair[0] == 4_000));
 }

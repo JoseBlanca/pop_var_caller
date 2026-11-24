@@ -44,6 +44,7 @@ pub mod pass_one;
 pub mod pass_three;
 pub mod pass_two;
 pub mod patch;
+pub mod resume;
 pub mod scoring_context;
 pub mod spill;
 pub mod spill_file;

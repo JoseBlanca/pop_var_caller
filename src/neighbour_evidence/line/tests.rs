@@ -25,17 +25,14 @@ fn rewrite_phased(
     phases: Vec<Option<WrittenPhase>>,
 ) -> (Option<String>, RewriteTally) {
     let mut tally = RewriteTally::default();
-    let rewritten = rewrite_line(
-        line,
-        &RefinedRecord {
-            background_copy: vec![0.0; outcomes.len()],
-            phases,
-            outcomes,
-            posteriors,
-        },
-        &mut GenotypePairs::default(),
-        &mut tally,
-    );
+    let genotypes = posteriors.len() / outcomes.len().max(1);
+    let mut refined = RefinedRecord::unchanged(outcomes.len(), genotypes);
+    refined.posteriors = posteriors.iter().map(|&value| value as f32).collect();
+    refined.outcomes = outcomes;
+    for (sample, phase) in phases.into_iter().enumerate() {
+        refined.set_phase(sample, phase);
+    }
+    let rewritten = rewrite_line(line, &refined, &mut GenotypePairs::default(), &mut tally);
     (
         rewritten.map(|bytes| String::from_utf8(bytes).expect("text")),
         tally,

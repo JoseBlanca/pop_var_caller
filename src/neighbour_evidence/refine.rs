@@ -41,11 +41,12 @@ use super::phase::{
 };
 use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
-use super::templates::{ChosenTemplate, choose_haplotypes, choose_templates, compared_records};
+use super::templates::{
+    ChosenTemplate, choose_haplotypes, choose_templates_where, compared_records_where,
+};
 use crate::calling::quality::score_best_genotype;
-use crate::read_phase::fragments::PackedRecordFragments;
-use crate::read_phase::link::LinkAllele;
-use crate::read_phase::link::{Heterozygote, score_read_link};
+use crate::read_phase::fragments::{PackedRecordFragments, SampleReadAlleles};
+use crate::read_phase::link::{Heterozygote, ReadAlleleList, score_read_lists};
 use crate::vcf::encode::written_genotype_quality;
 
 /// The chance a template's allele is not the one the copy carries (`ε`, §3.4) — the prototype's.
@@ -203,30 +204,138 @@ pub enum Outcome {
 }
 
 /// **The pass's result at one core record**, every sample.
+///
+/// **Held in single precision** (pass spec §6): a window holds one for every core record until its
+/// lines are rewritten, every sample's numbers in each. A posterior's entries other than the best
+/// are small and keep seven significant digits as `f32`; the best is read back as one less the
+/// others ([`RefinedRecord::posterior_into`]), so a `GQ` near the cap loses nothing to the rounding
+/// of a number near one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RefinedRecord {
     /// What happened to each sample.
     pub outcomes: Vec<Outcome>,
     /// Each sample's new genotype posterior, `genotype_count` numbers a sample in the genotype
-    /// table's order; meaningful only where the outcome is not [`Outcome::Unchanged`].
-    pub posteriors: Vec<f64>,
+    /// table's order; meaningful only where the outcome is not [`Outcome::Unchanged`]. Read a
+    /// sample's with [`RefinedRecord::posterior_into`].
+    pub posteriors: Vec<f32>,
     /// Each sample's probability of copying the background template here — of having no sampled
     /// haplotype to copy (§3.3); meaningful only where the outcome is not [`Outcome::Unchanged`].
-    pub background_copy: Vec<f64>,
-    /// Each sample's phase where it is written phased (phase output spec §2.2), `None` elsewhere.
-    pub phases: Vec<Option<WrittenPhase>>,
+    pub background_copy: Vec<f32>,
+    /// Each sample's phase set where it is written phased, [`NOT_PHASED`] elsewhere.
+    phase_sets: Vec<u64>,
+    /// Each sample's alleles on copy 0 and copy 1 where it is written phased.
+    phased_alleles: Vec<[u16; 2]>,
+}
+
+/// In [`RefinedRecord`]'s phase sets: the sample is not written phased. A phase set is the 1-based
+/// position of its block's first record, so never 0.
+const NOT_PHASED: u64 = 0;
+
+impl RefinedRecord {
+    /// Every sample [`Outcome::Unchanged`], unphased, at a record of `genotypes` genotypes.
+    #[must_use]
+    pub fn unchanged(samples: usize, genotypes: usize) -> Self {
+        Self {
+            outcomes: vec![Outcome::Unchanged; samples],
+            posteriors: vec![0.0; samples * genotypes],
+            background_copy: vec![0.0; samples],
+            phase_sets: vec![NOT_PHASED; samples],
+            phased_alleles: vec![[0; 2]; samples],
+        }
+    }
+
+    /// `sample`'s phase where it is written phased (phase output spec §2.2), `None` elsewhere.
+    #[must_use]
+    pub fn phase(&self, sample: usize) -> Option<WrittenPhase> {
+        let phase_set = self.phase_sets[sample];
+        (phase_set != NOT_PHASED).then(|| {
+            let [copy_0, copy_1] = self.phased_alleles[sample];
+            WrittenPhase {
+                copy_0_allele: usize::from(copy_0),
+                copy_1_allele: usize::from(copy_1),
+                phase_set,
+            }
+        })
+    }
+
+    /// Sets `sample`'s phase.
+    ///
+    /// # Panics
+    ///
+    /// If the phase's set is 0, which no 1-based position is, or an allele does not fit a `u16`,
+    /// as no record's alleles do ([`crate::read_phase::fragments::ReadAllele`] holds them so too).
+    pub fn set_phase(&mut self, sample: usize, phase: Option<WrittenPhase>) {
+        match phase {
+            None => self.phase_sets[sample] = NOT_PHASED,
+            Some(phase) => {
+                assert_ne!(
+                    phase.phase_set, NOT_PHASED,
+                    "a phase set is a 1-based position"
+                );
+                let allele = |allele: usize| {
+                    u16::try_from(allele).expect("a record's alleles are numbered within a u16")
+                };
+                self.phase_sets[sample] = phase.phase_set;
+                self.phased_alleles[sample] =
+                    [allele(phase.copy_0_allele), allele(phase.copy_1_allele)];
+            }
+        }
+    }
+
+    /// `sample`'s posterior, `genotypes` numbers, into `out` in double precision
+    /// ([`posterior_from_single`]).
+    pub fn posterior_into(&self, sample: usize, genotypes: usize, out: &mut Vec<f64>) {
+        posterior_from_single(
+            &self.posteriors[sample * genotypes..(sample + 1) * genotypes],
+            out,
+        );
+    }
+}
+
+/// **A posterior held in single precision, read back in double** into `out`: the entries as they
+/// are, except the largest, which is one less the others. The others are small and `f32` keeps
+/// seven significant digits of them, so `1 − p` of the best — what its `GQ` is — keeps them too,
+/// where `f32` would round a best of `1 − 10⁻⁹` to one; and the entries total one, as the callers
+/// of [`score_best_genotype`] require. Ties go to the first, as `score_best_genotype`'s do.
+pub fn posterior_from_single(single: &[f32], out: &mut Vec<f64>) {
+    out.clear();
+    out.extend(single.iter().map(|&value| f64::from(value)));
+    best_as_one_less_the_others(out);
+}
+
+/// Sets a distribution's largest entry, the first among equals, to one less the others.
+fn best_as_one_less_the_others(distribution: &mut [f64]) {
+    let best = argmax(distribution);
+    let others: f64 = distribution
+        .iter()
+        .enumerate()
+        .filter(|&(index, _)| index != best)
+        .map(|(_, &value)| value)
+        .sum();
+    if let Some(value) = distribution.get_mut(best) {
+        *value = (1.0 - others).max(0.0);
+    }
 }
 
 /// One sample's posteriors at the core's sites.
 struct SampleSolution {
-    /// Index into the window's records, the outcome, where the posterior starts in `posteriors`,
-    /// and the probability of copying the background there.
-    sites: Vec<(usize, Outcome, usize, f64)>,
+    /// Each solved site: its record index, the outcome, where the posterior starts in
+    /// `posteriors`, and the probability of copying the background there.
+    sites: Vec<SolvedSite>,
     /// The phase written at each of `sites`.
     phases: Vec<Option<WrittenPhase>>,
-    posteriors: Vec<f64>,
+    posteriors: Vec<f32>,
     check: FillCheck,
     read_counts: PassReadCounts,
+}
+
+/// One row of a [`SampleSolution`].
+#[derive(Clone, Copy)]
+struct SolvedSite {
+    record: usize,
+    outcome: Outcome,
+    posterior_start: usize,
+    background: f32,
 }
 
 /// **How a window is solved: in one round, or in phasing's rounds** (phasing spec §2.1, §5). One
@@ -242,6 +351,10 @@ pub struct Phasing {
     path_agreement: PathAgreement,
     reads_in_draw: bool,
 }
+
+/// **How many paths a run's window draws**, at [`PHASING_ROUNDS`]: what the window budget counts
+/// each allele pair's packed bits at.
+pub(super) const PHASED_PATHS: usize = (PHASING_ROUNDS - 1) * (1 + EXTRA_PATHS_PER_ROUND);
 
 // The default rounds' paths fit the link test's masks.
 const _: () = assert!((PHASING_ROUNDS - 1) * (1 + EXTRA_PATHS_PER_ROUND) <= MAX_PATHS);
@@ -308,6 +421,11 @@ impl Phasing {
             path_agreement: agreement,
             ..self
         }
+    }
+
+    /// How many paths the window's averaged rounds draw: each round's own and its extra ones.
+    fn paths(self) -> usize {
+        (self.rounds - 1) * (1 + self.extra_paths)
     }
 
     fn is_on(self) -> bool {
@@ -394,32 +512,26 @@ pub fn refine_window(
     )
 }
 
-/// **The bytes a written phase is counted at**, `Option<WrittenPhase>`: two allele indices and a
-/// phase set, and the option's tag, as the 64-bit targets lay it out.
+/// **The bytes a written phase is counted at** in a [`RefinedRecord`]: its phase set and its two
+/// alleles.
 ///
 /// **The accounting's sizes are written out, not read from `size_of`**, wherever the compiler
 /// chooses the layout (enums, options, tuples): the budget places the windows, the windows shape
 /// the output, and a compiler that packed a tuple differently must not move a genotype.
-const WRITTEN_PHASE_BYTES: usize = 32;
-
-/// **The bytes one sample's row of a solved record is counted at**, `(usize, Outcome, usize, f64)`:
-/// its record, its outcome, where its posterior starts, and its background share.
-const SOLVED_ROW_BYTES: usize = 32;
+const WRITTEN_PHASE_BYTES: usize = 8 + 2 * 2;
 
 /// **The bytes an [`Outcome`] is counted at.**
 const OUTCOME_BYTES: usize = 1;
 
 /// **The bytes the solve holds for one sample at every record of a window**, at a record of
 /// `alleles` alleles, over the window's rounds (pass spec §6): its two haplotypes in the round read
-/// and the round written, the templates they followed, its phase, and the record's position among
-/// its informative ones (an upper bound: a record it has no reads at holds none). Counted at every
-/// record, whether a walk uses it or not.
+/// and the round written, the templates they followed, and its phase. Counted at every record,
+/// whether a walk uses it or not.
 #[must_use]
 pub fn held_solve_bytes(alleles: usize) -> u64 {
     let stored = 2 * (alleles - 1) * std::mem::size_of::<f32>();
     let followed = std::mem::size_of::<[u8; 2]>();
-    let informative_position = std::mem::size_of::<u64>();
-    (2 * (stored + followed) + phase_bytes(alleles) + informative_position) as u64
+    (2 * (stored + followed) + phase_bytes(alleles)) as u64
 }
 
 /// **What one record adds to a window's two running totals** (pass spec §6), `samples` samples of
@@ -436,19 +548,27 @@ pub fn record_window_bytes(record: &SiteRecord) -> (u64, u64) {
 }
 
 /// **The bytes the solve holds for one sample at a record of a window's core** besides
-/// [`held_solve_bytes`]: the sums over its averaged rounds, and what it writes — its result, then
-/// the record's rewritten columns, both held at the window's end (pass spec §6).
+/// [`held_solve_bytes`]: the sums over its averaged rounds, and the record's result, its
+/// [`RefinedRecord`] (pass spec §6). Each sample's own result is made from its sums and copied
+/// into the records a few samples at a time ([`SOLUTIONS_AT_ONCE`]), so it is not counted, as the
+/// walks' arrays are not.
 #[must_use]
 pub fn core_solve_bytes(alleles: usize) -> u64 {
     let genotypes = alleles * (alleles + 1) / 2;
-    let sums = (2 * genotypes + 1) * std::mem::size_of::<f64>();
-    let result = genotypes * std::mem::size_of::<f64>() + SOLVED_ROW_BYTES + WRITTEN_PHASE_BYTES;
-    let written = genotypes * std::mem::size_of::<f64>()
+    let sums = (2 * genotypes + 1) * std::mem::size_of::<f32>();
+    let written = genotypes * std::mem::size_of::<f32>()
         + OUTCOME_BYTES
-        + std::mem::size_of::<f64>()
+        + std::mem::size_of::<f32>()
         + WRITTEN_PHASE_BYTES;
-    (sums + result + written) as u64
+    (sums + written) as u64
 }
+
+/// **How many samples' results are made before they are copied into the window's records** (pass
+/// spec §6): each sample's state is let go as its result is made, and each result as it is copied,
+/// so the window never holds every sample's state, its result and the records' all at once. A
+/// fixed number rather than one per thread, so what is held does not depend on the thread count;
+/// large enough that a chunk keeps 96 threads busy.
+const SOLUTIONS_AT_ONCE: usize = 256;
 
 /// **Where a window's records sit in its walks.** Three index spaces meet here, and every
 /// conversion goes through this type: a *record index* into the window's records, a *site* — a
@@ -466,9 +586,13 @@ struct WindowLayout {
 }
 
 impl WindowLayout {
-    fn new(records: &[SiteRecord], core: &Range<usize>) -> Self {
+    /// The layout of a window whose walks read every site `walked` admits (every site, if `None`;
+    /// pass spec §6, thinned margins).
+    fn new(records: &[SiteRecord], core: &Range<usize>, walked: Option<&[bool]>) -> Self {
         let record_of_site: Vec<usize> = (0..records.len())
-            .filter(|&index| records[index].is_site())
+            .filter(|&index| {
+                records[index].is_site() && walked.is_none_or(|walked| walked[index])
+            })
             .collect();
         let mut site_of_record = vec![None; records.len()];
         for (site, &index) in record_of_site.iter().enumerate() {
@@ -728,16 +852,20 @@ struct SampleRounds {
     /// Record indices whose reads are held out of the haplotype draw for the read check, ascending;
     /// empty unless the draw uses reads (reads-in-draw spec §2.6).
     read_check: Vec<usize>,
-    /// Positions of its informative records, for §4.2's evidence-nearby rule.
-    informative_positions: Vec<u64>,
+    /// How many of the window's sites it is informative at. Their positions, which §4.2's
+    /// evidence-nearby rule reads, are listed only when its result is made
+    /// ([`informative_positions`]): held for every sample over the rounds they were eight bytes a
+    /// sample a record (pass spec §6).
+    informative_sites: usize,
     /// The parameters round 1 fitted or read.
     parameters: Option<WalkParameters>,
     /// The sums over the averaged rounds, core site after core site in one array, each site's
     /// genotype posterior, then its prediction, then its chance of copying the background, at
     /// [`WindowLayout::core_sums`]; empty until the first averaged round. One flat array rather
     /// than two vectors a site: held for every sample over a window's rounds, the vectors' own
-    /// headers and allocations were twice the numbers they held (pass spec §6).
-    sums: Vec<f64>,
+    /// headers and allocations were twice the numbers they held (pass spec §6). In single
+    /// precision, read back as [`posterior_from_single`] reads a posterior.
+    sums: Vec<f32>,
     /// The phase across the averaged rounds; `None` without phasing or for a sample not walked.
     phase: Option<SamplePhase>,
 }
@@ -799,6 +927,7 @@ pub fn refine_window_joined(
     refine_window_with_reads(
         records,
         None,
+        None,
         core,
         contig_length,
         fits,
@@ -814,14 +943,20 @@ pub fn refine_window_joined(
 /// without reads, which phases as the population alone does. An empty list is not "no reads":
 /// it is a list of the wrong length, and refused.
 ///
+/// `walked`, one entry a record, says which records the walks read (pass spec §6, thinned margins, thinned
+/// margins); `None` reads every site. It must admit every core record and every record of
+/// `last_blocks`.
+///
 /// # Panics
 ///
-/// As [`refine_window_joined`]; and if `fragments` is given and not one entry a record.
+/// As [`refine_window_joined`]; if `fragments` or `walked` is given and not one entry a record;
+/// and if `walked` leaves out a core site.
 #[allow(clippy::too_many_arguments)] // the window, its reads, the run's settings, what came before
 #[must_use]
 pub fn refine_window_with_reads(
     records: &[SiteRecord],
     fragments: Option<&[PackedRecordFragments]>,
+    walked: Option<&[bool]>,
     core: Range<usize>,
     contig_length: Option<u64>,
     fits: &mut [SampleFit],
@@ -833,6 +968,12 @@ pub fn refine_window_with_reads(
     assert!(
         fragments.is_none_or(|fragments| fragments.len() == records.len()),
         "one fragment list a record, or none"
+    );
+    assert!(
+        walked.is_none_or(|walked| walked.len() == records.len() && walked[core.clone()]
+            .iter()
+            .all(|&walked| walked)),
+        "one walked flag a record, every core record walked"
     );
     let fragments = fragments.unwrap_or(&[]);
     assert!(
@@ -847,7 +988,7 @@ pub fn refine_window_with_reads(
         last_blocks.is_empty() || last_blocks.len() == samples,
         "one last block a sample, or none"
     );
-    let layout = WindowLayout::new(records, &core);
+    let layout = WindowLayout::new(records, &core, walked);
     let allele_counts: Vec<usize> = layout
         .record_of_site
         .iter()
@@ -864,13 +1005,14 @@ pub fn refine_window_with_reads(
     let mut states: Vec<SampleRounds> = (0..samples)
         .into_par_iter()
         .map(|sample| {
-            let templates = choose_templates(records, sample, max_templates);
-            let informative_positions = layout
+            let templates = choose_templates_where(records, sample, max_templates, |record| {
+                walked.is_none_or(|walked| walked[record])
+            });
+            let informative_sites = layout
                 .record_of_site
                 .iter()
                 .filter(|&&index| records[index].row(sample) == SampleRow::Informative)
-                .map(|&index| records[index].position)
-                .collect();
+                .count();
             let hidden = if phasing.is_on() && templates.is_some() {
                 draw_hidden_records(records, &layout, sample, phasing.window_key)
             } else {
@@ -882,15 +1024,17 @@ pub fn refine_window_with_reads(
                 Vec::new()
             };
             SampleRounds {
-                compared: compared_records(records, sample),
+                compared: compared_records_where(records, sample, |record| {
+                    layout.site_of_record[record].is_some()
+                }),
                 previous_posteriors: Vec::new(),
                 hidden,
                 read_check,
-                informative_positions,
+                informative_sites,
                 parameters: None,
                 sums: Vec::new(),
                 phase: (phasing.is_on() && templates.is_some())
-                    .then(|| SamplePhase::new(&sum_offsets, &pairs)),
+                    .then(|| SamplePhase::new(&sum_offsets, &pairs, phasing.paths())),
                 templates,
             }
         })
@@ -938,60 +1082,64 @@ pub fn refine_window_with_reads(
         store.sources_next = sources_next;
         store.finish_round();
     }
+    // The rounds' haplotypes are read no more; let them go before the results are made.
+    drop(store);
+    drop(hidden);
 
     let averaged = phasing.averaged_rounds();
-    let solutions: Vec<Option<SampleSolution>> = states
-        .par_iter()
-        .enumerate()
-        .map(|(sample, state)| {
-            final_solution(
-                records,
-                fragments,
-                &layout,
-                &pairs,
-                sample,
-                last_blocks.get(sample).and_then(Option::as_ref),
-                state,
-                averaged,
-                phasing,
-                contig_length,
-                no_read,
-            )
-        })
-        .collect();
-
     let mut refined: Vec<RefinedRecord> = records[core.clone()]
         .iter()
-        .map(|record| RefinedRecord {
-            outcomes: vec![Outcome::Unchanged; samples],
-            posteriors: vec![0.0; samples * record.genotype_count()],
-            background_copy: vec![0.0; samples],
-            phases: vec![None; samples],
-        })
+        .map(|record| RefinedRecord::unchanged(samples, record.genotype_count()))
         .collect();
     let mut checks = vec![FillCheck::default(); samples];
     let mut read_counts = vec![PassReadCounts::default(); samples];
-    for (sample, solution) in solutions.iter().enumerate() {
-        let Some(solution) = solution else {
-            continue;
-        };
-        checks[sample] = solution.check;
-        read_counts[sample] = solution.read_counts;
-        assert_eq!(
-            solution.sites.len(),
-            solution.phases.len(),
-            "one phase a solved site"
-        );
-        for (&(record, outcome, start, background), &phase) in
-            solution.sites.iter().zip(&solution.phases)
-        {
-            let genotypes = records[record].genotype_count();
-            let out = &mut refined[record - core.start];
-            out.outcomes[sample] = outcome;
-            out.background_copy[sample] = background;
-            out.phases[sample] = phase;
-            out.posteriors[sample * genotypes..(sample + 1) * genotypes]
-                .copy_from_slice(&solution.posteriors[start..start + genotypes]);
+    // A chunk of samples at a time: each state goes as its result is made, each result as it is
+    // copied into the records (`SOLUTIONS_AT_ONCE`).
+    let mut states = states.into_iter();
+    for first in (0..samples).step_by(SOLUTIONS_AT_ONCE) {
+        let chunk: Vec<SampleRounds> = states.by_ref().take(SOLUTIONS_AT_ONCE).collect();
+        let solutions: Vec<Option<SampleSolution>> = chunk
+            .into_par_iter()
+            .enumerate()
+            .map(|(offset, state)| {
+                let sample = first + offset;
+                final_solution(
+                    records,
+                    fragments,
+                    &layout,
+                    &pairs,
+                    sample,
+                    last_blocks.get(sample).and_then(Option::as_ref),
+                    &state,
+                    averaged,
+                    phasing,
+                    contig_length,
+                    no_read,
+                )
+            })
+            .collect();
+        for (offset, solution) in solutions.into_iter().enumerate() {
+            let Some(solution) = solution else {
+                continue;
+            };
+            let sample = first + offset;
+            checks[sample] = solution.check;
+            read_counts[sample] = solution.read_counts;
+            assert_eq!(
+                solution.sites.len(),
+                solution.phases.len(),
+                "one phase a solved site"
+            );
+            for (site, &phase) in solution.sites.iter().zip(&solution.phases) {
+                let genotypes = records[site.record].genotype_count();
+                let out = &mut refined[site.record - core.start];
+                out.outcomes[sample] = site.outcome;
+                out.background_copy[sample] = site.background;
+                out.set_phase(sample, phase);
+                let start = site.posterior_start;
+                out.posteriors[sample * genotypes..(sample + 1) * genotypes]
+                    .copy_from_slice(&solution.posteriors[start..start + genotypes]);
+            }
         }
     }
     WindowRefinement {
@@ -1005,20 +1153,20 @@ pub fn refine_window_with_reads(
 /// at each, the heterozygote the chain reads at each, the lower allele first. Positive is *cis*,
 /// which the chain reads as the two records taking the same orientation; `None` where no fragment
 /// counts at both.
-fn draw_link<A: LinkAllele>(
-    at_one: &[A],
+fn draw_link<A: ReadAlleleList>(
+    at_one: A,
     one_pair: (usize, usize),
-    at_other: &[A],
+    at_other: A,
     other_pair: (usize, usize),
 ) -> Option<f64> {
-    if at_one.is_empty() || at_other.is_empty() {
+    if at_one.count() == 0 || at_other.count() == 0 {
         return None;
     }
     let heterozygote = |(a, b): (usize, usize)| {
         // PANIC-FREE: a chain's pair has two different alleles, the lower first.
         Heterozygote::of(a as u16, b as u16).expect("a chain's pair is a heterozygote")
     };
-    let found = score_read_link(
+    let found = score_read_lists(
         at_one,
         heterozygote(one_pair),
         at_other,
@@ -1027,9 +1175,9 @@ fn draw_link<A: LinkAllele>(
     (found.fragments > 0).then_some(found.log_odds)
 }
 
-fn add_to(sum: &mut [f64], values: &[f64]) {
-    for (total, value) in sum.iter_mut().zip(values) {
-        *total += value;
+fn add_to(sum: &mut [f32], values: &[f64]) {
+    for (total, &value) in sum.iter_mut().zip(values) {
+        *total += value as f32;
     }
 }
 
@@ -1204,7 +1352,7 @@ fn solve_round(
     // what the prediction and the drawn haplotypes read.
     let mut definite = (round > 1).then(|| {
         (
-            Vec::<f64>::new(),
+            Vec::<u8>::new(),
             Uniforms::new(
                 StreamPurpose::DefiniteAlleles,
                 phasing.window_key,
@@ -1240,7 +1388,7 @@ fn solve_round(
         if let Some((drawn, uniforms)) = definite.as_mut() {
             for template_shares in shares[share_start..].chunks_exact(record.allele_count) {
                 let allele = pick(template_shares, uniforms.next_uniform());
-                drawn.extend((0..record.allele_count).map(|a| f64::from(u8::from(a == allele))));
+                drawn.extend((0..record.allele_count).map(|a| u8::from(a == allele)));
             }
         }
         spans.push((
@@ -1271,7 +1419,7 @@ fn solve_round(
                 &sites,
                 walk_templates,
                 Some(&template_weights),
-                state.informative_positions.len() - state.hidden.len(),
+                state.informative_sites - state.hidden.len(),
                 MISMATCH,
                 Some(BACKGROUND_LANDING_SHARE),
             );
@@ -1286,7 +1434,9 @@ fn solve_round(
         let fragments_at = |site: usize| {
             fragments
                 .get(layout.record_of_site[site])
-                .map_or(&[][..], |fragments| fragments.of_sample(sample as u32))
+                .map_or(SampleReadAlleles::EMPTY, |fragments| {
+                    fragments.of_sample(sample as u32)
+                })
         };
         let link =
             |one: usize, one_pair: (usize, usize), other: usize, other_pair: (usize, usize)| {
@@ -1403,7 +1553,7 @@ fn solve_round(
                 &mut sums[genotypes..2 * genotypes],
                 &neighbour_predictions[site],
             );
-            sums[2 * genotypes] += last_template_copy[site];
+            sums[2 * genotypes] += last_template_copy[site] as f32;
         }
     }
 }
@@ -1427,8 +1577,9 @@ fn final_solution(
     let parameters = state.parameters?;
     let reach = parameters.segment_bases as u64;
     let mut pairs = GenotypePairs::default();
+    let informative_positions = informative_positions(records, layout, sample);
     let would_write = |position: u64, posterior: &[f64], background: f64| {
-        has_evidence_nearby(&state.informative_positions, position, reach, contig_length)
+        has_evidence_nearby(&informative_positions, position, reach, contig_length)
             && score_best_genotype(posterior).1.get() >= no_read.min_genotype_quality
             && no_read
                 .max_background_copy
@@ -1457,11 +1608,9 @@ fn final_solution(
         let record = &records[index];
         let sum = &state.sums[layout.core_sums[core_site]..layout.core_sums[core_site + 1]];
         let genotypes = record.genotype_count();
-        let mean =
-            |values: &[f64]| -> Vec<f64> { values.iter().map(|value| value / averaged).collect() };
-        let prediction = mean(&sum[genotypes..2 * genotypes]);
-        let background = sum[2 * genotypes] / averaged;
-        let mut posterior = mean(&sum[..genotypes]);
+        let prediction = mean_distribution(&sum[genotypes..2 * genotypes], averaged);
+        let background = f64::from(sum[2 * genotypes]) / averaged;
+        let mut posterior = mean_distribution(&sum[..genotypes], averaged);
         let outcome = match record.row(sample) {
             SampleRow::Absent => continue,
             SampleRow::Informative => {
@@ -1516,10 +1665,15 @@ fn final_solution(
                 genotype_qualities[site] = Some(written_genotype_quality(quality));
             }
         }
+        solution.sites.push(SolvedSite {
+            record: index,
+            outcome,
+            posterior_start: solution.posteriors.len(),
+            background: background as f32,
+        });
         solution
-            .sites
-            .push((index, outcome, solution.posteriors.len(), background));
-        solution.posteriors.extend_from_slice(&posterior);
+            .posteriors
+            .extend(posterior.iter().map(|&value| value as f32));
     }
     // The phase, at the heterozygotes called in the core and the last written block's records in
     // the left margin, joined to that block where they agree (phase output spec §2.2–§2.4).
@@ -1552,7 +1706,9 @@ fn final_solution(
                     .map(|&index| {
                         fragments
                             .get(index)
-                            .map_or(&[][..], |fragments| fragments.of_sample(sample as u32))
+                            .map_or(SampleReadAlleles::EMPTY, |fragments| {
+                                fragments.of_sample(sample as u32)
+                            })
                     })
                     .collect(),
                 genotype_qualities,
@@ -1588,9 +1744,27 @@ fn final_solution(
     solution.phases = solution
         .sites
         .iter()
-        .map(|&(index, ..)| phases[layout.site(index)])
+        .map(|site| phases[layout.site(site.record)])
         .collect();
     Some(solution)
+}
+
+/// The positions of the window's sites where `sample`'s reads are informative, ascending.
+fn informative_positions(records: &[SiteRecord], layout: &WindowLayout, sample: usize) -> Vec<u64> {
+    layout
+        .record_of_site
+        .iter()
+        .filter(|&&index| records[index].row(sample) == SampleRow::Informative)
+        .map(|&index| records[index].position)
+        .collect()
+}
+
+/// **The mean over `rounds` rounds of a distribution summed in single precision**, read back as
+/// [`posterior_from_single`] reads a posterior: the largest entry one less the others.
+fn mean_distribution(sums: &[f32], rounds: f64) -> Vec<f64> {
+    let mut mean: Vec<f64> = sums.iter().map(|&sum| f64::from(sum) / rounds).collect();
+    best_as_one_less_the_others(&mut mean);
+    mean
 }
 
 /// The genotype a sample's own evidence settles ([`SETTLED_POSTERIOR`]), or `None`: its reads'

@@ -135,6 +135,7 @@ mod tests {
             force: true,
             log: Some(output.with_extension("log")),
             tmp_dir: None,
+            keep_tmp_on_error: false,
             regions: None,
             parameters: None,
             defaults: true,
@@ -151,6 +152,11 @@ mod tests {
             refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
             phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
+            refine_window_max: None,
+            refine_core_floor: None,
+            refine_core_max: None,
             locus_builder_regions_len: None,
             threads: 0,
             min_copies: MinCopies::default(),
@@ -256,6 +262,7 @@ mod tests {
             force: true,
             log: Some(output.with_extension("log")),
             tmp_dir: None,
+            keep_tmp_on_error: false,
             parameters: None,
             defaults: true,
             ploidy: None,
@@ -270,6 +277,11 @@ mod tests {
             refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
             phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
+            refine_window_max: None,
+            refine_core_floor: None,
+            refine_core_max: None,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
@@ -427,6 +439,187 @@ mod tests {
             unfiltered,
             "what the filter does not flag, it must not change",
         );
+    }
+
+    /// The varying cohort walked into psps and set up to fail where the tomato25 run of
+    /// 2026-11-17 failed: after calling and scoring, in the writing pass, because genotype
+    /// refinement's smallest window does not fit a budget of one byte. The run's scratch goes in a
+    /// `--tmp-dir` of its own, returned too.
+    fn a_psp_run_that_fails_in_the_writing_pass(
+        keep_tmp_on_error: bool,
+    ) -> (AVaryingCohort, CallFromPspsArgs, PathBuf) {
+        let cohort = a_varying_cohort_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+        let psps = walked_into_psps(&cohort);
+        let tmp_dir = cohort.directory.path().join("scratch");
+        std::fs::create_dir_all(&tmp_dir).expect("the --tmp-dir");
+        let mut args = psps_args(&cohort, &output, &psps, &["one", "two"]);
+        args.tmp_dir = Some(tmp_dir.clone());
+        args.keep_tmp_on_error = keep_tmp_on_error;
+        args.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        args.refine_genotypes = crate::cli::calling_run::RefineGenotypesArg::On;
+        args.refine_window_bytes = 1;
+        (cohort, args, tmp_dir)
+    }
+
+    /// What a `--tmp-dir` holds after a run: each entry's name, and the names inside it.
+    fn what_the_tmp_dir_holds(tmp_dir: &Path) -> Vec<(String, Vec<String>)> {
+        let names_in = |directory: &Path| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(directory)
+                .expect("the directory lists")
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        names_in(tmp_dir)
+            .into_iter()
+            .map(|name| {
+                let inside = names_in(&tmp_dir.join(&name));
+                (name, inside)
+            })
+            .collect()
+    }
+
+    /// **`--keep-tmp-on-error`: a run that fails in the writing pass leaves its scratch directory
+    /// with the spill in it**, so a person can see what the run had made before it stopped.
+    #[test]
+    fn a_run_that_fails_keeps_its_scratch_and_spill_when_asked() {
+        let (cohort, args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(true);
+
+        let failed =
+            run_call_from_psps(&args).expect_err("refinement cannot fit a one-byte window");
+        let rendered = crate::error_render::format_error_chain(&failed);
+        assert!(
+            rendered.contains("genotype refinement cannot go on"),
+            "the run must fail where the tomato run did, and failed with: {rendered}"
+        );
+
+        let held = what_the_tmp_dir_holds(&tmp_dir);
+        assert_eq!(held.len(), 1, "one scratch directory is kept: {held:?}");
+        let (name, inside) = &held[0];
+        assert!(
+            name.starts_with("pvc_tmp_"),
+            "kept under the run's own name: {name}"
+        );
+        assert_eq!(
+            inside,
+            &vec![
+                crate::run::paralog_filter::resume::HISTOGRAMS_FILE_NAME.to_owned(),
+                "hidden-dup-spill.tmp".to_owned(),
+                crate::run::paralog_filter::resume::RESUME_FILE_NAME.to_owned(),
+            ],
+            "the spill, and what resuming the run needs beside it"
+        );
+        let spill = tmp_dir.join(name).join("hidden-dup-spill.tmp");
+        assert!(
+            std::fs::metadata(&spill).expect("the spill is there").len() > 0,
+            "the kept spill holds the parked records"
+        );
+        drop(cohort);
+    }
+
+    /// **`pvc resume-calling` finishes a run that failed in the writing pass from the scratch
+    /// directory it kept, and writes the records a run that never failed writes** — the tomato25
+    /// failure of 2026-11-22, resumed with a budget refinement fits, against the same run made at
+    /// that budget from the start. The header differs only in the command line and the log it
+    /// names, which are the failed run's, the run that called; the refinement line states the
+    /// budget the resumed run used. The directory is gone once the resumed run has finished.
+    #[test]
+    fn a_run_resumed_from_its_kept_scratch_writes_what_an_unbroken_run_writes() {
+        let (cohort, args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(true);
+        run_call_from_psps(&args).expect_err("refinement cannot fit a one-byte window");
+        let held = what_the_tmp_dir_holds(&tmp_dir);
+        assert_eq!(held.len(), 1, "one scratch directory is kept: {held:?}");
+        let scratch = tmp_dir.join(&held[0].0);
+
+        let resumed_output = cohort.directory.path().join("resumed.vcf");
+        crate::cli::resume_calling::run_resume_calling(
+            &crate::cli::resume_calling::ResumeCallingArgs {
+                scratch_dir: scratch.clone(),
+                output: resumed_output.clone(),
+                threads: 0,
+                force: false,
+                log: Some(cohort.directory.path().join("resumed.log")),
+                keep_tmp_on_error: false,
+                refine_window_bytes: Some(crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES),
+                refine_window_floor: None,
+                refine_margin_density: None,
+                refine_core_floor: None,
+                phase_min_path_agreement: None,
+            },
+        )
+        .expect("the run resumes and finishes");
+        assert!(
+            !scratch.exists(),
+            "a resumed run that finishes removes the directory"
+        );
+
+        let mut unbroken = args.clone();
+        unbroken.refine_window_bytes = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
+        unbroken.keep_tmp_on_error = false;
+        unbroken.output = cohort.directory.path().join("unbroken.vcf");
+        unbroken.log = Some(cohort.directory.path().join("unbroken.log"));
+        run_call_from_psps(&unbroken).expect("the same run at a budget refinement fits");
+
+        let without_the_command_line = |lines: Vec<String>| -> Vec<String> {
+            lines
+                .into_iter()
+                .filter(|line| {
+                    !line.starts_with("##commandline=") && !line.starts_with("##pvcLog=")
+                })
+                .collect()
+        };
+        let resumed = without_the_command_line(comparable(&resumed_output));
+        let unbroken = without_the_command_line(comparable(&unbroken.output));
+        assert!(
+            records(&unbroken) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the run must call something for the comparison to claim anything"
+        );
+        assert!(
+            unbroken
+                .iter()
+                .any(|line| line.starts_with("##neighbourEvidence=<ran=yes")),
+            "refinement must run, or this does not test resuming it"
+        );
+        assert_eq!(resumed, unbroken);
+        drop(cohort);
+    }
+
+    /// **Without the flag, the same failed run leaves nothing in `--tmp-dir`**, as before the
+    /// flag existed.
+    #[test]
+    fn a_run_that_fails_removes_its_scratch_by_default() {
+        let (cohort, args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(false);
+
+        run_call_from_psps(&args).expect_err("refinement cannot fit a one-byte window");
+
+        assert_eq!(what_the_tmp_dir_holds(&tmp_dir), vec![]);
+        drop(cohort);
+    }
+
+    /// **A run that finishes removes its scratch directory even with `--keep-tmp-on-error`**:
+    /// the same cohort and filter with refinement at its default budget writes its VCF and leaves
+    /// nothing behind.
+    #[test]
+    fn a_run_that_finishes_removes_its_scratch_even_when_asked_to_keep_it_on_error() {
+        let (cohort, mut args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(true);
+        args.refine_window_bytes = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
+
+        run_call_from_psps(&args).expect("the run finishes");
+
+        assert!(
+            records(&comparable(&args.output)) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the run must have called something for its scratch to have held anything"
+        );
+        assert_eq!(what_the_tmp_dir_holds(&tmp_dir), vec![]);
+        drop(cohort);
     }
 
     /// **Spec §10's fourth oracle, with the filter on: one cohort, two modes, one VCF.**
@@ -1452,6 +1645,7 @@ mod tests {
             force: true,
             log: Some(output.with_extension("log")),
             tmp_dir: None,
+            keep_tmp_on_error: false,
             parameters: None,
             defaults: true,
             ploidy: None,
@@ -1466,6 +1660,11 @@ mod tests {
             refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
             phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
+            refine_window_max: None,
+            refine_core_floor: None,
+            refine_core_max: None,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,

@@ -67,6 +67,12 @@ impl VcfHeaderMetadata {
         self
     }
 
+    /// Whether the low-base-quality test ran, so its `BQPEN` field is declared.
+    #[must_use]
+    pub fn low_base_quality_test(&self) -> bool {
+        self.low_base_quality_test
+    }
+
     /// **Say whether the neighbour-evidence pass runs, and why** — decided once, before the
     /// file is opened (`neighbour_evidence_pass.md` §5). Consuming, for the reason
     /// [`Self::the_hidden_duplication_filter_ran`] is.

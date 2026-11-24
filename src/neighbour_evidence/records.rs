@@ -46,9 +46,11 @@ pub struct SiteRecord {
     background_shares: Vec<f32>,
     /// What each sample's column says.
     rows: Vec<SampleRow>,
-    /// Each sample's genotype likelihoods, `10^(−PL/10)`, `genotype_count` numbers a sample; zeros
-    /// where the sample is [`SampleRow::Absent`].
-    likelihoods: Vec<f32>,
+    /// Each sample's genotype likelihoods as their `PL` above the sample's lowest, `genotype_count`
+    /// numbers a sample, read as `10^(−PL/10)` through [`likelihood_of`]; zeros where the sample
+    /// is [`SampleRow::Absent`]. **Two bytes a genotype rather than the four of the `f32` it
+    /// stands for**, and the same `f32` read back (pass spec §6).
+    likelihoods: Vec<u16>,
     /// Each sample's expected share of its copies carrying each allele, from its `GP`,
     /// `allele_count` numbers a sample; zeros where the sample is [`SampleRow::Absent`].
     shares: Vec<f32>,
@@ -78,7 +80,7 @@ impl SiteRecord {
         let mut background = Vec::with_capacity(allele_count);
         background_shares(alt_frequencies, &mut background);
         let mut rows = Vec::with_capacity(samples.len());
-        let mut likelihoods = vec![0.0_f32; samples.len() * genotype_count];
+        let mut likelihoods = vec![0_u16; samples.len() * genotype_count];
         let mut shares = vec![0.0_f32; samples.len() * allele_count];
         for (sample, columns) in samples.iter().enumerate() {
             let Some(columns) = columns else {
@@ -107,7 +109,7 @@ impl SiteRecord {
                 .iter_mut()
                 .zip(columns.phred_likelihoods)
             {
-                *out = float::powf(10.0, -f64::from(phred - lowest) / 10.0) as f32;
+                *out = u16::try_from(phred - lowest).unwrap_or(u16::MAX);
             }
             // q(a) = Σ_g GP_g · copies_a(g) / 2, rescaled because GP is written rounded.
             let mut sample_shares = vec![0.0_f64; allele_count];
@@ -151,9 +153,28 @@ impl SiteRecord {
     /// the compiler sized anything.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        (self.background_shares.len() + self.likelihoods.len() + self.shares.len())
-            * std::mem::size_of::<f32>()
+        (self.background_shares.len() + self.shares.len()) * std::mem::size_of::<f32>()
+            + self.likelihoods.len() * std::mem::size_of::<u16>()
             + self.rows.len()
+    }
+
+    /// **Takes the record's numbers out** — its likelihoods and allele shares, the background's
+    /// and each sample's — and leaves its position, allele count and rows, all a window whose walks
+    /// skip the record reads of it (pass spec §6, thinned margins). [`Self::put_numbers`] puts
+    /// them back.
+    pub fn take_numbers(&mut self) -> RecordNumbers {
+        RecordNumbers {
+            background_shares: std::mem::take(&mut self.background_shares),
+            likelihoods: std::mem::take(&mut self.likelihoods),
+            shares: std::mem::take(&mut self.shares),
+        }
+    }
+
+    /// Puts back the numbers [`Self::take_numbers`] took.
+    pub fn put_numbers(&mut self, numbers: RecordNumbers) {
+        self.background_shares = numbers.background_shares;
+        self.likelihoods = numbers.likelihoods;
+        self.shares = numbers.shares;
     }
 
     /// How many samples the record has a column for.
@@ -187,7 +208,13 @@ impl SiteRecord {
         let absent = self.rows[sample] == SampleRow::Absent;
         self.likelihoods[sample * genotypes..(sample + 1) * genotypes]
             .iter()
-            .map(move |&likelihood| if absent { 1.0 } else { f64::from(likelihood) })
+            .map(move |&above_lowest| {
+                if absent {
+                    1.0
+                } else {
+                    f64::from(likelihood_of(above_lowest))
+                }
+            })
     }
 
     /// Sample `sample`'s allele shares as a template; `1/A` each where the sample is absent
@@ -210,6 +237,79 @@ impl SiteRecord {
     pub fn background_shares(&self) -> impl Iterator<Item = f64> + '_ {
         self.background_shares.iter().map(|&share| f64::from(share))
     }
+}
+
+/// **A record's numbers, taken out of it** ([`SiteRecord::take_numbers`]) to be held as bytes
+/// while no walk reads them.
+#[derive(Debug, Default)]
+pub struct RecordNumbers {
+    background_shares: Vec<f32>,
+    likelihoods: Vec<u16>,
+    shares: Vec<f32>,
+}
+
+impl RecordNumbers {
+    /// Appends the numbers to `out`, each array its length and then its values, little-endian.
+    pub fn write_to(&self, out: &mut Vec<u8>) {
+        let length = |out: &mut Vec<u8>, length: usize| {
+            out.extend_from_slice(&u32::try_from(length).expect("a record's array fits u32").to_le_bytes());
+        };
+        length(out, self.background_shares.len());
+        for value in &self.background_shares {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        length(out, self.likelihoods.len());
+        for value in &self.likelihoods {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        length(out, self.shares.len());
+        for value in &self.shares {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    /// Reads back what [`Self::write_to`] wrote at the start of `bytes`, and moves `bytes` past it.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` does not start with what [`Self::write_to`] writes: the stage reads only what it
+    /// wrote.
+    #[must_use]
+    pub fn read_from(bytes: &mut &[u8]) -> Self {
+        fn take<const N: usize>(bytes: &mut &[u8]) -> [u8; N] {
+            let (head, rest) = bytes.split_at(N);
+            *bytes = rest;
+            head.try_into().expect("N bytes")
+        }
+        let length = |bytes: &mut &[u8]| u32::from_le_bytes(take(bytes)) as usize;
+        let count = length(bytes);
+        let background_shares = (0..count).map(|_| f32::from_le_bytes(take(bytes))).collect();
+        let count = length(bytes);
+        let likelihoods = (0..count).map(|_| u16::from_le_bytes(take(bytes))).collect();
+        let count = length(bytes);
+        let shares = (0..count).map(|_| f32::from_le_bytes(take(bytes))).collect();
+        Self {
+            background_shares,
+            likelihoods,
+            shares,
+        }
+    }
+}
+
+/// **The likelihood a `PL` this far above the sample's lowest stands for**, `10^(−PL/10)` as an
+/// `f32`, read from a table of every `u16` made once by that same expression — so a record holds
+/// two bytes a genotype and its walks read the value it held as an `f32` before.
+///
+/// **Clamping at `u16::MAX` changes nothing**: from about 455 up the `f32` is zero, as it is at
+/// every larger `PL`.
+#[must_use]
+pub fn likelihood_of(above_lowest: u16) -> f32 {
+    static TABLE: std::sync::OnceLock<Box<[f32]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..=u16::MAX)
+            .map(|phred| float::powf(10.0, -f64::from(phred) / 10.0) as f32)
+            .collect()
+    })[usize::from(above_lowest)]
 }
 
 /// **The background template's allele shares** at a record (spec §3.3): the cohort's allele

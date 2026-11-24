@@ -25,14 +25,16 @@ use super::phase::{
     DISAGREEMENT_COST, EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, PassReadCounts,
     PathAgreement, SHARED_RECORDS_TO_JOIN, SWITCH_COST, WrittenPhase,
 };
-use super::records::SiteRecord;
+use super::records::{RecordNumbers, SiteRecord};
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
-    PHASING_ROUNDS, Phasing, RefinedRecord, record_window_bytes, refine_window_with_reads,
-    window_key,
+    PHASING_ROUNDS, Phasing, RefinedRecord, held_solve_bytes, record_window_bytes,
+    refine_window_with_reads, window_key,
 };
 use super::templates::MAX_TEMPLATES;
-use super::windows::{WindowBytes, WindowSizes, plan_window};
+use super::windows::{
+    MarginThinning, NEAR_MARGIN_BASES, WindowBytes, WindowSizes, plan_window,
+};
 use crate::read_phase::fragments::{PackedRecordFragments, RecordFragments};
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
@@ -97,22 +99,91 @@ impl NeighbourEvidenceDecision {
         }
     }
 
+    /// The same decision, no window's margins (nor, then, its core) shorter than `bases`
+    /// (`--refine-window-floor`).
+    #[must_use]
+    pub fn with_window_floor(self, bases: u64) -> Self {
+        Self {
+            sizes: WindowSizes {
+                margin_floor_bases: bases,
+                ..self.sizes
+            },
+            ..self
+        }
+    }
+
+    /// The same decision, no window's core shorter than `bases` once its margins are at their
+    /// floor (`--refine-core-floor`); at or above the margin floor, the core stops there too.
+    #[must_use]
+    pub fn with_core_floor(self, bases: u64) -> Self {
+        Self {
+            sizes: WindowSizes {
+                core_floor_bases: bases,
+                ..self.sizes
+            },
+            ..self
+        }
+    }
+
+    /// The same decision, no window's core longer than `bases` (the hidden `--refine-core-max`),
+    /// nor its core floor.
+    #[must_use]
+    pub fn with_core_max(self, bases: u64) -> Self {
+        Self {
+            sizes: WindowSizes {
+                core_bases: bases,
+                core_floor_bases: self.sizes.core_floor_bases.min(bases),
+                ..self.sizes
+            },
+            ..self
+        }
+    }
+
+    /// The same decision, no window's core nor margins longer than `bases` (the hidden
+    /// `--refine-window-max`), nor its floor.
+    #[must_use]
+    pub fn with_window_max(self, bases: u64) -> Self {
+        Self {
+            sizes: WindowSizes {
+                core_bases: bases,
+                margin_bases: bases,
+                margin_floor_bases: self.sizes.margin_floor_bases.min(bases),
+                ..self.sizes
+            },
+            ..self
+        }
+    }
+
+    /// The same decision, its far margins walked at most `thinning` records a kb
+    /// (`--refine-margin-density`, pass spec §6, thinned margins); `None` walks every record.
+    #[must_use]
+    pub fn with_margin_thinning(self, thinning: Option<MarginThinning>) -> Self {
+        Self {
+            sizes: WindowSizes {
+                thinning,
+                ..self.sizes
+            },
+            ..self
+        }
+    }
+
     /// The value of the `##neighbourEvidence=` header line.
     #[must_use]
     pub fn as_header_value(&self) -> String {
         let why = self.why.replace('"', "'");
         if self.ran {
             format!(
-                "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},window_bytes={},\
+                "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},margin_floor={},window_bytes={},\
                  rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES},\
                  hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
                  hidden_share={MAX_HIDDEN_SHARE},extra_paths={EXTRA_PATHS_PER_ROUND},\
                  lean_min={LEAN_MIN},path_agreement={},join_records={SHARED_RECORDS_TO_JOIN},\
                  alignment_costs={DISAGREEMENT_COST}/{SWITCH_COST},\
                  read_link_min={:.2},read_break_min={:.2},read_error_floor={},read_gq_min={},\
-                 read_reach={},read_cap={}>",
+                 read_reach={},read_cap={}{}{}>",
                 self.sizes.core_bases,
                 self.sizes.margin_bases,
+                self.sizes.margin_floor_bases,
                 self.sizes.budget_bytes,
                 self.path_agreement.get(),
                 crate::read_phase::link::LINK_MIN,
@@ -121,6 +192,16 @@ impl NeighbourEvidenceDecision {
                 crate::read_phase::link::GQ_MIN,
                 crate::read_phase::fragments::READ_REACH,
                 crate::read_phase::capture::READ_ALLELES_KEPT,
+                // Only where the margins are thinned, so an unthinned run's header is as it was.
+                self.sizes.thinning.map_or(String::new(), |thinning| format!(
+                    ",margin_density={thinning},margin_near={NEAR_MARGIN_BASES}"
+                )),
+                // Only where a core may be shorter than the margin floor, likewise.
+                if self.sizes.core_floor_bases < self.sizes.margin_floor_bases.min(self.sizes.core_bases) {
+                    format!(",core_floor={}", self.sizes.core_floor_bases)
+                } else {
+                    String::new()
+                },
             )
         } else {
             format!("<ran=no,why=\"{why}\">")
@@ -179,7 +260,7 @@ pub fn decide(
     }
 }
 
-/// **A window the pass cannot solve within its budget** (pass spec §6): at the 500-kb floor it
+/// **A window the pass cannot solve within its budget** (pass spec §6): at the floor it
 /// still holds more bytes than `--refine-window-bytes` allows. The run stops here rather than
 /// switch refinement off or go on past the budget (owner, 2026-11-13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +275,35 @@ pub struct WindowOverBudget {
     pub bytes: u64,
     pub budget: u64,
 }
+
+/// **Why the stage stopped handing lines on**: a window over its budget, or the writer refusing a
+/// line it was handed ([`NeighbourEvidenceStage::push_writing`]).
+#[derive(Debug)]
+pub enum StageStop<E> {
+    /// A window holds more than the budget even at the smallest size.
+    OverBudget(WindowOverBudget),
+    /// Writing a line failed.
+    Write(E),
+}
+
+impl<E> From<WindowOverBudget> for StageStop<E> {
+    fn from(over: WindowOverBudget) -> Self {
+        Self::OverBudget(over)
+    }
+}
+
+/// What a stage that hands its lines to a vector can stop on: only the budget.
+fn over_budget(stop: StageStop<std::convert::Infallible>) -> WindowOverBudget {
+    match stop {
+        StageStop::OverBudget(over) => over,
+        StageStop::Write(never) => match never {},
+    }
+}
+
+/// **How many of a core's lines are rewritten together**, on the pool, and handed on before the
+/// next ones are: a core's rewritten lines were all held at once before the first was written —
+/// on 2,176 tomato samples about 9 GB at the smallest window — and a chunk is a few hundred MB.
+const LINES_REWRITTEN_TOGETHER: usize = 1_024;
 
 /// **How many held lines are compressed together**, on the pool, once that many have arrived
 /// since the last batch: compressing each as it arrives would put the work on the one thread every
@@ -316,6 +426,13 @@ pub struct NeighbourEvidenceStage {
     /// than the lines ([`WindowBytes`]): over every line a window spans, and again over its core.
     held_bytes: Vec<u64>,
     core_bytes: Vec<u64>,
+    /// With thinned margins (pass spec §6, thinned margins): whether each held line is a record the far margins
+    /// walk, and, as a running total like `held_bytes`, what `held_bytes` counts for the solve
+    /// state of each line the far margins skip. Empty without thinning.
+    far_walked: Vec<bool>,
+    skipped_bytes: Vec<u64>,
+    /// Which records the far margins walk, decided as each arrives.
+    thinner: Option<MarginThinner>,
     /// The held sites, each with its fragments; the first is site number `first_site`.
     sites: HeldSites,
     first_site: usize,
@@ -358,6 +475,9 @@ impl NeighbourEvidenceStage {
             positions: Vec::new(),
             held_bytes: vec![0],
             core_bytes: vec![0],
+            far_walked: Vec::new(),
+            skipped_bytes: vec![0],
+            thinner: decision.sizes.thinning.map(MarginThinner::new),
             sites: HeldSites::default(),
             first_site: 0,
             next_site: 0,
@@ -405,19 +525,56 @@ impl NeighbourEvidenceStage {
         fragments: RecordFragments,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) -> Result<(), WindowOverBudget> {
+        self.push_writing(place, line, fragments, &mut |place, line| {
+            ready.push((place, line));
+            Ok(())
+        })
+        .map_err(over_budget)
+    }
+
+    /// **Takes one line, as [`Self::push`], and hands each line it completes to `write`** in the
+    /// order they arrived, a chunk of a core at a time ([`LINES_REWRITTEN_TOGETHER`]) — so a core's
+    /// rewritten lines are never all held at once.
+    ///
+    /// # Errors
+    ///
+    /// If a window this line completed holds more than the budget even at the smallest size, or
+    /// `write` refuses a line.
+    pub fn push_writing<E>(
+        &mut self,
+        place: RecordPlace,
+        line: Vec<u8>,
+        fragments: RecordFragments,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
         if self.contig.is_some_and(|contig| contig != place.at.contig) {
-            self.finish(ready)?;
+            self.finish_writing(write)?;
         }
         self.contig = Some(place.at.contig);
-        // Counted as the line arrived, though most lines are held compressed: what a record costs
-        // must not depend on when its batch was compressed.
+        // **A line is counted at its compressed length** over every window that spans it. Until it
+        // is compressed it counts at the length it arrived at, which only overstates, and no window
+        // is planned on a line not yet compressed (`release`), so what a record costs does not
+        // depend on when its batch was compressed. A core's lines are rewritten and handed on a
+        // chunk at a time, which the budget does not count, as it does not count the walks' arrays.
         let mut held = line.len() as u64;
         let mut core = 0;
+        let mut skipped = 0;
+        let mut far_walked = false;
         let site = site_of(&line, self.samples).map(|record| {
             let fragments = PackedRecordFragments::from(fragments);
             let (record_held, record_core) = record_window_bytes(&record);
             held += record_held + fragments.heap_bytes() as u64;
             core = record_core;
+            if let Some(thinner) = &mut self.thinner {
+                far_walked = record.is_site() && thinner.walks(record.position);
+                if !far_walked {
+                    // Its solve state, and its numbers and reads, which it holds compressed
+                    // instead while no walk reads it ([`HeldSites::pack`]).
+                    skipped = record.sample_count() as u64 * held_solve_bytes(record.allele_count)
+                        + (record.heap_bytes() - record.sample_count()) as u64
+                        + fragments.heap_bytes() as u64;
+                }
+            }
             self.sites.push(record, fragments);
             self.next_site += 1;
             self.next_site - 1
@@ -425,20 +582,60 @@ impl NeighbourEvidenceStage {
         let last = |totals: &[u64]| totals.last().copied().unwrap_or(0);
         self.held_bytes.push(last(&self.held_bytes) + held);
         self.core_bytes.push(last(&self.core_bytes) + core);
+        if self.thinner.is_some() {
+            self.far_walked.push(far_walked);
+            self.skipped_bytes
+                .push(last(&self.skipped_bytes) + skipped);
+        }
         self.positions.push(place.at.position.0);
         self.held.push(HeldLine {
             place,
             text: HeldText::Plain(line),
             site,
         });
-        self.compressed_up_to = self.compressed_up_to.max(self.core_start);
-        if self.held.len() - self.compressed_up_to >= LINES_COMPRESSED_TOGETHER {
-            self.held[self.compressed_up_to..]
-                .par_iter_mut()
-                .for_each_init(LineCompressor::new, |with, held| held.text.compress(with));
-            self.compressed_up_to = self.held.len();
+        if self.held.len() - self.compressed_up_to.max(self.core_start) >= LINES_COMPRESSED_TOGETHER
+        {
+            self.compress_held_lines();
         }
-        self.release(false, ready)
+        self.release(false, write)
+    }
+
+    /// **Compresses every held line not yet compressed**, on the pool, and counts each at its
+    /// compressed length from then on.
+    fn compress_held_lines(&mut self) {
+        let from = self.compressed_up_to.max(self.core_start);
+        self.held[from..]
+            .par_iter_mut()
+            .for_each_init(LineCompressor::new, |with, held| held.text.compress(with));
+        // With thinned margins, the sites the far margins skip are held compressed too, until a
+        // window walks them (pass spec §6, thinned margins).
+        if self.thinner.is_some() {
+            let sites = self.site_span(from..self.held.len());
+            let first_site = self.first_site;
+            let held = &self.held;
+            let far_walked = &self.far_walked;
+            let line_of_site: Vec<usize> = (from..held.len())
+                .filter(|&line| held[line].site.is_some())
+                .collect();
+            let start = sites.start;
+            self.sites.pack(sites.start - first_site..sites.end - first_site, |site| {
+                !far_walked[line_of_site[site + first_site - start]]
+            });
+        }
+        // The running totals from the first compressed line on, less what each line saved, plus
+        // what its site holds compressed.
+        let mut saved: i64 = 0;
+        for (index, held) in self.held.iter().enumerate().skip(from) {
+            if let HeldText::Compressed { bytes, length } = &held.text {
+                saved += *length as i64 - bytes.len() as i64;
+            }
+            if let Some(site) = held.site {
+                saved -= self.sites.packed_bytes(site - self.first_site) as i64;
+            }
+            let total = &mut self.held_bytes[index + 1];
+            *total = (*total as i64 - saved) as u64;
+        }
+        self.compressed_up_to = self.held.len();
     }
 
     /// **Finishes the current contig**: solves its remaining windows and appends their lines to
@@ -451,10 +648,31 @@ impl NeighbourEvidenceStage {
         &mut self,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
     ) -> Result<(), WindowOverBudget> {
-        self.release(true, ready)?;
+        self.finish_writing(&mut |place, line| {
+            ready.push((place, line));
+            Ok(())
+        })
+        .map_err(over_budget)
+    }
+
+    /// **Finishes the current contig, as [`Self::finish`], handing its lines to `write`.**
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::push_writing`].
+    pub fn finish_writing<E>(
+        &mut self,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
+        self.release(true, write)?;
         self.held.clear();
         self.held_bytes = vec![0];
         self.core_bytes = vec![0];
+        self.far_walked.clear();
+        self.skipped_bytes = vec![0];
+        if let Some(thinner) = &mut self.thinner {
+            *thinner = MarginThinner::new(thinner.thinning);
+        }
         self.compressed_up_to = 0;
         self.positions.clear();
         self.sites.clear();
@@ -468,17 +686,22 @@ impl NeighbourEvidenceStage {
 
     /// Solves every window whose lines have all arrived (or all of them, when the contig is
     /// complete), hands back their cores, and forgets what no later window reads.
-    fn release(
+    fn release<E>(
         &mut self,
         contig_complete: bool,
-        ready: &mut Vec<(RecordPlace, Vec<u8>)>,
-    ) -> Result<(), WindowOverBudget> {
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
         while self.core_start < self.held.len() {
+            // With thinned margins, a far-margin record some sample's last block joins at is
+            // walked, so its solve state is counted (pass spec §6, thinned margins).
+            let joined = self.joined_lines();
+            let skipped = self.skipped_bytes_besides(&joined);
             let Some(plan) = plan_window(
                 &self.positions,
                 WindowBytes {
                     held: &self.held_bytes,
                     core: &self.core_bytes,
+                    skipped: skipped.as_deref(),
                 },
                 self.core_start,
                 contig_complete,
@@ -486,18 +709,26 @@ impl NeighbourEvidenceStage {
             ) else {
                 return Ok(());
             };
+            if self.compressed_up_to < self.held.len() {
+                // Lines not yet compressed count at the length they arrived at, more than they will
+                // hold; counted compressed, the window may be larger, or need lines not yet read.
+                self.compress_held_lines();
+                continue;
+            }
             if plan.over_budget > 0 {
-                return Err(WindowOverBudget {
+                return Err(StageStop::OverBudget(WindowOverBudget {
                     contig: self.contig.map_or(0, |contig| contig.0),
                     position: self.positions[plan.core_start],
                     records: plan.records(),
                     samples: self.samples,
                     bytes: plan.bytes,
                     budget: self.sizes.budget_bytes,
-                });
+                }));
             }
             #[cfg(test)]
             self.core_starts.push(self.positions[plan.core_start]);
+            let began = std::time::Instant::now();
+            let mut walked_records = None;
             let window_sites = self.site_span(plan.context_start..plan.context_end);
             let core_sites = self.site_span(plan.core_start..plan.core_end);
             let refined = if core_sites.is_empty() {
@@ -537,10 +768,41 @@ impl NeighbourEvidenceStage {
                     .collect();
                 let in_window =
                     window_sites.start - self.first_site..window_sites.end - self.first_site;
+                let walked = self.thinner.is_some().then(|| {
+                    let mut walked = vec![false; in_window.len()];
+                    for (line, held) in self
+                        .held
+                        .iter()
+                        .enumerate()
+                        .take(plan.context_end)
+                        .skip(plan.context_start)
+                    {
+                        if let Some(site) = held.site {
+                            walked[site - window_sites.start] = (plan.near_start..plan.near_end)
+                                .contains(&line)
+                                || self.far_walked[line]
+                                || joined.binary_search(&line).is_ok();
+                        }
+                    }
+                    walked
+                });
+                // The window's walks read the numbers and reads of the records they walk, and only
+                // those: the others are held compressed.
+                if let Some(walked) = &walked {
+                    self.sites.hold_whole(in_window.clone(), walked);
+                }
                 let (records, fragments) = self.sites.window(in_window);
+                walked_records = walked.as_ref().map(|walked| {
+                    walked
+                        .iter()
+                        .zip(records)
+                        .filter(|(walked, record)| **walked && record.is_site())
+                        .count()
+                });
                 let solved = refine_window_with_reads(
                     records,
                     Some(fragments),
+                    walked.as_deref(),
                     core_sites.start - window_sites.start..core_sites.end - window_sites.start,
                     contig_length,
                     &mut self.fits,
@@ -560,38 +822,60 @@ impl NeighbourEvidenceStage {
                 self.remember_last_blocks(core_sites.start, &solved.records);
                 solved.records
             };
-            // **The core's lines are rewritten on the pool and handed back in their own order.**
-            // Each rewrite reads only its line and its refined record, so the lines are
-            // independent; done on this thread it was a quarter of the writing pass on 59 tomato
-            // accessions over 32 Mb, with every other thread waiting for the next window. The
-            // tallies are counts, so summing them in any order gives the serial total.
-            let rewritten: Vec<(RecordPlace, Option<Vec<u8>>, RewriteTally)> = self.held
-                [plan.core_start..plan.core_end]
-                .par_iter_mut()
-                .map_init(
-                    || (GenotypePairs::default(), line_decompressor()),
-                    |(pairs, decompressor), held| {
-                        let line = held.text.take(decompressor);
-                        let mut tally = RewriteTally::default();
-                        let written = match held.site {
-                            Some(site) => rewrite_line(
-                                &line,
-                                &refined[site - core_sites.start],
-                                pairs,
-                                &mut tally,
-                            ),
-                            None => Some(line),
-                        };
-                        (held.place, written, tally)
-                    },
-                )
-                .collect();
-            for (place, written, tally) in rewritten {
-                self.tally.add(tally);
-                if let Some(line) = written {
-                    ready.push((place, line));
+            // **The core's lines are rewritten on the pool and handed on in their own order**, a
+            // chunk at a time. Each rewrite reads only its line and its refined record, so the lines
+            // are independent; done on this thread it was a quarter of the writing pass on 59
+            // tomato accessions over 32 Mb, with every other thread waiting for the next window.
+            // The tallies are counts, so summing them in any order gives the serial total.
+            let mut chunk_start = plan.core_start;
+            while chunk_start < plan.core_end {
+                let chunk_end = (chunk_start + LINES_REWRITTEN_TOGETHER).min(plan.core_end);
+                let rewritten: Vec<(RecordPlace, Option<Vec<u8>>, RewriteTally)> = self.held
+                    [chunk_start..chunk_end]
+                    .par_iter_mut()
+                    .map_init(
+                        || (GenotypePairs::default(), line_decompressor()),
+                        |(pairs, decompressor), held| {
+                            let line = held.text.take(decompressor);
+                            let mut tally = RewriteTally::default();
+                            let written = match held.site {
+                                Some(site) => rewrite_line(
+                                    &line,
+                                    &refined[site - core_sites.start],
+                                    pairs,
+                                    &mut tally,
+                                ),
+                                None => Some(line),
+                            };
+                            (held.place, written, tally)
+                        },
+                    )
+                    .collect();
+                for (place, written, tally) in rewritten {
+                    self.tally.add(tally);
+                    if let Some(line) = written {
+                        write(place, line).map_err(StageStop::Write)?;
+                    }
                 }
+                chunk_start = chunk_end;
             }
+            // **One line a window in the run's log**: where it was, what it held by the budget's
+            // count and how long it took — what a run that slows or runs short of memory is read
+            // back from.
+            tracing::debug!(
+                "refinement window: contig {} core {}..{}, {} records ({} in the core{}), {} \
+                 samples, {:.2} GB of a {:.2} GB budget, {:.1} s",
+                self.contig.map_or(0, |contig| contig.0),
+                self.positions[plan.core_start],
+                self.positions[plan.core_end - 1],
+                plan.records(),
+                plan.core_end - plan.core_start,
+                walked_records.map_or(String::new(), |walked| format!(", {walked} walked")),
+                self.samples,
+                plan.bytes as f64 / 1e9,
+                self.sizes.budget_bytes as f64 / 1e9,
+                began.elapsed().as_secs_f64()
+            );
             self.core_start = plan.core_end;
             self.forget_what_no_window_reads();
         }
@@ -608,7 +892,7 @@ impl NeighbourEvidenceStage {
                 .iter()
                 .enumerate()
                 .filter_map(|(offset, record)| {
-                    record.phases[sample].map(|phase| {
+                    record.phase(sample).map(|phase| {
                         let site = first_site + offset;
                         WrittenRecord {
                             site,
@@ -639,6 +923,56 @@ impl NeighbourEvidenceStage {
         }
     }
 
+    /// **The held lines some sample's last written block holds a record at**, ascending: the
+    /// records a window's walks join at (phase output spec §2.4). Empty without thinning, where
+    /// every record is walked anyway.
+    fn joined_lines(&self) -> Vec<usize> {
+        if self.thinner.is_none() || self.core_start == 0 {
+            return Vec::new();
+        }
+        // Held sites are consecutive numbers from `first_site`, each on one line.
+        let mut line_of_site = vec![0; self.next_site - self.first_site];
+        for (line, held) in self.held.iter().enumerate() {
+            if let Some(site) = held.site {
+                line_of_site[site - self.first_site] = line;
+            }
+        }
+        let mut joined: Vec<usize> = self
+            .last_blocks
+            .iter()
+            .flatten()
+            .flat_map(|block| &block.records)
+            .filter(|record| record.site >= self.first_site)
+            .map(|record| line_of_site[record.site - self.first_site])
+            .filter(|&line| !self.far_walked[line])
+            .collect();
+        joined.sort_unstable();
+        joined.dedup();
+        joined
+    }
+
+    /// **What a window does not pay for the far margins' skipped records**, as running totals over
+    /// the held lines: `skipped_bytes`, less the records in `joined`, which are walked. `None`
+    /// without thinning.
+    fn skipped_bytes_besides(&self, joined: &[usize]) -> Option<Vec<u64>> {
+        self.thinner.as_ref()?;
+        if joined.is_empty() {
+            return Some(self.skipped_bytes.clone());
+        }
+        let mut totals = Vec::with_capacity(self.skipped_bytes.len());
+        totals.push(0);
+        let mut less = 0;
+        let mut next_joined = joined.iter().peekable();
+        for line in 0..self.held.len() {
+            let own = self.skipped_bytes[line + 1] - self.skipped_bytes[line];
+            if next_joined.next_if_eq(&&line).is_some() {
+                less += own;
+            }
+            totals.push(self.skipped_bytes[line + 1] - less);
+        }
+        Some(totals)
+    }
+
     /// The sites among held lines `lines`, as a range of site numbers.
     fn site_span(&self, lines: std::ops::Range<usize>) -> std::ops::Range<usize> {
         let first = self.held[lines.clone()].iter().find_map(|held| held.site);
@@ -667,7 +1001,17 @@ impl NeighbourEvidenceStage {
             .filter(|held| held.site.is_some())
             .count();
         self.held.drain(..keep_from);
-        for totals in [&mut self.held_bytes, &mut self.core_bytes] {
+        if self.thinner.is_some() {
+            self.far_walked.drain(..keep_from);
+        }
+        for totals in [
+            &mut self.held_bytes,
+            &mut self.core_bytes,
+            &mut self.skipped_bytes,
+        ] {
+            if totals.len() == 1 {
+                continue;
+            }
             let dropped = totals[keep_from];
             totals.drain(..keep_from);
             for total in totals.iter_mut() {
@@ -682,31 +1026,174 @@ impl NeighbourEvidenceStage {
     }
 }
 
+/// **Which records a window's far margins walk** (pass spec §6, thinned margins), decided once for each record as
+/// it arrives, so it does not depend on which window reads the record: a token bucket that fills at
+/// the thinning's density, a token a record, holding a kb's worth or one token if that is more,
+/// and spends one on each record it walks. A stretch no denser than that is walked in full; a
+/// denser one is walked at that density, evenly spaced, after a burst of at most a kb's worth.
+/// Counted in millionths of a token, in integers, so the choice is the same on every machine.
+#[derive(Clone, Copy, Debug)]
+struct MarginThinner {
+    thinning: MarginThinning,
+    tokens: u64,
+    last_position: Option<u64>,
+}
+
+/// A token, in [`MarginThinner`]'s units: at a density of `t` thousandths of a record a kb, a base
+/// adds `t` units, so a kb adds `t / 1,000` tokens.
+const THINNER_TOKEN: u64 = 1_000_000;
+
+impl MarginThinner {
+    /// A bucket at a contig's start, full.
+    fn new(thinning: MarginThinning) -> Self {
+        Self {
+            thinning,
+            tokens: Self::capacity(thinning),
+            last_position: None,
+        }
+    }
+
+    /// A kb's worth of tokens, or one token at a density under one a kb.
+    fn capacity(thinning: MarginThinning) -> u64 {
+        (u64::from(thinning.thousandths_per_kb.get()) * 1_000).max(THINNER_TOKEN)
+    }
+
+    /// Whether the record at `position`, the next site of the contig, is walked in far margins.
+    fn walks(&mut self, position: u64) -> bool {
+        let since = self
+            .last_position
+            .map_or(0, |last| position.saturating_sub(last));
+        self.last_position = Some(position);
+        self.tokens = self
+            .tokens
+            .saturating_add(since.saturating_mul(u64::from(self.thinning.thousandths_per_kb.get())))
+            .min(Self::capacity(self.thinning));
+        if self.tokens >= THINNER_TOKEN {
+            self.tokens -= THINNER_TOKEN;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// **The held sites' walk records and, beside each, its fragments** (read phase spec §2.7): the
 /// reads the link test reads. Two vectors, so a window hands the solve two slices without a copy,
 /// but changed only together, here, so one cannot drift a site from the other. A line that is no
 /// site keeps none, since the pass phases only sites.
+///
+/// **With thinned margins, a site the far margins skip is held compressed** (pass spec §6, thinned
+/// margins): its numbers and reads, packed once its line is compressed, and taken out of the
+/// record, which keeps its position, allele count and rows. A window puts them back for the sites
+/// it walks ([`Self::hold_whole`]) and takes them out again of those it does not.
 #[derive(Debug, Default)]
 struct HeldSites {
     records: Vec<SiteRecord>,
     fragments: Vec<PackedRecordFragments>,
+    /// Each site's numbers and reads, compressed: its uncompressed length, then zstd's frame.
+    /// `None` for a site held whole throughout.
+    packed: Vec<Option<Box<[u8]>>>,
+    /// Whether each site's numbers and reads are in `records` and `fragments`.
+    whole: Vec<bool>,
 }
 
 impl HeldSites {
     fn push(&mut self, record: SiteRecord, fragments: PackedRecordFragments) {
         self.records.push(record);
         self.fragments.push(fragments);
+        self.packed.push(None);
+        self.whole.push(true);
     }
 
     fn clear(&mut self) {
         self.records.clear();
         self.fragments.clear();
+        self.packed.clear();
+        self.whole.clear();
     }
 
     /// Forget the first `count` sites.
     fn drop_first(&mut self, count: usize) {
         self.records.drain(..count);
         self.fragments.drain(..count);
+        self.packed.drain(..count);
+        self.whole.drain(..count);
+    }
+
+    /// **Compresses the numbers and reads of the sites in `range` that `skipped` admits**, on the
+    /// pool, and holds them so.
+    fn pack(&mut self, range: std::ops::Range<usize>, skipped: impl Fn(usize) -> bool + Sync) {
+        let start = range.start;
+        self.records[range.clone()]
+            .par_iter_mut()
+            .zip(&mut self.fragments[range.clone()])
+            .zip(&mut self.packed[range.clone()])
+            .zip(&mut self.whole[range])
+            .enumerate()
+            .for_each_init(LineCompressor::new, |with, (at, (((record, fragments), packed), whole))| {
+                if !skipped(start + at) || packed.is_some() {
+                    return;
+                }
+                let numbers = record.take_numbers();
+                let mut plain = Vec::new();
+                numbers.write_to(&mut plain);
+                std::mem::take(fragments).write_to(&mut plain);
+                with.scratch.clear();
+                with.scratch
+                    .reserve(zstd::zstd_safe::compress_bound(plain.len()));
+                // PANIC-FREE: the buffer holds zstd's bound for the bytes, so compressing fails
+                // only where allocation does.
+                with.compressor
+                    .compress_to_buffer(plain.as_slice(), &mut with.scratch)
+                    .expect("a site's numbers in memory compress");
+                let mut bytes = Vec::with_capacity(4 + with.scratch.len());
+                bytes.extend_from_slice(
+                    &u32::try_from(plain.len())
+                        .expect("a site's numbers fit u32 bytes")
+                        .to_le_bytes(),
+                );
+                bytes.extend_from_slice(&with.scratch);
+                *packed = Some(bytes.into_boxed_slice());
+                *whole = false;
+            });
+    }
+
+    /// The bytes site `site` holds compressed; zero for a site held whole throughout.
+    fn packed_bytes(&self, site: usize) -> usize {
+        self.packed[site].as_ref().map_or(0, |bytes| bytes.len())
+    }
+
+    /// **Holds whole exactly the packed sites in `range` that `walked` admits** (one entry a site
+    /// in `range`), on the pool: unpacks those it admits, and takes the numbers and reads out of
+    /// the others again, whose packed bytes they were read from.
+    fn hold_whole(&mut self, range: std::ops::Range<usize>, walked: &[bool]) {
+        self.records[range.clone()]
+            .par_iter_mut()
+            .zip(&mut self.fragments[range.clone()])
+            .zip(&self.packed[range.clone()])
+            .zip(&mut self.whole[range])
+            .zip(walked)
+            .for_each_init(line_decompressor, |with, ((((record, fragments), packed), whole), &walked)| {
+                let Some(packed) = packed else {
+                    return;
+                };
+                if walked && !*whole {
+                    let (length, frame) = packed.split_at(4);
+                    let length = u32::from_le_bytes(length.try_into().expect("four bytes")) as usize;
+                    // PANIC-FREE: the stage reads back only frames it compressed, at their length.
+                    let plain = with
+                        .decompress(frame, length)
+                        .expect("a site's numbers compressed here decompress");
+                    let mut bytes = plain.as_slice();
+                    record.put_numbers(RecordNumbers::read_from(&mut bytes));
+                    *fragments = PackedRecordFragments::read_from(&mut bytes);
+                    *whole = true;
+                } else if !walked && *whole {
+                    drop(record.take_numbers());
+                    *fragments = PackedRecordFragments::default();
+                    *whole = false;
+                }
+            });
     }
 
     /// The sites in `range`, as the window solve takes them.

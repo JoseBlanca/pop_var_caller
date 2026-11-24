@@ -219,6 +219,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         force: true,
         log: None,
         tmp_dir: None,
+        keep_tmp_on_error: false,
         parameters: None,
         defaults: true,
         ploidy: None,
@@ -233,6 +234,11 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
         phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
         refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+        refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+        refine_margin_density: crate::cli::calling_run::MarginDensity(None),
+        refine_window_max: None,
+        refine_core_floor: None,
+        refine_core_max: None,
         locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,
@@ -384,6 +390,7 @@ fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
         output: cohort.directory.path().join("pure.vcf"),
         log: Some(cohort.directory.path().join("pure.log")),
         tmp_dir: None,
+        keep_tmp_on_error: false,
         ..args
     };
     run_call_from_psps(&args).expect("the psps' own settings are the run's");

@@ -1,5 +1,7 @@
 //! The one thing this module owns: **the file cannot outlive its run**, and nothing else may
-//! write over it while it lives.
+//! write over it while it lives. A spill named inside the run's scratch directory hands the
+//! first half to that directory, which removes it or, after a failed run with
+//! `--keep-tmp-on-error`, keeps it; the last test here pins that hand-over.
 //!
 //! Three exits are tested separately because they are three different mechanisms — a value
 //! going out of scope at the end of a block, a value going out of scope because `?` returned
@@ -248,6 +250,27 @@ fn a_spill_nothing_was_written_to_creates_nothing_and_removes_nothing() {
         "a spill that was never written to removed a file it did not create"
     );
     fs::remove_file(&path).expect("the planted file is the test's to clean up");
+}
+
+/// **A spill named inside the run's scratch directory leaves its file when dropped**: the
+/// directory removes it with everything else, or keeps it for a failed run asked to keep its
+/// scratch, and a spill that unlinked itself would empty the directory kept to look at.
+#[test]
+fn a_spill_in_the_runs_scratch_directory_leaves_its_removal_to_the_directory() {
+    let directory = scratch("a_spill_in_the_runs_scratch_directory_leaves_its_removal");
+    let path = SpillFile::in_directory(&directory).path().to_path_buf();
+    let _ = fs::remove_file(&path);
+
+    {
+        let mut spill = SpillFile::in_directory(&directory);
+        spill
+            .append(&a_record_at(100), &RecordFragments::default())
+            .expect("a record parked");
+        spill.finish_writing().expect("pass one ends");
+    }
+
+    assert!(path.exists(), "the spill removed itself from its directory");
+    fs::remove_file(&path).expect("the spill is the test's to clean up");
 }
 
 // ---------------------------------------------------------------------------

@@ -57,3 +57,74 @@ fn frequencies_past_one_are_rescaled() {
     background_shares(&[0.6, 0.6], &mut shares);
     assert_eq!(shares, vec![0.0, 0.5, 0.5]);
 }
+
+/// **A likelihood held as its `PL` above the lowest reads back as the `f32` the expression gives**,
+/// bit for bit, at every `u16`, and a `PL` past `u16::MAX` reads as the zero it is.
+#[test]
+fn a_likelihood_held_in_two_bytes_is_the_f32_it_stands_for() {
+    for phred in 0..=u16::MAX {
+        let expected = crate::float::powf(10.0, -f64::from(phred) / 10.0) as f32;
+        assert_eq!(
+            likelihood_of(phred).to_bits(),
+            expected.to_bits(),
+            "PL {phred}"
+        );
+    }
+    let far = crate::float::powf(10.0, -f64::from(70_000_u32) / 10.0) as f32;
+    assert_eq!(far.to_bits(), likelihood_of(u16::MAX).to_bits());
+    let record = SiteRecord::new(
+        10,
+        &[0.5],
+        &[
+            biallelic(&[0, 70_000, 455], &[1.0, 0.0, 0.0]),
+            biallelic(&[30, 0, 300], &[0.0, 1.0, 0.0]),
+        ],
+    );
+    let read: Vec<u32> = record
+        .likelihoods(0)
+        .map(|l| (l as f32).to_bits())
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            1.0_f32.to_bits(),
+            0.0_f32.to_bits(),
+            likelihood_of(455).to_bits()
+        ]
+    );
+}
+
+/// **A record's numbers, taken out and written to bytes, read back and put back as they were**,
+/// and the record keeps its rows while they are out (pass spec §6, thinned margins).
+#[test]
+fn a_records_numbers_taken_out_and_written_come_back_the_same() {
+    let mut record = SiteRecord::new(
+        100,
+        &[0.25, 0.1],
+        &[
+            Some(SampleColumns {
+                phred_likelihoods: &[0, 10, 20, 30, 40, 50],
+                genotype_posteriors: &[0.5, 0.2, 0.1, 0.1, 0.05, 0.05],
+            }),
+            None,
+            Some(SampleColumns {
+                phred_likelihoods: &[7, 0, 9, 70_000, 3, 1],
+                genotype_posteriors: &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            }),
+        ],
+    );
+    let before = format!("{record:?}");
+    let heap = record.heap_bytes();
+    let numbers = record.take_numbers();
+    assert_eq!(record.heap_bytes(), record.sample_count());
+    assert_eq!((record.row(0), record.row(1)), (SampleRow::Informative, SampleRow::Absent));
+    assert!(record.is_site());
+    let mut bytes = Vec::new();
+    numbers.write_to(&mut bytes);
+    bytes.push(99);
+    let mut reading = bytes.as_slice();
+    record.put_numbers(RecordNumbers::read_from(&mut reading));
+    assert_eq!(reading, &[99]);
+    assert_eq!(format!("{record:?}"), before);
+    assert_eq!(record.heap_bytes(), heap);
+}

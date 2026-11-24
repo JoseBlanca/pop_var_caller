@@ -34,6 +34,7 @@ fn plan_uniform(
         WindowBytes {
             held: &held,
             core: &core,
+            skipped: None,
         },
         core_start,
         complete,
@@ -167,6 +168,7 @@ fn only_the_core_pays_the_core_cost() {
     let bytes = WindowBytes {
         held: &held,
         core: &core,
+        skipped: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
     let core_records = (plan.core_end - plan.core_start) as u64;
@@ -174,4 +176,172 @@ fn only_the_core_pays_the_core_cost() {
     assert!(plan.bytes <= sizes.budget_bytes);
     // Every record paying 1,000 bytes would allow only 1,000 records.
     assert!(plan.records() > 1_000, "{plan:?}");
+}
+
+/// Thinning at some rate; the planner reads only whether there is one.
+fn thinned(sizes: WindowSizes) -> WindowSizes {
+    WindowSizes {
+        thinning: Some(MarginThinning {
+            thousandths_per_kb: std::num::NonZeroU32::new(40_000).expect("not zero"),
+        }),
+        ..sizes
+    }
+}
+
+/// **A thinned window pays the skipped records' solve state only near its core** (§6, thinned margins): every
+/// record holds 100 bytes, of which 60 are its solve state, skipped at every other record. The
+/// core and the 50 kb either side pay in full, the far margins 70 bytes a record on average.
+#[test]
+fn a_thinned_window_pays_skipped_solve_state_only_near_its_core() {
+    let positions = evenly(4_000_000, 1_000);
+    let records = positions.len();
+    let held: Vec<u64> = (0..=records as u64).map(|i| i * 100).collect();
+    let core = vec![0; records + 1];
+    let skipped: Vec<u64> = (0..=records as u64).map(|i| (i / 2) * 60).collect();
+    let sizes = thinned(WindowSizes {
+        budget_bytes: u64::MAX,
+        ..WindowSizes::default()
+    });
+    let bytes = WindowBytes {
+        held: &held,
+        core: &core,
+        skipped: Some(&skipped),
+    };
+    let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
+    // A 2-Mb core, 1-Mb margins, near margins of 50 kb.
+    assert_eq!(
+        (plan.context_start, plan.core_end, plan.context_end),
+        (500, 3_500, 4_000)
+    );
+    assert_eq!((plan.near_start, plan.near_end), (1_450, 3_550));
+    let near = (plan.near_end - plan.near_start) as u64;
+    let far = plan.records() as u64 - near;
+    assert_eq!(plan.bytes, near * 100 + far * 70);
+    // Without thinning the same costs plan the whole window as walked, at full cost.
+    let unthinned = plan_window(
+        &positions,
+        bytes,
+        1_500,
+        true,
+        &WindowSizes {
+            budget_bytes: u64::MAX,
+            ..WindowSizes::default()
+        },
+    )
+    .expect("the contig is complete");
+    assert_eq!(
+        (unthinned.near_start, unthinned.near_end),
+        (unthinned.context_start, unthinned.context_end)
+    );
+    assert_eq!(unthinned.bytes, unthinned.records() as u64 * 100);
+}
+
+/// **Thinning lets a window too large unthinned fit its budget**, at a larger size than unthinned
+/// would plan.
+#[test]
+fn thinning_fits_a_larger_window_in_the_same_budget() {
+    let positions = evenly(4_000_000, 1_000);
+    let records = positions.len();
+    let held: Vec<u64> = (0..=records as u64).map(|i| i * 100).collect();
+    let core = vec![0; records + 1];
+    let skipped: Vec<u64> = (0..=records as u64).map(|i| i * 90).collect();
+    let budget = WindowSizes {
+        budget_bytes: 140_000,
+        ..WindowSizes::default()
+    };
+    let bytes = WindowBytes {
+        held: &held,
+        core: &core,
+        skipped: Some(&skipped),
+    };
+    let unthinned = plan_window(&positions, bytes, 1_500, true, &budget).expect("complete");
+    let thinned = plan_window(&positions, bytes, 1_500, true, &thinned(budget)).expect("complete");
+    assert!(unthinned.over_budget > 0, "{unthinned:?}");
+    assert_eq!(thinned.over_budget, 0, "{thinned:?}");
+    assert!(thinned.records() > unthinned.records());
+}
+
+/// **`--refine-margin-density` reads records a kb to three decimals**, 0 as no thinning, and
+/// writes them back as given.
+#[test]
+fn a_margin_density_reads_and_writes_to_three_decimals() {
+    let read = |text: &str| MarginThinning::parse(text);
+    assert_eq!(read("0"), Ok(None));
+    assert_eq!(read("0.000"), Ok(None));
+    for (text, thousandths, written) in [
+        ("40", 40_000, "40"),
+        ("0.5", 500, "0.5"),
+        (".25", 250, "0.25"),
+        ("2.125", 2_125, "2.125"),
+    ] {
+        let thinning = read(text).expect("a density").expect("not zero");
+        assert_eq!(thinning.thousandths_per_kb.get(), thousandths);
+        assert_eq!(thinning.to_string(), written);
+    }
+    for bad in ["", ".", "1.2345", "-1", "1e3", "2000000", "x"] {
+        assert!(read(bad).is_err(), "{bad}");
+    }
+}
+
+/// **Below the margin floor, the core shrinks alone** (`--refine-core-floor`): a window the margin
+/// floor cannot fit is planned with its margins at the floor and a shorter core, and it fits.
+#[test]
+fn a_core_floor_fits_a_window_the_margin_floor_cannot() {
+    let positions = evenly(4_000_000, 100);
+    let records = positions.len();
+    let (held, core) = uniform(records, 1);
+    let bytes = WindowBytes {
+        held: &held,
+        core: &core,
+        skipped: None,
+    };
+    // A record a 100 bases at 40 bytes: 500-kb margins and a 500-kb core hold 600 kB.
+    let budget = 500_000;
+    let margin_floor_only = WindowSizes {
+        budget_bytes: budget,
+        ..WindowSizes::default()
+    };
+    let at_floor = plan_window(&positions, bytes, 20_000, true, &margin_floor_only)
+        .expect("the contig is complete");
+    assert!(at_floor.over_budget > 0, "{at_floor:?}");
+    assert_eq!((at_floor.core_bases, at_floor.margin_bases), (500_000, 500_000));
+
+    let with_core_floor = WindowSizes {
+        core_floor_bases: 100_000,
+        ..margin_floor_only
+    };
+    let plan = plan_window(&positions, bytes, 20_000, true, &with_core_floor)
+        .expect("the contig is complete");
+    assert_eq!(plan.over_budget, 0, "{plan:?}");
+    assert_eq!(plan.margin_bases, 500_000);
+    // The longest core in steps of 50 kb that fits: 1 Mb of margins is 400 kB, leaving 100 kB.
+    assert_eq!(plan.core_bases, 250_000);
+}
+
+/// **The core floor is a floor, not a size**: with the budget to spare, the core is as long as
+/// ever, and a core floor at the margin floor plans what no core floor plans.
+#[test]
+fn a_core_floor_changes_only_windows_over_the_margin_floor() {
+    let positions = evenly(4_000_000, 100);
+    let (held, core) = uniform(positions.len(), 1);
+    let bytes = WindowBytes {
+        held: &held,
+        core: &core,
+        skipped: None,
+    };
+    for budget in [u64::MAX, 3_000_000, 1_300_000, 600_000] {
+        let base = WindowSizes {
+            budget_bytes: budget,
+            ..WindowSizes::default()
+        };
+        let lower = WindowSizes {
+            core_floor_bases: 50_000,
+            ..base
+        };
+        assert_eq!(
+            plan_window(&positions, bytes, 20_000, true, &base),
+            plan_window(&positions, bytes, 20_000, true, &lower),
+            "budget {budget}"
+        );
+    }
 }

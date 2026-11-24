@@ -119,6 +119,34 @@ Tools that read `PS`, such as WhatsHap, or SHAPEIT with its option to use it, tr
 on its own. A tool that ignores `PS` reads every `|` of a sample as one phase along the whole
 chromosome, which these phase sets do not claim.
 
+## Memory: windows, budget and thinned margins
+
+The pass reads the cohort in windows: a *core*, whose genotypes it writes, and a *margin* on each
+side, read only to tell which samples each sample resembles there. A window holds every sample's
+numbers at every record it spans, so its memory grows with the samples and with the records a
+kilobase. Four options, under *Advanced* in `--help`, set how large windows may be:
+
+- `--refine-window-bytes` is the memory one window may hold, 32 GB by default. Windows start at a
+  2-Mb core with 1-Mb margins and shrink until they fit. Each thread also holds a few kilobytes a
+  window record that the budget does not count, and the process as a whole has used up to about a
+  fifth more than the budget.
+- `--refine-window-floor` is the shortest a margin may become, 500 kb by default. A sample copies
+  stretches of up to about 300 kb from the samples it resembles, so shorter margins cut off
+  evidence. A window over budget even at the floor stops the run, and the error says how many
+  bytes it needs.
+- `--refine-core-floor` lets a core shrink below the margin floor while the margins stay at it,
+  for a window that would otherwise stop the run. It defaults to the margin floor, so cores do not
+  shrink below it. On 2,176 tomato samples a 125-kb core wrote as many wrong genotypes as a 500-kb
+  one and took 60% longer, but on a simulated F2, whose haplotypes run the length of a chromosome,
+  short cores wrote up to a fifth more wrong genotypes; it is a last resort.
+- `--refine-margin-density`, 5 by default, walks at most that many records a kilobase in the
+  margins farther than 50 kb from the core, evenly spaced; the records nearer the core, and the core
+  itself, are walked in full, and stretches no denser are walked in full too. A record not walked
+  holds no state in the walks and is held compressed until a window walks it. On 2,176 tomato
+  samples, where the densest stretches hold about 90 records a kilobase, a window then held 41%
+  less memory and took half the time, with as many genotypes wrong; at 1 a kilobase and below, the
+  simulated cohorts began to lose genotypes. `0` walks every record.
+
 ## How good the fills are: the fill check
 
 Every run reports, for each sample, how often its fills would be wrong, measured on its own data.

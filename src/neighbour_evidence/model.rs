@@ -93,9 +93,10 @@ pub struct WalkSite<'a> {
     /// drawn haplotypes read them.
     pub template_shares: &'a [f64],
     /// **The shares the states' emissions read, where they differ from `template_shares`** —
-    /// definite alleles drawn from them (phasing spec §2.3), laid out the same way. `None`: the
-    /// emissions read `template_shares`.
-    pub emission_shares: Option<&'a [f64]>,
+    /// definite alleles drawn from them (phasing spec §2.3), laid out the same way, each 1 for the
+    /// allele drawn and 0 for the rest: a byte each, read as the share it is. `None`: the emissions
+    /// read `template_shares`.
+    pub emission_shares: Option<&'a [u8]>,
 }
 
 /// **A run of numbers at each site, every site's in one array**: site `i`'s at
@@ -222,8 +223,15 @@ impl GenotypePairs {
     }
 }
 
-/// **One site's blurred shares and likelihoods**, kept from the forward walk for the backward one
-/// and the draw; its emissions are in the window's [`Emissions`].
+/// **One site's blurred shares and likelihoods**, computed from the site wherever a walk reads them
+/// ([`SiteTerms::fill`]) into a buffer the walk reuses; its emissions are in the window's
+/// [`Emissions`].
+///
+/// **Not kept for every site.** They were, from the forward walk for the backward one and the draw:
+/// a few hundred bytes to over a kilobyte a site on each walking thread, which at 2,176 tomato
+/// samples and 48 threads was gigabytes beside the window's own memory. Computing them again is a
+/// blur and a copy — the same bits each time — next to the emissions' `K²` products.
+#[derive(Default)]
 struct SiteTerms {
     /// `q̃`: `templates × allele_count`, each template's shares blurred by the mismatch rate — the
     /// shares the prediction and the drawn haplotypes read, whatever the emissions read.
@@ -242,8 +250,29 @@ struct EmissionScratch {
     own: Vec<f64>,
 }
 
-/// One site's terms, its emissions written over `autozygous` (`K`) and `pair_emissions` (`K × K`,
-/// row `k₁`).
+impl SiteTerms {
+    /// **Site `site`'s terms, into this buffer**: `pairs` are its alleles' diploid genotypes.
+    fn fill(&mut self, site: &WalkSite<'_>, mismatch: f64, pairs: &[(usize, usize)]) {
+        let alleles = site.allele_count;
+        self.blurred.clear();
+        self.blurred.extend(
+            site.template_shares
+                .iter()
+                .map(|&share| blur(share, mismatch, alleles)),
+        );
+        // The likelihood as a symmetric allele-by-allele matrix, so the pair emission is two matrix
+        // products: Σ_a Σ_b q̃_k₁(a) · L(a/b) · q̃_k₂(b).
+        self.by_alleles.clear();
+        self.by_alleles.resize(alleles * alleles, 0.0);
+        for (&(first, second), &likelihood) in pairs.iter().zip(site.likelihoods) {
+            self.by_alleles[first * alleles + second] = likelihood;
+            self.by_alleles[second * alleles + first] = likelihood;
+        }
+    }
+}
+
+/// One site's terms into `terms`, its emissions written over `autozygous` (`K`) and
+/// `pair_emissions` (`K × K`, row `k₁`).
 fn site_terms(
     site: &WalkSite<'_>,
     templates: usize,
@@ -251,7 +280,8 @@ fn site_terms(
     pairs: &[(usize, usize)],
     emissions: (&mut [f64], &mut [f64]),
     scratch: &mut EmissionScratch,
-) -> SiteTerms {
+    terms: &mut SiteTerms,
+) {
     let alleles = site.allele_count;
     assert_eq!(
         site.likelihoods.len(),
@@ -268,24 +298,8 @@ fn site_terms(
         "a site at {} needs {templates} templates × {alleles} allele shares",
         site.position
     );
-    let blurred: Vec<f64> = site
-        .template_shares
-        .iter()
-        .map(|&share| blur(share, mismatch, alleles))
-        .collect();
-    // The likelihood as a symmetric allele-by-allele matrix, so the pair emission is two matrix
-    // products: Σ_a Σ_b q̃_k₁(a) · L(a/b) · q̃_k₂(b).
-    let mut by_alleles = vec![0.0; alleles * alleles];
-    for (&(first, second), &likelihood) in pairs.iter().zip(site.likelihoods) {
-        by_alleles[first * alleles + second] = likelihood;
-        by_alleles[second * alleles + first] = likelihood;
-    }
-    let terms = SiteTerms {
-        blurred,
-        by_alleles,
-    };
-    emissions_into(site, &terms, templates, mismatch, emissions, scratch);
-    terms
+    terms.fill(site, mismatch, pairs);
+    emissions_into(site, terms, templates, mismatch, emissions, scratch);
 }
 
 /// A template's share blurred by the mismatch rate: `(1 − ε)·q + ε/A`.
@@ -320,7 +334,11 @@ fn emissions_into(
                 site.position
             );
             own.clear();
-            own.extend(shares.iter().map(|&share| blur(share, mismatch, alleles)));
+            own.extend(
+                shares
+                    .iter()
+                    .map(|&share| blur(f64::from(share), mismatch, alleles)),
+            );
             own
         }
         None => &terms.blurred,
@@ -940,7 +958,7 @@ fn walk_with_draw(
     emissions.resize(FORWARD_BLOCK + 1, k);
     checkpoints.resize(blocks, k);
     let mut scratch = EmissionScratch::default();
-    let mut terms: Vec<SiteTerms> = Vec::with_capacity(sites.len());
+    let mut terms = SiteTerms::default();
     // Each site's persistence from the site before, entry 0 unused: read by the forward step, the
     // block's recomputation, the draw and the backward step, so computed once rather than four
     // times — three `exp`s each.
@@ -957,14 +975,15 @@ fn walk_with_draw(
     // multiply to the window's likelihood. Two slots, the site's and the one before.
     let mut log_likelihood = 0.0;
     for (index, site) in sites.iter().enumerate() {
-        terms.push(site_terms(
+        site_terms(
             site,
             k,
             parameters.mismatch,
             genotype_pairs.of(site.allele_count),
             emissions.site_mut(0),
             &mut scratch,
-        ));
+            &mut terms,
+        );
         let previous = (index > 0).then(|| ((index - 1) % 2, transition(index)));
         let scale = forward_step(
             &mut forward,
@@ -1025,11 +1044,16 @@ fn walk_with_draw(
         let start = block * FORWARD_BLOCK;
         let end = (start + FORWARD_BLOCK).min(sites.len());
         checkpoints.restore(block, &mut forward, 0);
-        for index in start..end {
+        for (index, site) in sites.iter().enumerate().take(end).skip(start) {
             let local = index - start;
+            terms.fill(
+                site,
+                parameters.mismatch,
+                pairs_of_alleles.of(site.allele_count),
+            );
             emissions_into(
-                &sites[index],
-                &terms[index],
+                site,
+                &terms,
                 k,
                 parameters.mismatch,
                 emissions.site_mut(local),
@@ -1122,7 +1146,12 @@ fn walk_with_draw(
                 scale_by(&mut backward_pairs, inverse);
             }
             let site = &sites[index];
-            let site_terms = &terms[index];
+            terms.fill(
+                site,
+                parameters.mismatch,
+                pairs_of_alleles.of(site.allele_count),
+            );
+            let site_terms = &terms;
             let alleles = site.allele_count;
 
             // The state posterior with this site's own emission divided back out, so the sample's
@@ -1258,7 +1287,15 @@ fn walk_with_draw(
     let mut joints = Joints::default();
     let mut paths: Vec<PathHaplotypes> = state_paths
         .iter()
-        .map(|states| haplotypes_along(sites, &terms, states, reads.as_deref_mut(), &mut joints))
+        .map(|states| {
+            haplotypes_along(
+                sites,
+                (parameters.mismatch, &mut pairs_of_alleles, &mut terms),
+                states,
+                reads.as_deref_mut(),
+                &mut joints,
+            )
+        })
         .collect();
     let drawn = draws_own.then(|| DrawnPath {
         haplotypes: paths.remove(0),
@@ -1429,14 +1466,15 @@ fn choose_part(masses: &[f64], u: f64) -> (usize, f64) {
 /// the sample's reads where `reads` links it (reads-in-draw spec §2.2).
 fn haplotypes_along(
     sites: &[WalkSite<'_>],
-    terms: &[SiteTerms],
+    (mismatch, pairs, site_terms): (f64, &mut GenotypePairs, &mut SiteTerms),
     states: &[State],
     reads: Option<&mut DrawReads<'_>>,
     joints: &mut Joints,
 ) -> PathHaplotypes {
     joints.clear();
-    for ((site, site_terms), &state) in sites.iter().zip(terms).zip(states) {
+    for (site, &state) in sites.iter().zip(states) {
         let alleles = site.allele_count;
+        site_terms.fill(site, mismatch, pairs.of(alleles));
         let start = joints.values.len();
         joints.starts.push(start);
         joints.values.resize(start + alleles * alleles, 0.0);

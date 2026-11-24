@@ -16,7 +16,7 @@ const SHAPE: CohortShape = CohortShape {
     silent_from: None,
 };
 
-fn argmax(values: &[f64]) -> usize {
+fn argmax<T: PartialOrd>(values: &[T]) -> usize {
     (0..values.len()).fold(0, |best, index| {
         if values[index] > values[best] {
             index
@@ -136,7 +136,7 @@ fn a_no_read_call_copying_the_background_is_withheld() {
             match (with_limit.outcomes[sample], without.outcomes[sample]) {
                 (Outcome::Called, Outcome::Called) => {}
                 (Outcome::Withheld, Outcome::Called) => {
-                    assert!(background > NO_READ_MAX_BACKGROUND_COPY);
+                    assert!(f64::from(background) > NO_READ_MAX_BACKGROUND_COPY);
                     removed += 1;
                 }
                 (same, other) => assert_eq!(same, other),
@@ -144,7 +144,7 @@ fn a_no_read_call_copying_the_background_is_withheld() {
             if with_limit.outcomes[sample] == Outcome::Called
                 && record.row(sample) == SampleRow::Flat
             {
-                assert!(background <= NO_READ_MAX_BACKGROUND_COPY);
+                assert!(f64::from(background) <= NO_READ_MAX_BACKGROUND_COPY);
             }
         }
     }
@@ -173,9 +173,9 @@ fn a_sample_without_evidence_on_both_sides_is_withheld() {
     .records;
     for record in &refined[1_000..] {
         assert_eq!(record.outcomes[0], Outcome::Withheld);
-        let total: f64 = record.posteriors[..3].iter().sum();
+        let total: f64 = record.posteriors[..3].iter().map(|&p| f64::from(p)).sum();
         assert!(
-            (total - 1.0).abs() < 1e-9,
+            (total - 1.0).abs() < 1e-6,
             "a withheld sample still has a posterior"
         );
     }
@@ -518,8 +518,10 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
     );
 }
 
-/// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects.
-const RECORDED_POSTERIOR_BITS: u64 = 0x517a_406f_f350_f366;
+/// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects. **Re-recorded
+/// 2026-11-18** on Linux x86-64 when the posteriors became `f32`, summed over the rounds in `f32`
+/// (`refine_memory_2026-11-18.md`); the phase's bits did not move. It was `0x517a_406f_f350_f366`.
+const RECORDED_POSTERIOR_BITS: u64 = 0x3e83_c1c0_449f_3a86;
 
 /// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
 /// round went unnoticed): two rounds and five leave every sample's fit in the same state, since
@@ -601,7 +603,7 @@ fn hidden_records_respect_both_limits() {
             depth: 30.0,
             ..SHAPE
         });
-        let layout = WindowLayout::new(&cohort.records, &(0..records));
+        let layout = WindowLayout::new(&cohort.records, &(0..records), None);
         let hidden = draw_hidden_records(&cohort.records, &layout, 0, 5);
         assert_eq!(hidden.len(), expected, "{records} records");
         assert!(hidden.windows(2).all(|pair| pair[0] < pair[1]));
@@ -697,7 +699,7 @@ fn the_written_phase_follows_the_true_copies() {
         for (index, record) in solved.records.iter().enumerate() {
             let [copy_0, copy_1] = cohort.truth_copies[index][sample];
             heterozygous += usize::from(copy_0 != copy_1);
-            let Some(phase) = record.phases[sample] else {
+            let Some(phase) = record.phase(sample) else {
                 continue;
             };
             assert_ne!(
@@ -766,7 +768,7 @@ fn a_phased_windows_phase_is_the_same_bits_everywhere() {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut phased = 0;
     for record in &solved.records {
-        for phase in &record.phases {
+        for phase in (0..record.outcomes.len()).map(|sample| record.phase(sample)) {
             let words = match phase {
                 Some(phase) => {
                     phased += 1;
@@ -819,20 +821,25 @@ fn the_draws_link_is_positive_for_cis() {
     // Two fragments, each the lower allele at both records or the upper at both: cis.
     let cis_one = [allele(0, 0), allele(1, 1)];
     let cis_other = [allele(0, 0), allele(1, 1)];
-    let cis = draw_link(&cis_one, (0, 1), &cis_other, (0, 1)).expect("two fragments count");
+    let cis = draw_link(&cis_one[..], (0, 1), &cis_other[..], (0, 1)).expect("two fragments count");
     assert!(cis > 0.0, "{cis}");
     // The same fragments with the second record's alleles swapped: trans, the same size.
     let trans_other = [allele(0, 1), allele(1, 0)];
-    let trans = draw_link(&cis_one, (0, 1), &trans_other, (0, 1)).expect("two fragments count");
+    let trans =
+        draw_link(&cis_one[..], (0, 1), &trans_other[..], (0, 1)).expect("two fragments count");
     assert_eq!(trans, -cis);
     // A 1/2 heterozygote beside a 0/1: allele 1 there is the lower, so 1 with 0 is cis.
     let one_two = [allele(0, 1), allele(1, 2)];
     let zero_one = [allele(0, 0), allele(1, 1)];
-    let multi = draw_link(&one_two, (1, 2), &zero_one, (0, 1)).expect("two fragments count");
+    let multi =
+        draw_link(&one_two[..], (1, 2), &zero_one[..], (0, 1)).expect("two fragments count");
     assert_eq!(multi, cis);
     // No fragment at both records: no link.
-    assert_eq!(draw_link(&cis_one, (0, 1), &[allele(7, 0)], (0, 1)), None);
-    assert_eq!(draw_link(&[], (0, 1), &cis_other, (0, 1)), None);
+    assert_eq!(
+        draw_link(&cis_one[..], (0, 1), &[allele(7, 0)][..], (0, 1)),
+        None
+    );
+    assert_eq!(draw_link(&[][..], (0, 1), &cis_other[..], (0, 1)), None);
 }
 
 /// **About one in twenty of a sample's core records with fragments is held out for the read check,
@@ -847,7 +854,7 @@ fn read_check_records_are_one_in_twenty_and_never_hidden() {
         depth: 30.0,
         ..SHAPE
     });
-    let layout = WindowLayout::new(&cohort.records, &(0..records));
+    let layout = WindowLayout::new(&cohort.records, &(0..records), None);
     let fragments: Vec<PackedRecordFragments> = (0..records)
         .map(|index| {
             let entry = |sample: u32| FragmentAllele {
@@ -920,7 +927,7 @@ fn a_copy_that_followed_the_reader_is_read_without_it() {
     let cohort = test_cohort(shape);
     let records = &cohort.records;
     let core = 0..records.len();
-    let layout = WindowLayout::new(records, &core);
+    let layout = WindowLayout::new(records, &core, None);
     let mut store = HaplotypeStore::new(records, &layout, shape.samples);
     let mut genotype_pairs = GenotypePairs::default();
     let pairs = genotype_pairs.of(2).to_vec();
