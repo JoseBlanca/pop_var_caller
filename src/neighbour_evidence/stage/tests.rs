@@ -69,6 +69,21 @@ fn place(contig: u32, position: u64) -> RecordPlace {
 type StageRun = (Vec<String>, Vec<(RecordPlace, Vec<u8>)>, RewriteTally);
 
 fn run_stage(threads: usize) -> StageRun {
+    let (inputs, output, tally, _) = run_stage_reading(threads, LINES_READ_TOGETHER);
+    (inputs, output, tally)
+}
+
+/// [`run_stage`], with `lines_read_together` lines waiting to be read at a time, and every window
+/// the stage planned.
+fn run_stage_reading(
+    threads: usize,
+    lines_read_together: usize,
+) -> (
+    Vec<String>,
+    Vec<(RecordPlace, Vec<u8>)>,
+    RewriteTally,
+    Vec<crate::neighbour_evidence::windows::WindowPlan>,
+) {
     let cohort = test_cohort(CohortShape {
         samples: 20,
         founders: 4,
@@ -107,8 +122,9 @@ fn run_stage(threads: usize) -> StageRun {
         .num_threads(threads)
         .build()
         .expect("a pool");
-    let (output, tally) = pool.install(|| {
+    let (output, tally, plans) = pool.install(|| {
         let mut stage = NeighbourEvidenceStage::new(&decision, vec![1_000_000, 1_000_000]);
+        stage.lines_read_together = lines_read_together;
         let mut output = Vec::new();
         for (place, line) in &inputs {
             stage
@@ -121,12 +137,13 @@ fn run_stage(threads: usize) -> StageRun {
                 .expect("within the window budget");
         }
         stage.finish(&mut output).expect("within the window budget");
-        (output, stage.tally())
+        (output, stage.tally(), stage.plans.clone())
     });
     (
         inputs.into_iter().map(|(_, line)| line).collect(),
         output,
         tally,
+        plans,
     )
 }
 
@@ -171,6 +188,127 @@ fn every_line_comes_out_once_in_order() {
     assert_eq!(tally.sites, 2 * 1_999);
     let (_, one_thread, _) = run_stage(1);
     assert_eq!(output, one_thread);
+}
+
+/// **Lines read into sites one at a time, or in batches of any size, plan the same windows and
+/// write the same bytes**: the batch is read on the pool, then each line is taken in arrival order
+/// as it would have been on arrival. Batches of 7 and 333 end mid-window and mid-contig; the
+/// default, 1,024, holds a contig's 2,000 lines in two batches, the second ending at the next
+/// contig's first lines.
+#[test]
+fn lines_read_one_at_a_time_or_in_batches_write_the_same_bytes() {
+    let (_, output, tally, plans) = run_stage_reading(2, 1);
+    assert!(plans.len() > 4, "{} windows", plans.len());
+    for lines_read_together in [7, 333, LINES_READ_TOGETHER] {
+        let (_, batched, batched_tally, batched_plans) = run_stage_reading(2, lines_read_together);
+        assert_eq!(batched_plans, plans, "{lines_read_together} at a time");
+        assert_eq!(batched_tally, tally, "{lines_read_together} at a time");
+        assert!(batched == output, "{lines_read_together} at a time");
+    }
+}
+
+/// The join cohort through a stage whose windows hold 200 kb each side, with `budget_bytes`, each
+/// line read `lines_read_together` at a time and handed to `write`; what `write` was handed, and
+/// where the stage stopped if it did.
+fn run_join_stage_writing(
+    budget_bytes: u64,
+    lines_read_together: usize,
+    mut write: impl FnMut(&[u8]) -> Result<(), &'static str>,
+) -> (Vec<Vec<u8>>, Option<StageStop<&'static str>>) {
+    let cohort = join_cohort();
+    let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+    decision.sizes = WindowSizes {
+        core_bases: 200_000,
+        margin_bases: 200_000,
+        margin_floor_bases: 200_000,
+        core_floor_bases: 200_000,
+        budget_bytes,
+        thinning: None,
+    };
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+    stage.lines_read_together = lines_read_together;
+    let mut written = Vec::new();
+    let mut handed = |_: RecordPlace, line: Vec<u8>| {
+        write(&line)?;
+        written.push(line);
+        Ok(())
+    };
+    let mut stop = None;
+    for (index, line) in cohort.lines.iter().enumerate() {
+        if let Err(stopped) = stage.push_writing(
+            place(0, 1 + index as u64 * 500),
+            line.clone().into_bytes(),
+            RecordFragments::default(),
+            &mut handed,
+        ) {
+            stop = Some(stopped);
+            break;
+        }
+    }
+    if stop.is_none() {
+        stop = stage.finish_writing(&mut handed).err();
+    }
+    (written, stop)
+}
+
+/// **A window over budget stops the stage with the same error however many lines wait**: lines
+/// waiting to be read delay the stop by up to the batch, never change what it reports, and no line
+/// of the window is written.
+#[test]
+fn a_window_over_budget_stops_the_stage_the_same_however_many_lines_wait() {
+    let (written, stop) = run_join_stage_writing(100_000, 1, |_| Ok(()));
+    let Some(StageStop::OverBudget(over)) = stop else {
+        panic!("the first window is over budget");
+    };
+    assert!(written.is_empty());
+    for lines_read_together in [7, LINES_READ_TOGETHER] {
+        let (batched_written, batched_stop) =
+            run_join_stage_writing(100_000, lines_read_together, |_| Ok(()));
+        assert!(
+            batched_written.is_empty(),
+            "{lines_read_together} at a time"
+        );
+        assert!(
+            matches!(batched_stop, Some(StageStop::OverBudget(batched)) if batched == over),
+            "{lines_read_together} at a time: {batched_stop:?}"
+        );
+    }
+}
+
+/// **A write that fails stops the stage with the writer's error however many lines wait**, after
+/// the same lines were written: here the 300th line handed on is refused.
+#[test]
+fn a_refused_write_stops_the_stage_after_the_same_lines_however_many_lines_wait() {
+    let refuse_the_300th = || {
+        let mut handed = 0;
+        move |_: &[u8]| {
+            handed += 1;
+            if handed == 300 {
+                Err("refused")
+            } else {
+                Ok(())
+            }
+        }
+    };
+    let budget = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
+    let (written, stop) = run_join_stage_writing(budget, 1, refuse_the_300th());
+    assert_eq!(written.len(), 299);
+    assert!(
+        matches!(stop, Some(StageStop::Write("refused"))),
+        "{stop:?}"
+    );
+    for lines_read_together in [7, LINES_READ_TOGETHER] {
+        let (batched_written, batched_stop) =
+            run_join_stage_writing(budget, lines_read_together, refuse_the_300th());
+        assert!(
+            batched_written == written,
+            "{lines_read_together} at a time"
+        );
+        assert!(
+            matches!(batched_stop, Some(StageStop::Write("refused"))),
+            "{lines_read_together} at a time: {batched_stop:?}"
+        );
+    }
 }
 
 /// The outbred cohort the join tests run: 20 samples of 4 founders at 4×, 2,000 records.

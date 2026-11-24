@@ -326,6 +326,18 @@ const LINES_REWRITTEN_TOGETHER: usize = 1_024;
 /// line passes through.
 const LINES_COMPRESSED_TOGETHER: usize = 1_024;
 
+/// **How many arriving lines wait to be read into sites together**, on the pool, or fewer once
+/// their text reaches [`BYTES_READ_TOGETHER`]. Read one at a time on the one thread every line
+/// passes through, reading was the stage's largest serial step outside the solve: on 59 tomato
+/// samples at 2 threads, 2.7 s of the 10 s the writing pass spent outside it, with the pool idle.
+const LINES_READ_TOGETHER: usize = 1_024;
+
+/// **The most line text that waits to be read**, so that at thousands of samples, where a line is
+/// about 90 kB, the queue holds about 90 lines rather than 1,024. The sites read from them are held
+/// only until each line is taken, a moment later, and the budget does not count them, as it does
+/// not count the walks' arrays.
+const BYTES_READ_TOGETHER: usize = 8 << 20;
+
 /// **The zstd level held lines are compressed at.** On 800 tomato samples level 1 shrank a line
 /// about 5.4 times at about 440 MB/s a thread; levels −3 and 3 gave about the same.
 const LINE_COMPRESSION_LEVEL: i32 = 1;
@@ -411,6 +423,21 @@ impl HeldText {
     }
 }
 
+/// **A line handed to the stage and not yet taken**: it waits to be read into its site with the
+/// lines that arrived beside it ([`LINES_READ_TOGETHER`]).
+struct ArrivedLine {
+    place: RecordPlace,
+    line: Vec<u8>,
+    fragments: RecordFragments,
+}
+
+/// A line read into its walk record, if it has one, with its fragments packed beside it.
+type ReadLine = (
+    RecordPlace,
+    Vec<u8>,
+    Option<(SiteRecord, PackedRecordFragments)>,
+);
+
 /// One line the stage holds.
 struct HeldLine {
     place: RecordPlace,
@@ -445,6 +472,12 @@ pub struct NeighbourEvidenceStage {
     reads_in_draw: bool,
     fits: Vec<SampleFit>,
     contig: Option<ContigId>,
+    /// Lines handed in and not yet taken, in arrival order, and the bytes of their text.
+    arrived: Vec<ArrivedLine>,
+    arrived_bytes: usize,
+    /// How many lines wait before they are read: [`LINES_READ_TOGETHER`], or fewer in the tests
+    /// that check the output does not depend on it.
+    lines_read_together: usize,
     held: Vec<HeldLine>,
     /// The held lines' positions, kept beside them for the window planner.
     positions: Vec<u64>,
@@ -531,6 +564,9 @@ impl NeighbourEvidenceStage {
                 .map(|&inbreeding| SampleFit::new(inbreeding))
                 .collect(),
             contig: None,
+            arrived: Vec::new(),
+            arrived_bytes: 0,
+            lines_read_together: LINES_READ_TOGETHER,
             held: Vec::new(),
             positions: Vec::new(),
             held_bytes: vec![0],
@@ -591,8 +627,10 @@ impl NeighbourEvidenceStage {
     }
 
     /// **Takes one line**, its place already checked against the line before it by the writer,
-    /// and appends to `ready` every line whose window this one completed. `fragments` are the
-    /// line's reads that reach another record (read phase spec §2.4).
+    /// and appends to `ready` every line whose window is complete. `fragments` are the line's reads
+    /// that reach another record (read phase spec §2.4). Lines are taken a batch at a time
+    /// ([`Self::push_writing`]), so a window is solved, and its lines appended, when the batch
+    /// holding the line that completes it is taken, or at [`Self::finish`].
     ///
     /// # Errors
     ///
@@ -615,10 +653,18 @@ impl NeighbourEvidenceStage {
     /// order they arrived, a chunk of a core at a time ([`LINES_REWRITTEN_TOGETHER`]) — so a core's
     /// rewritten lines are never all held at once.
     ///
+    /// **A line is taken a little after it arrives.** Lines wait until [`LINES_READ_TOGETHER`]
+    /// have arrived, or their text reaches [`BYTES_READ_TOGETHER`], then are read into sites
+    /// together on the pool and taken one at a time in arrival order, exactly as each would have
+    /// been taken on arrival: the running totals, the margin thinner and the window plans see the
+    /// same lines in the same order, so the output does not depend on how many wait.
+    /// [`Self::finish_writing`] takes those still waiting.
+    ///
     /// # Errors
     ///
-    /// If a window this line completed holds more than the budget even at the smallest size, or
-    /// `write` refuses a line.
+    /// If a window this line, or one that arrived before it and was still waiting, completed holds
+    /// more than the budget even at the smallest size, or `write` refuses a line. A stopped stage
+    /// is not fed again.
     pub fn push_writing<E>(
         &mut self,
         place: RecordPlace,
@@ -626,8 +672,52 @@ impl NeighbourEvidenceStage {
         fragments: RecordFragments,
         write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
     ) -> Result<(), StageStop<E>> {
+        self.arrived_bytes += line.len();
+        self.arrived.push(ArrivedLine {
+            place,
+            line,
+            fragments,
+        });
+        if self.arrived.len() >= self.lines_read_together
+            || self.arrived_bytes >= BYTES_READ_TOGETHER
+        {
+            self.take_arrived_lines(write)?;
+        }
+        Ok(())
+    }
+
+    /// **Reads every waiting line into its site on the pool, then takes them one at a time**, in
+    /// the order they arrived.
+    fn take_arrived_lines<E>(
+        &mut self,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
+        let samples = self.samples;
+        let read: Vec<ReadLine> = std::mem::take(&mut self.arrived)
+            .into_par_iter()
+            .map(|arrived| {
+                let site = site_of(&arrived.line, samples)
+                    .map(|record| (record, PackedRecordFragments::from(arrived.fragments)));
+                (arrived.place, arrived.line, site)
+            })
+            .collect();
+        self.arrived_bytes = 0;
+        for (place, line, site) in read {
+            self.take_line(place, line, site, write)?;
+        }
+        Ok(())
+    }
+
+    /// **Takes one line already read into its site**, as [`Self::push_writing`] describes.
+    fn take_line<E>(
+        &mut self,
+        place: RecordPlace,
+        line: Vec<u8>,
+        site: Option<(SiteRecord, PackedRecordFragments)>,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
         if self.contig.is_some_and(|contig| contig != place.at.contig) {
-            self.finish_writing(write)?;
+            self.finish_contig(write)?;
         }
         self.contig = Some(place.at.contig);
         // **A line is counted at its compressed length** over every window that spans it. Until it
@@ -640,8 +730,7 @@ impl NeighbourEvidenceStage {
         let mut skipped = 0;
         let (mut store, mut results, mut store_skipped) = (0, 0, 0);
         let mut far_walked = false;
-        let site = site_of(&line, self.samples).map(|record| {
-            let fragments = PackedRecordFragments::from(fragments);
+        let site = site.map(|(record, fragments)| {
             let (record_held, record_core) = record_window_bytes(&record);
             held += record_held + fragments.heap_bytes() as u64;
             core = record_core;
@@ -773,6 +862,15 @@ impl NeighbourEvidenceStage {
     ///
     /// As [`Self::push_writing`].
     pub fn finish_writing<E>(
+        &mut self,
+        write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
+    ) -> Result<(), StageStop<E>> {
+        self.take_arrived_lines(write)?;
+        self.finish_contig(write)
+    }
+
+    /// **Finishes the current contig** once every line of it handed in has been taken.
+    fn finish_contig<E>(
         &mut self,
         write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
     ) -> Result<(), StageStop<E>> {
