@@ -442,25 +442,29 @@ pub struct NeighbourEvidenceStage {
     core_bytes: Vec<u64>,
     /// **What each held line holds while no window reads it**, as a running total like `held_bytes`:
     /// what `held_bytes` counts for it less its solve state, which only a window holds, and, for a
-    /// site held packed, less its numbers and reads too. A window pays it for every held line it
-    /// does not span ([`WindowBytes::outside`]): the stage keeps the lines within the configured
-    /// margin of the next core, and those read past a window, whatever window the budget plans.
+    /// site held packed, its packed bytes in place of its numbers and reads. A window pays it for
+    /// every held line it does not span ([`WindowBytes::outside`]): the stage keeps the lines
+    /// within the configured margin of the next core, and those read past a window, whatever
+    /// window the budget plans.
     resident_bytes: Vec<u64>,
-    /// With thinned margins (pass spec §6, thinned margins): whether each held line is a record the far margins
-    /// walk, and, as a running total like `held_bytes`, what `held_bytes` counts for the solve
-    /// state of each line the far margins skip. Empty without thinning.
+    /// With thinned margins (pass spec §6, thinned margins): whether each held line is a record the
+    /// far margins walk, and, as running totals like `held_bytes`, for each line the far margins
+    /// skip, what `held_bytes` counts for its solve state and its numbers and reads
+    /// (`skipped_bytes`), and the bytes it holds packed instead (`packed_bytes`), known once its
+    /// line is compressed. Empty without thinning.
     far_walked: Vec<bool>,
     skipped_bytes: Vec<u64>,
+    packed_bytes: Vec<u64>,
     /// With thinned margins: the held lines some sample's last written block holds a record at
-    /// ([`Self::joined_lines`]), and `skipped_bytes` less what those lines' records save, which
-    /// they do not since a window walks them ([`Self::skipped_bytes_besides`]) — what a window is
-    /// planned with. **Kept, not made for each line pushed**: both change only when a window is
-    /// solved or held lines are dropped, and are made again then; a pushed line is in no block, so
-    /// it only extends the totals. Made for every line, on 300,000 records of 10 samples at the
-    /// default density they took 43 to 55 s against 8 to 12 s kept (code review 2026-11-24).
-    /// Empty without thinning.
+    /// ([`Self::joined_lines`]), and `skipped_bytes` and `packed_bytes` less those lines', which a
+    /// window walks ([`totals_besides`]) — what a window is planned with. **Kept, not made for
+    /// each line pushed**: they change only when a window is solved or held lines are dropped, and
+    /// are made again then; a pushed line is in no block, so it only extends the totals. Made for
+    /// every line, on 300,000 records of 10 samples at the default density they took 43 to 55 s
+    /// against 8 to 12 s kept (code review 2026-11-24). Empty without thinning.
     joined: Vec<usize>,
     skipped_besides_joined: Vec<u64>,
+    packed_besides_joined: Vec<u64>,
     /// Which records the far margins walk, decided as each arrives.
     thinner: Option<MarginThinner>,
     /// The held sites, each with its fragments; the first is site number `first_site`.
@@ -513,8 +517,10 @@ impl NeighbourEvidenceStage {
             resident_bytes: vec![0],
             far_walked: Vec::new(),
             skipped_bytes: vec![0],
+            packed_bytes: vec![0],
             joined: Vec::new(),
             skipped_besides_joined: vec![0],
+            packed_besides_joined: vec![0],
             thinner: decision.sizes.thinning.map(MarginThinner::new),
             sites: HeldSites::default(),
             first_site: 0,
@@ -616,8 +622,8 @@ impl NeighbourEvidenceStage {
             if let Some(thinner) = &mut self.thinner {
                 far_walked = record.is_site() && thinner.walks(record.position);
                 if !far_walked {
-                    // Its solve state, and its numbers and reads, which it holds compressed
-                    // instead while no walk reads it ([`HeldSites::pack`]).
+                    // Its solve state, and its numbers and reads, which it holds packed instead
+                    // while no walk reads it ([`HeldSites::pack`]).
                     skipped = record.sample_count() as u64 * held_solve_bytes(record.allele_count)
                         + (record.heap_bytes() - record.sample_count()) as u64
                         + fragments.heap_bytes() as u64;
@@ -636,6 +642,10 @@ impl NeighbourEvidenceStage {
             // A new line is in no last block: blocks hold only records of cores already written.
             self.skipped_besides_joined
                 .push(last(&self.skipped_besides_joined) + skipped);
+            // Its packed bytes are counted once it is packed, when its line is compressed.
+            self.packed_bytes.push(last(&self.packed_bytes));
+            self.packed_besides_joined
+                .push(last(&self.packed_besides_joined));
         }
         self.positions.push(place.at.position.0);
         self.held.push(HeldLine {
@@ -676,18 +686,29 @@ impl NeighbourEvidenceStage {
                     !far_walked[line_of_site[site + first_site - start]]
                 });
         }
-        // The running totals from the first compressed line on, less what each line saved, plus
-        // what its site holds compressed.
-        let mut saved: i64 = 0;
+        // The running totals from the first compressed line on, less what each line saved.
+        let mut saved = 0;
         for (index, held) in self.held.iter().enumerate().skip(from) {
             if let HeldText::Compressed { bytes, length } = &held.text {
-                saved += *length as i64 - bytes.len() as i64;
+                saved += *length - bytes.len();
             }
-            if let Some(site) = held.site {
-                saved -= self.sites.packed_bytes(site - self.first_site) as i64;
+            self.held_bytes[index + 1] -= saved as u64;
+        }
+        // What the sites packed hold so, from the same line on. The lines from `from` were pushed
+        // after every block's records, so none is joined.
+        if self.thinner.is_some() {
+            for totals in [&mut self.packed_bytes, &mut self.packed_besides_joined] {
+                totals.truncate(from + 1);
             }
-            let total = &mut self.held_bytes[index + 1];
-            *total = (*total as i64 - saved) as u64;
+            for line in from..self.held.len() {
+                let own = self.held[line]
+                    .site
+                    .map_or(0, |site| self.sites.packed_length[site - self.first_site])
+                    as u64;
+                self.packed_bytes.push(self.packed_bytes[line] + own);
+                self.packed_besides_joined
+                    .push(self.packed_besides_joined[line] + own);
+            }
         }
         self.compressed_up_to = self.held.len();
         self.count_resident_bytes_from(from);
@@ -726,8 +747,10 @@ impl NeighbourEvidenceStage {
         self.resident_bytes = vec![0];
         self.far_walked.clear();
         self.skipped_bytes = vec![0];
+        self.packed_bytes = vec![0];
         self.joined.clear();
         self.skipped_besides_joined = vec![0];
+        self.packed_besides_joined = vec![0];
         if let Some(thinner) = &mut self.thinner {
             *thinner = MarginThinner::new(thinner.thinning);
         }
@@ -764,6 +787,10 @@ impl NeighbourEvidenceStage {
                         .thinner
                         .is_some()
                         .then_some(self.skipped_besides_joined.as_slice()),
+                    packed: self
+                        .thinner
+                        .is_some()
+                        .then_some(self.packed_besides_joined.as_slice()),
                 },
                 self.core_start,
                 contig_complete,
@@ -1019,29 +1046,10 @@ impl NeighbourEvidenceStage {
         joined
     }
 
-    /// **What a window does not pay for the far margins' skipped records**, as running totals over
-    /// the held lines: `skipped_bytes`, less the records in `joined`, which are walked.
-    fn skipped_bytes_besides(&self, joined: &[usize]) -> Vec<u64> {
-        if joined.is_empty() {
-            return self.skipped_bytes.clone();
-        }
-        let mut totals = Vec::with_capacity(self.skipped_bytes.len());
-        totals.push(0);
-        let mut less = 0;
-        let mut next_joined = joined.iter().peekable();
-        for line in 0..self.held.len() {
-            let own = self.skipped_bytes[line + 1] - self.skipped_bytes[line];
-            if next_joined.next_if_eq(&&line).is_some() {
-                less += own;
-            }
-            totals.push(self.skipped_bytes[line + 1] - less);
-        }
-        totals
-    }
-
     /// **What held line `line` holds while no window reads it**: what `held_bytes` counts for it,
     /// less the solve state a window would add for a site, and, for a site whose numbers and reads
-    /// are held packed, less those too — which leaves its line, its rows and its packed bytes.
+    /// are held packed, its packed bytes in place of those — which leaves its line, its rows and
+    /// its packed bytes.
     fn resident_bytes_of(&self, line: usize) -> u64 {
         let held = self.held_bytes[line + 1] - self.held_bytes[line];
         let Some(site) = self.held[line].site else {
@@ -1055,6 +1063,7 @@ impl NeighbourEvidenceStage {
             // Packed only where the far margins skip it, so `skipped_bytes` counts it: its solve
             // state, numbers and reads.
             held - (self.skipped_bytes[line + 1] - self.skipped_bytes[line])
+                + (self.packed_bytes[line + 1] - self.packed_bytes[line])
         }
     }
 
@@ -1075,7 +1084,8 @@ impl NeighbourEvidenceStage {
             return;
         }
         self.joined = self.joined_lines();
-        self.skipped_besides_joined = self.skipped_bytes_besides(&self.joined);
+        self.skipped_besides_joined = totals_besides(&self.skipped_bytes, &self.joined);
+        self.packed_besides_joined = totals_besides(&self.packed_bytes, &self.joined);
     }
 
     /// **The kept joins and resident totals are what making them again gives**: what lets them be
@@ -1097,9 +1107,27 @@ impl NeighbourEvidenceStage {
         assert_eq!(self.joined, self.joined_lines(), "the kept joins drifted");
         assert_eq!(
             self.skipped_besides_joined,
-            self.skipped_bytes_besides(&self.joined),
+            totals_besides(&self.skipped_bytes, &self.joined),
             "the kept skipped totals drifted"
         );
+        assert_eq!(
+            self.packed_besides_joined,
+            totals_besides(&self.packed_bytes, &self.joined),
+            "the kept packed totals drifted"
+        );
+        // A site is held in one form at a time, and a site held packed holds the bytes it is
+        // counted at: packing a record again gives the bytes its first packing gave.
+        for index in 0..self.sites.records.len() {
+            let packed = &self.sites.packed[index];
+            assert_eq!(packed.is_some(), !self.sites.whole[index], "site {index}");
+            if let Some(packed) = packed {
+                assert_eq!(
+                    packed.len(),
+                    self.sites.packed_length[index],
+                    "site {index}"
+                );
+            }
+        }
     }
 
     /// The sites among held lines `lines`, as a range of site numbers.
@@ -1137,6 +1165,7 @@ impl NeighbourEvidenceStage {
             &mut self.held_bytes,
             &mut self.core_bytes,
             &mut self.skipped_bytes,
+            &mut self.packed_bytes,
         ] {
             if totals.len() == 1 {
                 continue;
@@ -1153,6 +1182,26 @@ impl NeighbourEvidenceStage {
         self.first_site += sites_dropped;
         self.core_start -= keep_from;
     }
+}
+
+/// **A running total over the held lines, less the lines in `joined`** (ascending): what a window
+/// does not pay for the far margins' skipped records, or holds packed for them, besides the records
+/// some sample's last written block joins at, which a window walks.
+fn totals_besides(totals: &[u64], joined: &[usize]) -> Vec<u64> {
+    if joined.is_empty() {
+        return totals.to_vec();
+    }
+    let mut besides = Vec::with_capacity(totals.len());
+    besides.push(0);
+    let mut less = 0;
+    let mut next_joined = joined.iter().peekable();
+    for line in 0..totals.len() - 1 {
+        if next_joined.next_if_eq(&&line).is_some() {
+            less += totals[line + 1] - totals[line];
+        }
+        besides.push(totals[line + 1] - less);
+    }
+    besides
 }
 
 /// **Which records a window's far margins walk** (pass spec §6, thinned margins), decided once for each record as
@@ -1214,14 +1263,20 @@ impl MarginThinner {
 /// **With thinned margins, a site the far margins skip is held compressed** (pass spec §6, thinned
 /// margins): its numbers and reads, packed once its line is compressed, and taken out of the
 /// record, which keeps its position, allele count and rows. A window puts them back for the sites
-/// it walks ([`Self::hold_whole`]) and takes them out again of those it does not.
+/// it walks ([`Self::hold_whole`]), dropping the packed bytes, and packs again those it does not
+/// walk. **A site is held in one form at a time**: kept beside the whole numbers, the packed copy
+/// was a twelfth of a 2,000-sample window at the 500-kb floor (memory review 2026-11-24). Packing
+/// depends on the site's numbers and reads alone, so packing again gives the same bytes.
 #[derive(Debug, Default)]
 struct HeldSites {
     records: Vec<SiteRecord>,
     fragments: Vec<PackedRecordFragments>,
-    /// Each site's numbers and reads, compressed: its uncompressed length, then zstd's frame.
-    /// `None` for a site held whole throughout.
+    /// Each site's numbers and reads, compressed — its uncompressed length, then zstd's frame —
+    /// while no window walks it; `None` while it is held whole.
     packed: Vec<Option<Box<[u8]>>>,
+    /// The bytes each site holds while packed, from its first packing: zero for a site the far
+    /// margins walk, which is never packed.
+    packed_length: Vec<usize>,
     /// Whether each site's numbers and reads are in `records` and `fragments`.
     whole: Vec<bool>,
 }
@@ -1231,6 +1286,7 @@ impl HeldSites {
         self.records.push(record);
         self.fragments.push(fragments);
         self.packed.push(None);
+        self.packed_length.push(0);
         self.whole.push(true);
     }
 
@@ -1238,6 +1294,7 @@ impl HeldSites {
         self.records.clear();
         self.fragments.clear();
         self.packed.clear();
+        self.packed_length.clear();
         self.whole.clear();
     }
 
@@ -1246,77 +1303,62 @@ impl HeldSites {
         self.records.drain(..count);
         self.fragments.drain(..count);
         self.packed.drain(..count);
+        self.packed_length.drain(..count);
         self.whole.drain(..count);
     }
 
-    /// **Compresses the numbers and reads of the sites in `range` that `skipped` admits**, on the
-    /// pool, and holds them so.
+    /// **Packs the numbers and reads of the sites in `range` that `skipped` admits**, on the
+    /// pool, the first time they are, and holds them so.
     fn pack(&mut self, range: std::ops::Range<usize>, skipped: impl Fn(usize) -> bool + Sync) {
         let start = range.start;
         self.records[range.clone()]
             .par_iter_mut()
             .zip(&mut self.fragments[range.clone()])
             .zip(&mut self.packed[range.clone()])
+            .zip(&mut self.packed_length[range.clone()])
             .zip(&mut self.whole[range])
             .enumerate()
             .for_each_init(
                 LineCompressor::new,
-                |with, (at, (((record, fragments), packed), whole))| {
-                    if !skipped(start + at) || packed.is_some() {
+                |with, (at, ((((record, fragments), packed), packed_length), whole))| {
+                    if !skipped(start + at) || *packed_length > 0 {
                         return;
                     }
-                    let numbers = record.take_numbers();
-                    let mut plain = Vec::new();
-                    numbers.write_to(&mut plain);
-                    std::mem::take(fragments).write_to(&mut plain);
-                    with.scratch.clear();
-                    with.scratch
-                        .reserve(zstd::zstd_safe::compress_bound(plain.len()));
-                    // PANIC-FREE: the buffer holds zstd's bound for the bytes, so compressing fails
-                    // only where allocation does.
-                    with.compressor
-                        .compress_to_buffer(plain.as_slice(), &mut with.scratch)
-                        .expect("a site's numbers in memory compress");
-                    let mut bytes = Vec::with_capacity(4 + with.scratch.len());
-                    bytes.extend_from_slice(
-                        &u32::try_from(plain.len())
-                            .expect("a site's numbers fit u32 bytes")
-                            .to_le_bytes(),
-                    );
-                    bytes.extend_from_slice(&with.scratch);
-                    *packed = Some(bytes.into_boxed_slice());
+                    let bytes = pack_site(with, record, fragments);
+                    *packed_length = bytes.len();
+                    *packed = Some(bytes);
                     *whole = false;
                 },
             );
     }
 
-    /// The bytes site `site` holds compressed; zero for a site held whole throughout.
-    fn packed_bytes(&self, site: usize) -> usize {
-        self.packed[site].as_ref().map_or(0, |bytes| bytes.len())
-    }
-
     /// **Holds whole exactly the packed sites in `range` that `walked` admits** (one entry a site
-    /// in `range`), on the pool: unpacks those it admits, and takes the numbers and reads out of
-    /// the others again, whose packed bytes they were read from.
+    /// in `range`), on the pool: unpacks those it admits, letting their packed bytes go, and packs
+    /// again those it does not admit that an earlier window unpacked.
     fn hold_whole(&mut self, range: std::ops::Range<usize>, walked: &[bool]) {
         self.records[range.clone()]
             .par_iter_mut()
             .zip(&mut self.fragments[range.clone()])
-            .zip(&self.packed[range.clone()])
+            .zip(&mut self.packed[range.clone()])
+            .zip(&self.packed_length[range.clone()])
             .zip(&mut self.whole[range])
             .zip(walked)
             .for_each_init(
-                line_decompressor,
-                |with, ((((record, fragments), packed), whole), &walked)| {
-                    let Some(packed) = packed else {
+                || (line_decompressor(), LineCompressor::new()),
+                |(decompressor, compressor),
+                 (((((record, fragments), packed), &packed_length), whole), &walked)| {
+                    if packed_length == 0 {
+                        // Never packed: a site the far margins walk, held whole throughout.
                         return;
-                    };
+                    }
                     if walked && !*whole {
+                        // PANIC-FREE: a packed site not held whole holds its packed bytes.
+                        let packed = packed.take().expect("a site not held whole is packed");
                         let (length, frame) = packed.split_at(4);
                         let length =
                             u32::from_le_bytes(length.try_into().expect("four bytes")) as usize;
                         // PANIC-FREE: the stage reads back only frames it compressed, at their length.
-                        let plain = with
+                        let plain = decompressor
                             .decompress(frame, length)
                             .expect("a site's numbers compressed here decompress");
                         let mut bytes = plain.as_slice();
@@ -1324,8 +1366,7 @@ impl HeldSites {
                         *fragments = PackedRecordFragments::read_from(&mut bytes);
                         *whole = true;
                     } else if !walked && *whole {
-                        drop(record.take_numbers());
-                        *fragments = PackedRecordFragments::default();
+                        *packed = Some(pack_site(compressor, record, fragments));
                         *whole = false;
                     }
                 },
@@ -1336,6 +1377,35 @@ impl HeldSites {
     fn window(&self, range: std::ops::Range<usize>) -> (&[SiteRecord], &[PackedRecordFragments]) {
         (&self.records[range.clone()], &self.fragments[range])
     }
+}
+
+/// **Packs a site's numbers and reads**, taking them out of it: their uncompressed length, then
+/// zstd's frame, in an array of its own length.
+fn pack_site(
+    with: &mut LineCompressor,
+    record: &mut SiteRecord,
+    fragments: &mut PackedRecordFragments,
+) -> Box<[u8]> {
+    let numbers = record.take_numbers();
+    let mut plain = Vec::new();
+    numbers.write_to(&mut plain);
+    std::mem::take(fragments).write_to(&mut plain);
+    with.scratch.clear();
+    with.scratch
+        .reserve(zstd::zstd_safe::compress_bound(plain.len()));
+    // PANIC-FREE: the buffer holds zstd's bound for the bytes, so compressing fails only where
+    // allocation does.
+    with.compressor
+        .compress_to_buffer(plain.as_slice(), &mut with.scratch)
+        .expect("a site's numbers in memory compress");
+    let mut bytes = Vec::with_capacity(4 + with.scratch.len());
+    bytes.extend_from_slice(
+        &u32::try_from(plain.len())
+            .expect("a site's numbers fit u32 bytes")
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&with.scratch);
+    bytes.into_boxed_slice()
 }
 
 #[cfg(test)]

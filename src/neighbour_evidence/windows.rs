@@ -33,7 +33,8 @@
 //! a window's walks read only the records the stage marked as walked in thinned margins, at most so
 //! many a kb. The solve holds no state for the others, and the stage holds their numbers and reads
 //! compressed, so the caller hands over what each record saves where it is skipped
-//! ([`WindowBytes::skipped`]), and a window pays it only within the near margins.
+//! ([`WindowBytes::skipped`]) and what it holds packed instead ([`WindowBytes::packed`]); a window
+//! pays the first and not the second within the near margins, and the other way beyond them.
 
 /// **How large a window may be** (§2.2, §6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,8 +143,10 @@ pub const DEFAULT_WINDOW_BYTES: u64 = 32_000_000_000;
 /// A window pays `held` for every record it spans, margins included, and `core` again for every
 /// record of its core — what the solve keeps only for the records it writes. With thinned margins,
 /// `skipped` is what `held` counts for a record where the walks skip the record and a window
-/// holding it does not walk it — its solve state, and its numbers and reads, which it then holds
-/// compressed — zero for a record they read; a window does not pay it beyond its near margins.
+/// holding it does not walk it — its solve state, and its numbers and reads — zero for a record
+/// they read; a window does not pay it beyond its near margins. `packed` is what such a record
+/// holds there instead, its numbers and reads compressed; a window pays it only beyond its near
+/// margins, and none where it is `None`.
 /// `outside` is what a record holds while no window reads it; a window pays it for every record
 /// the caller holds outside the window, before or after it. `None` where the caller holds only
 /// what the window spans.
@@ -152,6 +155,7 @@ pub struct WindowBytes<'a> {
     pub held: &'a [u64],
     pub core: &'a [u64],
     pub skipped: Option<&'a [u64]>,
+    pub packed: Option<&'a [u64]>,
     pub outside: Option<&'a [u64]>,
 }
 
@@ -229,6 +233,9 @@ pub fn plan_window(
                 .skipped
                 .is_none_or(|skipped| skipped.len() == positions.len() + 1)
             && bytes
+                .packed
+                .is_none_or(|packed| packed.len() == positions.len() + 1)
+            && bytes
                 .outside
                 .is_none_or(|outside| outside.len() == positions.len() + 1),
         "one running total a record, and one before them"
@@ -260,14 +267,17 @@ pub fn plan_window(
         };
         // A record's skipped cost is at most what `held` counts for it, so the difference only
         // grows as the window reads further.
-        let skipped = bytes.skipped.map_or(0, |skipped| {
-            skipped[near_start] - skipped[context_start] + skipped[context_end] - skipped[near_end]
-        });
+        let beyond_near = |totals: &[u64]| {
+            totals[near_start] - totals[context_start] + totals[context_end] - totals[near_end]
+        };
+        let skipped = bytes.skipped.map_or(0, beyond_near);
+        let packed = bytes.packed.map_or(0, beyond_near);
         // What the caller holds before the window and after it. Reading further only adds to it.
         let outside_bytes = bytes.outside.map_or(0, |outside| {
             outside[context_start] - outside[0] + outside[positions.len()] - outside[context_end]
         });
         let held = bytes.held[context_end] - bytes.held[context_start] - skipped
+            + packed
             + bytes.core[core_end]
             - bytes.core[core_start];
         let held = held + outside_bytes;

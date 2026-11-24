@@ -35,6 +35,7 @@ fn plan_uniform(
             held: &held,
             core: &core,
             skipped: None,
+            packed: None,
             outside: None,
         },
         core_start,
@@ -170,6 +171,7 @@ fn only_the_core_pays_the_core_cost() {
         held: &held,
         core: &core,
         skipped: None,
+        packed: None,
         outside: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
@@ -192,7 +194,8 @@ fn thinned(sizes: WindowSizes) -> WindowSizes {
 
 /// **A thinned window pays the skipped records' solve state only near its core** (§6, thinned margins): every
 /// record holds 100 bytes, of which 60 are its solve state, skipped at every other record. The
-/// core and the 50 kb either side pay in full, the far margins 70 bytes a record on average.
+/// core and the 50 kb either side pay in full, the far margins 70 bytes a record on average, and
+/// the skipped records' packed bytes on top there.
 #[test]
 fn a_thinned_window_pays_skipped_solve_state_only_near_its_core() {
     let positions = evenly(4_000_000, 1_000);
@@ -208,6 +211,7 @@ fn a_thinned_window_pays_skipped_solve_state_only_near_its_core() {
         held: &held,
         core: &core,
         skipped: Some(&skipped),
+        packed: None,
         outside: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
@@ -220,6 +224,24 @@ fn a_thinned_window_pays_skipped_solve_state_only_near_its_core() {
     let near = (plan.near_end - plan.near_start) as u64;
     let far = plan.records() as u64 - near;
     assert_eq!(plan.bytes, near * 100 + far * 70);
+    // A skipped record held packed in 15 bytes pays them beyond the near margins, and only there.
+    let packed: Vec<u64> = (0..=records as u64).map(|i| (i / 2) * 15).collect();
+    let with_packed = plan_window(
+        &positions,
+        WindowBytes {
+            packed: Some(&packed),
+            ..bytes
+        },
+        1_500,
+        true,
+        &sizes,
+    )
+    .expect("the contig is complete");
+    assert_eq!(
+        (with_packed.context_start, with_packed.context_end),
+        (plan.context_start, plan.context_end)
+    );
+    assert_eq!(with_packed.bytes, near * 100 + far * 70 + far / 2 * 15);
     // Without thinning the same costs plan the whole window as walked, at full cost.
     let unthinned = plan_window(
         &positions,
@@ -256,6 +278,7 @@ fn thinning_fits_a_larger_window_in_the_same_budget() {
         held: &held,
         core: &core,
         skipped: Some(&skipped),
+        packed: None,
         outside: None,
     };
     let unthinned = plan_window(&positions, bytes, 1_500, true, &budget).expect("complete");
@@ -298,6 +321,7 @@ fn a_core_floor_fits_a_window_the_margin_floor_cannot() {
         held: &held,
         core: &core,
         skipped: None,
+        packed: None,
         outside: None,
     };
     // A record a 100 bases at 40 bytes: 500-kb margins and a 500-kb core hold 600 kB.
@@ -336,6 +360,7 @@ fn a_core_floor_changes_only_windows_over_the_margin_floor() {
         held: &held,
         core: &core,
         skipped: None,
+        packed: None,
         outside: None,
     };
     for budget in [u64::MAX, 3_000_000, 1_300_000, 600_000] {
@@ -378,6 +403,7 @@ fn a_window_pays_for_the_records_held_outside_it() {
                 held: &held,
                 core: &core,
                 skipped: None,
+                packed: None,
                 outside,
             },
             core_start,
