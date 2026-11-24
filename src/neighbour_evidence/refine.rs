@@ -1516,10 +1516,19 @@ fn solve_round(
             |one: usize, one_pair: (usize, usize), other: usize, other_pair: (usize, usize)| {
                 draw_link(fragments_at(one), one_pair, fragments_at(other), other_pair)
             };
-        let (hidden, read_check) = (&state.hidden, &state.read_check);
-        let kept_out =
-            |site: usize| keeps_reads_out(hidden, read_check, layout.record_of_site[site]);
-        let mut draw_reads = phasing.draws_with_reads(fragments).then(|| DrawReads {
+        // The walk sites that keep the sample's reads out of the draw, marked once a round rather
+        // than looked up in the two lists at every site of every path the round draws.
+        let draws_with_reads = phasing.draws_with_reads(fragments);
+        let mut kept_out_sites = vec![false; if draws_with_reads { layout.sites() } else { 0 }];
+        if draws_with_reads {
+            for &record in state.hidden.iter().chain(&state.read_check) {
+                if let Some(site) = layout.site_of_record[record] {
+                    kept_out_sites[site] = true;
+                }
+            }
+        }
+        let kept_out = |site: usize| kept_out_sites[site];
+        let mut draw_reads = draws_with_reads.then(|| DrawReads {
             link: &link,
             kept_out: &kept_out,
             het_mass_min: HET_MASS_MIN,

@@ -299,19 +299,25 @@ pub(crate) fn choose_haplotypes(
         2,
     );
     let mut carried = Vec::new();
+    let observed = |carried: &[f64], lacked: &[f64]| -> f64 {
+        carried
+            .iter()
+            .zip(lacked)
+            .map(|(carried, lacked)| carried * lacked)
+            .sum()
+    };
+    // Both copies of a sample in one pass over the compared records: whether the sample is
+    // informative is read once for the two, and each copy's sums are added in the order a pass a
+    // copy would add them.
     for &other in &others {
-        for copy in 0..2 {
-            sums.add(compared.iter().zip(&lacking).map(|(&index, lacked)| {
-                (records[index].row(other) == SampleRow::Informative).then(|| {
-                    haplotype(other, copy, index, &mut carried);
-                    carried
-                        .iter()
-                        .zip(lacked)
-                        .map(|(carried, lacked)| carried * lacked)
-                        .sum()
-                })
-            }));
-        }
+        sums.add_both_copies(compared.iter().zip(&lacking).map(|(&index, lacked)| {
+            (records[index].row(other) == SampleRow::Informative).then(|| {
+                haplotype(other, 0, index, &mut carried);
+                let first = observed(&carried, lacked);
+                haplotype(other, 1, index, &mut carried);
+                (first, observed(&carried, lacked))
+            })
+        }));
     }
     let judged = sums.judged();
     let mut offers: Vec<Judged> = judged
@@ -460,6 +466,27 @@ impl StretchSums {
             if let Some(observed) = observed {
                 sums[stretch].0 += observed;
                 sums[stretch].1 += expected;
+            }
+        }
+    }
+
+    /// Adds a sample's two haplotypes as the next two candidates, as two [`Self::add`]s would:
+    /// each copy's observed disagreement at each compared record, `None` where the sample is not
+    /// informative.
+    fn add_both_copies(&mut self, observed: impl IntoIterator<Item = Option<(f64, f64)>>) {
+        let start = self.sums.len();
+        self.sums.resize(start + 2 * self.stretches, (0.0, 0.0));
+        let (first, second) = self.sums[start..].split_at_mut(self.stretches);
+        for ((observed, &stretch), &expected) in observed
+            .into_iter()
+            .zip(&self.stretch_of)
+            .zip(&self.expected)
+        {
+            if let Some((on_first, on_second)) = observed {
+                first[stretch].0 += on_first;
+                first[stretch].1 += expected;
+                second[stretch].0 += on_second;
+                second[stretch].1 += expected;
             }
         }
     }

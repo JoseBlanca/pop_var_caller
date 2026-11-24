@@ -440,3 +440,39 @@ fn the_haplotype_choice_reads_every_allele() {
     let chosen = choose_haplotypes(&records, 0, &compared, &previous, &haplotype, 2);
     assert_eq!(haplotype_sources(&chosen), vec![(1, 0), (2, 0)]);
 }
+
+/// **A sample's two copies added in one pass give the sums of two passes, bit for bit**: two
+/// samples over six records cut into stretches, one copy each not informative at some records.
+#[test]
+fn both_copies_in_one_pass_sum_as_two_passes() {
+    let expected = vec![0.3, 0.7, 0.1, 0.9, 0.45, 0.2];
+    let judged = [true; 6];
+    let copies: [[Vec<Option<f64>>; 2]; 2] = [
+        [
+            vec![Some(0.1), Some(0.3), None, Some(0.7), Some(0.05), Some(0.6)],
+            vec![Some(0.9), Some(0.2), None, Some(0.1), Some(0.33), Some(0.0)],
+        ],
+        [
+            vec![None, Some(0.4), Some(0.8), Some(0.2), None, Some(0.15)],
+            vec![None, Some(0.6), Some(0.25), Some(0.5), None, Some(0.85)],
+        ],
+    ];
+    let mut two_passes = StretchSums::new(expected.clone(), &judged, 0.5, 2);
+    let mut one_pass = StretchSums::new(expected, &judged, 0.5, 2);
+    assert!(
+        two_passes.stretches > 1,
+        "the records are cut into several stretches"
+    );
+    for [first, second] in &copies {
+        two_passes.add(first.iter().copied());
+        two_passes.add(second.iter().copied());
+        one_pass.add_both_copies(first.iter().zip(second).map(|(one, other)| one.zip(*other)));
+    }
+    let bits = |sums: &StretchSums| -> Vec<(u64, u64)> {
+        sums.sums
+            .iter()
+            .map(|(observed, expected)| (observed.to_bits(), expected.to_bits()))
+            .collect()
+    };
+    assert_eq!(bits(&one_pass), bits(&two_passes));
+}
