@@ -212,6 +212,7 @@ fn main() -> ExitCode {
                 skipped: None,
                 packed: None,
                 outside: None,
+                store_and_results: None,
             };
             let plan = plan_window(&positions, bytes, core_start, true, &sizes)
                 .expect("a whole contig always plans");

@@ -524,14 +524,22 @@ const WRITTEN_PHASE_BYTES: usize = 8 + 2 * 2;
 const OUTCOME_BYTES: usize = 1;
 
 /// **The bytes the solve holds for one sample at every record of a window**, at a record of
-/// `alleles` alleles, over the window's rounds (pass spec §6): its two haplotypes in the round read
-/// and the round written, the templates they followed, and its phase. Counted at every record,
-/// whether a walk uses it or not.
+/// `alleles` alleles, over the window's rounds (pass spec §6): the rounds' haplotype store
+/// ([`round_store_bytes`]) and its phase. Counted at every record, whether a walk uses it or not.
 #[must_use]
 pub fn held_solve_bytes(alleles: usize) -> u64 {
+    round_store_bytes(alleles) + phase_bytes(alleles) as u64
+}
+
+/// **The bytes the rounds' haplotype store holds for one sample at a record** of `alleles`
+/// alleles: its two haplotypes in the round read and the round written, and the templates they
+/// followed. Part of [`held_solve_bytes`]; let go once the rounds end, before the core's results
+/// are made ([`written_result_bytes`]), so a window holds the one or the other, never both.
+#[must_use]
+pub fn round_store_bytes(alleles: usize) -> u64 {
     let stored = 2 * (alleles - 1) * std::mem::size_of::<f32>();
     let followed = std::mem::size_of::<[u8; 2]>();
-    (2 * (stored + followed) + phase_bytes(alleles)) as u64
+    (2 * (stored + followed)) as u64
 }
 
 /// **What one record adds to a window's two running totals** (pass spec §6), `samples` samples of
@@ -558,11 +566,19 @@ pub fn record_window_bytes(record: &SiteRecord) -> (u64, u64) {
 pub fn core_solve_bytes(alleles: usize) -> u64 {
     let genotypes = alleles * (alleles + 1) / 2;
     let sums = (genotypes + 1) * std::mem::size_of::<f32>();
-    let written = genotypes * std::mem::size_of::<f32>()
+    sums as u64 + written_result_bytes(alleles)
+}
+
+/// **The bytes one sample's written result takes at a core record** of `alleles` alleles, in its
+/// [`RefinedRecord`]: its posterior, outcome, background share and phase. Part of
+/// [`core_solve_bytes`]; made only once the rounds' store is let go ([`round_store_bytes`]).
+#[must_use]
+pub fn written_result_bytes(alleles: usize) -> u64 {
+    let genotypes = alleles * (alleles + 1) / 2;
+    (genotypes * std::mem::size_of::<f32>()
         + OUTCOME_BYTES
         + std::mem::size_of::<f32>()
-        + WRITTEN_PHASE_BYTES;
-    (sums + written) as u64
+        + WRITTEN_PHASE_BYTES) as u64
 }
 
 /// **How many samples' results are made before they are copied into the window's records** (pass

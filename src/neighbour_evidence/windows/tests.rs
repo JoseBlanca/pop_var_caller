@@ -37,6 +37,7 @@ fn plan_uniform(
             skipped: None,
             packed: None,
             outside: None,
+            store_and_results: None,
         },
         core_start,
         complete,
@@ -173,6 +174,7 @@ fn only_the_core_pays_the_core_cost() {
         skipped: None,
         packed: None,
         outside: None,
+        store_and_results: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
     let core_records = (plan.core_end - plan.core_start) as u64;
@@ -213,6 +215,7 @@ fn a_thinned_window_pays_skipped_solve_state_only_near_its_core() {
         skipped: Some(&skipped),
         packed: None,
         outside: None,
+        store_and_results: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
     // A 2-Mb core, 1-Mb margins, near margins of 50 kb.
@@ -280,6 +283,7 @@ fn thinning_fits_a_larger_window_in_the_same_budget() {
         skipped: Some(&skipped),
         packed: None,
         outside: None,
+        store_and_results: None,
     };
     let unthinned = plan_window(&positions, bytes, 1_500, true, &budget).expect("complete");
     let thinned = plan_window(&positions, bytes, 1_500, true, &thinned(budget)).expect("complete");
@@ -323,6 +327,7 @@ fn a_core_floor_fits_a_window_the_margin_floor_cannot() {
         skipped: None,
         packed: None,
         outside: None,
+        store_and_results: None,
     };
     // A record a 100 bases at 40 bytes: 500-kb margins and a 500-kb core hold 600 kB.
     let budget = 500_000;
@@ -362,6 +367,7 @@ fn a_core_floor_changes_only_windows_over_the_margin_floor() {
         skipped: None,
         packed: None,
         outside: None,
+        store_and_results: None,
     };
     for budget in [u64::MAX, 3_000_000, 1_300_000, 600_000] {
         let base = WindowSizes {
@@ -405,6 +411,7 @@ fn a_window_pays_for_the_records_held_outside_it() {
                 skipped: None,
                 packed: None,
                 outside,
+                store_and_results: None,
             },
             core_start,
             true,
@@ -430,4 +437,52 @@ fn a_window_pays_for_the_records_held_outside_it() {
         with.bytes,
         held[with.context_end] - held[with.context_start] + with.outside_bytes
     );
+}
+
+/// **A window pays the larger of the store it walks and the results its core writes, not both**
+/// (§6): every record holds 100 bytes, `store` of them the rounds' store, and every core record 50
+/// more, 40 of them its results. With a store of 30 a record the core's results are the smaller
+/// part and go uncounted; with 10, the store is.
+#[test]
+fn a_window_pays_the_larger_of_store_and_results() {
+    let positions = evenly(4_000_000, 1_000);
+    let records = positions.len();
+    let totals = |each: u64| -> Vec<u64> { (0..=records as u64).map(|i| i * each).collect() };
+    let (held, core, results) = (totals(100), totals(50), totals(40));
+    let sizes = WindowSizes {
+        budget_bytes: u64::MAX,
+        ..WindowSizes::default()
+    };
+    for (store_each, uncounted) in [(30, 2_000 * 40), (10, 3_500 * 10)] {
+        let store = totals(store_each);
+        let plan = plan_window(
+            &positions,
+            WindowBytes {
+                held: &held,
+                core: &core,
+                skipped: None,
+                packed: None,
+                outside: None,
+                store_and_results: Some(StoreAndResults {
+                    store: &store,
+                    store_skipped: None,
+                    results: &results,
+                }),
+            },
+            1_500,
+            true,
+            &sizes,
+        )
+        .expect("the contig is complete");
+        // A 2-Mb core and 1-Mb margins: 3,500 records, 2,000 in the core.
+        assert_eq!(
+            (plan.records(), plan.core_end - plan.core_start),
+            (3_500, 2_000)
+        );
+        assert_eq!(
+            plan.bytes,
+            3_500 * 100 + 2_000 * 50 - uncounted,
+            "store {store_each}"
+        );
+    }
 }

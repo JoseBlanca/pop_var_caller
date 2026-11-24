@@ -29,10 +29,12 @@ use super::records::{RecordNumbers, SiteRecord};
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
     PHASING_ROUNDS, Phasing, RefinedRecord, held_solve_bytes, record_window_bytes,
-    refine_window_with_reads, window_key,
+    refine_window_with_reads, round_store_bytes, window_key, written_result_bytes,
 };
 use super::templates::MAX_TEMPLATES;
-use super::windows::{MarginThinning, NEAR_MARGIN_BASES, WindowBytes, WindowSizes, plan_window};
+use super::windows::{
+    MarginThinning, NEAR_MARGIN_BASES, StoreAndResults, WindowBytes, WindowSizes, plan_window,
+};
 use crate::read_phase::fragments::{PackedRecordFragments, RecordFragments};
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
@@ -440,6 +442,11 @@ pub struct NeighbourEvidenceStage {
     /// than the lines ([`WindowBytes`]): over every line a window spans, and again over its core.
     held_bytes: Vec<u64>,
     core_bytes: Vec<u64>,
+    /// Of those, as running totals likewise, what `held_bytes` counts for the rounds' haplotype
+    /// store and what `core_bytes` counts for the written results, which a window never holds
+    /// together ([`StoreAndResults`]).
+    store_bytes: Vec<u64>,
+    results_bytes: Vec<u64>,
     /// **What each held line holds while no window reads it**, as a running total like `held_bytes`:
     /// what `held_bytes` counts for it less its solve state, which only a window holds, and, for a
     /// site held packed, its packed bytes in place of its numbers and reads. A window pays it for
@@ -455,8 +462,11 @@ pub struct NeighbourEvidenceStage {
     far_walked: Vec<bool>,
     skipped_bytes: Vec<u64>,
     packed_bytes: Vec<u64>,
+    /// With thinned margins: of `skipped_bytes`, the rounds' store, as a running total likewise.
+    store_skipped_bytes: Vec<u64>,
     /// With thinned margins: the held lines some sample's last written block holds a record at
-    /// ([`Self::joined_lines`]), and `skipped_bytes` and `packed_bytes` less those lines', which a
+    /// ([`Self::joined_lines`]), and `skipped_bytes`, `packed_bytes` and `store_skipped_bytes`
+    /// less those lines', which a
     /// window walks ([`totals_besides`]) — what a window is planned with. **Kept, not made for
     /// each line pushed**: they change only when a window is solved or held lines are dropped, and
     /// are made again then; a pushed line is in no block, so it only extends the totals. Made for
@@ -465,6 +475,7 @@ pub struct NeighbourEvidenceStage {
     joined: Vec<usize>,
     skipped_besides_joined: Vec<u64>,
     packed_besides_joined: Vec<u64>,
+    store_skipped_besides_joined: Vec<u64>,
     /// Which records the far margins walk, decided as each arrives.
     thinner: Option<MarginThinner>,
     /// The held sites, each with its fragments; the first is site number `first_site`.
@@ -514,13 +525,17 @@ impl NeighbourEvidenceStage {
             positions: Vec::new(),
             held_bytes: vec![0],
             core_bytes: vec![0],
+            store_bytes: vec![0],
+            results_bytes: vec![0],
             resident_bytes: vec![0],
             far_walked: Vec::new(),
             skipped_bytes: vec![0],
             packed_bytes: vec![0],
+            store_skipped_bytes: vec![0],
             joined: Vec::new(),
             skipped_besides_joined: vec![0],
             packed_besides_joined: vec![0],
+            store_skipped_besides_joined: vec![0],
             thinner: decision.sizes.thinning.map(MarginThinner::new),
             sites: HeldSites::default(),
             first_site: 0,
@@ -613,15 +628,20 @@ impl NeighbourEvidenceStage {
         let mut held = line.len() as u64;
         let mut core = 0;
         let mut skipped = 0;
+        let (mut store, mut results, mut store_skipped) = (0, 0, 0);
         let mut far_walked = false;
         let site = site_of(&line, self.samples).map(|record| {
             let fragments = PackedRecordFragments::from(fragments);
             let (record_held, record_core) = record_window_bytes(&record);
             held += record_held + fragments.heap_bytes() as u64;
             core = record_core;
+            let samples = record.sample_count() as u64;
+            store = samples * round_store_bytes(record.allele_count);
+            results = samples * written_result_bytes(record.allele_count);
             if let Some(thinner) = &mut self.thinner {
                 far_walked = record.is_site() && thinner.walks(record.position);
                 if !far_walked {
+                    store_skipped = store;
                     // Its solve state, and its numbers and reads, which it holds packed instead
                     // while no walk reads it ([`HeldSites::pack`]).
                     skipped = record.sample_count() as u64 * held_solve_bytes(record.allele_count)
@@ -636,12 +656,18 @@ impl NeighbourEvidenceStage {
         let last = |totals: &[u64]| totals.last().copied().unwrap_or(0);
         self.held_bytes.push(last(&self.held_bytes) + held);
         self.core_bytes.push(last(&self.core_bytes) + core);
+        self.store_bytes.push(last(&self.store_bytes) + store);
+        self.results_bytes.push(last(&self.results_bytes) + results);
         if self.thinner.is_some() {
             self.far_walked.push(far_walked);
             self.skipped_bytes.push(last(&self.skipped_bytes) + skipped);
             // A new line is in no last block: blocks hold only records of cores already written.
             self.skipped_besides_joined
                 .push(last(&self.skipped_besides_joined) + skipped);
+            self.store_skipped_bytes
+                .push(last(&self.store_skipped_bytes) + store_skipped);
+            self.store_skipped_besides_joined
+                .push(last(&self.store_skipped_besides_joined) + store_skipped);
             // Its packed bytes are counted once it is packed, when its line is compressed.
             self.packed_bytes.push(last(&self.packed_bytes));
             self.packed_besides_joined
@@ -744,13 +770,17 @@ impl NeighbourEvidenceStage {
         self.held.clear();
         self.held_bytes = vec![0];
         self.core_bytes = vec![0];
+        self.store_bytes = vec![0];
+        self.results_bytes = vec![0];
         self.resident_bytes = vec![0];
         self.far_walked.clear();
         self.skipped_bytes = vec![0];
         self.packed_bytes = vec![0];
+        self.store_skipped_bytes = vec![0];
         self.joined.clear();
         self.skipped_besides_joined = vec![0];
         self.packed_besides_joined = vec![0];
+        self.store_skipped_besides_joined = vec![0];
         if let Some(thinner) = &mut self.thinner {
             *thinner = MarginThinner::new(thinner.thinning);
         }
@@ -791,6 +821,14 @@ impl NeighbourEvidenceStage {
                         .thinner
                         .is_some()
                         .then_some(self.packed_besides_joined.as_slice()),
+                    store_and_results: Some(StoreAndResults {
+                        store: &self.store_bytes,
+                        store_skipped: self
+                            .thinner
+                            .is_some()
+                            .then_some(self.store_skipped_besides_joined.as_slice()),
+                        results: &self.results_bytes,
+                    }),
                 },
                 self.core_start,
                 contig_complete,
@@ -1086,6 +1124,7 @@ impl NeighbourEvidenceStage {
         self.joined = self.joined_lines();
         self.skipped_besides_joined = totals_besides(&self.skipped_bytes, &self.joined);
         self.packed_besides_joined = totals_besides(&self.packed_bytes, &self.joined);
+        self.store_skipped_besides_joined = totals_besides(&self.store_skipped_bytes, &self.joined);
     }
 
     /// **The kept joins and resident totals are what making them again gives**: what lets them be
@@ -1114,6 +1153,11 @@ impl NeighbourEvidenceStage {
             self.packed_besides_joined,
             totals_besides(&self.packed_bytes, &self.joined),
             "the kept packed totals drifted"
+        );
+        assert_eq!(
+            self.store_skipped_besides_joined,
+            totals_besides(&self.store_skipped_bytes, &self.joined),
+            "the kept skipped store totals drifted"
         );
         // A site is held in one form at a time, and a site held packed holds the bytes it is
         // counted at: packing a record again gives the bytes its first packing gave.
@@ -1166,6 +1210,9 @@ impl NeighbourEvidenceStage {
             &mut self.core_bytes,
             &mut self.skipped_bytes,
             &mut self.packed_bytes,
+            &mut self.store_bytes,
+            &mut self.results_bytes,
+            &mut self.store_skipped_bytes,
         ] {
             if totals.len() == 1 {
                 continue;

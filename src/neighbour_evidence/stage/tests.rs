@@ -998,8 +998,8 @@ fn a_shrunken_window_counts_the_lines_held_outside_it() {
         margin_bases: 60_000,
         margin_floor_bases: 20_000,
         core_floor_bases: 20_000,
-        // Full windows over the dense stretch count about 1.2 MB, the others about 0.6 MB.
-        budget_bytes: 1_000_000,
+        // Full windows over the dense stretch count about 0.97 MB, the others about 0.5 MB.
+        budget_bytes: 800_000,
         thinning: None,
     };
     let planned = plans(sizes).expect("within the window budget");

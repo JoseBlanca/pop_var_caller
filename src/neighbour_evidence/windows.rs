@@ -26,6 +26,9 @@
 //! 2026-11-24 estimated them at about a sixth on top of the count of a window at the 500-kb floor
 //! on 2,176 tomato samples; on the stage tests' drawn cohort, without reads, they add up to 4%.
 //!
+//! **It counts the rounds' haplotype store or the core's results, whichever is larger, not both**
+//! ([`StoreAndResults`]): the solve lets the store go before it makes the results.
+//!
 //! The budget does not count the walks' own arrays, which every thread holds one of: counting
 //! them would make the windows, and so the output, depend on the thread count (§2.3).
 //!
@@ -157,6 +160,24 @@ pub struct WindowBytes<'a> {
     pub skipped: Option<&'a [u64]>,
     pub packed: Option<&'a [u64]>,
     pub outside: Option<&'a [u64]>,
+    /// The two parts of `held` and `core` the solve never holds at once; `None` counts both.
+    pub store_and_results: Option<StoreAndResults<'a>>,
+}
+
+/// **Two parts of a window's count the solve never holds at once**, as running totals like
+/// [`WindowBytes`]'s: the rounds' haplotype store, part of `held` at every record, which the solve
+/// lets go when the rounds end, and the core's written results, part of `core`, which it makes
+/// after. A window is counted at the larger of the store it walks and the results its core
+/// writes, not their sum (pass spec §6).
+#[derive(Clone, Copy, Debug)]
+pub struct StoreAndResults<'a> {
+    /// What `held` counts for the rounds' store at each record.
+    pub store: &'a [u64],
+    /// What a record skipped beyond the near margins does not hold of `store` — its store, as part
+    /// of `WindowBytes::skipped`; zero for a record walked there. `None` without thinning.
+    pub store_skipped: Option<&'a [u64]>,
+    /// What `core` counts for the written results at each record.
+    pub results: &'a [u64],
 }
 
 impl Default for WindowSizes {
@@ -235,6 +256,13 @@ pub fn plan_window(
             && bytes
                 .packed
                 .is_none_or(|packed| packed.len() == positions.len() + 1)
+            && bytes.store_and_results.is_none_or(|apart| {
+                apart.store.len() == positions.len() + 1
+                    && apart.results.len() == positions.len() + 1
+                    && apart
+                        .store_skipped
+                        .is_none_or(|skipped| skipped.len() == positions.len() + 1)
+            })
             && bytes
                 .outside
                 .is_none_or(|outside| outside.len() == positions.len() + 1),
@@ -276,10 +304,21 @@ pub fn plan_window(
         let outside_bytes = bytes.outside.map_or(0, |outside| {
             outside[context_start] - outside[0] + outside[positions.len()] - outside[context_end]
         });
+        // The store the walks hold and the results the core writes are never held together, so
+        // the smaller is not paid. Reading further only adds: a record adds at least its store to
+        // `held` and at least its result to `core`.
+        let never_together = bytes.store_and_results.map_or(0, |apart| {
+            let store = apart.store[context_end]
+                - apart.store[context_start]
+                - apart.store_skipped.map_or(0, beyond_near);
+            let results = apart.results[core_end] - apart.results[core_start];
+            store.min(results)
+        });
         let held = bytes.held[context_end] - bytes.held[context_start] - skipped
             + packed
             + bytes.core[core_end]
-            - bytes.core[core_start];
+            - bytes.core[core_start]
+            - never_together;
         let held = held + outside_bytes;
         let plan = WindowPlan {
             context_start,
