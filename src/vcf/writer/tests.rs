@@ -733,3 +733,113 @@ fn the_writer_reads_fragments_exactly_where_it_builds_a_stage_that_phases() {
         }
     }
 }
+
+/// Some 10 MB of VCF-like text, in pieces of uneven length, as lines reach the sink.
+fn uneven_pieces() -> Vec<Vec<u8>> {
+    (0..40_000_u32)
+        .map(|index| {
+            let length = 60 + (index.wrapping_mul(2_654_435_761) % 450) as usize;
+            let mut piece = format!("chr1\t{index}\t.\tA\tC\t").into_bytes();
+            piece.extend((0..length).map(|at| b"0123456789:/,|"[(at + index as usize) % 14]));
+            piece.push(b'\n');
+            piece
+        })
+        .collect()
+}
+
+/// **The bgzf writer fed through a thread of its own writes the bytes it writes fed directly**:
+/// over several hand-overs of 4 MB, and with a flush in the middle, which cuts a block there in
+/// both.
+#[test]
+fn bytes_handed_to_the_bgzf_thread_compress_to_the_same_file() {
+    let workers = NonZeroUsize::new(3).expect("three");
+    let pieces = uneven_pieces();
+    let text_bytes: usize = pieces.iter().map(Vec::len).sum();
+    assert!(text_bytes > 2 * HANDED_OVER_BYTES, "{text_bytes} bytes");
+    let mut direct = noodles_bgzf::io::MultithreadedWriter::with_worker_count(workers, Vec::new());
+    let mut handed = BgzfHandOff::new(Box::new(
+        noodles_bgzf::io::MultithreadedWriter::with_worker_count(workers, Vec::new()),
+    ));
+    for (index, piece) in pieces.iter().enumerate() {
+        direct.write_all(piece).expect("in memory");
+        handed.write_all(piece).expect("in memory");
+        if index == 12_345 {
+            direct.flush().expect("in memory");
+            handed.flush().expect("in memory");
+        }
+    }
+    let direct = direct.finish().expect("in memory");
+    let handed = handed
+        .finish()
+        .expect("every byte written")
+        .finish()
+        .expect("in memory");
+    assert!(
+        handed == direct,
+        "{} against {} bytes",
+        handed.len(),
+        direct.len()
+    );
+}
+
+/// A destination that takes `room` bytes, then refuses every write.
+struct FillsUp {
+    room: usize,
+}
+
+impl Write for FillsUp {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.room {
+            return Err(io::Error::other("no space left on the device"));
+        }
+        self.room -= buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// **A write the destination refuses on the bgzf thread reaches the writing thread with its own
+/// message**, at a later write or at `finish`, and nothing hangs.
+#[test]
+fn a_write_the_destination_refuses_is_reported_with_its_message() {
+    let mut handed = BgzfHandOff::new(Box::new(
+        noodles_bgzf::io::MultithreadedWriter::with_worker_count(
+            NonZeroUsize::new(2).expect("two"),
+            FillsUp { room: 100_000 },
+        ),
+    ));
+    let mut refused = None;
+    for piece in uneven_pieces() {
+        if let Err(error) = handed.write_all(&piece) {
+            refused = Some(error);
+            break;
+        }
+    }
+    let error = match refused {
+        Some(error) => error,
+        None => handed.finish().err().expect("the destination fills up"),
+    };
+    assert!(
+        error.to_string().contains("no space left on the device"),
+        "{error}"
+    );
+}
+
+/// **Dropped without `finish`**, as when a run stops on another error, the writer waits for its
+/// thread to write what it was handed, so no thread outlives it.
+#[test]
+fn a_hand_off_dropped_without_finishing_waits_for_its_thread() {
+    let mut handed = BgzfHandOff::new(Box::new(
+        noodles_bgzf::io::MultithreadedWriter::with_worker_count(
+            NonZeroUsize::new(2).expect("two"),
+            Vec::new(),
+        ),
+    ));
+    for piece in uneven_pieces() {
+        handed.write_all(&piece).expect("in memory");
+    }
+    drop(handed);
+}

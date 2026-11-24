@@ -506,6 +506,133 @@ fn path_is_bgzf(path: &Path) -> bool {
     name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz")
 }
 
+/// **How many bytes the writing thread gathers before it hands them to the bgzf thread**
+/// ([`BgzfHandOff`]). At most three such buffers live at once — one filling, one waiting in the
+/// channel, one being written — about 12 MB whatever the cohort.
+const HANDED_OVER_BYTES: usize = 4 << 20;
+
+/// **What the writing thread hands the bgzf thread**: bytes to write, or a request to flush.
+enum HandedOver {
+    Bytes(Vec<u8>),
+    Flush,
+}
+
+/// The bgzf thread's result: the writer, every byte handed to it written, or why it stopped.
+type BgzfThreadResult<W> = io::Result<Box<noodles_bgzf::io::MultithreadedWriter<W>>>;
+
+/// **The multithreaded bgzf writer behind a thread of its own**, fed a few MB at a time.
+///
+/// The bgzf writer queues at most as many blocks as it has workers, so the thread writing to it
+/// blocks whenever they are all compressing; with the neighbour-evidence pass on, that thread is
+/// the one that hands the pool its next chunk of lines to rewrite, so the pool waited with it —
+/// 1.4 s of a 100-s writing pass on 59 tomato samples at 2 threads, 2.9 s at 100 drawn samples.
+/// Behind a thread of its own, the writing thread only appends to a buffer and goes back to the
+/// pool, and compression overlaps the rewrite. The thread is one beyond `--threads`, which is the
+/// least a run uses, not a cap (owner, 2026-11-17).
+///
+/// **The file is the same, byte for byte**: bgzf cuts its blocks by the bytes alone, not by how
+/// they were handed to it, and a flush is passed on in order, so it cuts a block where it would
+/// have.
+///
+/// **An error reaches the caller late but is never lost**: the thread stops at the first failed
+/// write; the next hand-over, flush or [`Self::finish`] finds the channel closed and returns the
+/// thread's error. Dropped without `finish`, as when the run stops on an error, it closes the
+/// channel and waits for the thread, so no thread outlives the writer.
+struct BgzfHandOff<W: Write + Send + 'static> {
+    buffer: Vec<u8>,
+    to_bgzf: Option<std::sync::mpsc::SyncSender<HandedOver>>,
+    bgzf: Option<std::thread::JoinHandle<BgzfThreadResult<W>>>,
+}
+
+impl<W: Write + Send + 'static> BgzfHandOff<W> {
+    fn new(mut bgzf: Box<noodles_bgzf::io::MultithreadedWriter<W>>) -> Self {
+        // A channel of one: one buffer waits while the thread writes another.
+        let (to_bgzf, handed) = std::sync::mpsc::sync_channel::<HandedOver>(1);
+        let bgzf = std::thread::spawn(move || -> BgzfThreadResult<W> {
+            for handed_over in handed {
+                match handed_over {
+                    HandedOver::Bytes(bytes) => bgzf.write_all(&bytes)?,
+                    HandedOver::Flush => bgzf.flush()?,
+                }
+            }
+            Ok(bgzf)
+        });
+        Self {
+            buffer: Vec::with_capacity(HANDED_OVER_BYTES),
+            to_bgzf: Some(to_bgzf),
+            bgzf: Some(bgzf),
+        }
+    }
+
+    /// Hands the gathered bytes over, if there are any.
+    fn hand_over_the_buffer(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let full = std::mem::replace(&mut self.buffer, Vec::with_capacity(HANDED_OVER_BYTES));
+        self.send(HandedOver::Bytes(full))
+    }
+
+    fn send(&mut self, handed_over: HandedOver) -> io::Result<()> {
+        let sent = match &self.to_bgzf {
+            Some(to_bgzf) => to_bgzf.send(handed_over).is_ok(),
+            None => false,
+        };
+        if sent {
+            return Ok(());
+        }
+        // The thread has stopped, so a write failed: its error says why.
+        match self.join() {
+            Err(error) => Err(error),
+            Ok(_) => Err(io::Error::other("the bgzf writing thread stopped")),
+        }
+    }
+
+    /// Closes the channel and waits for the thread: the writer, every byte written, or its error.
+    /// A second call finds no thread and says so.
+    fn join(&mut self) -> BgzfThreadResult<W> {
+        self.to_bgzf = None;
+        match self.bgzf.take().map(std::thread::JoinHandle::join) {
+            Some(Ok(result)) => result,
+            Some(Err(_)) => Err(io::Error::other("the bgzf writing thread panicked")),
+            None => Err(io::Error::other("the bgzf writing thread stopped")),
+        }
+    }
+
+    /// Hands over the last bytes and returns the bgzf writer, every byte written, to be finished.
+    fn finish(mut self) -> BgzfThreadResult<W> {
+        self.hand_over_the_buffer()?;
+        self.join()
+    }
+}
+
+impl<W: Write + Send + 'static> Drop for BgzfHandOff<W> {
+    fn drop(&mut self) {
+        if self.bgzf.is_some() {
+            // Dropped without `finish`: the run is stopping on an error already being reported.
+            let _ = self.join();
+        }
+    }
+}
+
+impl<W: Write + Send + 'static> Write for BgzfHandOff<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        if self.buffer.len() >= HANDED_OVER_BYTES {
+            self.hand_over_the_buffer()?;
+        }
+        Ok(buf.len())
+    }
+
+    /// Hands the bytes over and asks the thread to flush the bgzf writer after them, which cuts a
+    /// block there as a flush of the bgzf writer itself would. Returns once the request is handed
+    /// over, not once it is done; an error in it surfaces at the next call or at `finish`.
+    fn flush(&mut self) -> io::Result<()> {
+        self.hand_over_the_buffer()?;
+        self.send(HandedOver::Flush)
+    }
+}
+
 /// The bytes' destination: plain text or bgzf, fixed at creation by the path's suffix, or
 /// standard output, which is always plain text.
 ///
@@ -515,11 +642,12 @@ fn path_is_bgzf(path: &Path) -> bool {
 /// writes while the others waited. The multithreaded writer cuts the same 64 KiB blocks at the
 /// same level, so the file is byte for byte the one the single-threaded writer produces. **One
 /// thread keeps the single-threaded writer**, since the multithreaded one adds a writer thread and
-/// at least one compressing thread, and an operator who asked for one thread asked for one.
+/// at least one compressing thread, and an operator who asked for one thread asked for one. With
+/// more, the multithreaded writer is fed through a thread of its own ([`BgzfHandOff`]).
 enum Sink {
     Plain(BufWriter<File>),
     Bgzf(Box<noodles_bgzf::io::Writer<File>>),
-    BgzfThreaded(Box<noodles_bgzf::io::MultithreadedWriter<File>>),
+    BgzfThreaded(BgzfHandOff<File>),
     Stdout(BufWriter<io::Stdout>),
 }
 
@@ -538,9 +666,9 @@ impl Sink {
         })?;
         Ok(if path_is_bgzf(final_path) {
             match NonZeroUsize::new(rayon::current_num_threads()).filter(|n| n.get() > 1) {
-                Some(workers) => Self::BgzfThreaded(Box::new(
+                Some(workers) => Self::BgzfThreaded(BgzfHandOff::new(Box::new(
                     noodles_bgzf::io::MultithreadedWriter::with_worker_count(workers, file),
-                )),
+                ))),
                 None => Self::Bgzf(Box::new(noodles_bgzf::io::Writer::new(file))),
             }
         } else {
@@ -577,7 +705,13 @@ impl Sink {
                 tmp_path: tmp_path.clone(),
                 source,
             })?,
-            Self::BgzfThreaded(mut bgzf) => {
+            Self::BgzfThreaded(hand_off) => {
+                // Every byte handed over is written before the writer is finished: an error here
+                // is a write's, not the terminator's.
+                let mut bgzf = hand_off.finish().map_err(|source| VcfWriteError::Write {
+                    tmp_path: tmp_path.clone(),
+                    source,
+                })?;
                 bgzf.finish().map_err(|source| VcfWriteError::FinishBgzf {
                     tmp_path: tmp_path.clone(),
                     source,
