@@ -12,6 +12,9 @@
 //! thinning (5 records a kb). The output lines go to `out.vcf` when given; the wall time of the
 //! drawing and of the stage go to stderr. Threads: `RAYON_NUM_THREADS`. Margin thinning:
 //! `DENSITY`, as `--refine-margin-density` takes it (`0` walks every record).
+//!
+//! The allocator is mimalloc, as `pvc`'s. Built with `--no-default-features --features dhat-heap`,
+//! it is dhat, and the peak of the bytes asked for is printed at the end.
 #![allow(
     clippy::disallowed_methods,
     reason = "a measurement tool outside the portable-float guarantee (clippy.toml)"
@@ -56,6 +59,14 @@ const READ_ERROR: f64 = 0.01;
 const ERROR_PHRED: u8 = 20;
 const MUTATION: f64 = 0.003;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 7 {
@@ -72,6 +83,8 @@ fn main() {
     let seed: u64 = args[6].parse().unwrap();
     let out_path = args.get(7);
 
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
     print_windows();
     let started = Instant::now();
     let mut draw = Draw(seed);
@@ -249,6 +262,11 @@ fn main() {
         "stage: {:.2} s, {} lines out",
         solving.elapsed().as_secs_f64(),
         out.len()
+    );
+    #[cfg(feature = "dhat-heap")]
+    eprintln!(
+        "dhat: peak {:.1} MB requested",
+        dhat::HeapStats::get().max_bytes as f64 / 1e6
     );
     if let Some(path) = out_path {
         let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());

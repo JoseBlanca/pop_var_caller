@@ -22,7 +22,11 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-24):** **refinement's window memory, five cuts built**
+> - **Last completed task (2026-11-24):** **refinement's solve, four exact speed-ups built**
+> (branch `refine-solve`, [report](doc/devel/reports/implementations/refine_solve_build_2026-11-24.md)):
+> items 4.1 to 4.4 of the solve review on branch `solve-hunt`; output byte for byte main's on 13
+> drawn cohorts; instructions −29% at 200 drawn samples, −40% at 800. Not merged.
+> - **Also 2026-11-24:** **refinement's window memory, five cuts built**
 > (branch `refine-mem`, [report](doc/devel/reports/implementations/refine_mem_build_2026-11-24.md)):
 > items 1, 2, 3, 4 and 8 of the memory review on branch `mem-hunt`; output identical where the
 > budget does not bind; the budget's count is lower, so the default budget wants re-measuring on
