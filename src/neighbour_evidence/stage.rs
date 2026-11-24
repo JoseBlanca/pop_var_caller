@@ -338,6 +338,16 @@ enum HeldText {
     Compressed { bytes: Vec<u8>, length: usize },
 }
 
+impl HeldText {
+    /// The bytes the text holds: its length as it arrived, or compressed.
+    fn held_bytes(&self) -> usize {
+        match self {
+            Self::Plain(line) => line.len(),
+            Self::Compressed { bytes, .. } => bytes.len(),
+        }
+    }
+}
+
 /// **One thread's compressor and the buffer it compresses into**, made once a batch a thread
 /// rather than once a line.
 struct LineCompressor {
@@ -957,6 +967,11 @@ impl NeighbourEvidenceStage {
             // are independent; done on this thread it was a quarter of the writing pass on 59
             // tomato accessions over 32 Mb, with every other thread waiting for the next window.
             // The tallies are counts, so summing them in any order gives the serial total.
+            // What the core's lines are counted at, which they no longer hold once written.
+            let written_text: Vec<u64> = self.held[plan.core_start..plan.core_end]
+                .iter()
+                .map(|held| held.text.held_bytes() as u64)
+                .collect();
             let mut chunk_start = plan.core_start;
             while chunk_start < plan.core_end {
                 let chunk_end = (chunk_start + LINES_REWRITTEN_TOGETHER).min(plan.core_end);
@@ -988,6 +1003,15 @@ impl NeighbourEvidenceStage {
                     }
                 }
                 chunk_start = chunk_end;
+            }
+            // **A written line is counted at nothing**: its text is let go as it is written, but
+            // the line is held on, in the next windows' left margin, for its record.
+            let mut freed = 0;
+            for line in plan.core_start..self.held.len() {
+                if line < plan.core_end {
+                    freed += written_text[line - plan.core_start];
+                }
+                self.held_bytes[line + 1] -= freed;
             }
             // **One line a window in the run's log**: where it was, what it held by the budget's
             // count and how long it took — what a run that slows or runs short of memory is read
@@ -1141,6 +1165,21 @@ impl NeighbourEvidenceStage {
             "the kept resident totals drifted"
         );
         if self.thinner.is_none() {
+            // Without thinning every site is held whole, and each line is counted at the text it
+            // holds — none once written — and its record's numbers, reads and solve state.
+            for (line, held) in self.held.iter().enumerate() {
+                let record = held.site.map_or(0, |site| {
+                    let index = site - self.first_site;
+                    record_window_bytes(&self.sites.records[index]).0
+                        + self.sites.fragments[index].heap_bytes() as u64
+                });
+                assert_eq!(
+                    self.held_bytes[line + 1] - self.held_bytes[line],
+                    held.text.held_bytes() as u64 + record,
+                    "line {line}, the core starting at {}",
+                    self.core_start
+                );
+            }
             return;
         }
         assert_eq!(self.joined, self.joined_lines(), "the kept joins drifted");
