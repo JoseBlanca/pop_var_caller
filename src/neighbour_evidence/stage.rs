@@ -609,9 +609,11 @@ impl NeighbourEvidenceStage {
             .par_iter_mut()
             .for_each_init(LineCompressor::new, |with, held| held.text.compress(with));
         // With thinned margins, the sites the far margins skip are held compressed too, until a
-        // window walks them (pass spec §6, thinned margins).
-        if self.thinner.is_some() {
-            let sites = self.site_span(from..self.held.len());
+        // window walks them (pass spec §6, thinned margins). Lines with no site among them have
+        // nothing to pack, and their empty span, `0..0`, is no range of held sites past the first
+        // contig.
+        let sites = self.site_span(from..self.held.len());
+        if self.thinner.is_some() && !sites.is_empty() {
             let first_site = self.first_site;
             let held = &self.held;
             let far_walked = &self.far_walked;

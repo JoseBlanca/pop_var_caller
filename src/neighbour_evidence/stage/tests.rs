@@ -857,6 +857,62 @@ fn the_thinner_walks_sparse_stretches_in_full_and_dense_ones_at_its_rate() {
     assert_eq!((0..100).filter(|_| thinner.walks(7)).count(), 40);
 }
 
+/// **A later contig whose lines are none of them sites passes through with thinning on** (code
+/// review 2026-11-24, B1): compressing a batch with no site in it asked for the sites
+/// `0..0` less the first held site's number, which is above zero on every contig after the first,
+/// and the run stopped. Twenty sites on one contig, then a single `LowQual` line on the next, at
+/// the default density: every line the pass keeps comes out, once, in order, the filtered one
+/// byte for byte.
+#[test]
+fn a_later_contig_of_filtered_lines_only_passes_through_with_thinning_on() {
+    let cohort = join_cohort();
+    let decision = decide(NeighbourEvidenceSwitch::On, &[0.95; 20], diploid())
+        .with_margin_thinning(
+            MarginThinning::parse(crate::neighbour_evidence::windows::DEFAULT_MARGIN_DENSITY)
+                .expect("the default density"),
+        );
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000, 2_000_000]);
+    let mut output = Vec::new();
+    for (index, line) in cohort.lines.iter().take(20).enumerate() {
+        stage
+            .push(
+                place(0, 1 + index as u64 * 500),
+                line.clone().into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            )
+            .expect("within the window budget");
+    }
+    let filtered = cohort.lines[20]
+        .replace("chr1", "chr2")
+        .replace("PASS", "LowQual");
+    stage
+        .push(
+            place(1, 1 + 20 * 500),
+            filtered.clone().into_bytes(),
+            RecordFragments::default(),
+            &mut output,
+        )
+        .expect("within the window budget");
+    stage.finish(&mut output).expect("within the window budget");
+    let places: Vec<(u32, u64)> = output
+        .iter()
+        .map(|(place, _)| (place.at.contig.0, place.at.position.0))
+        .collect();
+    // The pass drops a record no sample carries once refined; every other line comes out, once,
+    // in the order it went in.
+    assert_eq!(output.len() as u64 + stage.tally().records_dropped, 21);
+    assert!(
+        places.windows(2).all(|pair| pair[0] < pair[1]),
+        "{places:?}"
+    );
+    assert_eq!(places.last(), Some(&(1, 1 + 20 * 500)));
+    assert_eq!(
+        String::from_utf8_lossy(&output.last().expect("the filtered line").1),
+        filtered
+    );
+}
+
 /// **A thinned run says so in its header**, and an unthinned one's line is as it was.
 #[test]
 fn the_header_states_the_thinning_only_where_there_is_one() {
