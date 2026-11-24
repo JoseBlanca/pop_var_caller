@@ -1574,7 +1574,7 @@ fn final_solution(
     let parameters = state.parameters?;
     let reach = parameters.segment_bases as u64;
     let mut pairs = GenotypePairs::default();
-    let informative_positions = informative_positions(records, layout, sample);
+    let informative_positions = informative_positions(records, sample);
     let would_write = |position: u64, posterior: &[f64], background: f64| {
         has_evidence_nearby(&informative_positions, position, reach, contig_length)
             && score_best_genotype(posterior).1.get() >= no_read.min_genotype_quality
@@ -1747,12 +1747,16 @@ fn final_solution(
 }
 
 /// The positions of the window's sites where `sample`'s reads are informative, ascending.
-fn informative_positions(records: &[SiteRecord], layout: &WindowLayout, sample: usize) -> Vec<u64> {
-    layout
-        .record_of_site
+///
+/// **Every site, walked or not** (pass spec §6, thinned margins): a record the far margins skip
+/// keeps its rows, and reads there are as much the sample's own evidence as at a walked one.
+/// Listed over the walked sites only, a sample whose nearest reads on one side lay among skipped
+/// records was written `./.` where an unthinned run called it (code review 2026-11-24).
+fn informative_positions(records: &[SiteRecord], sample: usize) -> Vec<u64> {
+    records
         .iter()
-        .filter(|&&index| records[index].row(sample) == SampleRow::Informative)
-        .map(|&index| records[index].position)
+        .filter(|record| record.is_site() && record.row(sample) == SampleRow::Informative)
+        .map(|record| record.position)
         .collect()
 }
 

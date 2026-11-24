@@ -625,7 +625,9 @@ and so is every far record a sample's last written block joins at (phase output 
 far records are read is decided once for each record as it arrives, not by the window reading it —
 a token bucket of `D` tokens a kb, holding at most a kb's worth, that spends one on each record it
 walks — so a stretch no denser than `D` is read in full, and the choice does not depend on the
-thread count. Templates are chosen (§3.3) over the walked records only.
+thread count. Templates are chosen (§3.3) over the walked records only; §4.2's rule for writing a
+sample without reads reads every record, walked or not, since a skipped record keeps its rows
+(code review 2026-11-24).
 
 **A record the far margins skip is held compressed** while no window walks it: its numbers
 (likelihoods and allele shares) and its reads are packed with zstd once its line is compressed,

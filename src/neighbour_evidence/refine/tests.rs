@@ -1011,3 +1011,71 @@ fn a_copy_that_followed_the_reader_is_read_without_it() {
         "unsure {unsure}, settled {settled}"
     );
 }
+
+/// [`SHAPE`] at four reads a record, where the walks fit the drawn 300-kb segments; at one read a
+/// record they fit 30 kb, a reach the 50-kb near margins hold whole.
+const FOUR_READS: CohortShape = CohortShape {
+    depth: 4.0,
+    ..SHAPE
+};
+
+/// **A sample whose evidence on one side lies only among far records the walks skip is still
+/// written** (code review 2026-11-24, Mi1). Whether a sample with no reads at a record is written
+/// asks for informative records on both sides within its reach (§4.2); with thinned margins that
+/// list was made from the walked records only, so a sample whose nearest reads on one side lay
+/// past the near margin, among skipped records, was written `./.` where an unthinned run called
+/// it. Here sample 0 has reads up to record 999 and from record 1,300 on, none between; the core
+/// is records 1,000 to 1,099 (300 to 330 kb), and every record more than 50 kb from it is
+/// skipped, so sample 0's reads on the right, from 390 kb, are all in skipped records. Its core
+/// records must be called, not all withheld: when written, 98 of 100 called unthinned and 75
+/// thinned, against none thinned before.
+#[test]
+fn a_sample_whose_far_evidence_was_skipped_is_still_written() {
+    let silent = test_cohort(CohortShape {
+        silent_from: Some((0, 1_000)),
+        ..FOUR_READS
+    });
+    let speaking = test_cohort(FOUR_READS);
+    let records: Vec<SiteRecord> = silent.records[..1_300]
+        .iter()
+        .chain(&speaking.records[1_300..])
+        .cloned()
+        .collect();
+    let core = 1_000..1_100;
+    let near_start = records[core.start].position - 50_000;
+    let near_end = records[core.end - 1].position + 50_000;
+    let walked: Vec<bool> = records
+        .iter()
+        .map(|record| (near_start..=near_end).contains(&record.position))
+        .collect();
+    let solve = |walked: Option<&[bool]>| {
+        let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.95)).collect();
+        refine_window_with_reads(
+            &records,
+            None,
+            walked,
+            core.clone(),
+            None,
+            &mut fits,
+            MAX_TEMPLATES,
+            NoReadRule::default(),
+            Phasing::none(),
+            &[],
+        )
+        .records
+    };
+    let called = |refined: &[RefinedRecord]| {
+        refined
+            .iter()
+            .filter(|record| record.outcomes[0] == Outcome::Called)
+            .count()
+    };
+    let unthinned = called(&solve(None));
+    let thinned = called(&solve(Some(&walked)));
+    assert!(unthinned >= 50, "{unthinned} of 100 called unthinned");
+    // Thinning still changes which templates the walks choose, so not every call survives.
+    assert!(
+        thinned * 2 >= unthinned,
+        "{thinned} of 100 called thinned, {unthinned} unthinned"
+    );
+}
