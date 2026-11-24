@@ -92,7 +92,7 @@ fn main() {
     let switch = 1.0 - (-(spacing as f64) / SEGMENT_BASES).exp();
     // copies[sample][copy][record] -> allele
     let mut copies: Vec<[Vec<u8>; 2]> = Vec::with_capacity(samples);
-    for sample in 0..samples {
+    for &sample_inbreeding in &inbreeding {
         let mosaic = |draw: &mut Draw| {
             let mut founder = draw.below(FOUNDERS);
             (0..records)
@@ -110,7 +110,7 @@ fn main() {
                 .collect::<Vec<u8>>()
         };
         let first = mosaic(&mut draw);
-        let second = if inbreeding[sample] > 0.5 {
+        let second = if sample_inbreeding > 0.5 {
             first.clone()
         } else {
             mosaic(&mut draw)
