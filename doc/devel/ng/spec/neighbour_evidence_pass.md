@@ -586,7 +586,12 @@ threads.
   record's alleles are at most 3, four or seven where they do not fit (`PackedRecordFragments`);
   and each sample's two haplotypes, the templates they followed and its phase across the rounds,
   each allele pair's path bits packed in `⌈2·paths/8⌉` bytes. For each record of the core,
-  besides: each sample's sums over the averaged rounds and its written result, both `f32`. A
+  besides: each sample's sums over the averaged rounds and its written result, both `f32`. The
+  sums are of one genotype distribution and the background's share: with phasing the prediction
+  is read only at the sample's hidden records (§4.3), so a core record keeps the prediction's sums
+  where it is hidden from the sample and the posterior's elsewhere (2026-11-24,
+  `refine_mem_build_2026-11-24.md`); a window solved without phasing, which only the tests do,
+  keeps both. A
   core's lines are rewritten and written a chunk at a time (2026-11-22,
   `refine_memory_exact_2026-11-22.md`). Each sample's own result is
   made from its sums a few hundred samples at a time, as its state is let go, and copied into the
@@ -596,8 +601,11 @@ threads.
   of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
   bytes, counted only the likelihoods and shares.
 - **Per thread and record**: the round's inputs (the drawn definite alleles a byte each) and, from
-  round 2, the nine drawn paths; a site's blurred shares and likelihood matrix are computed where
-  they are read, not kept (2026-11-22). Its forward probabilities (`K² + 3K` numbers a record) and
+  round 2, the round's own drawn path; a site's blurred shares and likelihood matrix are computed
+  where they are read, not kept (2026-11-22). The eight extra paths are handed to the phase as each
+  is made, in one reused array; each path holds its states in two bytes a site, reads its uniforms
+  as it draws them, and the round's arrays are made at their exact length (2026-11-24: 2.15 kB a
+  walked record a thread before, 1.10 kB after, on the memory probe's drawn cohort). Its forward probabilities (`K² + 3K` numbers a record) and
   emissions (`K² + K`) are kept for one block of 64 records, the forward probabilities also at
   every block's first record, and computed again block by block in the backward sweep (2026-11-13;
   the same bits, and about three times fewer cycles, since the walk had been waiting on memory).
@@ -610,7 +618,11 @@ planned only once every line it spans is compressed, so the count does not depen
 batch was compressed. It counts too what the stage holds outside the window: the lines
 within the configured margin before the core, which a window whose margins the budget shrank does
 not span, and those read past the window, each at what it holds without solve state (code review
-2026-11-24). The shortest window, `--refine-window-floor`, is 500 kb of margin by
+2026-11-24). Two parts of the solve are never held together — the rounds' haplotype store, let
+go when the rounds end, and the core's written results, made after — so a window is counted at
+the larger of the store its walks hold and the results its core writes, not their sum. A core's
+lines are counted at nothing once written: their text is let go, though the lines stay held in
+the next windows' left margin for their records (both 2026-11-24, `refine_mem_build_2026-11-24.md`). The shortest window, `--refine-window-floor`, is 500 kb of margin by
 default, and of core unless `--refine-core-floor` is set lower (§2.2). It does not count the
 per-thread part: that would make the windows, and so the output, depend on the thread count (§2.3).
 For the same reason it counts arrays by their lengths, not the allocator's capacities, and types
@@ -634,10 +646,14 @@ sample without reads reads every record, walked or not, since a skipped record k
 
 **A record the far margins skip is held compressed** while no window walks it: its numbers
 (likelihoods and allele shares) and its reads are packed with zstd once its line is compressed,
-leaving its position, allele count and rows, and a window unpacks the records it walks and drops
-the unpacked copy of those it does not. The budget counts a skipped record at its packed size plus
-its line beyond the near margins, and in full within them; its solve state is never made. The
-packed size depends only on the record, so the windows do not depend on the thread count.
+leaving its position, allele count and rows. A window unpacks the records it walks, letting their
+packed bytes go, and packs again the unpacked records it does not walk: a record is held in one
+form at a time (2026-11-24; holding both was about 5 GB of a 2,000-sample window at the 500-kb
+floor). The budget counts a skipped record at its packed size plus its line beyond the near
+margins, and whole within them, never both; its solve state is never made there. A record held
+outside the window is counted in the form it is held in. The packed bytes depend only on the
+record — packing it again gives the same bytes — so the windows do not depend on the thread
+count.
 
 **`D` is 5 by default**; `0` reads every record, and the output is as before thinning. *Measured
 2026-11-23* (`doc/devel/reports/implementations/margin_thinning_2026-11-23.md`). On 2,176 tomato25

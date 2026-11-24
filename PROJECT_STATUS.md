@@ -22,7 +22,12 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-24):** **fixes from the refinement-memory review**
+> - **Last completed task (2026-11-24):** **refinement's window memory, five cuts built**
+> (branch `refine-mem`, [report](doc/devel/reports/implementations/refine_mem_build_2026-11-24.md)):
+> items 1, 2, 3, 4 and 8 of the memory review on branch `mem-hunt`; output identical where the
+> budget does not bind; the budget's count is lower, so the default budget wants re-measuring on
+> the tomato replay. Not merged.
+> - **Also 2026-11-24:** **fixes from the refinement-memory review**
 > (branch `refine-review-fixes`, [report](doc/devel/reports/implementations/refine_review_fixes_2026-11-24.md),
 > [review](doc/devel/reports/reviews/refine_memory_2026-11-24.md)): B1, M1, M2, M3, Mi1, Mi2 and the
 > nit fixed; Mi3 (zstd lengths place windows) left for the owner. Not merged.
