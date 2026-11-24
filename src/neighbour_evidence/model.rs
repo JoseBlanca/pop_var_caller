@@ -440,6 +440,65 @@ pub fn walk(
     .0
 }
 
+/// **[`walk`]'s log-likelihood alone**, from its forward pass alone: what the parameter grid is
+/// chosen by (§3.5). It runs the walk's own forward pass ([`forward_pass`]), so the number has the
+/// bits of `walk(...).log_likelihood`, at about a third of a walk's work: no backward pass, no
+/// block computed again, no posterior.
+///
+/// It holds no array a walk does not: the forward pass's two slots and one site's emissions, in
+/// the thread's walk arrays ([`WALK_ARRAYS`]).
+///
+/// # Panics
+///
+/// As [`walk`].
+#[must_use]
+pub fn walk_log_likelihood(
+    sites: &[WalkSite<'_>],
+    templates: usize,
+    template_weights: Option<&[f64]>,
+    parameters: WalkParameters,
+) -> f64 {
+    assert!(
+        sites
+            .windows(2)
+            .all(|pair| pair[0].position <= pair[1].position),
+        "a walk's sites must not descend in position"
+    );
+    let share = parameters.autozygous_share;
+    assert!(
+        share > 0.0 && share < 1.0 && templates > 0,
+        "a walk needs an autozygous share strictly between 0 and 1 and at least one template: \
+         got {share} and {templates}"
+    );
+    let k = templates;
+    let landing = parameters.landing_weights(k, template_weights);
+    let mut arrays = WALK_ARRAYS.take();
+    arrays.forward.resize(2, k);
+    arrays.emissions.resize(1, k);
+    let transition = |index: usize| {
+        persistence(
+            (sites[index].position - sites[index - 1].position) as f64,
+            &parameters,
+        )
+    };
+    let log_likelihood = forward_pass(
+        sites,
+        ForwardInputs {
+            k,
+            mismatch: parameters.mismatch,
+            landing: &landing,
+            share,
+            transition: &transition,
+        },
+        &mut GenotypePairs::default(),
+        (&mut arrays.forward, &mut arrays.emissions),
+        (&mut EmissionScratch::default(), &mut SiteTerms::default()),
+        |_, _, _| {},
+    );
+    WALK_ARRAYS.set(arrays);
+    log_likelihood
+}
+
 /// **A sample's read link between two walk sites**: `L` between `one` and `other`, each with its
 /// heterozygote's two alleles, the lower first; `None` when no fragment of the sample counts at both.
 pub(crate) type ReadLinkOf<'a> =
@@ -907,6 +966,59 @@ fn forward_step(
     scale
 }
 
+/// What a forward pass runs with besides its sites: `K`, the mismatch rate, the landing weights,
+/// the autozygous share, and each site's persistence from the site before ([`persistence`]), by
+/// the site's index.
+struct ForwardInputs<'a> {
+    k: usize,
+    mismatch: f64,
+    landing: &'a [f64],
+    share: f64,
+    transition: &'a dyn Fn(usize) -> (f64, f64, f64),
+}
+
+/// **The forward pass over `sites`**: each site's state distribution given the sites up to it,
+/// normalised; returns the log of the window's likelihood, the scales' logs added in site order.
+/// It uses two slots of `forward`, the site's and the one before, and slot 0 of `emissions`;
+/// `after_step(index, forward, slot)` sees each site's probabilities in `slot` as soon as they
+/// are made.
+///
+/// [`walk`] and [`walk_log_likelihood`] both run this one function, so the log-likelihood the
+/// parameter grid reads has the bits of the full walk's.
+fn forward_pass(
+    sites: &[WalkSite<'_>],
+    inputs: ForwardInputs<'_>,
+    genotype_pairs: &mut GenotypePairs,
+    (forward, emissions): (&mut Forward, &mut Emissions),
+    (scratch, terms): (&mut EmissionScratch, &mut SiteTerms),
+    mut after_step: impl FnMut(usize, &Forward, usize),
+) -> f64 {
+    let mut log_likelihood = 0.0;
+    for (index, site) in sites.iter().enumerate() {
+        site_terms(
+            site,
+            inputs.k,
+            inputs.mismatch,
+            genotype_pairs.of(site.allele_count),
+            emissions.site_mut(0),
+            scratch,
+            terms,
+        );
+        let previous = (index > 0).then(|| ((index - 1) % 2, (inputs.transition)(index)));
+        let scale = forward_step(
+            forward,
+            index % 2,
+            previous,
+            inputs.landing,
+            inputs.share,
+            (emissions.autozygous(0), emissions.pairs(0)),
+        );
+        log_likelihood += float::ln(scale);
+        after_step(index, forward, index % 2);
+    }
+    log_likelihood
+}
+
 thread_local! {
     /// The arrays a walk on this thread fills — see [`Forward`].
     static WALK_ARRAYS: std::cell::Cell<WalkArrays> = std::cell::Cell::new(WalkArrays::default());
@@ -1028,33 +1140,24 @@ fn walk_with_draw(
         .collect();
     let transition = |index: usize| persistences[index];
 
-    // Forward: each site's state distribution given the sites up to it, normalised; the scales
-    // multiply to the window's likelihood. Two slots, the site's and the one before.
-    let mut log_likelihood = 0.0;
-    for (index, site) in sites.iter().enumerate() {
-        site_terms(
-            site,
+    let log_likelihood = forward_pass(
+        sites,
+        ForwardInputs {
             k,
-            parameters.mismatch,
-            genotype_pairs.of(site.allele_count),
-            emissions.site_mut(0),
-            &mut scratch,
-            &mut terms,
-        );
-        let previous = (index > 0).then(|| ((index - 1) % 2, transition(index)));
-        let scale = forward_step(
-            &mut forward,
-            index % 2,
-            previous,
-            &landing,
+            mismatch: parameters.mismatch,
+            landing: &landing,
             share,
-            (emissions.autozygous(0), emissions.pairs(0)),
-        );
-        log_likelihood += float::ln(scale);
-        if index % FORWARD_BLOCK == 0 {
-            checkpoints.save(index / FORWARD_BLOCK, &forward, index % 2);
-        }
-    }
+            transition: &transition,
+        },
+        &mut genotype_pairs,
+        (&mut forward, &mut emissions),
+        (&mut scratch, &mut terms),
+        |index, forward, slot| {
+            if index % FORWARD_BLOCK == 0 {
+                checkpoints.save(index / FORWARD_BLOCK, forward, slot);
+            }
+        },
+    );
 
     // The round's own path from `uniforms`, then each extra path from the extra paths' stream, one
     // uniform a site from the last site back. All are drawn in the backward walk's one sweep, so

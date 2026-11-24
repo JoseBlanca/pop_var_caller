@@ -1104,3 +1104,89 @@ fn a_state_code_gives_the_state_back() {
         }
     }
 }
+
+/// **The forward pass alone gives the walk's log-likelihood, bit for bit**: on the four reference
+/// windows, and on a window longer than a block of the backward walk with template weights, a
+/// background landing share, multi-allelic sites and definite emission shares — each after a walk
+/// of another template count has left its arrays on the thread.
+#[test]
+fn the_log_likelihood_alone_has_the_walks_bits() {
+    let check = |sites: &[WalkSite<'_>],
+                 templates: usize,
+                 weights: Option<&[f64]>,
+                 parameters: WalkParameters| {
+        let whole = walk(sites, templates, weights, parameters).log_likelihood;
+        let alone = walk_log_likelihood(sites, templates, weights, parameters);
+        assert_eq!(
+            alone.to_bits(),
+            whole.to_bits(),
+            "{alone} against {whole} at {templates} templates over {} sites",
+            sites.len()
+        );
+    };
+    for case in reference_cases() {
+        let sites: Vec<WalkSite<'_>> = case
+            .sites
+            .iter()
+            .map(|(position, alleles, likelihoods, shares)| WalkSite {
+                position: *position,
+                allele_count: *alleles,
+                likelihoods,
+                template_shares: shares,
+                emission_shares: None,
+            })
+            .collect();
+        check(
+            &sites,
+            case.templates + usize::from(case.background),
+            None,
+            case.parameters,
+        );
+    }
+
+    // Three templates; every third site has three alleles, every fifth reads definite alleles.
+    let templates = 3;
+    let biallelic_likelihoods = [0.3, 1.0, 0.05];
+    let biallelic_shares = [0.9, 0.1, 0.2, 0.8, 0.5, 0.5];
+    let biallelic_definite = [1_u8, 0, 0, 1, 1, 0];
+    let triallelic_likelihoods = [0.1, 0.4, 0.02, 1.0, 0.3, 0.01];
+    let triallelic_shares = [0.8, 0.1, 0.1, 0.1, 0.1, 0.8, 0.3, 0.4, 0.3];
+    let triallelic_definite = [1_u8, 0, 0, 0, 0, 1, 0, 1, 0];
+    let sites: Vec<WalkSite<'_>> = (0..200_u64)
+        .map(|index| {
+            let definite = index % 5 == 0;
+            let (allele_count, likelihoods, shares, emission): (usize, &[f64], &[f64], &[u8]) =
+                if index % 3 == 0 {
+                    (
+                        3,
+                        &triallelic_likelihoods,
+                        &triallelic_shares,
+                        &triallelic_definite,
+                    )
+                } else {
+                    (
+                        2,
+                        &biallelic_likelihoods,
+                        &biallelic_shares,
+                        &biallelic_definite,
+                    )
+                };
+            WalkSite {
+                position: 1 + index * 700,
+                allele_count,
+                likelihoods,
+                template_shares: shares,
+                emission_shares: definite.then_some(emission),
+            }
+        })
+        .collect();
+    let parameters = WalkParameters {
+        segment_bases: 30_000.0,
+        run_bases: 100_000.0,
+        autozygous_share: 0.4,
+        mismatch: 0.01,
+        background_landing_share: Some(0.05),
+    };
+    check(&sites, templates, Some(&[2.0, 0.5]), parameters);
+    check(&sites[..1], templates, Some(&[2.0, 0.5]), parameters);
+}

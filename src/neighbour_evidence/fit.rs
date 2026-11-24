@@ -14,7 +14,7 @@
 //! one walked with — so the second fitting window refines the first window's choice rather than
 //! replacing it.
 
-use super::model::{WalkParameters, WalkSite, walk};
+use super::model::{WalkParameters, WalkSite, walk_log_likelihood};
 
 /// The grid of `S`, the mean stretch one copy copies from one template, in bases (§3.5).
 pub const SEGMENT_GRID: [f64; 2] = [30_000.0, 300_000.0];
@@ -94,7 +94,7 @@ impl SampleFit {
     /// frozen: the twelve grid walks at the sample's `F`, their log-likelihoods added to the running
     /// totals, and the best total chosen.
     /// `informative_records` is how many of the window's sites are informative records of the
-    /// sample. `template_weights` is the walk's, as [`walk`] takes it.
+    /// sample. `template_weights` is the walk's, as [`walk`](super::model::walk) takes it.
     pub fn fit_window(
         &mut self,
         sites: &[WalkSite<'_>],
@@ -108,19 +108,15 @@ impl SampleFit {
             return self.parameters(mismatch, background_landing_share);
         }
         for (point, summed) in self.summed_log_likelihood.iter_mut().enumerate() {
-            let result = walk(
-                sites,
-                templates,
-                template_weights,
-                WalkParameters {
-                    segment_bases: SEGMENT_GRID[point / RUN_GRID.len()],
-                    run_bases: RUN_GRID[point % RUN_GRID.len()],
-                    autozygous_share: self.autozygous_share,
-                    mismatch,
-                    background_landing_share,
-                },
-            );
-            *summed += result.log_likelihood;
+            // The forward pass alone: the backward pass and the posteriors would go unread.
+            let parameters = WalkParameters {
+                segment_bases: SEGMENT_GRID[point / RUN_GRID.len()],
+                run_bases: RUN_GRID[point % RUN_GRID.len()],
+                autozygous_share: self.autozygous_share,
+                mismatch,
+                background_landing_share,
+            };
+            *summed += walk_log_likelihood(sites, templates, template_weights, parameters);
         }
         // The largest total; on a tie, the earlier grid point.
         self.chosen = (0..GRID_POINTS).fold(0, |best, point| {
