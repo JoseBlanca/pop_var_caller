@@ -551,11 +551,13 @@ pub fn record_window_bytes(record: &SiteRecord) -> (u64, u64) {
 /// [`held_solve_bytes`]: the sums over its averaged rounds, and the record's result, its
 /// [`RefinedRecord`] (pass spec §6). Each sample's own result is made from its sums and copied
 /// into the records a few samples at a time ([`SOLUTIONS_AT_ONCE`]), so it is not counted, as the
-/// walks' arrays are not.
+/// walks' arrays are not. The sums are one distribution's and the background's share, as a
+/// phased window keeps them ([`KeptSums::OneDistribution`]); a window solved without phasing,
+/// which only the tests and the research probes solve, keeps a second distribution beyond this.
 #[must_use]
 pub fn core_solve_bytes(alleles: usize) -> u64 {
     let genotypes = alleles * (alleles + 1) / 2;
-    let sums = (2 * genotypes + 1) * std::mem::size_of::<f32>();
+    let sums = (genotypes + 1) * std::mem::size_of::<f32>();
     let written = genotypes * std::mem::size_of::<f32>()
         + OUTCOME_BYTES
         + std::mem::size_of::<f32>()
@@ -581,14 +583,55 @@ struct WindowLayout {
     /// The core's sites, ascending.
     core_sites: Vec<usize>,
     /// Where each core site's sums start in [`SampleRounds::sums`], one past the last at the end:
-    /// a site of `G` genotypes holds `2·G + 1` numbers.
+    /// a site of `G` genotypes holds `D·G + 1` numbers, `D` the distributions `kept_sums` keeps.
     core_sums: Vec<usize>,
+    kept_sums: KeptSums,
+}
+
+/// **Which genotype distributions a core site's sums keep for each sample** over the averaged
+/// rounds, besides the background's share. The prediction — what the neighbours alone say — is
+/// read only where a record is checked against the sample's own reads (§4.3), and the posterior
+/// only where it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeptSums {
+    /// The posterior's and the prediction's: without phasing, where every informative record is
+    /// checked and written.
+    Both,
+    /// One: the prediction's at the records hidden from the sample, the only ones checked with
+    /// phasing, whose posterior is made from the prediction; the posterior's elsewhere. With
+    /// phasing, which every run uses: the prediction's sums at every core record were about a
+    /// sixteenth of a 2,000-sample window at the 500-kb floor (memory review 2026-11-24).
+    OneDistribution,
+}
+
+impl KeptSums {
+    /// For a window solved with `phasing`.
+    fn for_phasing(phasing: Phasing) -> Self {
+        if phasing.is_on() {
+            Self::OneDistribution
+        } else {
+            Self::Both
+        }
+    }
+
+    /// How many distributions a core site's sums hold.
+    fn distributions(self) -> usize {
+        match self {
+            Self::Both => 2,
+            Self::OneDistribution => 1,
+        }
+    }
 }
 
 impl WindowLayout {
     /// The layout of a window whose walks read every site `walked` admits (every site, if `None`;
-    /// pass spec §6, thinned margins).
-    fn new(records: &[SiteRecord], core: &Range<usize>, walked: Option<&[bool]>) -> Self {
+    /// pass spec §6, thinned margins), and whose core sites keep the sums `kept_sums` says.
+    fn new(
+        records: &[SiteRecord],
+        core: &Range<usize>,
+        walked: Option<&[bool]>,
+        kept_sums: KeptSums,
+    ) -> Self {
         let record_of_site: Vec<usize> = (0..records.len())
             .filter(|&index| records[index].is_site() && walked.is_none_or(|walked| walked[index]))
             .collect();
@@ -603,13 +646,17 @@ impl WindowLayout {
         core_sums.push(0);
         for &site in &core_sites {
             let last = core_sums.last().copied().unwrap_or(0);
-            core_sums.push(last + 2 * records[record_of_site[site]].genotype_count() + 1);
+            core_sums.push(
+                last + kept_sums.distributions() * records[record_of_site[site]].genotype_count()
+                    + 1,
+            );
         }
         Self {
             record_of_site,
             site_of_record,
             core_sites,
             core_sums,
+            kept_sums,
         }
     }
 
@@ -858,7 +905,8 @@ struct SampleRounds {
     /// The parameters round 1 fitted or read.
     parameters: Option<WalkParameters>,
     /// The sums over the averaged rounds, core site after core site in one array, each site's
-    /// genotype posterior, then its prediction, then its chance of copying the background, at
+    /// genotype distributions as [`WindowLayout::kept_sums`] says — the posterior, then the
+    /// prediction, where both are kept — then its chance of copying the background, at
     /// [`WindowLayout::core_sums`]; empty until the first averaged round. One flat array rather
     /// than two vectors a site: held for every sample over a window's rounds, the vectors' own
     /// headers and allocations were twice the numbers they held (pass spec §6). In single
@@ -985,7 +1033,7 @@ pub fn refine_window_with_reads(
         last_blocks.is_empty() || last_blocks.len() == samples,
         "one last block a sample, or none"
     );
-    let layout = WindowLayout::new(records, &core, walked);
+    let layout = WindowLayout::new(records, &core, walked, KeptSums::for_phasing(phasing));
     let allele_counts: Vec<usize> = layout
         .record_of_site
         .iter()
@@ -1557,12 +1605,28 @@ fn solve_round(
             let sums =
                 &mut state.sums[layout.core_sums[core_site]..layout.core_sums[core_site + 1]];
             let genotypes = posteriors[site].len();
-            add_to(&mut sums[..genotypes], &posteriors[site]);
-            add_to(
-                &mut sums[genotypes..2 * genotypes],
-                &neighbour_predictions[site],
-            );
-            sums[2 * genotypes] += last_template_copy[site] as f32;
+            match layout.kept_sums {
+                KeptSums::Both => {
+                    add_to(&mut sums[..genotypes], &posteriors[site]);
+                    add_to(
+                        &mut sums[genotypes..2 * genotypes],
+                        &neighbour_predictions[site],
+                    );
+                }
+                KeptSums::OneDistribution => {
+                    let hidden = state
+                        .hidden
+                        .binary_search(&layout.record_of_site[site])
+                        .is_ok();
+                    let distribution = if hidden {
+                        &neighbour_predictions[site]
+                    } else {
+                        &posteriors[site]
+                    };
+                    add_to(&mut sums[..genotypes], distribution);
+                }
+            }
+            sums[genotypes * layout.kept_sums.distributions()] += last_template_copy[site] as f32;
         }
     }
 }
@@ -1617,16 +1681,30 @@ fn final_solution(
         let record = &records[index];
         let sum = &state.sums[layout.core_sums[core_site]..layout.core_sums[core_site + 1]];
         let genotypes = record.genotype_count();
-        let prediction = mean_distribution(&sum[genotypes..2 * genotypes], averaged);
-        let background = f64::from(sum[2 * genotypes]) / averaged;
-        let mut posterior = mean_distribution(&sum[..genotypes], averaged);
+        let hidden = state.hidden.binary_search(&index).is_ok();
+        let background = f64::from(sum[genotypes * layout.kept_sums.distributions()]) / averaged;
+        // The posterior and the prediction where both are kept; with one, the prediction at a
+        // hidden record — whose posterior is made from it below — and the posterior elsewhere.
+        let first = mean_distribution(&sum[..genotypes], averaged);
+        let (mut posterior, prediction) = match layout.kept_sums {
+            KeptSums::Both => (
+                first,
+                Some(mean_distribution(&sum[genotypes..2 * genotypes], averaged)),
+            ),
+            KeptSums::OneDistribution if hidden => (Vec::new(), Some(first)),
+            KeptSums::OneDistribution => (first, None),
+        };
         let outcome = match record.row(sample) {
             SampleRow::Absent => continue,
             SampleRow::Informative => {
-                let hidden = state.hidden.binary_search(&index).is_ok();
                 // Without phasing every informative record is checked, its prediction free of its
                 // own reads; with phasing only hidden records are (phasing spec §4.1).
                 if !phasing.is_on() || hidden {
+                    // PANIC-FREE: the prediction is kept at every core record without phasing,
+                    // and at the hidden ones with it.
+                    let prediction = prediction
+                        .as_deref()
+                        .expect("a checked record keeps its prediction");
                     let likelihoods: Vec<f64> = record.likelihoods(sample).collect();
                     let frequencies: Vec<f64> = record.background_shares().collect();
                     if let Some(settled) = settled_genotype(
@@ -1634,10 +1712,10 @@ fn final_solution(
                         &frequencies,
                         parameters.autozygous_share,
                         pairs.of(record.allele_count),
-                    ) && would_write(record.position, &prediction, background)
+                    ) && would_write(record.position, prediction, background)
                     {
                         solution.check.checked += 1;
-                        solution.check.disagreed += u32::from(argmax(&prediction) != settled);
+                        solution.check.disagreed += u32::from(argmax(prediction) != settled);
                     }
                     if hidden {
                         // The clean prediction times the sample's own reads, renormalised: its

@@ -603,11 +603,54 @@ fn hidden_records_respect_both_limits() {
             depth: 30.0,
             ..SHAPE
         });
-        let layout = WindowLayout::new(&cohort.records, &(0..records), None);
+        let layout = WindowLayout::new(
+            &cohort.records,
+            &(0..records),
+            None,
+            KeptSums::OneDistribution,
+        );
         let hidden = draw_hidden_records(&cohort.records, &layout, 0, 5);
         assert_eq!(hidden.len(), expected, "{records} records");
         assert!(hidden.windows(2).all(|pair| pair[0] < pair[1]));
     }
+}
+
+/// **A phased window keeps one distribution's sums at a core record, an unphased one two**, each
+/// with the background's share, and the budget counts a phased window's: `G + 1` numbers a sample
+/// at a record of `G` genotypes, which `core_solve_bytes` counts besides the written result.
+#[test]
+fn a_phased_core_keeps_one_distributions_sums() {
+    let records = 40;
+    let cohort = test_cohort(CohortShape { records, ..SHAPE });
+    let core = 10..30;
+    let genotypes: Vec<usize> = cohort.records[core.clone()]
+        .iter()
+        .filter(|record| record.is_site())
+        .map(SiteRecord::genotype_count)
+        .collect();
+    let numbers = |kept_sums| {
+        WindowLayout::new(&cohort.records, &core, None, kept_sums)
+            .core_sums
+            .last()
+            .copied()
+            .unwrap_or(0)
+    };
+    assert_eq!(
+        numbers(KeptSums::OneDistribution),
+        genotypes.iter().map(|g| g + 1).sum::<usize>()
+    );
+    assert_eq!(
+        numbers(KeptSums::Both),
+        genotypes.iter().map(|g| 2 * g + 1).sum::<usize>()
+    );
+    let biallelic_result = 3 * std::mem::size_of::<f32>()
+        + OUTCOME_BYTES
+        + std::mem::size_of::<f32>()
+        + WRITTEN_PHASE_BYTES;
+    assert_eq!(
+        core_solve_bytes(2),
+        (4 * std::mem::size_of::<f32>() + biallelic_result) as u64
+    );
 }
 
 /// **A phased window of two or three samples runs**, every template slot that exists filled, and
@@ -854,7 +897,12 @@ fn read_check_records_are_one_in_twenty_and_never_hidden() {
         depth: 30.0,
         ..SHAPE
     });
-    let layout = WindowLayout::new(&cohort.records, &(0..records), None);
+    let layout = WindowLayout::new(
+        &cohort.records,
+        &(0..records),
+        None,
+        KeptSums::OneDistribution,
+    );
     let fragments: Vec<PackedRecordFragments> = (0..records)
         .map(|index| {
             let entry = |sample: u32| FragmentAllele {
@@ -927,7 +975,7 @@ fn a_copy_that_followed_the_reader_is_read_without_it() {
     let cohort = test_cohort(shape);
     let records = &cohort.records;
     let core = 0..records.len();
-    let layout = WindowLayout::new(records, &core, None);
+    let layout = WindowLayout::new(records, &core, None, KeptSums::OneDistribution);
     let mut store = HaplotypeStore::new(records, &layout, shape.samples);
     let mut genotype_pairs = GenotypePairs::default();
     let pairs = genotype_pairs.of(2).to_vec();
