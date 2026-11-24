@@ -493,12 +493,23 @@ impl From<RecordFragments> for PackedRecordFragments {
                 error_phred: entry.error_phred,
             });
         }
-        // Three bytes an entry where every entry's allele and Phred fit, as most records' do.
-        let tight: Option<Vec<TightReadAllele>> =
-            compact.iter().copied().map(TightReadAllele::of).collect();
-        let entries = match tight {
-            Some(tight) => PackedEntries::Tight(tight),
-            None => PackedEntries::Compact(compact),
+        // Three bytes an entry where every entry's allele and Phred fit, as most records' do. Made
+        // at its exact length: collected through `Option`, the vector grew by doubling and kept up
+        // to as much again, which `heap_bytes` does not count.
+        let entries = if compact
+            .iter()
+            .all(|&entry| TightReadAllele::of(entry).is_some())
+        {
+            // A map over a slice knows its length, so the vector is allocated once, exactly.
+            PackedEntries::Tight(
+                compact
+                    .iter()
+                    // PANIC-FREE: every entry was just checked to fit.
+                    .map(|&entry| TightReadAllele::of(entry).expect("an entry that fits"))
+                    .collect(),
+            )
+        } else {
+            PackedEntries::Compact(compact)
         };
         Self { samples, entries }
     }
@@ -693,5 +704,39 @@ mod tests {
         );
         check(vec![entry(0, 5, 4, 30), entry(2, 9, 1, 60)], false);
         check(vec![entry(0, 5, 1, 64), entry(2, 9, 1, 60)], false);
+    }
+
+    /// **Each form's read alleles are held at their own length** (code review 2026-11-24, M3):
+    /// the window's budget counts an entry's bytes times the entries, so a vector with spare
+    /// capacity holds memory nobody counts. The three-byte form was collected through an iterator
+    /// that gave no length, so its vector grew by doubling and kept the slack: 1,025 entries in
+    /// room for 2,048.
+    #[test]
+    fn read_alleles_are_held_at_their_length_in_every_form() {
+        let entries = |allele: u16, fragment_step: u32| {
+            RecordFragments::from_entries(
+                (0..1_025)
+                    .map(|index| FragmentAllele {
+                        sample: 0,
+                        fragment: index * fragment_step,
+                        allele,
+                        error_phred: 20,
+                    })
+                    .collect(),
+            )
+        };
+        let length_and_capacity = |packed: &PackedRecordFragments| match &packed.entries {
+            PackedEntries::Tight(entries) => ("tight", entries.len(), entries.capacity()),
+            PackedEntries::Compact(entries) => ("compact", entries.len(), entries.capacity()),
+            PackedEntries::Whole(entries) => ("whole", entries.len(), entries.capacity()),
+        };
+        // Alleles 0 to 3 fit three bytes; allele 5 needs four; fragments 100 apart overflow the
+        // four-byte form's offset and are held whole.
+        let tight = PackedRecordFragments::from(entries(1, 1));
+        let compact = PackedRecordFragments::from(entries(5, 1));
+        let whole = PackedRecordFragments::from(entries(1, 100));
+        assert_eq!(length_and_capacity(&tight), ("tight", 1_025, 1_025));
+        assert_eq!(length_and_capacity(&compact), ("compact", 1_025, 1_025));
+        assert_eq!(length_and_capacity(&whole), ("whole", 1_025, 1_025));
     }
 }
