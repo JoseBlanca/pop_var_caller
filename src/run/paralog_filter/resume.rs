@@ -359,6 +359,12 @@ struct RefinementParts {
     /// be shorter than the margin floor, which is then the core floor too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     core_floor_bases: Option<u64>,
+    /// Whether the core floor was set on its own (`--refine-core-floor`), so a resumed run given a
+    /// new `--refine-window-floor` keeps it rather than moving it with the margin floor. Absent in a
+    /// manifest written before this was recorded: there a core floor other than the margin floor
+    /// was set on its own, and one equal to it is taken as not set, as it is by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core_floor_given: Option<bool>,
     budget_bytes: u64,
     /// The far margins' walked records a kb, in thousandths (`--refine-margin-density`); absent
     /// where every record is walked, as in a manifest written before margins could be thinned.
@@ -377,6 +383,7 @@ impl RefinementParts {
             margin_bases: decision.sizes.margin_bases,
             margin_floor_bases: decision.sizes.margin_floor_bases,
             core_floor_bases: Some(decision.sizes.core_floor_bases),
+            core_floor_given: Some(decision.core_floor_given),
             budget_bytes: decision.sizes.budget_bytes,
             margin_density_thousandths: decision
                 .sizes
@@ -414,6 +421,10 @@ impl RefinementParts {
             },
             path_agreement,
             reads_in_draw: self.reads_in_draw,
+            core_floor_given: self.core_floor_given.unwrap_or_else(|| {
+                self.core_floor_bases
+                    .is_some_and(|core_floor| core_floor != self.margin_floor_bases)
+            }),
         })
     }
 }

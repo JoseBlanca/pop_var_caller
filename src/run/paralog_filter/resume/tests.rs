@@ -155,3 +155,49 @@ fn a_directory_without_a_manifest_is_not_resumable() {
         Err(ResumeError::Read { .. })
     ));
 }
+
+/// **A manifest says whether the core floor was set on its own, and an older one is read as the
+/// run it was** (code review 2026-11-24, Mi2): a resumed run given a new `--refine-window-floor`
+/// moves the core floor with it only where the stopped run left it unset. A manifest written
+/// before the core floor existed had none set; one written before this was recorded had it set
+/// exactly where it differs from the margin floor.
+#[test]
+fn a_manifest_says_whether_the_core_floor_was_set_on_its_own() {
+    let inbreeding = vec![InbreedingF::try_new(0.9).expect("a fraction"); 2];
+    let coefficients: Vec<f64> = inbreeding.iter().map(|f| f.get()).collect();
+    let ploidy = Ploidy::try_new(2).expect("two copies");
+    let default = decide(NeighbourEvidenceSwitch::On, &coefficients, ploidy);
+    let given = default.clone().with_core_floor(300_000);
+    // Written, then read back with `drop` keys taken out of the manifest's JSON.
+    let read_back = |decision: &NeighbourEvidenceDecision, drop: &[&str]| {
+        let mut json = serde_json::to_value(RefinementParts::of(decision)).expect("to JSON");
+        for key in drop {
+            json.as_object_mut().expect("an object").remove(*key);
+        }
+        serde_json::from_value::<RefinementParts>(json)
+            .expect("from JSON")
+            .into_decision(&inbreeding)
+            .expect("a decision")
+    };
+    for keys in [
+        &[][..],
+        &["core_floor_given"],
+        &["core_floor_given", "core_floor_bases"],
+    ] {
+        let back = read_back(&default, keys);
+        assert!(!back.core_floor_given, "{keys:?}");
+        assert_eq!(
+            back.with_window_floor(800_000).sizes.core_floor_bases,
+            800_000
+        );
+    }
+    for keys in [&[][..], &["core_floor_given"]] {
+        let back = read_back(&given, keys);
+        assert!(back.core_floor_given, "{keys:?}");
+        assert_eq!(
+            back.with_window_floor(800_000).sizes.core_floor_bases,
+            300_000
+        );
+    }
+    assert_eq!(read_back(&given, &[]), given);
+}

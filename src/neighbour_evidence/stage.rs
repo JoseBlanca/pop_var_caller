@@ -73,6 +73,10 @@ pub struct NeighbourEvidenceDecision {
     /// (`neighbour_evidence_reads_in_draw.md`); [`decide`] sets it. Off only where a test needs
     /// the link test's reads alone.
     pub(crate) reads_in_draw: bool,
+    /// Whether the core floor was set on its own (`--refine-core-floor`). Where it was not, it is
+    /// the margin floor and follows it ([`Self::with_window_floor`]), on a fresh run and on a
+    /// resumed run given a new `--refine-window-floor` alike.
+    pub(crate) core_floor_given: bool,
 }
 
 impl NeighbourEvidenceDecision {
@@ -98,12 +102,18 @@ impl NeighbourEvidenceDecision {
     }
 
     /// The same decision, no window's margins (nor, then, its core) shorter than `bases`
-    /// (`--refine-window-floor`).
+    /// (`--refine-window-floor`). A core floor not set on its own ([`Self::with_core_floor`])
+    /// becomes `bases` too.
     #[must_use]
     pub fn with_window_floor(self, bases: u64) -> Self {
         Self {
             sizes: WindowSizes {
                 margin_floor_bases: bases,
+                core_floor_bases: if self.core_floor_given {
+                    self.sizes.core_floor_bases
+                } else {
+                    bases
+                },
                 ..self.sizes
             },
             ..self
@@ -119,6 +129,7 @@ impl NeighbourEvidenceDecision {
                 core_floor_bases: bases,
                 ..self.sizes
             },
+            core_floor_given: true,
             ..self
         }
     }
@@ -259,6 +270,7 @@ pub fn decide(
         sizes: WindowSizes::default(),
         path_agreement: PathAgreement::DEFAULT,
         reads_in_draw: true,
+        core_floor_given: false,
     }
 }
 

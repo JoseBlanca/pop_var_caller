@@ -25,6 +25,7 @@ use thiserror::Error;
 use crate::cli::calling_run::{self, CallingRunError};
 use crate::cli::run_output::{self, LogFileError};
 use crate::neighbour_evidence::phase::PathAgreement;
+use crate::neighbour_evidence::stage::NeighbourEvidenceDecision;
 use crate::run::paralog_filter::resume::{self, ResumeError};
 use crate::run::paralog_filter::{self, ParalogFilterError};
 use crate::vcf::writer::is_standard_output;
@@ -70,7 +71,8 @@ pub struct ResumeCallingArgs {
     pub refine_window_bytes: Option<u64>,
 
     /// The shortest each margin of a refinement window may become, in bases, in place of the
-    /// stopped run's. See `pvc call-from-psps --help`.
+    /// stopped run's. Where neither run was given --refine-core-floor, the shortest core follows
+    /// it, as in a fresh run. See `pvc call-from-psps --help`.
     #[arg(
         long,
         value_name = "BASES",
@@ -174,27 +176,7 @@ pub fn run_resume_calling(args: &ResumeCallingArgs) -> Result<(), ResumeCallingC
     let point = resume::load(scratch.path()).map_err(not_resumable)?;
     let mut metadata = point.metadata;
     if let Some(decision) = metadata.neighbour_evidence().cloned() {
-        let decision = match args.refine_window_bytes {
-            Some(bytes) => decision.with_window_bytes(bytes),
-            None => decision,
-        };
-        let decision = match args.refine_window_floor {
-            Some(bases) => decision.with_window_floor(bases),
-            None => decision,
-        };
-        let decision = match args.refine_core_floor {
-            Some(bases) => decision.with_core_floor(bases),
-            None => decision,
-        };
-        let decision = match args.refine_margin_density {
-            Some(density) => decision.with_margin_thinning(density.0),
-            None => decision,
-        };
-        let decision = match args.phase_min_path_agreement {
-            Some(agreement) => decision.with_path_agreement(agreement),
-            None => decision,
-        };
-        metadata = metadata.the_neighbour_evidence_decision(decision);
+        metadata = metadata.the_neighbour_evidence_decision(the_decision_resumed(decision, args));
     }
     tracing::info!(
         "resuming the run `{}`: {} samples, {} records on its spill, from {}",
@@ -234,6 +216,34 @@ pub fn run_resume_calling(args: &ResumeCallingArgs) -> Result<(), ResumeCallingC
     drop(point.spill);
     scratch.the_run_succeeded();
     Ok(())
+}
+
+/// **The stopped run's refinement decision with the options given to this run**: each one given
+/// replaces the stopped run's, and the others stay as that run had them.
+fn the_decision_resumed(
+    decision: NeighbourEvidenceDecision,
+    args: &ResumeCallingArgs,
+) -> NeighbourEvidenceDecision {
+    let decision = match args.refine_window_bytes {
+        Some(bytes) => decision.with_window_bytes(bytes),
+        None => decision,
+    };
+    let decision = match args.refine_window_floor {
+        Some(bases) => decision.with_window_floor(bases),
+        None => decision,
+    };
+    let decision = match args.refine_core_floor {
+        Some(bases) => decision.with_core_floor(bases),
+        None => decision,
+    };
+    let decision = match args.refine_margin_density {
+        Some(density) => decision.with_margin_thinning(density.0),
+        None => decision,
+    };
+    match args.phase_min_path_agreement {
+        Some(agreement) => decision.with_path_agreement(agreement),
+        None => decision,
+    }
 }
 
 #[cfg(test)]

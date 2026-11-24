@@ -892,8 +892,12 @@ pub fn neighbour_evidence_decision(
         .with_path_agreement(path_agreement)
         .with_window_bytes(windows.window_bytes)
         .with_window_floor(windows.window_floor)
-        .with_core_floor(windows.core_floor.unwrap_or(windows.window_floor))
         .with_margin_thinning(windows.margin_density.0);
+    // Not given, the core floor is the window floor, which `with_window_floor` has set.
+    let decision = match windows.core_floor {
+        Some(bases) => decision.with_core_floor(bases),
+        None => decision,
+    };
     let decision = match windows.window_max {
         Some(bases) => decision.with_window_max(bases),
         None => decision,
