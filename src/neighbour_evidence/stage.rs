@@ -445,6 +445,16 @@ pub struct NeighbourEvidenceStage {
     /// state of each line the far margins skip. Empty without thinning.
     far_walked: Vec<bool>,
     skipped_bytes: Vec<u64>,
+    /// With thinned margins: the held lines some sample's last written block holds a record at
+    /// ([`Self::joined_lines`]), and `skipped_bytes` less what those lines' records save, which
+    /// they do not since a window walks them ([`Self::skipped_bytes_besides`]) — what a window is
+    /// planned with. **Kept, not made for each line pushed**: both change only when a window is
+    /// solved or held lines are dropped, and are made again then; a pushed line is in no block, so
+    /// it only extends the totals. Made for every line, on 300,000 records of 10 samples at the
+    /// default density they took 43 to 55 s against 8 to 12 s kept (code review 2026-11-24).
+    /// Empty without thinning.
+    joined: Vec<usize>,
+    skipped_besides_joined: Vec<u64>,
     /// Which records the far margins walk, decided as each arrives.
     thinner: Option<MarginThinner>,
     /// The held sites, each with its fragments; the first is site number `first_site`.
@@ -491,6 +501,8 @@ impl NeighbourEvidenceStage {
             core_bytes: vec![0],
             far_walked: Vec::new(),
             skipped_bytes: vec![0],
+            joined: Vec::new(),
+            skipped_besides_joined: vec![0],
             thinner: decision.sizes.thinning.map(MarginThinner::new),
             sites: HeldSites::default(),
             first_site: 0,
@@ -599,6 +611,9 @@ impl NeighbourEvidenceStage {
         if self.thinner.is_some() {
             self.far_walked.push(far_walked);
             self.skipped_bytes.push(last(&self.skipped_bytes) + skipped);
+            // A new line is in no last block: blocks hold only records of cores already written.
+            self.skipped_besides_joined
+                .push(last(&self.skipped_besides_joined) + skipped);
         }
         self.positions.push(place.at.position.0);
         self.held.push(HeldLine {
@@ -686,6 +701,8 @@ impl NeighbourEvidenceStage {
         self.core_bytes = vec![0];
         self.far_walked.clear();
         self.skipped_bytes = vec![0];
+        self.joined.clear();
+        self.skipped_besides_joined = vec![0];
         if let Some(thinner) = &mut self.thinner {
             *thinner = MarginThinner::new(thinner.thinning);
         }
@@ -710,14 +727,17 @@ impl NeighbourEvidenceStage {
         while self.core_start < self.held.len() {
             // With thinned margins, a far-margin record some sample's last block joins at is
             // walked, so its solve state is counted (pass spec §6, thinned margins).
-            let joined = self.joined_lines();
-            let skipped = self.skipped_bytes_besides(&joined);
+            #[cfg(test)]
+            self.check_the_kept_joins();
             let Some(plan) = plan_window(
                 &self.positions,
                 WindowBytes {
                     held: &self.held_bytes,
                     core: &self.core_bytes,
-                    skipped: skipped.as_deref(),
+                    skipped: self
+                        .thinner
+                        .is_some()
+                        .then_some(self.skipped_besides_joined.as_slice()),
                 },
                 self.core_start,
                 contig_complete,
@@ -797,7 +817,7 @@ impl NeighbourEvidenceStage {
                             walked[site - window_sites.start] = (plan.near_start..plan.near_end)
                                 .contains(&line)
                                 || self.far_walked[line]
-                                || joined.binary_search(&line).is_ok();
+                                || self.joined.binary_search(&line).is_ok();
                         }
                     }
                     walked
@@ -894,6 +914,7 @@ impl NeighbourEvidenceStage {
             );
             self.core_start = plan.core_end;
             self.forget_what_no_window_reads();
+            self.make_the_joins_again();
         }
         Ok(())
     }
@@ -968,12 +989,10 @@ impl NeighbourEvidenceStage {
     }
 
     /// **What a window does not pay for the far margins' skipped records**, as running totals over
-    /// the held lines: `skipped_bytes`, less the records in `joined`, which are walked. `None`
-    /// without thinning.
-    fn skipped_bytes_besides(&self, joined: &[usize]) -> Option<Vec<u64>> {
-        self.thinner.as_ref()?;
+    /// the held lines: `skipped_bytes`, less the records in `joined`, which are walked.
+    fn skipped_bytes_besides(&self, joined: &[usize]) -> Vec<u64> {
         if joined.is_empty() {
-            return Some(self.skipped_bytes.clone());
+            return self.skipped_bytes.clone();
         }
         let mut totals = Vec::with_capacity(self.skipped_bytes.len());
         totals.push(0);
@@ -986,7 +1005,34 @@ impl NeighbourEvidenceStage {
             }
             totals.push(self.skipped_bytes[line + 1] - less);
         }
-        Some(totals)
+        totals
+    }
+
+    /// **Makes the kept joins and their totals again** (`joined`, `skipped_besides_joined`), once
+    /// a window is solved: its core may have changed the last written blocks, and lines may
+    /// have been dropped.
+    fn make_the_joins_again(&mut self) {
+        if self.thinner.is_none() {
+            return;
+        }
+        self.joined = self.joined_lines();
+        self.skipped_besides_joined = self.skipped_bytes_besides(&self.joined);
+    }
+
+    /// **The kept joins are what making them again gives**: what lets them be kept rather than
+    /// made for every line, checked before every window is planned in every test that runs a
+    /// stage.
+    #[cfg(test)]
+    fn check_the_kept_joins(&self) {
+        if self.thinner.is_none() {
+            return;
+        }
+        assert_eq!(self.joined, self.joined_lines(), "the kept joins drifted");
+        assert_eq!(
+            self.skipped_besides_joined,
+            self.skipped_bytes_besides(&self.joined),
+            "the kept skipped totals drifted"
+        );
     }
 
     /// The sites among held lines `lines`, as a range of site numbers.
