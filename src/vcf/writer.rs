@@ -446,12 +446,6 @@ impl VcfWriter {
     }
 }
 
-/// Where a record is written, after the padding rule has moved it.
-///
-/// **The position comes from the function that writes the `POS` column**
-/// ([`written_position`](super::encode::written_position)) rather than from a second copy of the
-/// padding rule. The two used to be spelled separately, so a record's ordering key and its own
-/// `POS` could drift apart under an edit to either.
 /// **Writes one line and its newline to the file**, counting it — what every line the writer
 /// writes goes through, its order already checked.
 fn write_one_line(
@@ -470,6 +464,12 @@ fn write_one_line(
     Ok(())
 }
 
+/// Where a record is written, after the padding rule has moved it.
+///
+/// **The position comes from the function that writes the `POS` column**
+/// ([`written_position`](super::encode::written_position)) rather than from a second copy of the
+/// padding rule. The two used to be spelled separately, so a record's ordering key and its own
+/// `POS` could drift apart under an edit to either.
 fn place_of(record: &VcfRecord) -> RecordPlace {
     RecordPlace {
         at: GenomePosition {
