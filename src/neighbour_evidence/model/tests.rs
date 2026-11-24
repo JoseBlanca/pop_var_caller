@@ -1190,3 +1190,96 @@ fn the_log_likelihood_alone_has_the_walks_bits() {
     check(&sites, templates, Some(&[2.0, 0.5]), parameters);
     check(&sites[..1], templates, Some(&[2.0, 0.5]), parameters);
 }
+
+/// **Emissions from definite alleles by the allele-pair table have the general computation's
+/// bits**: a site reading definite alleles as its emission shares against the same alleles given
+/// as the template shares, which the general computation reads — at 2, 3 and 5 alleles and 17
+/// templates, every allele carried by several templates. A template carrying no allele is not
+/// definite, and takes the general computation.
+#[test]
+fn definite_emissions_have_the_general_bits() {
+    let templates = 17;
+    let mismatch = 0.013;
+    for alleles in [2_usize, 3, 5] {
+        let genotypes = alleles * (alleles + 1) / 2;
+        let likelihoods: Vec<f64> = (0..genotypes)
+            .map(|genotype| 1.0 / (1.0 + genotype as f64 * 0.37))
+            .collect();
+        let carried = |template: usize| (template * 7 + 3) % alleles;
+        let mut definite = vec![0_u8; templates * alleles];
+        for template in 0..templates {
+            definite[template * alleles + carried(template)] = 1;
+        }
+        let mut no_allele = definite.clone();
+        no_allele[5 * alleles..6 * alleles].fill(0);
+        let soft = vec![1.0 / alleles as f64; templates * alleles];
+        let mut pairs = GenotypePairs::default();
+        let pairs = pairs.of(alleles);
+        let emissions_of = |site: &WalkSite<'_>| {
+            let mut terms = SiteTerms::default();
+            terms.fill(site, mismatch, pairs);
+            let mut autozygous = vec![f64::NAN; templates];
+            let mut pair_emissions = vec![f64::NAN; templates * templates];
+            emissions_into(
+                site,
+                &terms,
+                templates,
+                mismatch,
+                (&mut autozygous, &mut pair_emissions),
+                &mut EmissionScratch::default(),
+            );
+            (autozygous, pair_emissions)
+        };
+        let bits = |(autozygous, pairs): (Vec<f64>, Vec<f64>)| -> Vec<u64> {
+            autozygous
+                .iter()
+                .chain(&pairs)
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        // The table takes the definite site and refuses the one with a template carrying nothing.
+        let mut terms = SiteTerms::default();
+        let table_site = WalkSite {
+            position: 1,
+            allele_count: alleles,
+            likelihoods: &likelihoods,
+            template_shares: &soft,
+            emission_shares: None,
+        };
+        terms.fill(&table_site, mismatch, pairs);
+        let mut out = (vec![0.0; templates], vec![0.0; templates * templates]);
+        for (shares, taken) in [(&definite, true), (&no_allele, false)] {
+            assert_eq!(
+                definite_emissions_into(
+                    shares,
+                    alleles,
+                    &terms.by_alleles,
+                    mismatch,
+                    (&mut out.0, &mut out.1),
+                    &mut EmissionScratch::default(),
+                ),
+                taken
+            );
+        }
+        for shares in [&definite, &no_allele] {
+            let as_template: Vec<f64> = shares.iter().map(|&share| f64::from(share)).collect();
+            let by_table = WalkSite {
+                position: 1,
+                allele_count: alleles,
+                likelihoods: &likelihoods,
+                template_shares: &soft,
+                emission_shares: Some(shares),
+            };
+            let general = WalkSite {
+                template_shares: &as_template,
+                emission_shares: None,
+                ..by_table
+            };
+            assert_eq!(
+                bits(emissions_of(&by_table)),
+                bits(emissions_of(&general)),
+                "{alleles} alleles"
+            );
+        }
+    }
+}

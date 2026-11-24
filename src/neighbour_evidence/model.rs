@@ -248,6 +248,13 @@ struct EmissionScratch {
     weighted: Vec<f64>,
     by_allele: Vec<f64>,
     own: Vec<f64>,
+    /// Each template's one allele, where every template's emission shares are one allele for
+    /// certain ([`definite_emissions_into`]).
+    definite: Vec<usize>,
+    /// The emissions of each pair of alleles, `A × A`, row the first copy's allele.
+    pair_table: Vec<f64>,
+    /// The emission of each allele carried autozygous, `A`.
+    autozygous_table: Vec<f64>,
 }
 
 impl SiteTerms {
@@ -319,11 +326,6 @@ fn emissions_into(
     scratch: &mut EmissionScratch,
 ) {
     let alleles = site.allele_count;
-    let EmissionScratch {
-        weighted,
-        by_allele,
-        own,
-    } = scratch;
     // The emissions read their own shares where the site gives them, the blurred shares otherwise.
     let emitting: &[f64] = match site.emission_shares {
         Some(shares) => {
@@ -333,6 +335,17 @@ fn emissions_into(
                 "a site at {} gives emission shares laid out unlike its template shares",
                 site.position
             );
+            if definite_emissions_into(
+                shares,
+                alleles,
+                &terms.by_alleles,
+                mismatch,
+                (autozygous, pair_emissions),
+                scratch,
+            ) {
+                return;
+            }
+            let own = &mut scratch.own;
             own.clear();
             own.extend(
                 shares
@@ -343,6 +356,7 @@ fn emissions_into(
         }
         None => &terms.blurred,
     };
+    let (weighted, by_allele) = (&mut scratch.weighted, &mut scratch.by_allele);
     let by_alleles = &terms.by_alleles;
     weighted.clear();
     weighted.resize(templates * alleles, 0.0);
@@ -391,6 +405,121 @@ fn emissions_into(
             .map(|a| emitting[k * alleles + a] * by_alleles[a * alleles + a])
             .sum();
     }
+}
+
+/// **One site's emissions where every template's emission shares are one allele for certain**
+/// (phasing rounds' definite alleles, phasing spec §2.3), written over `autozygous` and
+/// `pair_emissions` as [`emissions_into`] writes them; `false`, writing nothing, where some
+/// template's shares are not one allele for certain.
+///
+/// Two templates that carry the same allele then have the same blurred shares, so a pair's emission
+/// depends on its two alleles only: `A × A` numbers rather than `K²`. Each is computed by
+/// [`emissions_into`]'s own arithmetic, in its order, from the same shares, so every emission has
+/// the bits the general computation gives it, and is then copied to each pair carrying those alleles.
+fn definite_emissions_into(
+    shares: &[u8],
+    alleles: usize,
+    by_alleles: &[f64],
+    mismatch: f64,
+    (autozygous, pair_emissions): (&mut [f64], &mut [f64]),
+    scratch: &mut EmissionScratch,
+) -> bool {
+    let EmissionScratch {
+        weighted,
+        own,
+        definite,
+        pair_table,
+        autozygous_table,
+        ..
+    } = scratch;
+    definite.clear();
+    for template in shares.chunks_exact(alleles) {
+        let mut carried = None;
+        for (allele, &share) in template.iter().enumerate() {
+            match share {
+                0 => {}
+                1 if carried.is_none() => carried = Some(allele),
+                _ => return false,
+            }
+        }
+        let Some(allele) = carried else {
+            return false;
+        };
+        definite.push(allele);
+    }
+    // Each allele's blurred shares, `own[a·A..]`, and weighed by the likelihood, `weighted[a·A..]`,
+    // as `emissions_into` makes a template's.
+    own.clear();
+    for carried in 0..alleles {
+        own.extend(
+            (0..alleles)
+                .map(|allele| blur(f64::from(u8::from(allele == carried)), mismatch, alleles)),
+        );
+    }
+    weighted.clear();
+    weighted.resize(alleles * alleles, 0.0);
+    for (out, shares) in weighted
+        .chunks_exact_mut(alleles)
+        .zip(own.chunks_exact(alleles))
+    {
+        for (b, value) in out.iter_mut().enumerate() {
+            *value = shares
+                .iter()
+                .zip(by_alleles.iter().skip(b).step_by(alleles))
+                .map(|(share, likelihood)| share * likelihood)
+                .sum();
+        }
+    }
+    pair_table.clear();
+    pair_table.resize(alleles * alleles, 0.0);
+    for (out, first) in pair_table
+        .chunks_exact_mut(alleles)
+        .zip(weighted.chunks_exact(alleles))
+    {
+        for (value, second) in out.iter_mut().zip(own.chunks_exact(alleles)) {
+            for (allele, (&weight, &share)) in first.iter().zip(second).enumerate() {
+                if allele == 0 {
+                    *value = weight * share;
+                } else {
+                    *value += weight * share;
+                }
+            }
+        }
+    }
+    autozygous_table.clear();
+    autozygous_table.extend(own.chunks_exact(alleles).map(|shares| {
+        (0..alleles)
+            .map(|a| shares[a] * by_alleles[a * alleles + a])
+            .sum::<f64>()
+    }));
+    let templates = definite.len();
+    if alleles == 2 {
+        // Two alleles: each entry is one of its row's two numbers, chosen by the second
+        // template's allele — a choice the loop makes several entries at a time.
+        for (out, &first) in pair_emissions
+            .chunks_exact_mut(templates)
+            .zip(definite.iter())
+        {
+            let (on_first, on_second) = (pair_table[first * 2], pair_table[first * 2 + 1]);
+            for (value, &second) in out.iter_mut().zip(definite.iter()) {
+                *value = if second == 0 { on_first } else { on_second };
+            }
+        }
+    } else {
+        for (out, &first) in pair_emissions
+            .chunks_exact_mut(templates)
+            .zip(definite.iter())
+        {
+            let row = &pair_table[first * alleles..(first + 1) * alleles];
+            for (value, &second) in out.iter_mut().zip(definite.iter()) {
+                *value = row[second];
+            }
+        }
+    }
+    for (value, &carried) in autozygous.iter_mut().zip(definite.iter()) {
+        *value = autozygous_table[carried];
+    }
+    true
 }
 
 /// The three persistence probabilities between two sites `gap` bases apart: a copy keeps its
