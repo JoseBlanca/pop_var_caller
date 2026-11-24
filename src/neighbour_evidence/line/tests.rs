@@ -319,3 +319,25 @@ fn a_phase_on_an_uncalled_column_is_not_written() {
     assert!(columns[1].starts_with("./.:"), "{}", columns[1]);
     assert!(columns[1].ends_with(":."), "{}", columns[1]);
 }
+
+/// **A column that drops trailing fields gets `.` up to its `PS`**, and `PS` is added to `FORMAT`:
+/// every field the pass does not write comes out as it went in.
+#[test]
+fn short_columns_keep_every_field_the_pass_does_not_write() {
+    let source = line(
+        &["0/1:20:5:3,2:30,0,40:0.01,0.98,0.01", "0/0:20"],
+        "C",
+        "AF=0.5;AC=1;AN=4",
+        BIALLELIC_FORMAT,
+    );
+    let (text, _) = rewrite(&source, vec![Outcome::Unchanged; 2], vec![0.0; 6]);
+    let text = text.expect("kept");
+    assert!(
+        text.contains(&format!("\t{BIALLELIC_FORMAT}:PS\t")),
+        "{text}"
+    );
+    assert_eq!(
+        sample_columns(&text),
+        ["0/1:20:5:3,2:30,0,40:0.01,0.98,0.01:.", "0/0:20:.:.:.:.:.",]
+    );
+}

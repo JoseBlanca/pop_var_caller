@@ -13,6 +13,8 @@
 //! `a|b`, copy 0's allele first, and its block in a `PS` field appended after every other; `PS` is
 //! `.` in every other column, and the repeat counts follow the written `GT`'s order.
 
+use std::borrow::Cow;
+
 use super::model::GenotypePairs;
 use super::records::{SampleColumns, SiteRecord};
 use super::refine::{Outcome, RefinedRecord};
@@ -173,14 +175,16 @@ pub(crate) fn rewrite_line(
     // `PS` goes after every field the line has, so each field the pass rewrites keeps its place.
     let phase_set_at = key("PS").unwrap_or(format.len());
     let field_count = format.len().max(phase_set_at + 1);
-    let mut columns: Vec<Vec<String>> = fields[COLUMNS_BEFORE_THE_SAMPLES..]
+    // Each field borrowed from the line, and owned only where the pass writes it.
+    let mut columns: Vec<Vec<Cow<'_, str>>> = fields[COLUMNS_BEFORE_THE_SAMPLES..]
         .iter()
         .map(|column| {
-            let mut values: Vec<String> = column.split(':').map(str::to_string).collect();
+            let mut values: Vec<Cow<'_, str>> = Vec::with_capacity(field_count);
+            values.extend(column.split(':').map(Cow::Borrowed));
             // A column may drop trailing fields; `PS` must land in its own place. A column with more
             // fields than `FORMAT` is kept as it is.
             if values.len() < field_count {
-                values.resize(field_count, ".".to_string());
+                values.resize(field_count, Cow::Borrowed("."));
             }
             values
         })
@@ -196,7 +200,7 @@ pub(crate) fn rewrite_line(
             else {
                 continue;
             };
-            if values == "." {
+            if values.as_ref() == "." {
                 continue;
             }
             for (allele, value) in [first, second].into_iter().zip(values.split(',')) {
@@ -282,10 +286,11 @@ pub(crate) fn rewrite_line(
             (None, _) => "./.".to_string(),
         };
         if recalled || subsetting {
-            column[genotype_at] = genotype_text(genotypes[sample]);
+            column[genotype_at] = Cow::Owned(genotype_text(genotypes[sample]));
         }
-        column[phase_set_at] =
-            phase.map_or_else(|| ".".to_string(), |phase| phase.phase_set.to_string());
+        column[phase_set_at] = phase.map_or(Cow::Borrowed("."), |phase| {
+            Cow::Owned(phase.phase_set.to_string())
+        });
         let posteriors: Option<Vec<f64>> = if recalled {
             refined.posterior_into(sample, genotype_count, &mut posterior);
             Some(posterior.clone())
@@ -309,12 +314,12 @@ pub(crate) fn rewrite_line(
             }
             if let (Some(quality_at), Outcome::Called) = (quality_at, outcome) {
                 let (_, quality) = score_best_genotype(&kept_posteriors);
-                column[quality_at] = written_genotype_quality(quality).to_string();
+                column[quality_at] = Cow::Owned(written_genotype_quality(quality).to_string());
             }
-            column[posterior_at] = posteriors_text(&kept_posteriors);
+            column[posterior_at] = Cow::Owned(posteriors_text(&kept_posteriors));
         }
         if let (Some(quality_at), Outcome::Withheld) = (quality_at, outcome) {
-            column[quality_at] = ".".to_string();
+            column[quality_at] = Cow::Borrowed(".");
         }
         if subsetting && column[phred_at] != "." {
             let phred: Vec<i64> = column[phred_at]
@@ -323,20 +328,21 @@ pub(crate) fn rewrite_line(
                 .collect();
             let kept_phred: Vec<i64> = kept_genotypes.iter().map(|&old| phred[old]).collect();
             let lowest = kept_phred.iter().copied().min().unwrap_or(0);
-            column[phred_at] = join(kept_phred.iter().map(|value| value - lowest));
+            column[phred_at] = Cow::Owned(join(kept_phred.iter().map(|value| value - lowest)));
         }
         if let Some(depths_at) = depths_at.filter(|_| subsetting)
             && column[depths_at] != "."
         {
             let depths: Vec<&str> = column[depths_at].split(',').collect();
-            column[depths_at] = kept
-                .iter()
-                .map(|&allele| depths[allele])
-                .collect::<Vec<_>>()
-                .join(",");
+            column[depths_at] = Cow::Owned(
+                kept.iter()
+                    .map(|&allele| depths[allele])
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
         if let (Some(repeats_at), true) = (repeats_at, recalled) {
-            column[repeats_at] = match genotypes[sample] {
+            column[repeats_at] = Cow::Owned(match genotypes[sample] {
                 None => ".".to_string(),
                 Some(pair) => phase
                     .map_or([pair.0, pair.1], |phase| {
@@ -351,7 +357,7 @@ pub(crate) fn rewrite_line(
                     })
                     .collect::<Vec<_>>()
                     .join(","),
-            };
+            });
         }
         match outcome {
             Outcome::Called => tally.called += 1,
@@ -412,17 +418,39 @@ pub(crate) fn rewrite_line(
         .map(|&allele| alternatives[allele - 1])
         .collect::<Vec<_>>()
         .join(",");
-    let mut out: Vec<String> = fields[..COLUMNS_BEFORE_THE_SAMPLES]
-        .iter()
-        .map(|field| (*field).to_string())
-        .collect();
-    out[ALT_COLUMN] = alt;
-    out[INFO_COLUMN] = info.join(";");
-    if phase_set_at == format.len() {
-        out[FORMAT_COLUMN] = format!("{}:PS", fields[FORMAT_COLUMN]);
+    // Written straight into one buffer, field by field, as joining the columns would.
+    let mut out: Vec<u8> = Vec::with_capacity(line.len() + line.len() / 4 + 64);
+    for (index, field) in fields[..COLUMNS_BEFORE_THE_SAMPLES].iter().enumerate() {
+        if index > 0 {
+            out.push(b'\t');
+        }
+        match index {
+            ALT_COLUMN => out.extend_from_slice(alt.as_bytes()),
+            INFO_COLUMN => {
+                for (at, entry) in info.iter().enumerate() {
+                    if at > 0 {
+                        out.push(b';');
+                    }
+                    out.extend_from_slice(entry.as_bytes());
+                }
+            }
+            FORMAT_COLUMN if phase_set_at == format.len() => {
+                out.extend_from_slice(field.as_bytes());
+                out.extend_from_slice(b":PS");
+            }
+            _ => out.extend_from_slice(field.as_bytes()),
+        }
     }
-    out.extend(columns.iter().map(|column| column.join(":")));
-    Some(out.join("\t").into_bytes())
+    for column in &columns {
+        out.push(b'\t');
+        for (at, value) in column.iter().enumerate() {
+            if at > 0 {
+                out.push(b':');
+            }
+            out.extend_from_slice(value.as_bytes());
+        }
+    }
+    Some(out)
 }
 
 fn join<T: std::fmt::Display>(values: impl Iterator<Item = T>) -> String {
