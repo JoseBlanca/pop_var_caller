@@ -607,7 +607,10 @@ threads.
 **The window is sized to a budget in bytes**, `--refine-window-bytes`, 32 GB by default. It counts
 the per-sample part exactly as the records arrive, each line at its compressed length: a window is
 planned only once every line it spans is compressed, so the count does not depend on when its
-batch was compressed. The shortest window, `--refine-window-floor`, is 500 kb of margin by
+batch was compressed. It counts too what the stage holds outside the window: the lines
+within the configured margin before the core, which a window whose margins the budget shrank does
+not span, and those read past the window, each at what it holds without solve state (code review
+2026-11-24). The shortest window, `--refine-window-floor`, is 500 kb of margin by
 default, and of core unless `--refine-core-floor` is set lower (§2.2). It does not count the
 per-thread part: that would make the windows, and so the output, depend on the thread count (§2.3).
 For the same reason it counts arrays by their lengths, not the allocator's capacities, and types

@@ -35,6 +35,7 @@ fn plan_uniform(
             held: &held,
             core: &core,
             skipped: None,
+            outside: None,
         },
         core_start,
         complete,
@@ -169,6 +170,7 @@ fn only_the_core_pays_the_core_cost() {
         held: &held,
         core: &core,
         skipped: None,
+        outside: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
     let core_records = (plan.core_end - plan.core_start) as u64;
@@ -206,6 +208,7 @@ fn a_thinned_window_pays_skipped_solve_state_only_near_its_core() {
         held: &held,
         core: &core,
         skipped: Some(&skipped),
+        outside: None,
     };
     let plan = plan_window(&positions, bytes, 1_500, true, &sizes).expect("the contig is complete");
     // A 2-Mb core, 1-Mb margins, near margins of 50 kb.
@@ -253,6 +256,7 @@ fn thinning_fits_a_larger_window_in_the_same_budget() {
         held: &held,
         core: &core,
         skipped: Some(&skipped),
+        outside: None,
     };
     let unthinned = plan_window(&positions, bytes, 1_500, true, &budget).expect("complete");
     let thinned = plan_window(&positions, bytes, 1_500, true, &thinned(budget)).expect("complete");
@@ -294,6 +298,7 @@ fn a_core_floor_fits_a_window_the_margin_floor_cannot() {
         held: &held,
         core: &core,
         skipped: None,
+        outside: None,
     };
     // A record a 100 bases at 40 bytes: 500-kb margins and a 500-kb core hold 600 kB.
     let budget = 500_000;
@@ -331,6 +336,7 @@ fn a_core_floor_changes_only_windows_over_the_margin_floor() {
         held: &held,
         core: &core,
         skipped: None,
+        outside: None,
     };
     for budget in [u64::MAX, 3_000_000, 1_300_000, 600_000] {
         let base = WindowSizes {
@@ -347,4 +353,55 @@ fn a_core_floor_changes_only_windows_over_the_margin_floor() {
             "budget {budget}"
         );
     }
+}
+
+/// **A window pays for the records the caller holds outside it** (code review 2026-11-24, M1):
+/// 100 records a kb over 3 Mb, the core starting at 1.5 Mb, a caller holding every record. With
+/// each record's outside cost given, a window's bytes are what it spans plus that cost of every
+/// record before and after it; at full size that is enough to push it over a budget it fit
+/// without, so it shrinks: when written, to an 800-kb core and margins.
+#[test]
+fn a_window_pays_for_the_records_held_outside_it() {
+    let positions = evenly(3_000_000, 10);
+    let core_start = 150_000;
+    let (held, core) = uniform(positions.len(), 1);
+    let outside: Vec<u64> = (0..=positions.len() as u64).map(|i| i * 10).collect();
+    let sizes = WindowSizes {
+        // The full window spans records 50,000 to the end, 250,000 of them, and just fits.
+        budget_bytes: 250_000 * BYTES_A_SAMPLE_RECORD + 1_000,
+        ..WindowSizes::default()
+    };
+    let plan_with = |outside: Option<&[u64]>| {
+        plan_window(
+            &positions,
+            WindowBytes {
+                held: &held,
+                core: &core,
+                skipped: None,
+                outside,
+            },
+            core_start,
+            true,
+            &sizes,
+        )
+        .expect("the contig is complete")
+    };
+    let without = plan_with(None);
+    assert_eq!(
+        (without.core_bases, without.margin_bases),
+        (2_000_000, 1_000_000)
+    );
+    assert_eq!(without.outside_bytes, 0);
+    let with = plan_with(Some(&outside));
+    assert_eq!(
+        (with.core_bases, with.margin_bases),
+        (800_000, 800_000),
+        "{with:?}"
+    );
+    let records_outside = (with.context_start + positions.len() - with.context_end) as u64;
+    assert_eq!(with.outside_bytes, records_outside * 10);
+    assert_eq!(
+        with.bytes,
+        held[with.context_end] - held[with.context_start] + with.outside_bytes
+    );
 }

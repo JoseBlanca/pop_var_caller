@@ -19,6 +19,13 @@
 //! cuts off nothing, since every record's margins stay as long; it only makes more windows, each
 //! solving its margins again.
 //!
+//! **It counts what the caller holds outside the window too** ([`WindowBytes::outside`]): the
+//! records before the window it keeps in case a later window plans longer margins, and those read
+//! past it while larger windows were ruled out. They hold no solve state, but their lines, numbers
+//! and reads are memory the run holds while the window is solved. Uncounted, the code review of
+//! 2026-11-24 estimated them at about a sixth on top of the count of a window at the 500-kb floor
+//! on 2,176 tomato samples; on the stage tests' drawn cohort, without reads, they add up to 4%.
+//!
 //! The budget does not count the walks' own arrays, which every thread holds one of: counting
 //! them would make the windows, and so the output, depend on the thread count (§2.3).
 //!
@@ -137,11 +144,15 @@ pub const DEFAULT_WINDOW_BYTES: u64 = 32_000_000_000;
 /// `skipped` is what `held` counts for a record where the walks skip the record and a window
 /// holding it does not walk it — its solve state, and its numbers and reads, which it then holds
 /// compressed — zero for a record they read; a window does not pay it beyond its near margins.
+/// `outside` is what a record holds while no window reads it; a window pays it for every record
+/// the caller holds outside the window, before or after it. `None` where the caller holds only
+/// what the window spans.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowBytes<'a> {
     pub held: &'a [u64],
     pub core: &'a [u64],
     pub skipped: Option<&'a [u64]>,
+    pub outside: Option<&'a [u64]>,
 }
 
 impl Default for WindowSizes {
@@ -174,8 +185,11 @@ pub struct WindowPlan {
     /// The core's length and each margin's, in bases, after the budget.
     pub core_bases: u64,
     pub margin_bases: u64,
-    /// The bytes the window holds, as [`WindowBytes`] counts them.
+    /// The bytes the window holds, as [`WindowBytes`] counts them, the records held outside it
+    /// included.
     pub bytes: u64,
+    /// Of `bytes`, what the records held outside the window cost ([`WindowBytes::outside`]).
+    pub outside_bytes: u64,
     /// The bytes it holds past the budget; zero within it.
     pub over_budget: u64,
 }
@@ -213,7 +227,10 @@ pub fn plan_window(
             && bytes.core.len() == positions.len() + 1
             && bytes
                 .skipped
-                .is_none_or(|skipped| skipped.len() == positions.len() + 1),
+                .is_none_or(|skipped| skipped.len() == positions.len() + 1)
+            && bytes
+                .outside
+                .is_none_or(|outside| outside.len() == positions.len() + 1),
         "one running total a record, and one before them"
     );
     debug_assert!(
@@ -246,9 +263,14 @@ pub fn plan_window(
         let skipped = bytes.skipped.map_or(0, |skipped| {
             skipped[near_start] - skipped[context_start] + skipped[context_end] - skipped[near_end]
         });
+        // What the caller holds before the window and after it. Reading further only adds to it.
+        let outside_bytes = bytes.outside.map_or(0, |outside| {
+            outside[context_start] - outside[0] + outside[positions.len()] - outside[context_end]
+        });
         let held = bytes.held[context_end] - bytes.held[context_start] - skipped
             + bytes.core[core_end]
             - bytes.core[core_start];
+        let held = held + outside_bytes;
         let plan = WindowPlan {
             context_start,
             core_start,
@@ -259,6 +281,7 @@ pub fn plan_window(
             core_bases,
             margin_bases,
             bytes: held,
+            outside_bytes,
             over_budget: held.saturating_sub(sizes.budget_bytes),
         };
         // Every record the window reaches has been read once a later one has, or none will come.

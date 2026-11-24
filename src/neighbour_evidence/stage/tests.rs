@@ -946,3 +946,120 @@ fn a_density_under_one_a_kb_walks_a_record_every_few_kb() {
     assert_eq!(walked.len(), 250);
     assert!(walked.windows(2).all(|pair| pair[1] - pair[0] == 4_000));
 }
+
+/// **A window's count includes the lines held outside it** (code review 2026-11-24, M1): after a
+/// window the stage keeps every line within the configured margin of the next core, and the lines
+/// read past a window while larger sizes were ruled out, but a plan counted only the lines its own
+/// margins span — so when the budget shrank the margins, the lines between went uncounted. The
+/// join cohort with a dense stretch that shrinks the windows, as in
+/// [`a_phase_set_carries_through_short_windows`]: every window whose margins shrank counts lines
+/// outside it, every window is within the budget with them, and what they add is printed — for
+/// these sizes, and at the smallest budget (in 20-kB steps) whose windows fit with margins allowed
+/// down to half the configured length, as the 500-kb floor is of the 1-Mb margin.
+#[test]
+fn a_shrunken_window_counts_the_lines_held_outside_it() {
+    use crate::neighbour_evidence::windows::WindowPlan;
+    let cohort = join_cohort();
+    let position = |index: usize| -> u64 {
+        let index = index as u64;
+        match index {
+            0..800 => 1 + index * 500,
+            800..1_200 => 400_001 + (index - 800) * 100,
+            _ => 440_001 + (index - 1_200) * 500,
+        }
+    };
+    let plans = |sizes: WindowSizes| -> Result<Vec<WindowPlan>, WindowOverBudget> {
+        let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+        decision.sizes = sizes;
+        let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+        let mut output = Vec::new();
+        for (index, line) in cohort.lines.iter().enumerate() {
+            let at = position(index);
+            let line = line.replacen(&format!("\t{}\t", 1 + index * 500), &format!("\t{at}\t"), 1);
+            stage.push(
+                place(0, at),
+                line.into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            )?;
+        }
+        stage.finish(&mut output)?;
+        Ok(stage.plans)
+    };
+    // What the lines outside a window add to what it spans, at most, over `plans`.
+    let most_added = |plans: &[&WindowPlan]| {
+        plans
+            .iter()
+            .map(|plan| plan.outside_bytes as f64 / (plan.bytes - plan.outside_bytes) as f64)
+            .fold(0.0, f64::max)
+    };
+    let sizes = WindowSizes {
+        core_bases: 60_000,
+        margin_bases: 60_000,
+        margin_floor_bases: 20_000,
+        core_floor_bases: 20_000,
+        // Full windows over the dense stretch count about 1.2 MB, the others about 0.6 MB.
+        budget_bytes: 1_000_000,
+        thinning: None,
+    };
+    let planned = plans(sizes).expect("within the window budget");
+    let shrunken: Vec<&WindowPlan> = planned
+        .iter()
+        .filter(|plan| plan.margin_bases < sizes.margin_bases)
+        .collect();
+    assert!(
+        !shrunken.is_empty(),
+        "the dense stretch shrinks some windows"
+    );
+    assert!(
+        shrunken.iter().all(|plan| plan.outside_bytes > 0),
+        "{shrunken:?}"
+    );
+    assert!(planned.iter().all(|plan| plan.bytes <= sizes.budget_bytes));
+    let full: Vec<&WindowPlan> = planned
+        .iter()
+        .filter(|plan| plan.margin_bases == sizes.margin_bases)
+        .collect();
+    eprintln!(
+        "{} windows, {} shrunken; lines outside add at most {:.1}% to a shrunken window's count, \
+         at most {:.1}% where the margins are full",
+        planned.len(),
+        shrunken.len(),
+        100.0 * most_added(&shrunken),
+        100.0 * most_added(&full)
+    );
+    // Margins allowed down to half the configured length.
+    let at_half = WindowSizes {
+        margin_floor_bases: 30_000,
+        core_floor_bases: 30_000,
+        ..sizes
+    };
+    let mut budget = 1_200_000;
+    let mut smallest = None;
+    while let Ok(planned) = plans(WindowSizes {
+        budget_bytes: budget,
+        ..at_half
+    }) {
+        smallest = Some((budget, planned));
+        budget -= 20_000;
+    }
+    let (budget, planned) = smallest.expect("the windows fit 1.2 MB");
+    // The smallest windows, their margins at or near the floor.
+    let smallest_margin = planned
+        .iter()
+        .map(|plan| plan.margin_bases)
+        .min()
+        .expect("some windows");
+    let at_floor: Vec<&WindowPlan> = planned
+        .iter()
+        .filter(|plan| plan.margin_bases == smallest_margin)
+        .collect();
+    assert!(smallest_margin < sizes.margin_bases);
+    eprintln!(
+        "at a budget of {budget} bytes, {} of {} windows have {smallest_margin}-base margins; lines \
+         outside add at most {:.1}% to their count",
+        at_floor.len(),
+        planned.len(),
+        100.0 * most_added(&at_floor)
+    );
+}

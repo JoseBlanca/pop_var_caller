@@ -440,6 +440,12 @@ pub struct NeighbourEvidenceStage {
     /// than the lines ([`WindowBytes`]): over every line a window spans, and again over its core.
     held_bytes: Vec<u64>,
     core_bytes: Vec<u64>,
+    /// **What each held line holds while no window reads it**, as a running total like `held_bytes`:
+    /// what `held_bytes` counts for it less its solve state, which only a window holds, and, for a
+    /// site held packed, less its numbers and reads too. A window pays it for every held line it
+    /// does not span ([`WindowBytes::outside`]): the stage keeps the lines within the configured
+    /// margin of the next core, and those read past a window, whatever window the budget plans.
+    resident_bytes: Vec<u64>,
     /// With thinned margins (pass spec §6, thinned margins): whether each held line is a record the far margins
     /// walk, and, as a running total like `held_bytes`, what `held_bytes` counts for the solve
     /// state of each line the far margins skip. Empty without thinning.
@@ -477,6 +483,9 @@ pub struct NeighbourEvidenceStage {
     /// edge.
     #[cfg(test)]
     core_starts: Vec<u64>,
+    /// Every window planned, for the tests that read what the budget counted.
+    #[cfg(test)]
+    plans: Vec<super::windows::WindowPlan>,
 }
 
 impl NeighbourEvidenceStage {
@@ -499,6 +508,7 @@ impl NeighbourEvidenceStage {
             positions: Vec::new(),
             held_bytes: vec![0],
             core_bytes: vec![0],
+            resident_bytes: vec![0],
             far_walked: Vec::new(),
             skipped_bytes: vec![0],
             joined: Vec::new(),
@@ -515,6 +525,8 @@ impl NeighbourEvidenceStage {
             last_blocks: vec![None; decision.inbreeding_by_sample.len()],
             #[cfg(test)]
             core_starts: Vec::new(),
+            #[cfg(test)]
+            plans: Vec::new(),
         }
     }
 
@@ -621,6 +633,7 @@ impl NeighbourEvidenceStage {
             text: HeldText::Plain(line),
             site,
         });
+        self.count_resident_bytes_from(self.held.len() - 1);
         if self.held.len() - self.compressed_up_to.max(self.core_start) >= LINES_COMPRESSED_TOGETHER
         {
             self.compress_held_lines();
@@ -667,6 +680,7 @@ impl NeighbourEvidenceStage {
             *total = (*total as i64 - saved) as u64;
         }
         self.compressed_up_to = self.held.len();
+        self.count_resident_bytes_from(from);
     }
 
     /// **Finishes the current contig**: solves its remaining windows and appends their lines to
@@ -699,6 +713,7 @@ impl NeighbourEvidenceStage {
         self.held.clear();
         self.held_bytes = vec![0];
         self.core_bytes = vec![0];
+        self.resident_bytes = vec![0];
         self.far_walked.clear();
         self.skipped_bytes = vec![0];
         self.joined.clear();
@@ -728,12 +743,13 @@ impl NeighbourEvidenceStage {
             // With thinned margins, a far-margin record some sample's last block joins at is
             // walked, so its solve state is counted (pass spec §6, thinned margins).
             #[cfg(test)]
-            self.check_the_kept_joins();
+            self.check_the_kept_totals();
             let Some(plan) = plan_window(
                 &self.positions,
                 WindowBytes {
                     held: &self.held_bytes,
                     core: &self.core_bytes,
+                    outside: Some(&self.resident_bytes),
                     skipped: self
                         .thinner
                         .is_some()
@@ -763,6 +779,8 @@ impl NeighbourEvidenceStage {
             }
             #[cfg(test)]
             self.core_starts.push(self.positions[plan.core_start]);
+            #[cfg(test)]
+            self.plans.push(plan);
             let began = std::time::Instant::now();
             let mut walked_records = None;
             let window_sites = self.site_span(plan.context_start..plan.context_end);
@@ -915,6 +933,8 @@ impl NeighbourEvidenceStage {
             self.core_start = plan.core_end;
             self.forget_what_no_window_reads();
             self.make_the_joins_again();
+            // The window unpacked the skipped records it walked, and packed again those it did not.
+            self.count_resident_bytes_from(0);
         }
         Ok(())
     }
@@ -1008,6 +1028,34 @@ impl NeighbourEvidenceStage {
         totals
     }
 
+    /// **What held line `line` holds while no window reads it**: what `held_bytes` counts for it,
+    /// less the solve state a window would add for a site, and, for a site whose numbers and reads
+    /// are held packed, less those too — which leaves its line, its rows and its packed bytes.
+    fn resident_bytes_of(&self, line: usize) -> u64 {
+        let held = self.held_bytes[line + 1] - self.held_bytes[line];
+        let Some(site) = self.held[line].site else {
+            return held;
+        };
+        let index = site - self.first_site;
+        if self.sites.whole[index] {
+            let record = &self.sites.records[index];
+            held - record.sample_count() as u64 * held_solve_bytes(record.allele_count)
+        } else {
+            // Packed only where the far margins skip it, so `skipped_bytes` counts it: its solve
+            // state, numbers and reads.
+            held - (self.skipped_bytes[line + 1] - self.skipped_bytes[line])
+        }
+    }
+
+    /// **Counts `resident_bytes` again from held line `from` on**, the totals before it kept.
+    fn count_resident_bytes_from(&mut self, from: usize) {
+        self.resident_bytes.truncate(from + 1);
+        for line in from..self.held.len() {
+            let total = self.resident_bytes[line] + self.resident_bytes_of(line);
+            self.resident_bytes.push(total);
+        }
+    }
+
     /// **Makes the kept joins and their totals again** (`joined`, `skipped_besides_joined`), once
     /// a window is solved: its core may have changed the last written blocks, and lines may
     /// have been dropped.
@@ -1019,11 +1067,19 @@ impl NeighbourEvidenceStage {
         self.skipped_besides_joined = self.skipped_bytes_besides(&self.joined);
     }
 
-    /// **The kept joins are what making them again gives**: what lets them be kept rather than
-    /// made for every line, checked before every window is planned in every test that runs a
+    /// **The kept joins and resident totals are what making them again gives**: what lets them be
+    /// kept rather than made for every line, checked before every window is planned in every test that runs a
     /// stage.
     #[cfg(test)]
-    fn check_the_kept_joins(&self) {
+    fn check_the_kept_totals(&self) {
+        let mut resident = vec![0];
+        for line in 0..self.held.len() {
+            resident.push(resident[line] + self.resident_bytes_of(line));
+        }
+        assert_eq!(
+            self.resident_bytes, resident,
+            "the kept resident totals drifted"
+        );
         if self.thinner.is_none() {
             return;
         }
