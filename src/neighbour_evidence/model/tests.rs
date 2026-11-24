@@ -1283,3 +1283,19 @@ fn definite_emissions_have_the_general_bits() {
         }
     }
 }
+
+/// **Pairs are kept by allele count, whatever order the counts are asked in**: a count not yet
+/// asked for is unknown, and asking for a larger count first leaves the smaller ones to be built
+/// when asked.
+#[test]
+fn genotype_pairs_are_kept_by_allele_count() {
+    let mut pairs = GenotypePairs::default();
+    assert!(pairs.known(2).is_none());
+    assert_eq!(pairs.of(4).len(), 10);
+    assert!(pairs.known(2).is_none());
+    assert!(pairs.known(9).is_none());
+    assert_eq!(pairs.of(2), &[(0, 0), (0, 1), (1, 1)]);
+    assert_eq!(pairs.known(2), Some(&[(0, 0), (0, 1), (1, 1)][..]));
+    assert_eq!(pairs.known(4).map(<[_]>::len), Some(10));
+    assert_eq!(pairs.of(1), &[(0, 0)]);
+}

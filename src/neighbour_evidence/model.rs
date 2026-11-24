@@ -14,7 +14,6 @@ use super::random::{Uniforms, pick, pick_at, pick_in_running};
 use crate::calling::genotype_table::{GenotypeIdx, GenotypeTable};
 use crate::float;
 use crate::types::Ploidy;
-use std::collections::HashMap;
 
 /// **The numbers a walk runs with** (spec §3.4, §3.5).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -188,16 +187,23 @@ pub struct WalkResult {
 /// an index formula of our own (spec §7) — and kept per allele count.
 #[derive(Default)]
 pub(crate) struct GenotypePairs {
-    by_allele_count: HashMap<usize, Vec<(usize, usize)>>,
+    /// Entry `A` holds the pairs of `A` alleles, empty until asked for. Indexed by the count, not
+    /// hashed: a walk asks for a site's pairs several times a site, and hashing the count was a
+    /// fiftieth of the pass's time (profile, 200 drawn samples, 2026-11-24).
+    by_allele_count: Vec<Vec<(usize, usize)>>,
 }
 
 impl GenotypePairs {
     pub(crate) fn of(&mut self, allele_count: usize) -> &[(usize, usize)] {
-        self.by_allele_count.entry(allele_count).or_insert_with(|| {
+        if self.by_allele_count.len() <= allele_count {
+            self.by_allele_count.resize_with(allele_count + 1, Vec::new);
+        }
+        let pairs = &mut self.by_allele_count[allele_count];
+        if pairs.is_empty() {
             let diploid = Ploidy::try_new(2).expect("two copies is a ploidy");
             let table = GenotypeTable::build(diploid, allele_count);
             let table = table.view();
-            (0..table.genotype_count())
+            *pairs = (0..table.genotype_count())
                 .map(|genotype| {
                     // PANIC-FREE: the index ranges over the table's own count.
                     let copies = table
@@ -213,13 +219,17 @@ impl GenotypePairs {
                         .expect("a diploid genotype has a second copy");
                     (first, second)
                 })
-                .collect()
-        })
+                .collect();
+        }
+        pairs
     }
 
     /// The pairs of an allele count [`Self::of`] has already been asked for; `None` otherwise.
     pub(crate) fn known(&self, allele_count: usize) -> Option<&[(usize, usize)]> {
-        self.by_allele_count.get(&allele_count).map(Vec::as_slice)
+        self.by_allele_count
+            .get(allele_count)
+            .filter(|pairs| !pairs.is_empty())
+            .map(Vec::as_slice)
     }
 }
 
