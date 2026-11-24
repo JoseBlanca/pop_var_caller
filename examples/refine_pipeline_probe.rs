@@ -21,7 +21,11 @@
 //! `.vcf.gz` is cut into blocks by its bytes alone, so equal text gives equal files.
 //!
 //! Runs with mimalloc, the allocator `pvc` declares: under the system allocator the rewrite cost
-//! about three times as much.
+//! about three times as much. Built with `--no-default-features --features dhat-heap`, it prints
+//! also the peak of the bytes asked of the allocator while writing: a measure that does not move
+//! with the allocator's own caching, as the resident memory does. What was allocated before the
+//! clock started — the loaded records, and so each line's text until the stage compresses it — is
+//! not counted. dhat writes `dhat-heap.json` in the working directory.
 #![allow(
     clippy::disallowed_methods,
     reason = "a research probe outside the portable-float guarantee (clippy.toml)"
@@ -40,7 +44,11 @@ use pop_var_caller::vcf::{HeaderContig, RecordPlace, VcfHeaderMetadata, VcfWrite
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-#[cfg(feature = "alloc-mimalloc")]
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -320,6 +328,8 @@ fn run(args: &[String]) -> Result<(), Failure> {
         }
     });
 
+    #[cfg(feature = "dhat-heap")]
+    let profiler = dhat::Profiler::new_heap();
     let began = Instant::now();
     let process_began = cpu_seconds(rustix::time::ClockId::ProcessCPUTime);
     let thread_began = cpu_seconds(rustix::time::ClockId::ThreadCPUTime);
@@ -342,6 +352,15 @@ fn run(args: &[String]) -> Result<(), Failure> {
     let process = cpu_seconds(rustix::time::ClockId::ProcessCPUTime) - process_began;
     let writing_thread = cpu_seconds(rustix::time::ClockId::ThreadCPUTime) - thread_began;
     handing.join().map_err(|_| "the handing thread panicked")?;
+    #[cfg(feature = "dhat-heap")]
+    {
+        let heap = dhat::HeapStats::get();
+        eprintln!(
+            "dhat: peak {:.1} MB asked of the allocator while writing",
+            heap.max_bytes as f64 / 1e6
+        );
+        drop(profiler);
+    }
 
     eprintln!(
         "records {records}, written {}, threads {threads}: wall {wall:.2} s, cpu {process:.2} s \
