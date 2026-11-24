@@ -477,11 +477,22 @@ pub(crate) struct PathHaplotypes {
 }
 
 impl PathHaplotypes {
+    #[cfg(test)]
     fn with_capacity(sites: usize) -> Self {
         Self {
             starts: Vec::with_capacity(sites),
             values: Vec::with_capacity(4 * sites),
         }
+    }
+
+    /// **Empties the path, with room for exactly `sites`' numbers**. Grown from four numbers a
+    /// site, a window with multi-allelic records doubled it and held up to twice what it used.
+    fn clear_to_hold(&mut self, sites: &[WalkSite<'_>]) {
+        self.starts.clear();
+        self.values.clear();
+        self.starts.reserve_exact(sites.len());
+        self.values
+            .reserve_exact(sites.iter().map(|site| 2 * site.allele_count).sum());
     }
 
     /// Appends a site of `alleles` alleles, its two copies at zero, to be written.
@@ -622,7 +633,7 @@ pub(crate) fn walk_and_draw(
     uniforms: &mut Uniforms,
     reads: Option<&mut DrawReads<'_>>,
 ) -> (WalkResult, DrawnPath) {
-    let (result, drawn, _) = walk_with_draw(
+    let (result, drawn) = walk_with_draw(
         sites,
         templates,
         template_weights,
@@ -644,11 +655,16 @@ pub(crate) fn walk_and_draw(
 /// drawing them changes neither the round's path nor anything the round passes on. The extra paths
 /// serve the phase's link test only.
 ///
+/// **Every path's haplotypes are handed to `on_path` as they are made**, the round's own first and
+/// then the extra paths in the order drawn, and only the round's own is kept and returned. The
+/// extra paths are read once each, by the phase; returned together they were nine window-long
+/// arrays on every thread at once.
+///
 /// # Panics
 ///
 /// As [`walk_and_draw`].
 #[must_use]
-#[allow(clippy::too_many_arguments)] // the walk's own inputs and the two draws' streams
+#[allow(clippy::too_many_arguments)] // the walk's own inputs, the two draws' streams, the paths' reader
 pub(crate) fn walk_and_draw_paths(
     sites: &[WalkSite<'_>],
     templates: usize,
@@ -658,22 +674,34 @@ pub(crate) fn walk_and_draw_paths(
     extra_uniforms: &mut Uniforms,
     extra: usize,
     reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, DrawnPath, Vec<PathHaplotypes>) {
-    let (result, drawn, extra_paths) = walk_with_draw(
+    on_path: &mut dyn FnMut(&PathHaplotypes),
+) -> (WalkResult, DrawnPath) {
+    let (result, drawn) = walk_with_draw(
         sites,
         templates,
         template_weights,
         parameters,
         Some(uniforms),
-        Some((extra_uniforms, extra)),
+        Some(ExtraPaths {
+            uniforms: extra_uniforms,
+            count: extra,
+            on_path,
+        }),
         reads,
     );
     (
         result,
         // PANIC-FREE: as in `walk_and_draw`.
         drawn.expect("a stream was given, so a path was drawn"),
-        extra_paths,
     )
+}
+
+/// **The extra paths a walk draws** besides the round's own ([`walk_and_draw_paths`]): their
+/// stream, how many, and where each path's haplotypes go as they are made.
+struct ExtraPaths<'a> {
+    uniforms: &'a mut Uniforms,
+    count: usize,
+    on_path: &'a mut dyn FnMut(&PathHaplotypes),
 }
 
 /// **The forward walk's probabilities, a few sites' in one array of each kind** rather than a
@@ -919,15 +947,44 @@ enum State {
     Pair(usize, usize),
 }
 
+/// **The most templates a walk that draws paths may have**: a drawn path holds each state as a
+/// [`State::code`], and `K` autozygous states and `K²` pairs must fit a `u16`.
+const MAX_DRAWN_TEMPLATES: usize = 255;
+
+impl State {
+    /// **The state as a number below `K + K²`**, at `k` templates: the autozygous states `0..K`,
+    /// then the pairs row by row — the order the walk lists its states in. A drawn path holds one a
+    /// site in two bytes, where the enum takes 24.
+    fn code(self, k: usize) -> u16 {
+        let code = match self {
+            Self::Autozygous(template) => template,
+            Self::Pair(first, second) => k + first * k + second,
+        };
+        // PANIC-FREE: a walk that draws has at most `MAX_DRAWN_TEMPLATES` templates, whose
+        // `K + K²` states all fit a u16.
+        u16::try_from(code).expect("a drawn walk's state fits a u16")
+    }
+
+    /// The state [`Self::code`] numbered `code`, at `k` templates.
+    fn from_code(code: u16, k: usize) -> Self {
+        let code = usize::from(code);
+        if code < k {
+            Self::Autozygous(code)
+        } else {
+            Self::Pair((code - k) / k, (code - k) % k)
+        }
+    }
+}
+
 fn walk_with_draw(
     sites: &[WalkSite<'_>],
     templates: usize,
     template_weights: Option<&[f64]>,
     parameters: WalkParameters,
     uniforms: Option<&mut Uniforms>,
-    extra: Option<(&mut Uniforms, usize)>,
+    mut extra: Option<ExtraPaths<'_>>,
     mut reads: Option<&mut DrawReads<'_>>,
-) -> (WalkResult, Option<DrawnPath>, Vec<PathHaplotypes>) {
+) -> (WalkResult, Option<DrawnPath>) {
     assert!(
         sites
             .windows(2)
@@ -999,24 +1056,33 @@ fn walk_with_draw(
         }
     }
 
-    // The round's own path from `uniforms`, then each extra path from `extra_uniforms`, one
+    // The round's own path from `uniforms`, then each extra path from the extra paths' stream, one
     // uniform a site from the last site back. All are drawn in the backward walk's one sweep, so
     // each site's totals are summed once for every path.
-    let mut streams: Vec<Vec<f64>> = Vec::new();
+    //
+    // **Each path reads its uniforms as it draws them**, which is the order its stretch of the
+    // stream gives them in: a path's stream starts where the path before it would have finished
+    // (`Uniforms::skip`), rather than every path's uniforms being drawn and held in advance.
+    let mut streams: Vec<Uniforms> = Vec::new();
     let draws_own = uniforms.is_some();
     if let Some(uniforms) = uniforms {
-        streams.push((0..sites.len()).map(|_| uniforms.next_uniform()).collect());
+        streams.push(uniforms.clone());
+        uniforms.skip(sites.len() as u64);
     }
-    if let Some((extra_uniforms, count)) = extra {
-        for _ in 0..count {
-            streams.push(
-                (0..sites.len())
-                    .map(|_| extra_uniforms.next_uniform())
-                    .collect(),
-            );
+    if let Some(extra) = extra.as_mut() {
+        for _ in 0..extra.count {
+            streams.push(extra.uniforms.clone());
+            extra.uniforms.skip(sites.len() as u64);
         }
     }
-    let mut state_paths: Vec<Vec<State>> = vec![Vec::with_capacity(sites.len()); streams.len()];
+    assert!(
+        streams.is_empty() || k <= MAX_DRAWN_TEMPLATES,
+        "a walk that draws paths takes at most {MAX_DRAWN_TEMPLATES} templates, not {k}"
+    );
+    // One state a site, each path's at its exact length.
+    let mut state_paths: Vec<Vec<u16>> = (0..streams.len())
+        .map(|_| Vec::with_capacity(sites.len()))
+        .collect();
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
     let mut posteriors = PerSite::zeroed(
@@ -1093,9 +1159,9 @@ fn walk_with_draw(
                     k,
                 );
                 let persistence = (index + 1 < sites.len()).then(|| transition(index + 1));
-                for (path, stream) in state_paths.iter_mut().zip(&streams) {
-                    let next = persistence.zip(path.last().copied());
-                    path.push(draw.draw(next, stream[sites.len() - 1 - index], &landing));
+                for (path, stream) in state_paths.iter_mut().zip(&mut streams) {
+                    let next = persistence.zip(path.last().map(|&code| State::from_code(code, k)));
+                    path.push(draw.draw(next, stream.next_uniform(), &landing).code(k));
                 }
             }
             if index + 1 < sites.len() {
@@ -1284,30 +1350,45 @@ fn walk_with_draw(
     for path in &mut state_paths {
         path.reverse();
     }
+    // **Each path's haplotypes are made in turn**, the round's own first, and the extra paths' are
+    // handed on as each is made, one array reused for them all: only the round's own is kept.
     let mut joints = Joints::default();
-    let mut paths: Vec<PathHaplotypes> = state_paths
-        .iter()
-        .map(|states| {
-            haplotypes_along(
-                sites,
-                (parameters.mismatch, &mut pairs_of_alleles, &mut terms),
-                states,
-                reads.as_deref_mut(),
-                &mut joints,
-            )
-        })
-        .collect();
-    let drawn = draws_own.then(|| DrawnPath {
-        haplotypes: paths.remove(0),
+    let mut own = None;
+    let mut extra_path = PathHaplotypes::default();
+    for (index, states) in state_paths.iter().enumerate() {
+        let is_own = draws_own && index == 0;
+        let mut path = if is_own {
+            PathHaplotypes::default()
+        } else {
+            std::mem::take(&mut extra_path)
+        };
+        haplotypes_along(
+            sites,
+            (parameters.mismatch, &mut pairs_of_alleles, &mut terms),
+            (states, k),
+            reads.as_deref_mut(),
+            &mut joints,
+            &mut path,
+        );
+        if let Some(extra) = extra.as_mut() {
+            (extra.on_path)(&path);
+        }
+        if is_own {
+            own = Some(path);
+        } else {
+            extra_path = path;
+        }
+    }
+    let drawn = own.map(|haplotypes| DrawnPath {
+        haplotypes,
         followed: state_paths[0]
             .iter()
-            .map(|&state| match state {
+            .map(|&code| match State::from_code(code, k) {
                 State::Autozygous(template) => [template, template],
                 State::Pair(first, second) => [first, second],
             })
             .collect(),
     });
-    let extra_paths = paths;
 
     (
         WalkResult {
@@ -1318,7 +1399,6 @@ fn walk_with_draw(
             log_likelihood,
         },
         drawn,
-        extra_paths,
     )
 }
 
@@ -1463,16 +1543,19 @@ fn choose_part(masses: &[f64], u: f64) -> (usize, f64) {
 }
 
 /// **The two haplotypes along one drawn path** (phasing spec §2.1), each site's joint oriented by
-/// the sample's reads where `reads` links it (reads-in-draw spec §2.2).
+/// the sample's reads where `reads` links it (reads-in-draw spec §2.2), written over `path`. The
+/// path is its states' [`State::code`]s at `k` templates.
 fn haplotypes_along(
     sites: &[WalkSite<'_>],
     (mismatch, pairs, site_terms): (f64, &mut GenotypePairs, &mut SiteTerms),
-    states: &[State],
+    (states, k): (&[u16], usize),
     reads: Option<&mut DrawReads<'_>>,
     joints: &mut Joints,
-) -> PathHaplotypes {
+    path: &mut PathHaplotypes,
+) {
     joints.clear();
-    for (site, &state) in sites.iter().zip(states) {
+    let states = states.iter().map(|&code| State::from_code(code, k));
+    for (site, state) in sites.iter().zip(states) {
         let alleles = site.allele_count;
         site_terms.fill(site, mismatch, pairs.of(alleles));
         let start = joints.values.len();
@@ -1490,7 +1573,7 @@ fn haplotypes_along(
     if let Some(reads) = reads {
         orient_by_reads(sites, joints, reads);
     }
-    let mut path = PathHaplotypes::with_capacity(sites.len());
+    path.clear_to_hold(sites);
     for (index, site) in sites.iter().enumerate() {
         copies_into(
             joints.get(index),
@@ -1498,7 +1581,6 @@ fn haplotypes_along(
             path.push_site(site.allele_count),
         );
     }
-    path
 }
 
 /// **The heterozygote a chain reads at a site**, its two alleles the lower first, or `None` when

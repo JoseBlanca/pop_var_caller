@@ -63,6 +63,15 @@ impl Uniforms {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         (finalise(self.state) >> 11) as f64 / (1_u64 << 53) as f64
     }
+
+    /// **Moves the stream `draws` uniforms on**, as that many calls to [`Self::next_uniform`]
+    /// would: a SplitMix64 state only counts, so a later stretch of the stream is reached without
+    /// drawing the uniforms before it.
+    pub fn skip(&mut self, draws: u64) {
+        self.state = self
+            .state
+            .wrapping_add(draws.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    }
 }
 
 /// SplitMix64's output function.
@@ -131,6 +140,23 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, third);
         assert!(first.iter().all(|&u| (0.0..1.0).contains(&u)));
+    }
+
+    /// **Skipping `n` uniforms lands where `n` draws do**, so a stretch of the stream read after a
+    /// skip is the stretch drawn after them.
+    #[test]
+    fn skipping_lands_where_drawing_does() {
+        for skipped in [0, 1, 7, 1_000] {
+            let mut drawn = Uniforms::new(StreamPurpose::ExtraPaths, 11, 4, 2);
+            for _ in 0..skipped {
+                drawn.next_uniform();
+            }
+            let mut skipped_to = Uniforms::new(StreamPurpose::ExtraPaths, 11, 4, 2);
+            skipped_to.skip(skipped);
+            let after_drawing: Vec<f64> = (0..5).map(|_| drawn.next_uniform()).collect();
+            let after_skipping: Vec<f64> = (0..5).map(|_| skipped_to.next_uniform()).collect();
+            assert_eq!(after_drawing, after_skipping, "{skipped} skipped");
+        }
     }
 
     /// **A pick follows the cumulative weights**, and a zero weight is never picked.

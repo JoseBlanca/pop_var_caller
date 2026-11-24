@@ -387,14 +387,28 @@ fn extra_paths_leave_the_round_unchanged() {
     let (walked, own) = walk_and_draw(&sites, 2, None, parameters, &mut alone, None);
     let mut with = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
     let mut extra = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
-    let (walked_again, own_again, paths) =
-        walk_and_draw_paths(&sites, 2, None, parameters, &mut with, &mut extra, 4, None);
+    let mut paths = Vec::new();
+    let (walked_again, own_again) = walk_and_draw_paths(
+        &sites,
+        2,
+        None,
+        parameters,
+        &mut with,
+        &mut extra,
+        4,
+        None,
+        &mut |path| paths.push(path.clone()),
+    );
     assert_eq!(walked, walked_again);
     assert_eq!(own, own_again);
-    assert_eq!(paths.len(), 4);
+    // The round's own path is handed on first, then the four extra ones.
+    assert_eq!(paths.len(), 5);
+    assert_eq!(paths[0], own.haplotypes);
+    let paths = paths.split_off(1);
     let mut extra_again = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
     let mut with_again = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
-    let (_, _, paths_again) = walk_and_draw_paths(
+    let mut paths_again = Vec::new();
+    let _ = walk_and_draw_paths(
         &sites,
         2,
         None,
@@ -403,8 +417,9 @@ fn extra_paths_leave_the_round_unchanged() {
         &mut extra_again,
         4,
         None,
+        &mut |path| paths_again.push(path.clone()),
     );
-    assert_eq!(paths, paths_again);
+    assert_eq!(paths, paths_again[1..]);
     assert!(
         paths.iter().any(|path| *path != own.haplotypes),
         "an extra path is a draw of its own"
@@ -662,7 +677,19 @@ fn reads_that_link_nothing_change_no_bit() {
     let draw = |reads: Option<&mut DrawReads<'_>>| {
         let mut path = Uniforms::new(StreamPurpose::Path, 5, 2, 3);
         let mut extra = Uniforms::new(StreamPurpose::ExtraPaths, 5, 2, 3);
-        walk_and_draw_paths(&sites, 3, None, parameters, &mut path, &mut extra, 4, reads)
+        let mut paths = Vec::new();
+        let (walked, own) = walk_and_draw_paths(
+            &sites,
+            3,
+            None,
+            parameters,
+            &mut path,
+            &mut extra,
+            4,
+            reads,
+            &mut |path| paths.push(path.clone()),
+        );
+        (walked, own, paths)
     };
     let link = |_: usize, _: (usize, usize), _: usize, _: (usize, usize)| None;
     let is_hidden = |_: usize| false;
@@ -1047,4 +1074,33 @@ fn the_emissions_and_the_prediction_read_their_own_shares() {
         split.log_likelihood,
         soft.log_likelihood
     );
+}
+
+/// **A drawn state's two-byte code gives the state back**, at one template, at the pass's own
+/// count with the background (`MAX_TEMPLATES + 1`) and at the most a drawn walk takes; the codes
+/// are the walk's own order of states, autozygous first, then the pairs row by row.
+#[test]
+fn a_state_code_gives_the_state_back() {
+    for k in [
+        1,
+        crate::neighbour_evidence::templates::MAX_TEMPLATES + 1,
+        MAX_DRAWN_TEMPLATES,
+    ] {
+        let states = (0..k)
+            .map(State::Autozygous)
+            .chain((0..k).flat_map(|first| (0..k).map(move |second| State::Pair(first, second))));
+        for (expected_code, state) in states.enumerate() {
+            let code = state.code(k);
+            assert_eq!(
+                usize::from(code),
+                expected_code,
+                "{state:?} at {k} templates"
+            );
+            assert_eq!(
+                State::from_code(code, k),
+                state,
+                "{state:?} at {k} templates"
+            );
+        }
+    }
 }

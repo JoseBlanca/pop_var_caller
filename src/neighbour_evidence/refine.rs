@@ -1341,15 +1341,28 @@ fn solve_round(
     };
     let template_count = template_weights.len();
 
-    let mut likelihoods: Vec<f64> = Vec::new();
-    let mut shares: Vec<f64> = Vec::new();
+    // The walk's arrays at their exact lengths, every thread holding one set: grown by doubling,
+    // they held up to twice what they used.
+    let (genotype_total, allele_total) =
+        layout
+            .record_of_site
+            .iter()
+            .fold((0, 0), |(genotypes, alleles), &index| {
+                (
+                    genotypes + records[index].genotype_count(),
+                    alleles + records[index].allele_count,
+                )
+            });
+    let share_total = (template_count + 1) * allele_total;
+    let mut likelihoods: Vec<f64> = Vec::with_capacity(genotype_total);
+    let mut shares: Vec<f64> = Vec::with_capacity(share_total);
     // From round 2 the states are weighed by definite alleles, one drawn from each template's
     // shares at each site, the background's included (phasing spec §2.3): a template that is
     // unsure is then sometimes plainly wrong, as a soft share never is. The shares themselves stay
     // what the prediction and the drawn haplotypes read.
     let mut definite = (round > 1).then(|| {
         (
-            Vec::<u8>::new(),
+            Vec::<u8>::with_capacity(share_total),
             Uniforms::new(
                 StreamPurpose::DefiniteAlleles,
                 phasing.window_key,
@@ -1459,7 +1472,9 @@ fn solve_round(
             Some(phase) => {
                 let mut extra_uniforms =
                     Uniforms::new(StreamPurpose::ExtraPaths, phasing.window_key, sample, round);
-                let (result, drawn, extra) = walk_and_draw_paths(
+                // Every path is recorded as it is made, the round's own first, so each takes the
+                // same bit of the phase's record as when the paths were returned together.
+                let (result, drawn) = walk_and_draw_paths(
                     &sites,
                     walk_templates,
                     Some(&template_weights),
@@ -1468,11 +1483,8 @@ fn solve_round(
                     &mut extra_uniforms,
                     phasing.extra_paths,
                     draw_reads.as_mut(),
+                    &mut |path| phase.record_path(pairs, path),
                 );
-                phase.record_path(pairs, &drawn.haplotypes);
-                for path in &extra {
-                    phase.record_path(pairs, path);
-                }
                 phase.add_round(&drawn.haplotypes);
                 (result, drawn)
             }
