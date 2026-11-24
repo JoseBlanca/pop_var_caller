@@ -1,54 +1,57 @@
 # Methods
 
-This page explains how pvc gets from reads to genotypes, and why it does each step the way it
-does. It is written for readers who know callers such as GATK and freebayes, and tools such as
-Beagle and STITCH, and want to judge pvc's model. For how to run pvc, see
-[Calling](calling.md); this page links to the usage pages instead of repeating them.
-
-Where a number is a default, it is given as one.
-
 ## 1. Overview
 
-pvc is a population caller. It calls SNPs, indels and short tandem repeats (STRs) in all the
-samples of a cohort at once, and each sample's genotype is informed by what the other samples
-carry.
+pvc is a population caller: it calls SNPs, indels and STRs in all the samples of a cohort at
+once.
 
 ![How evidence flows through pvc: a per-sample step that writes one psp file per sample, cohort steps that estimate the parameters and call jointly, and an optional refinement](figures/methods_signal_flow.svg)
 
 *The blue lane is done once per sample and never again. The orange lane is done over the whole
-cohort, and again when a sample is added. The grey lane is optional. In direct mode
-(`call-from-alignments`) there is no psp file and no parameter estimation: the evidence goes
-straight from the first lane to joint calling, with built-in parameter values or a parameters
-file from an earlier run.*
+cohort, and again when a sample is added. The grey lane is optional. [Calling](calling.md)
+compares this with direct mode.*
 
 The steps, in order:
 
 1. **Per sample: gather the evidence.** The reads are filtered and corrected, and what they show
    at every locus is written to a per-sample pileup file (a *psp file*). No genotype is called
    and no likelihood is computed here (sections 2 and 3).
-2. **Per cohort: estimate the parameters.** How often each library's bases are wrong, how inbred
-   each sample is, how variable the population is, how often repeats stutter. All of it is
-   estimated from the cohort's own reads, without calling a genotype first (sections 6 and 7).
-3. **Per cohort: call.** The genome is divided into region types, each with its own model of
-   how a read arises from an allele (section 4). At each locus the candidate alleles are chosen
-   from all samples (section 5), and a loop alternates between the allele frequencies and the
-   samples' genotypes until they agree (section 8). Qualities and site filters follow
+2. **Per cohort: estimate the parameters** used as priors in calling: how often each library's
+   bases are wrong, how inbred each sample is, how variable the population is, how often STRs
+   stutter. These priors are estimated from the cohort's own reads, without calling a genotype
+   first (sections 6 and 7).
+3. **Per cohort: call.** The genome is divided into region types, each with its own likelihood
+   model of how a read arises from an allele (section 4). At each locus the candidate alleles are
+   chosen from all samples (section 5), and a loop alternates between the allele frequencies and
+   the samples' genotypes until they agree (section 8). Qualities and site filters follow
    (sections 9 and 10).
-4. **Optionally: refine.** Each sample's genotypes are called again using the haplotypes the
-   other samples carry along the chromosome (section 11), and the genotypes are phased
-   (section 12).
+4. **Optionally, when asked for: refine.** Each sample's genotypes are called again (section 11)
+   and phased again (section 12), using the information from the haplotypes that the other
+   samples carry along the chromosome.
 
-Two design choices explain most of the rest:
+pvc stores the pileup information in one file per sample, so it does not have to read the
+alignment files again each time the cohort is called. GATK's gVCFs serve the same purpose. But
+GATK genotypes each sample from its own reads alone. Its joint step only makes the samples'
+alleles compatible, so they can be written in one VCF. In pvc, each sample's genotype also uses
+what the other samples carry (section 8).
 
-- **The evidence is stored per sample, and the model is applied per cohort.** GATK stores each
-  sample's genotype likelihoods in a gVCF, computed before the cohort is known. freebayes keeps
-  nothing it can call from later, and reads every alignment in every run. pvc stores the reads' evidence before
-  any model touches it, so a new sample costs one new file, and the model applied later can use
-  parameters and candidate alleles that come from the whole cohort.
-- **Nothing is learned from a first rough set of calls.** Every parameter is estimated by
-  summing over all the genotypes a sample could have, weighted by their probability, and never
-  by choosing one. There are no known-variant files to supply and no hard-filtered training
-  set.
+These are the main methods used by pvc:
+
+- Standard read filters, indel left-alignment and read realignment at STRs; no local
+  reassembly (section 2).
+- Different likelihood models for generic loci (SNPs and indels), STRs and STR bundles;
+  satellites are not called by default (section 4).
+- Candidate alleles are chosen from all the samples together (section 5).
+- Priors are estimated from the cohort's own reads by marginal likelihood, without calling
+  genotypes first (section 6).
+- Each sample's inbreeding coefficient F is part of the genotype prior, for inbred and selfing
+  species (section 7).
+- Bayesian genotype calling with an EM loop between allele frequencies and genotypes
+  (section 8).
+- Site quality with penalties for sequencing artifacts, and a filter for hidden duplications
+  (sections 9 and 10).
+- Optional refinement/imputation from the haplotypes the samples share (section 11).
+- Phase from read pairs, extended by the refinement (section 12).
 
 ## 2. Read filters and read fixes
 
@@ -57,17 +60,14 @@ Two design choices explain most of the rest:
 pvc ignores duplicates, QC failures, secondary, supplementary and unmapped reads, reads with a
 mapping quality below 20, reads shorter than 30 bases, reads with a malformed alignment, and
 reads where more than 1 aligned base in 10 disagrees with the reference.
-[Preparing the inputs](inputs.md#read-filters) gives the exact rules. The filters have no
-options.
+[Preparing the inputs](inputs.md#read-filters) gives the exact rules.
 
-On the generic path there is no minimum base quality. A poor base is kept and given the small
-weight its quality implies. On the STR path, a read that spans a repeat is used as a complete
-observation only if at least three quarters of its bases there have quality 15 or more.
+On the STR path, a read that spans a repeat is used as a complete observation only if at least
+three quarters of its bases there have quality 15 or more.
 
-### Fixes
+### Read fixes
 
-A fix changes how a read is counted without discarding it. Each one removes a known way in
-which reads give false evidence.
+pvc adjusts the reads, their qualities and their alignments to avoid some known problems.
 
 - **Indels are left-aligned.** One deletion inside a run of identical bases can be written at
   several positions, and mappers do not always choose the same one. On the generic path (the
@@ -77,37 +77,41 @@ which reads give false evidence.
   the read length, the sequencer reads through the fragment into the adaptor. pvc detects this
   from the pair: the two mates map to opposite strands of one chromosome, and the fragment
   length the mapper reports is shorter than the read. On the generic path, the bases beyond the
-  fragment's end are not counted.
+  fragment's end are not taken into account.
 - **Overlapping mates count once.** Where the two mates of a pair cover the same position, they
   are two readings of one molecule, not two independent observations. If they show the same
   base, one mate keeps it with the sum of the two qualities (at most 200), and the other mate's
   bases there are given quality 0, so they carry no weight. If they disagree, the mate with the
   higher quality keeps its base at 0.8 of its Phred quality, and the other is given quality 0.
   If either shows an indel there, the mate with the lower quality is dropped at that position.
-- **A read is as uncertain as its mapping.** On the generic path, the error probability of a
-  read at a locus is the larger of two: the one its base quality states, and the one its
+- **A read is as uncertain as its mapping.** On the generic path, pvc gives each read one
+  error probability at each locus, written **ε**: the probability that the read shows the
+  wrong sequence there. It comes from the read's qualities. A Phred quality *Q* states an error
+  probability of 10^(−*Q*/10): Phred 20 is 1 error in 100, Phred 30 is 1 in 1,000. ε is the
+  larger of two such probabilities: the one the read's base quality states, and the one its
   mapping quality states. The base quality used is the lowest among the read's bases in the
   locus; for an indel, it is the lowest over the indel and the read bases on each side of it.
-- **Base qualities are calibrated per read group.** Sequencers report qualities that are
-  usually too optimistic. pvc estimates one correction factor per read group from the data and
-  multiplies each read's error probability by it (section 6). The result is capped at one
-  half, the point where a read says nothing. GATK's base-quality recalibration (BQSR) solves
-  the same problem with a table by reported quality, machine cycle and sequence context, and
-  needs a file of known variants. pvc's correction is one number per read group and needs no
-  known variants.
-- **At STRs, each read is aligned again.** A mapper places gaps one read at a time and knows
-  nothing of repeats, so it can misjudge where a repeat ends in a read, or whether the read
-  reaches past it at all. pvc uses the mapper's alignment to cut out the part of the read that
-  lies over the repeat and the 15 bases on each side of it, and aligns that part again against
-  the reference repeat and those 15-base flanks, with an aligner in which gaining or losing a
-  whole repeat unit is cheap. This realignment decides what the read shows. A read that reaches
-  the flank on both sides is a complete observation. A read that reaches only one side is kept
-  as a partial observation: it shows that the repeat is at least as long as the part it covers.
-  A read that reaches neither side is dropped. What is kept of a complete read is its own
-  sequence over the whole repeat. Where the mapper's alignment places an indel in the read and
-  covers the repeat and one base on each side, its account of where the repeat starts and ends
-  in the read is kept; otherwise the realignment's is. A read whose bases match the reference over the whole window
-  is not realigned.
+- **Base-quality recalibration.** Base qualities are often optimistic. pvc estimates one
+  *calibration factor* per read group: how many times more errors its reads make than their
+  qualities claim. Every ε of the read group is then multiplied by that factor, except where
+  the read differs from an allele by an indel (section 4). With a factor of 2, a base reported
+  at Phred 30 (1 error in 1,000) is scored as Phred 27 (1 error in 500). The factor is
+  estimated from the cohort's own reads (section 6); with `--defaults` it is 2. For a very poor
+  base, the multiplication could give an error above 1 in 2: more likely wrong than right. pvc
+  stops it at 1 in 2, where a base counts as no evidence for or against any allele. GATK's
+  base-quality recalibration (BQSR) solves the same problem with a table by reported quality,
+  machine cycle and sequence context, and needs a file of known variants. pvc's correction is
+  one number per read group and needs no known variants.
+- **At STRs, each read is aligned again.** A mapper places gaps without a model of repeats, so
+  it can misjudge where a repeat ends in a read, or whether the read reaches past it at all.
+  pvc takes the part of the read that the mapper placed over the repeat, plus 15 bases on each
+  side. It aligns that part again against the reference repeat and its flanks, with an aligner
+  that makes gaining or losing a whole repeat unit cheap. Then:
+  - a read that reaches the flank on both sides is a complete observation, and pvc keeps its
+    sequence over the whole repeat;
+  - a read that reaches only one side is a partial observation: it shows that the repeat is at
+    least as long as the part it covers;
+  - a read that reaches neither side is dropped.
 
 Two more corrections act later and are described where they apply. Reads that fit no allele at
 an STR are given a small fixed weight (section 4). Variants supported mostly by low-quality
@@ -116,31 +120,32 @@ bases are penalised in QUAL (section 9).
 ### What pvc does not do
 
 - **No BAQ.** BAQ (base alignment quality, from samtools) lowers the quality of bases near
-  possible indels. pvc does not apply it and does not support reads that already carry it: if
-  an alignment's header records a `samtools calmd` step that wrote BAQ over the base
-  qualities, pvc warns. BAQ lowers the bases beside an indel towards quality 0, and pvc would
-  then take the reads that show an indel in a short run of bases as almost certainly wrong.
+  possible indels. pvc does not apply it, and does not support reads that already carry it.
+  BAQ lowers the bases beside an indel towards quality 0, so pvc would take the reads that show
+  an indel in a short run of bases as almost certainly wrong. pvc warns when an alignment's
+  header records a `samtools calmd` step that wrote BAQ over the base qualities.
 - **No local reassembly.** GATK's HaplotypeCaller rebuilds the reads of each active region
   into haplotypes with a de Bruijn graph and aligns the reads to them again. pvc, like
   freebayes, takes the mapper's alignment on the generic path, corrected only by
-  left-alignment. The consequences are that a variant the mapper aligned badly is not rescued,
-  and that a locus on the generic path can span at most 100 reference bases
-  (`--max-locus-span`), so the longest deletion pvc can call there is 99 bases, and less inside
-  a run of repeated sequence, where the deletion's possible positions widen the locus.
+  left-alignment. This has two consequences. A variant the mapper aligned badly is not rescued.
+  And a locus on the generic path can span at most 100 reference bases (`--max-locus-span`), so
+  the longest deletion pvc can call there is 99 bases. Inside repeated sequence it is shorter,
+  because the deletion's possible positions widen the locus.
 
 ## 3. Per-sample pileup files
 
-A psp file holds what one sample's reads show at every locus, after the filters and fixes, and
-before any statistical model.
+A psp file holds what one sample's reads show at every position, after the filters and fixes,
+but before any statistical model.
 
 - On the generic path there is a record for every position a read covers, including positions
-  where every read matches the reference. A record lists each distinct sequence seen and, for
-  each one and each read group: the number of reads, how many are on the forward strand, their
-  summed log error probability, a summary of their mapping qualities, and how many are of low
-  base quality or lie mostly to one side of the locus.
-- On the STR path there is one record per repeat, listing each distinct sequence the reads show
-  over the repeat and which part of it they covered, so that complete and partial observations
-  are told apart.
+  where every read matches the reference. A record lists each distinct sequence seen. For each
+  sequence and each read group, it stores the number of reads, how many are on the forward
+  strand, their summed log error probability, and a summary of their mapping qualities. Two
+  more counts feed the artifact penalties (section 9): how many of the reads have a base
+  quality below 20 at that position, and how many have at least as much of their length to the
+  left of the position as to its right.
+- On the STR path there is one record per locus, listing each distinct sequence the reads show
+  over the repeat and which part of it they covered.
 - Reads keep an identifier that the two mates of a pair share. Phasing uses it (section 12).
 - At its end, a psp holds a small summary for parameter estimation: the read counts at about
   two million positions and at up to 5,000 repeats of each class, chosen by a fixed
@@ -148,25 +153,16 @@ before any statistical model.
 
 A psp holds no genotype and no genotype likelihood. This is the difference from a GATK gVCF. A
 gVCF stores, for each sample, likelihoods over the alleles HaplotypeCaller found in that
-sample plus a catch-all `<NON_REF>` allele, computed with an error model fixed before the
-cohort existed. A psp stores the evidence those likelihoods would be computed from. The
-likelihood is computed at calling time, so it uses the candidate alleles of the whole cohort
-and the error rates, contamination and stutter estimated on the whole cohort.
-
-Both designs share the practical property: **adding a sample does not redo the others.** One
-new psp is written, and then the parameters are estimated and the cohort is called again from
-the psp files, without opening the earlier samples' alignments.
-
-**Direct mode** skips the files: `call-from-alignments` gathers the same evidence and calls in
-one run. Given the same samples and the same parameters, the two modes write the same calls.
-Direct mode cannot estimate parameters, because that needs the psp summaries.
-[Calling](calling.md) compares the two.
+sample plus a catch-all `<NON_REF>` allele. A psp stores the evidence those likelihoods would
+be computed from. The likelihood is computed at calling time. So it uses the candidate alleles
+of the whole cohort, and the error rates, contamination and stutter estimated from the whole
+cohort.
 
 ## 4. Region types and their read models
 
-Before any read is seen, pvc divides the reference into four types of region. The division
-depends only on the reference and on its repeat catalogue ([Preparing the
-inputs](inputs.md#the-repeat-catalogue)), so it is the same for every sample.
+pvc divides the reference into four types of region. The division depends only on the
+reference and on its repeat catalogue ([Preparing the inputs](inputs.md#the-repeat-catalogue)),
+so it is the same for every sample.
 
 | Region type | What it is | How it is called |
 |---|---|---|
@@ -175,19 +171,21 @@ inputs](inputs.md#the-repeat-catalogue)), so it is the same for every sample.
 | STR bundle | two or more repeats within 15 bases of each other, at most 100 bases in all | the STR path: one locus over all of them |
 | Satellite | a repeat or bundle longer than 100 bases | not called by default |
 
-The thresholds are options ([Options](options.md#what-counts-as-a-repeat)), except the
-15-base distance that makes a bundle, which is fixed.
+The thresholds are options ([Options](options.md#what-counts-as-a-repeat)).
 
-The two paths differ in what they take as an observation and in how a read can be wrong.
+The two paths differ in what they take as an observation and in their read likelihood models.
 
 ### The generic path
 
-An observation is the sequence a read shows over the locus. A read can be wrong in one way:
-the sequencer or the mapper made an error, with the probability ε that the read's qualities
-state after calibration (section 2).
+pvc models a read's errors with the read's error probability ε, defined in section 2: the
+error its base quality or its mapping quality states, whichever is larger, multiplied by its
+read group's calibration factor. ε is the read's own qualities, turned into a probability and
+corrected.
 
-For a sample with genotype *g*, each read came from one of the genotype's copies, each equally
-likely. The probability of a read that shows allele *o* is the average over the copies:
+Two alleles appear in the formula. *o* is the observed allele: the sequence the read
+shows over the locus. *b* is the allele on the chromosome copy the read came from, which
+is unknown. In a sample with genotype *g*, each read comes from one of the genotype's copies,
+all equally likely. So the probability of a read that shows *o* is an average over the copies:
 
 ```
 P(read shows o | g) = (1 − c) · Σ_b (k_b / P) · e(o | b)  +  c · q(o)
@@ -197,23 +195,34 @@ e(o | b) = ε / 3    when o and b differ by one substitution
 e(o | b) = ε        otherwise
 ```
 
-*P* is the ploidy, and *k_b* the number of copies of allele *b* in *g*. The sample's
-likelihood is the product over its reads. The last term is contamination: a share *c* of the
-read group's reads came from another individual, who shows allele *o* with probability *q(o)*,
-the allele's frequency in the rest of the cohort. *q* is re-estimated on every pass of the
-calling loop (section 8). *c* is zero unless it was estimated (section 6).
+*e(o | b)* is the probability that a read from a copy carrying *b* shows *o*. When the two are
+the same allele, the read is right, with probability 1 − ε. When they differ by one
+substitution, the read is wrong in one particular way: an error at that base could have
+produced any of the three other bases, so this one gets a third of ε. Any other difference,
+such as an indel, is charged the whole of ε.
 
-Two details. When *o* and *b* differ by one indel, ε is the read's uncalibrated error, because
-the calibration is estimated from substitutions. And reads of one read group that show the
-same allele are scored together at the geometric mean of their error probabilities, which is
-exact when they share one quality and an approximation otherwise.
+*P* is the ploidy, and *k_b* the number of copies of allele *b* in *g*, so *k_b / P* is the
+chance that a read came from a copy carrying *b*. The sample's likelihood is the product over
+its reads.
+
+The last term is contamination. A share *c* of the read group's reads came from another
+individual. That individual shows allele *o* with probability *q(o)*, the allele's frequency in
+the rest of the cohort. *q* is re-estimated on every pass of the calling loop (section 8). *c*
+is zero unless it was estimated (section 6).
+
+When *o* and *b* differ by one indel, ε is the read's uncalibrated error, because the
+calibration is estimated from substitutions.
+
+Reads of one read group that show the same allele are scored together at the geometric mean of
+their error probabilities, which is exact when they share one quality and an approximation
+otherwise.
 
 ### The STR path and stutter
 
 When a repeat is copied, in the cell or in the PCR of library preparation, the polymerase can
-slip and the copy gains or loses whole units. This is **stutter**. A sample that carries 12
-copies of `AC` gives reads with 12, and also some with 11 or 13. With the generic model those
-reads look like a second allele; with a stutter model they are the expected noise of the first.
+slip and the copy gains or loses whole units. This is stutter. A sample that carries 12
+copies of `AC` gives reads with 12, and also some with 11 or 13. The stutter model accounts for
+this kind of noise.
 
 An observation at an STR is the read's spelling of the whole repeat. The probability that an
 allele *a* gives that spelling is the product of two parts:
@@ -228,45 +237,41 @@ allele *a* gives that spelling is the product of two parts:
   *L* is the stutter level, the share of reads that slip by whole units. The direction share
   says how many of them are shorter and how many longer. *f* is the fall-off: each further unit
   is *f* times as likely as the one before. A length change that is not a whole number of units
-  is priced separately, as a sequencing indel, with the same direction share and fall-off; its
-  total is one twentieth of *L*, added to it. *L*, the direction share and *f* are estimated per
-  class of repeat (unit length × number of copies). *L* is then multiplied by a factor
-  estimated for each read group and unit length (section 6). The built-in values are those
-  HipSTR ships: 1 read in 20 a unit shorter and 1 in 20 a unit longer, each further unit 20
+  is treated as a sequencing indel. It has the same direction share and fall-off, and its total
+  probability is one twentieth of *L*, on top of *L*. *L*, the direction share and *f* are
+  estimated per class of repeat (unit length × number of copies). *L* is then multiplied by a factor
+  estimated for each read group and unit length (section 6). The built-in values are the same
+  HipSTR uses: 1 read in 20 a unit shorter and 1 in 20 a unit longer, each further unit 20
   times rarer, and 1 in 100 a part of a unit shorter and 1 in 100 longer.
 - **The bases.** After the allele is brought to the read's length, each base matches with
   probability 1 − ε and differs with ε/3. Here ε is not the read's base quality. It is a
-  substitution rate measured inside repeats, per class of repeat. For a read that spans the
-  repeat, a further error rate, estimated per read group, is added at the 20 bases that follow
-  a run of 8 or more identical bases, which sequencers misread more often.
+  substitution rate measured inside repeats, per class of repeat. Sequencers misread the 20
+  bases that follow a run of 8 or more identical bases more often than other bases. For a read
+  that spans the repeat, pvc adds an extra error rate there, estimated per read group.
 
-The sample's likelihood is:
+The probability of a read is then:
 
 ```
 P(read o | g) = (1 − λ − c) · Σ_a (k_a / P) · R(o | a)  +  λ · U  +  c · s(o)
 ```
 
 *R* is the product of the two parts above. *λ* is the share of reads taken to fit no allele at
-all: reads from another place in the genome, or chimeric ones. It is 0.07 by default and is
-not estimated, and such a read is equally likely to show any length the candidates can reach
-(*U*). Its effect is to limit how much one odd read can pull a genotype. *c* is
-contamination, as on the generic path, but the contaminant's allele *s(o)* is drawn from the
-lengths common in that class of repeat, and does not follow the calling loop.
-
-Other STR callers model stutter in similar terms. HipSTR learns a stutter model for each
-repeat by EM; GangSTR uses one fixed model for all. pvc estimates stutter once per cohort for
-each class of repeat, pooling the thousands of repeats of that class.
+all: reads from another place in the genome, or chimeric ones. It is 0.07 by default. Such a
+read is equally likely to show any length the candidates can reach (*U*). This term limits how
+much one odd read can pull a genotype. *c* is contamination, as on the generic path. Here,
+though, the contaminant's allele *s(o)* is drawn from the lengths common in that class of
+repeat, and it does not change during the calling loop.
 
 ### STR bundles
 
-When repeats lie within 15 bases of each other, none has clean sequence on both sides, and one
-read spans several. pvc calls the bundle as one locus. An allele is the whole sequence from
-the first repeat to the last. Within each allele, pvc finds the runs of repeated units it
-contains. Each run stutters on its own, with the rates for its unit length and its number of
-copies in that allele, and the probability of a read sums over the ways the runs could have
-slipped to give the read's length.
+When repeats lie within 15 bases of each other, none has clean sequence on both sides. pvc calls
+the bundle as one locus. An allele is the whole sequence from the first repeat to the last.
+Within each allele, pvc finds the runs of repeated units it contains. Each run stutters on its
+own, with the rates for its unit length and its number of copies in that allele. The
+probability of a read is the sum over all the ways the runs could have slipped to give the
+read's length.
 
-### What happens at the edges
+### STR edges
 
 - A SNP or indel in the sequence beside a repeat is on generic ground and is called on the
   generic path.
@@ -285,63 +290,60 @@ called on the generic path, and changes in the number of units mostly remain unc
 
 ## 5. Candidate alleles
 
-A genotype can only be made of alleles that were considered, so which alleles are considered
-bounds what can be called.
+pvc is a Bayesian caller, so it needs a way to decide which alleles to consider in calling.
 
-**Candidates are chosen over the cohort, and the bar is per sample.** An allele is considered
-for every sample if, in at least one sample, at least 2 reads and at least 10% of that
-sample's reads show it. The reference allele is always a candidate. So an allele seen clearly
-in one sample is tested in all the others, including samples where a single read shows it. An
-allele that appears in one read of each of many samples, and in two reads of none, is never
-considered: reads are not pooled across samples to pass the bar.
+Candidate alleles are chosen over the cohort. An allele is considered if at least one sample
+shows it in at least 2 reads and in at least 10% of its reads. The reference allele is always
+a candidate.
 
 On the generic path:
 
-- A locus starts where some sample has non-reference reads, at least 2 and at least 2% of its
-  reads. Variants that share reference bases, such as a SNP inside a deletion, are grouped
-  into one locus, whose alleles are the whole sequences. A locus wider than 100 bases is not
-  called.
-- At most 6 alleles are kept, the reference included (`--max-generic-alleles`). They are
-  ranked by their best share within one sample, then by the number of samples that passed the
-  bar. A sample that itself passed the bar for an allele the limit left out is written as not
-  called, because its genotype cannot be expressed.
+- pvc opens a locus only where at least one sample shows something other than the reference:
+  at least 2 of its reads, and at least 2% of its reads at that position. Inside a locus, an
+  allele still needs the bar above, 2 reads and 10%, to become a candidate.
+- Variants that cover some of the same reference bases, such as a SNP inside a deletion, are
+  joined into one locus, even when they come from different samples. For example, where the
+  reference reads `ACGT`, a deletion of `CGT` and a SNP of `G` to `T` become three alleles of
+  one locus: `ACGT`, `A` and `ACTT`. [Overlapping variants](overlapping_variants.md) shows how
+  these are written in the VCF.
+- A locus longer than 100 reference bases is not called (`--max-locus-span`).
+- By default at most 6 alleles are kept, the reference included (`--max-generic-alleles`). They
+  are ranked by their best share within one sample, then by the number of samples that passed
+  the bar. If a sample passed the bar for an allele that the limit left out, that sample is
+  written as not called, because its genotype cannot be expressed.
 
 On the STR path:
 
-- The candidates are the repeat sequences seen in the reads, under the same bar. Lengths come
-  first. Each sample nominates the lengths whose reads pass the bar, at most as many as its
-  ploidy, the best-supported first. If it nominated fewer, the lengths one unit away that its
-  reads show are added. Every sequence of a nominated length that passes the bar is a
-  candidate; where none does, the best-supported one stands for that length.
+- The candidates are repeat sequences seen in the reads, with the same bar of 2 reads and 10%.
+  Lengths are chosen first. Each sample nominates the lengths that pass the bar, best-supported
+  first, and at most as many as its ploidy. If it nominated fewer, the lengths one unit away
+  that its reads show are added. Then every sequence of a nominated length that passes the bar
+  is a candidate. If none passes, the best-supported sequence of that length is used.
 - A sequence that passes a stricter bar, at least 2 reads and at least 15% of one sample's
   reads, is a candidate even if its length was not nominated. This admits, for example, a
   third length in a diploid sample.
-- An allele that reaches into the sequence beside the repeat through a deletion, and differs
-  by one base from another candidate, is dropped as a misread when it makes up less than a
-  third of the reads in every sample that shows it.
+- Some alleles reach into the sequence beside the repeat through a deletion. Such an allele is
+  dropped as a misread if it differs by one base from another candidate and makes up less than
+  a third of the reads in every sample that shows it.
 - At most 32 alleles are kept, the reference included. A record where the limit left alleles
-  out is marked `tooManyAlleles`. No sample is set to not called for it.
+  out is marked `tooManyAlleles`.
 
 ## 6. Parameters estimated from the data
 
-The models above need numbers: error rates, contamination, how inbred each sample is, how
-variable the population is, how much repeats stutter. `estimate-parameters` measures them on
+Bayesian calling needs some parameters: error rates, contamination, how inbred each sample is,
+how variable the population is, how much repeats stutter. `estimate-parameters` measures them on
 the cohort and writes them to a parameters file, which the calling step uses as fixed inputs.
 [Estimated parameters](parameters.md) describes the file and its built-in values.
 
 ### The method: marginal likelihood
 
-The difficulty is circular. To measure an error rate you need to know which reads are errors,
-which needs the genotypes, which need the error rate. The usual way out is a first rough set
-of calls, or a file of known variants.
+To measure an error rate you need to know which reads are errors, which needs the genotypes,
+which need the error rate. To avoid this circularity, pvc computes, for any value of the
+parameters, the probability of the observed reads. It sums over everything that is unknown at
+each position, such as each sample's genotype. This is the *marginal likelihood*. pvc keeps the
+parameter values that make the observed reads most probable.
 
-pvc avoids both. For any value of the parameters, it computes the probability of the reads
-that were observed, **summing over everything that is unknown** at each position: whether the
-position varies, the allele's frequency, and each sample's genotype. This is the *marginal
-likelihood*. The parameter values kept are those that make the observed reads most probable.
-No genotype is ever chosen, so a wrong early call cannot bias the estimate.
-
-For the positions of the generic path, in symbols:
+For the positions of the generic path:
 
 ```
 L(parameters) = Π over positions of
@@ -351,7 +353,7 @@ L(parameters) = Π over positions of
 ```
 
 - The kinds of position are: invariant, fixed for a non-reference base, or segregating. Each
-  of these can be clean or noisy, the second standing for positions where reads are mismapped.
+  can be clean or noisy; noisy stands for positions where reads are mismapped.
   Each read group has one error rate at clean positions and another at noisy ones, so the
   noisy positions do not inflate the clean rate. A further kind stands for a duplicated
   sequence: its carriers show the other allele in about half their reads and are never
@@ -360,14 +362,12 @@ L(parameters) = Π over positions of
   are themselves estimated. It is not fitted position by position.
 - *P(g | f, F_s)* is the genotype prior with the sample's inbreeding coefficient (section 7).
 
-The data are the summaries at the end of the psp files: about two million positions, the same
-in every sample. The search is an EM algorithm, sped up with Newton steps, run from three
-starting points that differ in the error rates they assume. It stops when the remaining step
-could raise the log-likelihood by less than 0.01. When there are at least 500,000 positions,
-the usual case, the three starts are run on a regular subset of about 250,000 of them, and
-only the best continues on all of them.
+The input data are the summaries written at the end of the psp files: about two million
+positions, the same in every sample. The search is an EM algorithm, sped up with Newton steps,
+run from three starting points that differ in the error rates they assume. It stops when the
+remaining step could raise the log-likelihood by less than 0.01.
 
-### What is estimated, and how
+### What is estimated
 
 | Quantity | For each | Method |
 |---|---|---|
@@ -380,42 +380,44 @@ only the best continues on all of them.
 | Substitution rate inside repeats | class of repeat | counted |
 | Extra errors after a run of one base | read group | counted |
 
-**Base-quality calibration.** The fit gives each read group's true error rate at clean
-positions. The calibration is that rate divided by the rate the read group's reads claim,
-taken as a geometric mean over every read at every position they cover; what a read claims is
-the worse of its base and mapping qualities (section 2). One number rescales every read of the
-read group. A read group without data gets an error rate of 1 in 1,000, marked `defaulted`.
+**Base-quality calibration.** The parameter fit calculates each read group's true error rate
+at clean positions. The calibration factor is that rate divided by the rate the reads claim.
+The claimed rate is a geometric mean over every read at every position it covers, and what a
+read claims is the worse of its base and mapping qualities (section 2). A read group without
+data gets a default error rate of 1 in 1,000.
 
 **Contamination.** Each read comes from the sample with probability 1 − *c* and from another
-individual with probability *c*. The fit sums over the genotypes of both, the contaminant's
-drawn at the cohort's allele frequencies, and finds the *c*, between 0 and 0.5, that makes the
-reads most probable. It reports 0 unless a positive value explains the reads better. It needs a
-cohort: only positions with reads in at least 8 samples and an allele frequency between 2% and
-98% are used, so with fewer than 8 samples there is no estimate.
+individual with probability *c*. The fit sums over the genotypes of both; the contaminant's
+genotype is drawn at the cohort's allele frequencies. It keeps the *c*, between 0 and 0.5, that
+makes the reads most probable. It reports 0 unless a positive value explains the reads better.
+Only positions with reads in at least 8 samples and an allele frequency between 2% and 98% are
+used, so with fewer than 8 samples there is no estimate.
 
-**Stutter.** At each sampled repeat the fit sums over the sample's possible pairs of allele
-lengths, with the sample's F, and asks which stutter numbers make the observed spread of read
-lengths most probable. The numbers are not free for every class: they are smooth curves along
-the number of copies, one set per unit length, so a class with few repeats borrows from its
-neighbours. Three kinds of repeat are left out of this fit, and still called: interrupted
-repeats, repeats where more than 1 in 10 of the reads that differ from an allele differ by a
-part of a unit, and repeats whose depth or excess of off-length reads suggests a duplicated
-sequence. The multiplier of each read group is pulled towards 1 when the read group has few
-reads, and is 1 when a sample has a single read group.
+**Stutter.** At each sampled repeat the parameter fit sums over the sample's possible pairs of
+allele lengths, with the sample's F, and asks which stutter numbers make the observed spread of
+read lengths most probable. The numbers are not free for every class: they are smooth curves
+along the number of copies, one set per unit length. Three kinds of repeat are left out of this
+fit:
 
-**Counted rates.** The substitution rate inside repeats is the mismatches divided by the
+- interrupted repeats;
+- repeats where more than 1 in 10 of the reads that differ from an allele differ by part of a
+  unit;
+- repeats whose depth, or excess of reads of other lengths, suggests a duplicated sequence.
+
+The multiplier of each read group is pulled towards 1 when the
+read group has few reads, and is 1 when a sample has a single read group.
+
+The substitution rate inside repeats is the number of mismatches divided by the number of
 bases compared, per class, pooled over all read groups, in reads that show the reference
 length. The extra error after a run of 8 or more identical bases is the difference between
 reads sequenced through the run and reads that reached the same base from the other side.
-
-**Fixed.** The weight of a read that fits no allele at an STR, 0.07, is not estimated.
 
 ## 7. Inbreeding
 
 The inbreeding coefficient F of a sample is the probability that its two copies at a locus
 are identical by descent. A selfed line has F near 1, an outbred individual near 0.
 
-**The prior.** For a diploid sample at a site with two alleles of frequencies *p* and *q*:
+For a diploid sample at a site with two alleles of frequencies *p* and *q*:
 
 ```
 P(AA) = p² + F·p·q        P(AB) = 2·p·q·(1 − F)        P(BB) = q² + F·p·q
@@ -425,42 +427,30 @@ In general, for any ploidy and any number of alleles, the prior is a mixture: wi
 1 − F the genotype is drawn under random mating, and with probability F the sample is
 homozygous for one allele, drawn at its frequency.
 
-**Why it matters.** With F = 0, the Hardy–Weinberg prior expects 2*pq* heterozygotes. In a
-selfing species almost none exist. A caller that assumes random mating makes two kinds of
-mistake there, both worst at low depth. A homozygote with one stray read of the other allele
-is called heterozygous, because the prior finds that plausible. And a homozygote covered by
-one or two reads is left uncertain, because the prior holds that the unseen copy may differ.
-With F = 0.95 the prior makes a heterozygote 20 times less probable, a stray read no longer
-makes one, and one read is strong evidence for the homozygote.
-[Accuracy](accuracy.md#simulated-inbreeding-does-a-wrong-f-cost-genotypes) measures what a
-wrong F costs on simulated cohorts.
+With F = 0, the Hardy–Weinberg prior expects 2*pq* heterozygotes. In a selfing species there
+are almost no heterozygotes.
 
-GATK's joint genotyping and freebayes both assume Hardy–Weinberg proportions in their priors.
-GATK reports an inbreeding coefficient as a site annotation and does not use it in the prior.
+F is estimated as one of the parameters of the fit in section 6: the F of each sample is the
+value that best explains how few, or how many, heterozygous positions its reads show, given the
+allele frequencies of the cohort. It is at least 0 and below 1. It is measured against the
+frequencies of the same cohort, so it is an inbreeding relative to that cohort.
 
-**How F is estimated.** It is one of the parameters of the fit in section 6: the F of each
-sample is the value that best explains how few, or how many, heterozygous positions its reads
-show, given the allele frequencies of the cohort. It is at least 0 and below 1. It is
-measured against the frequencies of the same cohort, so it is an inbreeding relative to that
-cohort.
-
-**With one sample, F cannot be estimated.** One genome cannot show whether it has too few
+With one sample, F cannot be estimated. One genome cannot show whether it has too few
 heterozygotes: there are no allele frequencies to compare with. F is set to 0 and marked
-`defaulted` in the parameters file. For an inbred line called alone, supply the value, for
-example `estimate-parameters --inbreeding 0.99`. The value must be below 1: pvc refuses
-`--inbreeding 1`. A supplied value is given to every sample.
+`defaulted` in the parameters file. For an inbred line called alone, the user can supply the
+value with `--inbreeding`. The value must be below 1: pvc refuses `--inbreeding 1`.
 
 The F of the parameters file is used in three places: the calling prior (section 8), the
 hidden-duplication filter (section 10), and the refinement (section 11). The stutter and
 contamination fits use the F estimated within the same run, not a supplied one.
 
-## 8. Calling: the loop between allele frequencies and genotypes
+## 8. Calling
 
-At each locus, two things are unknown and each depends on the other. A sample's genotype
-depends on how common each allele is: a rare allele needs more reads to be believed. And how
-common each allele is depends on the samples' genotypes. pvc alternates between the two.
+At each locus, two things are unknown and each depends on the other. A sample's genotype prior
+depends on the allele frequencies, and the allele frequencies depend on the samples'
+genotypes. pvc solves this with an EM loop that alternates between the two.
 
-**The loop.** For each sample *s* and each candidate genotype *g*:
+For each sample *s* and each candidate genotype *g*:
 
 ```
 prior:       α_s(a)  =  seed(a)  +  Σ over the other samples t of  E[copies of a in t]
@@ -474,43 +464,43 @@ update:      E[copies of a in s]  =  Σ over g of  P(g | reads_s) · (copies of 
 
 In words:
 
-- **The prior of a sample is built from the other samples.** α_s(a) is the number of copies
+- The prior of a sample is built from the other samples. α_s(a) is the number of copies
   of allele *a* the rest of the cohort is expected to carry, plus a seed. The sample's own
   copies are left out, so its reads are not counted twice, once as evidence and once as prior.
-- **DM** is the Dirichlet-multinomial distribution: the probability of drawing the genotype's
+- DM is the Dirichlet-multinomial distribution: the probability of drawing the genotype's
   copies from a population whose allele counts are α_s. With large counts it is the multinomial
   of Hardy–Weinberg; with small ones it allows for the frequencies being uncertain.
-- **The seed** is what is known before any sample is seen: a pseudo-count for the reference
+- The seed is what is known before any sample is seen: a pseudo-count for the reference
   allele and a much smaller one shared among the alternatives. It comes from the population
   diversity estimated in section 6. With built-in parameters it is 1 for the reference and
-  0.001 shared among the alternatives. At an STR, the seed of each allele follows how common its length
-  is in repeats of that class.
-- **F_s** enters as in section 7.
+  0.001 shared among the alternatives. At an STR, the seed of each allele follows how common
+  its length is in repeats of that class.
+- F_s enters as in section 7.
 - The expected copies are recomputed from the posteriors, and the loop repeats.
 
 The loop starts from one pass without a prior. It stops when no allele's expected count moves
-by more than one thousandth of the allele copies of the samples that have evidence, or after
-50 passes. A
-locus that reaches 50 is written with the filter `EMNoConv`. A sample without reads at the
-locus adds nothing to the counts. When contamination was estimated, the allele frequencies in
-its term follow the loop too.
+by more than one thousandth of the total allele copies in the samples with reads, or after 50
+passes. A locus that reaches 50 is written with the filter `EMNoConv`. A sample without reads
+at the locus adds nothing to the counts. When contamination was estimated, its allele
+frequencies are also updated on each pass.
 
-**The call.** Each sample's genotype is the one with the highest posterior. A sample whose
-reads give every genotype the same likelihood, which includes a sample with no reads, is
-written `./.`. It is never called homozygous for the reference for lack of evidence. The
-allele frequency written as `AF` is the loop's estimate, rescaled over the alleles written: an
-alternative allele no called genotype carries is removed from the record first.
+At the end, each sample's genotype is the one with the highest posterior. A sample whose reads
+give every genotype the same likelihood, which includes a sample with no reads, is written
+`./.`. It is never called homozygous for the reference for lack of evidence.
+
+The allele frequency written as `AF` is the loop's estimate. Alternative alleles that no
+called genotype carries are first removed from the record, and `AF` is rescaled over the
+alleles that remain.
 
 ### Compared with GATK and freebayes
 
-**GATK.** The step to compare with is joint genotyping (`GenotypeGVCFs`), not
-HaplotypeCaller. HaplotypeCaller in gVCF mode sees one sample and writes its genotype
+GATK's HaplotypeCaller in gVCF mode first calls one sample at a time and writes its genotype
 likelihoods; no cohort exists yet. Joint genotyping then estimates the cohort's allele
-frequencies with a loop of the same family as pvc's: genotype posteriors given the
-frequencies, then frequencies given the expected allele counts, with fixed pseudo-counts as
-prior, until no expected count moves by more than 0.1. Four things differ.
+frequencies with a loop like pvc's. It alternates between genotype posteriors given the
+frequencies, and frequencies given the expected allele counts. Its prior is a set of fixed
+pseudo-counts, and it stops when no expected count moves by more than 0.1. Four things differ.
 
-- In GATK the loop's result is used for the site: QUAL, and which alleles are kept. Each
+- In GATK the loop's result is used only for the site: its QUAL, and which alleles are kept. Each
   sample's written genotype and GQ come from its own likelihoods alone. In pvc the written
   genotype is the posterior, so the cohort's allele frequencies change individual genotypes.
   This matters most where a sample has few reads, and least where its reads alone settle the
@@ -522,35 +512,33 @@ prior, until no expected count moves by more than 0.1. Four things differ.
   of its prior.
 - GATK's prior assumes Hardy–Weinberg. pvc's has F per sample.
 
-**freebayes.** freebayes does not iterate allele frequencies. It searches over combinations
-of genotypes, one genotype per sample. It starts from each sample's most likely genotype,
-tries neighbouring combinations, changing one sample at a time, and scores each by the
-samples' likelihoods times a prior on the combination, which includes the probability of its
-allele counts under a neutral population model (Ewens' sampling formula) and a Hardy–Weinberg
-term. The number of combinations grows exponentially with the number of samples, which is why
-they are searched and not enumerated. The best combination found decides which alternative
-alleles the site carries, and QUAL comes from the posteriors of the combinations explored. By
-default, the genotype written for each sample is
-then its own most likely genotype over those alleles, so, as in GATK, the cohort chooses the
-alleles but not the individual genotypes. pvc's loop does one pass over the samples per
-iteration, and its cost grows in proportion to their number.
+freebayes does not iterate allele frequencies. Instead, it searches over combinations of
+genotypes, one per sample. It starts from each sample's most likely genotype and tries
+neighbouring combinations, changing one sample at a time. Each combination is scored by the
+samples' likelihoods times a prior on the combination. That prior includes the probability of
+its allele counts under a neutral population model (Ewens' sampling formula) and a
+Hardy–Weinberg term. The number of combinations grows exponentially with the number of
+samples, so they are searched, not enumerated. The best combination found decides which
+alternative alleles the site carries, and QUAL comes from the posteriors of the combinations
+explored. By default, each sample's written genotype is then its own most likely genotype over
+those alleles. So, as in GATK, the cohort chooses the alleles but not the individual genotypes.
+pvc's loop, in contrast, does one pass over the samples per iteration, and its cost grows in
+proportion to their number.
 
 ## 9. QUAL and GQ
 
-**GQ** is the Phred-scaled probability that the sample's written genotype is wrong: one minus
+GQ is the Phred-scaled probability that the sample's written genotype is wrong: one minus
 its posterior, at most 99.
 
-**QUAL** answers a different question: is there any variant at this site at all? It is the
-Phred-scaled probability that no sample in the cohort carries a non-reference allele, given
-all the reads.
-
-That probability is computed directly. It is not the product of each sample's probability of
-being homozygous for the reference. Each sample's likelihoods are reduced to the likelihood of
-carrying 0, 1 or 2 non-reference copies (up to the ploidy). These are combined over the
-samples into the likelihood of each total number of non-reference copies in the cohort. A
-prior is applied to that total, from the same seed as in section 8, and QUAL is the posterior
-of a total of zero. The prior is on the alleles' frequency in the population, not on each
-sample separately, so QUAL does not rise merely because many samples match the reference.
+QUAL is the Phred-scaled probability that no sample in the cohort carries a non-reference
+allele, given all the reads. That probability is computed directly. It is not the product of
+each sample's probability of being homozygous for the reference. Each sample's likelihoods are
+reduced to the likelihood of carrying 0, 1 or 2 non-reference copies (up to the ploidy). These
+are combined over the samples into the likelihood of each total number of non-reference copies
+in the cohort. A prior is applied to that total, built from the same seed as in section 8. QUAL
+is the posterior probability of a total of zero. The prior is on the alleles' frequency in the
+population, not on each sample separately, so QUAL does not rise merely because many samples
+match the reference.
 
 Three penalties are then subtracted, each a test for a known kind of artifact. Each looks at
 the reads of the main alternative allele, pooled over the called samples.
@@ -590,54 +578,51 @@ ratio of the two likelihoods is written as `PARALOG_LR`.
 
 A ratio says which explanation fits better, not how probable a duplication is. For that, pvc
 also estimates how common hidden duplications are among the called sites: over the run, and
-locally in windows of 50 kb by default, because duplications cluster. Ratio and rate together
-give each site's probability of being a hidden duplication (`PARALOG_POST`). The sites are
-ranked by it, and the top of the ranking is removed for as long as the expected share of true
-variants among the removed sites stays at or under 1 in 100 (`--hidden-dup-fdr`). With
+locally in windows of 50 kb by default, because duplications tend to cluster. Ratio and rate
+together give each site's probability of being a hidden duplication (`PARALOG_POST`). pvc ranks
+the sites by that probability and removes them from the top down. It stops before the expected
+share of true variants among the removed sites would exceed 1 in 100 (`--hidden-dup-fdr`). With
 `--hidden-dup-tag` the removed sites are kept and marked `hiddenDup` instead.
-
-STR records are tested as well. A sample without a depth model is left out of the test.
 
 This filter is the reason the calls of a run wait on disk until the whole genome is called
 ([Calling § scratch space](calling.md#output-logs-and-scratch-space)).
 
-**The other filters.**
+Other filters:
 
 - A locus where any read group of any sample is deeper than `--max-depth` (1,000) is not
   called. Such depth usually means collapsed copies.
 - `EMNoConv` marks a site where the loop of section 8 did not settle.
 - `tooManyAlleles` marks an STR where the limit of 32 candidates left alleles out.
 
-## 11. Refinement: genotypes from neighbouring sites and related samples
+## 11. Refinement/imputation
 
 Calling treats each locus alone. Yet the samples of a cohort share stretches of chromosome,
-and a sample's genotype at a site with one read is often settled by the well-covered sites
-around it together with the samples that look the same there. The optional **neighbour-evidence
-pass** uses that. It *refines* every genotype: the haplotypes of the other samples act as a
-prior, the sample's own genotype likelihoods as the evidence. Where a sample has no reads at a
-site, the posterior is the prior alone, what the haplotypes it copies predict; pvc calls a
-genotype written from it a *fill*, and writes one only under conditions.
-[Its page](neighbour_evidence.md) covers when it runs, what it changes in the VCF and how to
-judge its fills. This section describes the model.
+and that fact can be used to improve the genotypes. For instance, a sample's genotype at a
+site with one read could be settled by taking into account the genotypes of the other samples
+that share the same haplotype. The optional **neighbour-evidence pass** uses that kind of
+information. The haplotypes of the other samples act as a prior, and the sample's own genotype
+likelihoods as the evidence. Where a sample has no reads at a site, the posterior is the prior
+alone: what the haplotypes it copies predict.
 
-**The model.** Along a chromosome, each of a sample's two copies is modelled as a mosaic of
-*templates*: stretches copied from haplotypes that other samples carry. This is the copying
-model of Li and Stephens that most imputation tools use. Three things are particular to pvc:
+Along a chromosome, each of a sample's two copies is modelled as a mosaic of *templates*:
+stretches copied from haplotypes that other samples carry. This is the copying model of Li and
+Stephens that most imputation tools use. Three things are particular to pvc:
 
-- **The templates come from the cohort itself.** For each sample and each window of the
+- The templates come from the cohort itself. For each sample and each window of the
   genome, up to 16 other samples are chosen, those that agree best with it over stretches of
   the window. There is no reference panel. One more template stands for "none of them": it
   carries the cohort's allele frequencies.
-- **Inbreeding is a state of the model.** A sample is, stretch by stretch, either copying two
+- Inbreeding is a state of the model. A sample is, stretch by stretch, either copying two
   templates, one per chromosome copy, or *autozygous*: both copies are the same template. The
   long-run share of the autozygous state is the sample's F from the parameters file. In an
   inbred line almost the whole genome is in that state, and the model then has one template to
   find, not two.
-- **Distances are physical.** No genetic map is used. The typical length of a copied stretch
-  is either 30 kb or 300 kb, chosen per sample, together with the typical length of its
-  autozygous stretches, by which fits the sample's first 5,000 informative sites better.
+- Distances are physical. No genetic map is used. The typical length of a copied stretch is
+  either 30 kb or 300 kb. It is chosen per sample, together with the typical length of its
+  autozygous stretches: pvc keeps the values that better fit the sample's first 5,000
+  informative sites.
 
-**What it reads.** The pass works on the calls, not on the alignments.
+The pass works on the calls, not on the alignments.
 
 | Input | Used for |
 |---|---|
@@ -649,15 +634,15 @@ model of Li and Stephens that most imputation tools use. Three things are partic
 
 Reads do not enter a genotype's evidence a second time: they already made the likelihoods.
 
-**The computation.** The genome is taken in windows of 2 Mb, with 1 Mb of margin on each
-side; on a large cohort the windows are shortened, down to 500 kb, to keep the pass within its
-memory budget (`--refine-window-bytes`). In each window the pass makes five rounds. In the
-first, the templates are the other samples' genotype posteriors. In a round, every sample is
-solved against the others' current haplotypes: a forward–backward pass over its sites gives the probability
-of each state, one path of states is drawn at random, and the sample's two haplotypes are
-estimated along that path. From the second round on, the templates are those drawn haplotypes.
-The genotype written is the average posterior of rounds two to five. The random draws are
-seeded, so a run gives the same output at any number of threads.
+The genome is taken in windows of 2 Mb, with 1 Mb of margin on each side. On a large cohort the
+windows are shortened, down to 500 kb, to keep the pass within its memory budget
+(`--refine-window-bytes`). In each window the pass makes five rounds. In the first, the
+templates are the other samples' genotype posteriors. In each round, every sample is solved
+against the others' current haplotypes. A forward–backward pass over its sites gives the
+probability of each state. One path of states is drawn at random, and the sample's two
+haplotypes are estimated along that path. From the second round on, the templates are those
+drawn haplotypes. The genotype written is the average posterior of rounds two to five. The
+random draws are seeded, so a run gives the same output at any number of threads.
 
 It applies to SNPs, indels and STRs alike, at sites with any number of alleles, in diploid
 samples only.
@@ -670,56 +655,53 @@ samples only.
 | STITCH | the reads, at a given list of biallelic SNPs | *K* ancestral haplotypes, estimated; no panel | EM over the ancestral haplotypes; built for low coverage |
 | pvc | genotype likelihoods; read pairs for the phase | up to 16 other samples of the cohort per window; no panel | hidden Markov model with an autozygous state; five rounds of sampled haplotypes |
 
-Like Beagle, pvc starts from genotype likelihoods and needs a caller before it; in pvc that
-caller is the same run. Like STITCH, it needs no panel and is aimed at many samples at low
+Like Beagle, pvc starts from genotype likelihoods and needs a caller before it; in pvc, that
+caller is pvc itself. Like STITCH, it needs no panel and is aimed at many samples at low
 depth. Unlike both, it carries each sample's inbreeding in the model. Unlike STITCH, it is
 not limited to biallelic SNPs.
 
-The pass is built for inbred lines. With the default `auto` it runs only on diploid cohorts
-of at least 10 samples whose median F is at least 0.5. In outbred samples each stretch of the
-genome is a pair of different haplotypes, which a handful of templates describes poorly; for
-those, tools that model many haplotypes, such as Beagle or GLIMPSE, are the better choice.
+The pass is off by default and runs only when asked for with `--refine-genotypes`.
+
 [Accuracy](accuracy.md#imputation-genotype-refinement-and-filling) compares pvc with GATK
 followed by Beagle, and with STITCH, on simulated inbred and outbred cohorts.
 
 ## 12. Phase
 
 Two heterozygous genotypes of a sample are *phased* when it is known which alleles lie on the
-same chromosome copy. pvc writes phase for diploid samples, in short blocks (phase sets, the
-`PS` field), from two sources.
+same chromosome copy. pvc writes phase for diploid samples from two sources.
 
 **From reads.** A read pair comes from one molecule. If it covers two heterozygous sites, the
 alleles it shows there lie on one copy. For each pair of nearby heterozygous genotypes, pvc
-adds up the read pairs that cover both: each pair votes for one of the two arrangements, with a
-weight that falls as the error probability of its bases rises, no base counting as better than
-1 error in 100. The two genotypes are linked when the odds reach 199 to 1, which takes at
-least two read pairs. Only PASS genotypes with GQ of 30 or more are linked, and STR records
-never are. Read pairs reach about a kilobase, so the blocks are short. This is all the phase
-there is when the refinement does not run, including with one sample. [The
-VCF](vcf.md#phase-from-reads) gives measurements.
+adds up the read pairs that cover both. Each read pair votes for one of the two arrangements.
+Its vote weighs less when its bases are more likely to be wrong, and no base counts as more
+reliable than 1 error in 100. The two genotypes are linked when the odds reach 199 to 1, which
+takes at least two read pairs. Only PASS genotypes with GQ of 30 or more are linked, and STR
+records never are. Read pairs reach about a kilobase, so the blocks are short. This is all the
+phase there is when the refinement does not run, including with one sample.
+[The VCF](vcf.md#phase-from-reads) gives measurements.
 
-**From the cohort.** The refinement estimates each sample's two haplotypes (section 11), and
-haplotypes are phase. But one estimate is one random draw, and a link between two sites is
-worth writing only if it is stable. So the pass draws 36 paths per sample over its rounds, and
-links two neighbouring heterozygous genotypes when at least 80% of the paths agree on the
-arrangement (`--phase-min-path-agreement`).
+**From the cohort.** The refinement estimates each sample's two haplotypes (section 11). But
+one estimate is one random draw, and a link between two sites is worth writing only if it is
+stable. So the pass draws 36 paths per sample over its rounds. It links two neighbouring
+heterozygous genotypes when at least 80% of the paths agree on the arrangement
+(`--phase-min-path-agreement`).
 
 **How the two combine.** The cohort reaches far, over the tens of kilobases a copied stretch
 spans, but it knows nothing where a sample's haplotype is rare. Reads reach a kilobase, and
 are direct evidence. When the refinement runs:
 
 - Read pairs take part in each haplotype draw. Where a sample's read pairs connect
-  heterozygous sites, the draw orients those sites together, weighted by the reads' odds. The
-  haplotypes that later serve as templates for other samples are better for it.
+  heterozygous sites, the draw orients those sites together, weighted by the reads' odds. This
+  also improves the haplotypes that later serve as templates for other samples.
 - A link the paths agree on is kept unless the sample's reads contradict it at odds of 9 to 1.
   There the block ends.
 - Where the paths do not agree, reads at odds of 199 to 1 make the link.
 
-So the refinement improves on read-only phase in reach: blocks extend beyond a kilobase,
-across stretches with no read pair, in the samples whose haplotypes others share. And reads
-improve on cohort-only phase in the places where it is weakest. Some read pairs are held out
-of the draws, and the log reports how often they contradict the links the cohort made: a check
-of the cohort's phase that does not rest on its own model.
+So the refinement phases further than reads alone. In samples whose haplotypes others share,
+blocks extend beyond a kilobase, across stretches with no read pair. And reads improve the
+cohort's phase where it is weakest. Some read pairs are held out of the draws. The log reports
+how often they contradict the links made from the cohort, which checks the cohort's phase
+independently of its own model.
 [Genotypes from neighbouring sites](neighbour_evidence.md#phase--and-ps) gives the measured
 error rates.
 
@@ -745,7 +727,7 @@ at the ends.
 | Phase (12) | from reads only | from the cohort and from reads | few read pairs cover two sites: from reads alone, 20 of 289 heterozygous SNPs (7%) were phased in 100 regions of the human sample HG002 at 3× | from reads alone, 197 of 289 (68%) in the same regions at 30×, and little more beyond, because 32 reads per site are kept for phasing |
 
 A single sample at low depth is the hardest case, and the weakest: there is no cohort to give
-allele frequencies, F or contamination, and few reads to outweigh the prior. pvc's answer in
-that corner is to leave a genotype uncalled, or a parameter marked `defaulted`, sooner than to
-write a confident value it has no evidence for. [Accuracy](accuracy.md) reports how each
-corner measures.
+allele frequencies, F or contamination, and few reads to outweigh the prior. In that case pvc
+prefers to leave a genotype uncalled, or a parameter marked `defaulted`, rather than write a
+confident value it has no evidence for. [Accuracy](accuracy.md) reports the measured accuracy
+in each of these cases.

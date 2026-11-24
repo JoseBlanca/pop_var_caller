@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640" version="1.1"
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="604" viewBox="0 0 960 604" version="1.1"
      font-family="'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" fill="#0b0b0b">
   <title>How evidence flows through pvc: per sample, per cohort, and the optional refinement</title>
   <defs>
@@ -9,12 +9,12 @@
   </defs>
 
   <!-- white page, so the figure reads the same on a dark page -->
-  <rect x="0" y="0" width="960" height="640" fill="#ffffff"/>
+  <rect x="0" y="0" width="960" height="604" fill="#ffffff"/>
 
   <!-- ===== Lane 1: per sample ===== -->
   <rect x="10" y="10" width="940" height="188" rx="8" fill="#e6f0fa" stroke="#2f6fb0" stroke-width="1.5"/>
-  <text x="26" y="36" font-size="15" font-weight="bold" fill="#1f4e80">Per sample</text>
-  <text x="118" y="36" fill="#1f4e80">done once for each sample, on its own; no other sample is read</text>
+  <text x="26" y="36" font-size="15" font-weight="bold" fill="#1f4e80">Per-sample pileup</text>
+  <text x="166" y="36" fill="#1f4e80">done once per sample, independently of the others</text>
 
   <g stroke="#2f6fb0" stroke-width="1.2" fill="#ffffff">
     <rect x="26" y="58" width="130" height="118" rx="5"/>
@@ -24,27 +24,24 @@
   </g>
 
   <g text-anchor="middle">
-    <text x="91" y="104" font-weight="bold">BAM / CRAM</text>
-    <text x="91" y="124">one sample's</text>
-    <text x="91" y="142">alignments</text>
+    <text x="91" y="122" font-weight="bold">BAM / CRAM</text>
 
     <text x="304" y="80" font-weight="bold">Read filters and fixes</text>
     <text x="304" y="100">duplicates, low mapping quality</text>
     <text x="304" y="117">indels left-aligned</text>
     <text x="304" y="134">adaptor bases ignored</text>
-    <text x="304" y="151">overlapping mates count once</text>
-    <text x="304" y="168">reads aligned again at STRs</text>
+    <text x="304" y="151">read-pair overlap processing</text>
+    <text x="304" y="168">read realignment at STR loci</text>
 
-    <text x="570" y="88" font-weight="bold">Evidence at every locus</text>
-    <text x="570" y="108">generic path: sequences seen at</text>
-    <text x="570" y="125">each position, with their qualities</text>
+    <text x="570" y="88" font-weight="bold">Locus evidence</text>
+    <text x="570" y="108">generic path: sequences</text>
+    <text x="570" y="125">and qualities seen</text>
     <text x="570" y="142">STR path: each read's sequence</text>
     <text x="570" y="159">over the whole repeat</text>
 
-    <text x="831" y="96" font-weight="bold">psp file</text>
-    <text x="831" y="116">one per sample</text>
-    <text x="831" y="136">evidence only: no genotype,</text>
-    <text x="831" y="153">no likelihood</text>
+    <text x="831" y="104" font-weight="bold">psp file</text>
+    <text x="831" y="124">one per sample</text>
+    <text x="831" y="144">evidence for every position</text>
   </g>
 
   <g stroke="#444444" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
@@ -55,7 +52,7 @@
 
   <!-- ===== Lane 2: whole cohort ===== -->
   <rect x="10" y="218" width="940" height="196" rx="8" fill="#fdeedd" stroke="#c46a14" stroke-width="1.5"/>
-  <text x="26" y="244" font-size="15" font-weight="bold" fill="#8a4708">Whole cohort</text>
+  <text x="26" y="244" font-size="15" font-weight="bold" fill="#8a4708">Cohort calling</text>
   <text x="190" y="244" fill="#8a4708" font-size="12">summary at the end of each psp</text>
   <text x="520" y="244" fill="#8a4708" font-size="12">every sample's evidence, all samples at once</text>
 
@@ -68,16 +65,18 @@
   </g>
 
   <g text-anchor="middle">
-    <text x="126" y="288" font-weight="bold">Parameter estimation</text>
-    <text x="126" y="308">base-quality calibration</text>
-    <text x="126" y="325">contamination</text>
-    <text x="126" y="342">inbreeding F per sample</text>
-    <text x="126" y="359">population diversity</text>
-    <text x="126" y="376">stutter rates</text>
+    <text x="126" y="284" font-weight="bold">Parameter estimation</text>
+    <text x="126" y="300">(optional)</text>
+    <text x="126" y="318">base-quality calibration</text>
+    <text x="126" y="334">contamination</text>
+    <text x="126" y="350">inbreeding F per sample</text>
+    <text x="126" y="366">population diversity</text>
+    <text x="126" y="382">stutter rates</text>
 
-    <text x="321" y="314" font-weight="bold">Parameters file</text>
-    <text x="321" y="334">the priors used</text>
-    <text x="321" y="351">in calling</text>
+    <text x="321" y="306" font-weight="bold">Parameters file</text>
+    <text x="321" y="326">priors used</text>
+    <text x="321" y="343">in calling</text>
+    <text x="321" y="360">(optional)</text>
 
     <text x="521" y="288" font-weight="bold">Joint calling, locus by locus</text>
     <text x="521" y="308">candidate alleles, cohort-wide</text>
@@ -112,10 +111,7 @@
 
   <!-- ===== Lane 3: optional refinement ===== -->
   <rect x="10" y="444" width="940" height="150" rx="8" fill="#f1f1ef" stroke="#6b6b6b" stroke-width="1.5" stroke-dasharray="7 5"/>
-  <text x="26" y="470" font-size="15" font-weight="bold" fill="#3d3d3d">Optional refinement</text>
-  <text x="26" y="492" fill="#3d3d3d">runs by default only on a diploid cohort of</text>
-  <text x="26" y="509" fill="#3d3d3d">10 or more samples whose median</text>
-  <text x="26" y="526" fill="#3d3d3d">inbreeding F is 0.5 or more</text>
+  <text x="26" y="470" font-size="15" font-weight="bold" fill="#3d3d3d">Refinement/imputation (optional)</text>
 
   <g stroke="#6b6b6b" stroke-width="1.2" fill="#ffffff">
     <rect x="330" y="462" width="498" height="114" rx="5"/>
@@ -137,16 +133,5 @@
   <g stroke="#444444" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
     <path d="M 743 390 L 743 460" stroke-dasharray="6 4"/>
     <line x1="828" y1="519" x2="858" y2="519"/>
-  </g>
-  <text x="753" y="432" fill="#3d3d3d" font-size="12">replaces the VCF above</text>
-
-  <!-- legend -->
-  <g font-size="12">
-    <rect x="26" y="610" width="14" height="14" fill="#e6f0fa" stroke="#2f6fb0"/>
-    <text x="46" y="622">per sample: not redone when the cohort changes</text>
-    <rect x="356" y="610" width="14" height="14" fill="#fdeedd" stroke="#c46a14"/>
-    <text x="376" y="622">whole cohort: redone when a sample is added</text>
-    <rect x="676" y="610" width="14" height="14" fill="#f1f1ef" stroke="#6b6b6b" stroke-dasharray="3 2"/>
-    <text x="696" y="622">optional</text>
   </g>
 </svg>

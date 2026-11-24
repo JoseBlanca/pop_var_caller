@@ -15,6 +15,8 @@ because the parameters used as priors can only be estimated from psp files.
 | reads each alignment | once per call | once per sample, ever |
 | adding a sample later | call the whole cohort again from the alignments | write one psp file, then fit and call again |
 
+![Direct mode: every BAM goes into one calling step, then optional refinement. psp mode: each BAM becomes its own psp file; the psp files go to optional parameter estimation and to calling, then optional refinement. A sample added later needs only its own new psp file](figures/calling_modes.svg)
+
 Given the same samples and the same parameters, the two modes write the same calls.
 
 ## Direct mode
