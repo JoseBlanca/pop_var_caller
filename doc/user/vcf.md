@@ -79,7 +79,8 @@ unphased.
 
 Where the [neighbour-evidence pass](neighbour_evidence.md) runs, the reads are combined with the
 phase it estimates from the cohort, and its page says how. Elsewhere — one sample, a cohort the
-pass does not run on, or `--refine-genotypes off` — the phase comes from the reads alone. Read
+pass does not run on, or `--refine-genotypes off`, the default — the phase comes from the reads
+alone. Read
 pairs reach about a kilobase, so the phase sets are short: they join neighbouring heterozygotes,
 not whole genes. STR records are never phased from reads.
 

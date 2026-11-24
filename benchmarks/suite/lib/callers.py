@@ -24,8 +24,9 @@ q = shlex.quote
 
 # ---- pvc --------------------------------------------------------------------------------------
 
-# Genotype refinement (pvc's default, `auto`, runs it on 10 or more mostly inbred diploid samples) is
-# measured by refine_sim alone, which sets it itself; every other calling run turns it off.
+# Genotype refinement is off by default in pvc; it is measured by refine_sim alone, which sets it
+# itself. Every other calling run states `off` anyway, so a run stays comparable with results made
+# when the default was `auto`.
 REFINE_OFF = "--refine-genotypes off "
 
 

@@ -240,15 +240,16 @@ pub struct CallFromPspsArgs {
     pub hidden_dup_window: u64,
 
     /// Whether to re-call each sample's genotypes with the evidence of the samples it shares
-    /// stretches of chromosome with, and of its own neighbouring sites. `auto` runs it on a
-    /// diploid cohort of at least 10 samples whose median inbreeding is at least 0.5; the VCF
-    /// header says whether it ran and why. Where it does not run, on a diploid cohort, phase is
+    /// stretches of chromosome with, and of its own neighbouring sites. Off by default; `auto`
+    /// runs it on a diploid cohort of at least 10 samples whose median inbreeding is at least
+    /// 0.5, and `on` on any diploid cohort of two or more. The VCF header says whether it ran
+    /// and why. Where it does not run, on a diploid cohort, phase is
     /// written from reads alone (`GT` `a|b` with a `PS`); the header's `##readBackedPhase=` line
     /// states its thresholds.
     #[arg(
         long,
         value_enum,
-        default_value_t = calling_run::RefineGenotypesArg::Auto,
+        default_value_t = calling_run::RefineGenotypesArg::Off,
         help_heading = "Advanced"
     )]
     pub refine_genotypes: calling_run::RefineGenotypesArg,

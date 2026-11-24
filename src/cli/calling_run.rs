@@ -793,7 +793,7 @@ pub enum RefineGenotypesArg {
     Auto,
     /// Run wherever it can: two or more samples, diploid.
     On,
-    /// Do not run.
+    /// Do not run. The default, by the owner's decision (2026-11-23).
     Off,
 }
 

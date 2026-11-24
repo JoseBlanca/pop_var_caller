@@ -35,8 +35,9 @@ Supported on Linux and macOS.
 - **Filters out calls caused by hidden duplications** (places where two copies of a sequence
   exist in the genome but only one in the reference), so both copies' reads pile onto one place
   and look like heterozygous variants.
-- **Refines genotypes with the neighbouring loci**: in a cohort, it re-calls each sample from the
-  haplotypes it shares with other samples, which corrects genotypes and fills those with no reads.
+- **Refines genotypes with the neighbouring loci**, when asked to (`--refine-genotypes`; off by
+  default): in a cohort, it re-calls each sample from the haplotypes it shares with other samples,
+  which corrects genotypes and fills those with no reads.
 - **Writes overlapping variants as one record**, such as a SNP inside a deletion, whose alleles are
   the whole haplotypes, so it never needs the `*` allele. See
   [overlapping variants](doc/user/overlapping_variants.md).
