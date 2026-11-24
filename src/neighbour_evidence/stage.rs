@@ -486,6 +486,8 @@ pub struct NeighbourEvidenceStage {
     /// Every window planned, for the tests that read what the budget counted.
     #[cfg(test)]
     plans: Vec<super::windows::WindowPlan>,
+    /// The last window planned and solved ([`Self::last_window`]).
+    last_window: Option<super::windows::WindowPlan>,
 }
 
 impl NeighbourEvidenceStage {
@@ -527,6 +529,7 @@ impl NeighbourEvidenceStage {
             core_starts: Vec::new(),
             #[cfg(test)]
             plans: Vec::new(),
+            last_window: None,
         }
     }
 
@@ -534,6 +537,13 @@ impl NeighbourEvidenceStage {
     #[must_use]
     pub fn tally(&self) -> RewriteTally {
         self.tally
+    }
+
+    /// **The last window solved**, as the budget planned it: its records and what it counted for
+    /// them. For the probes that measure the budget's count against what a run holds.
+    #[must_use]
+    pub fn last_window(&self) -> Option<super::windows::WindowPlan> {
+        self.last_window
     }
 
     /// Each sample's fill check so far, in the VCF's sample order.
@@ -781,6 +791,7 @@ impl NeighbourEvidenceStage {
             self.core_starts.push(self.positions[plan.core_start]);
             #[cfg(test)]
             self.plans.push(plan);
+            self.last_window = Some(plan);
             let began = std::time::Instant::now();
             let mut walked_records = None;
             let window_sites = self.site_span(plan.context_start..plan.context_end);
