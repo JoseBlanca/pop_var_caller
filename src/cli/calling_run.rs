@@ -838,9 +838,7 @@ pub fn parse_path_agreement(text: &str) -> Result<PathAgreement, String> {
 /// # Errors
 ///
 /// As [`MarginThinning::parse`](crate::neighbour_evidence::windows::MarginThinning::parse).
-pub fn parse_margin_density(
-    text: &str,
-) -> Result<MarginDensity, String> {
+pub fn parse_margin_density(text: &str) -> Result<MarginDensity, String> {
     crate::neighbour_evidence::windows::MarginThinning::parse(text).map(MarginDensity)
 }
 

@@ -32,9 +32,7 @@ use super::refine::{
     refine_window_with_reads, window_key,
 };
 use super::templates::MAX_TEMPLATES;
-use super::windows::{
-    MarginThinning, NEAR_MARGIN_BASES, WindowBytes, WindowSizes, plan_window,
-};
+use super::windows::{MarginThinning, NEAR_MARGIN_BASES, WindowBytes, WindowSizes, plan_window};
 use crate::read_phase::fragments::{PackedRecordFragments, RecordFragments};
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
@@ -193,11 +191,15 @@ impl NeighbourEvidenceDecision {
                 crate::read_phase::fragments::READ_REACH,
                 crate::read_phase::capture::READ_ALLELES_KEPT,
                 // Only where the margins are thinned, so an unthinned run's header is as it was.
-                self.sizes.thinning.map_or(String::new(), |thinning| format!(
-                    ",margin_density={thinning},margin_near={NEAR_MARGIN_BASES}"
-                )),
+                self.sizes
+                    .thinning
+                    .map_or(String::new(), |thinning| format!(
+                        ",margin_density={thinning},margin_near={NEAR_MARGIN_BASES}"
+                    )),
                 // Only where a core may be shorter than the margin floor, likewise.
-                if self.sizes.core_floor_bases < self.sizes.margin_floor_bases.min(self.sizes.core_bases) {
+                if self.sizes.core_floor_bases
+                    < self.sizes.margin_floor_bases.min(self.sizes.core_bases)
+                {
                     format!(",core_floor={}", self.sizes.core_floor_bases)
                 } else {
                     String::new()
@@ -584,8 +586,7 @@ impl NeighbourEvidenceStage {
         self.core_bytes.push(last(&self.core_bytes) + core);
         if self.thinner.is_some() {
             self.far_walked.push(far_walked);
-            self.skipped_bytes
-                .push(last(&self.skipped_bytes) + skipped);
+            self.skipped_bytes.push(last(&self.skipped_bytes) + skipped);
         }
         self.positions.push(place.at.position.0);
         self.held.push(HeldLine {
@@ -618,9 +619,10 @@ impl NeighbourEvidenceStage {
                 .filter(|&line| held[line].site.is_some())
                 .collect();
             let start = sites.start;
-            self.sites.pack(sites.start - first_site..sites.end - first_site, |site| {
-                !far_walked[line_of_site[site + first_site - start]]
-            });
+            self.sites
+                .pack(sites.start - first_site..sites.end - first_site, |site| {
+                    !far_walked[line_of_site[site + first_site - start]]
+                });
         }
         // The running totals from the first compressed line on, less what each line saved, plus
         // what its site holds compressed.
@@ -1130,32 +1132,35 @@ impl HeldSites {
             .zip(&mut self.packed[range.clone()])
             .zip(&mut self.whole[range])
             .enumerate()
-            .for_each_init(LineCompressor::new, |with, (at, (((record, fragments), packed), whole))| {
-                if !skipped(start + at) || packed.is_some() {
-                    return;
-                }
-                let numbers = record.take_numbers();
-                let mut plain = Vec::new();
-                numbers.write_to(&mut plain);
-                std::mem::take(fragments).write_to(&mut plain);
-                with.scratch.clear();
-                with.scratch
-                    .reserve(zstd::zstd_safe::compress_bound(plain.len()));
-                // PANIC-FREE: the buffer holds zstd's bound for the bytes, so compressing fails
-                // only where allocation does.
-                with.compressor
-                    .compress_to_buffer(plain.as_slice(), &mut with.scratch)
-                    .expect("a site's numbers in memory compress");
-                let mut bytes = Vec::with_capacity(4 + with.scratch.len());
-                bytes.extend_from_slice(
-                    &u32::try_from(plain.len())
-                        .expect("a site's numbers fit u32 bytes")
-                        .to_le_bytes(),
-                );
-                bytes.extend_from_slice(&with.scratch);
-                *packed = Some(bytes.into_boxed_slice());
-                *whole = false;
-            });
+            .for_each_init(
+                LineCompressor::new,
+                |with, (at, (((record, fragments), packed), whole))| {
+                    if !skipped(start + at) || packed.is_some() {
+                        return;
+                    }
+                    let numbers = record.take_numbers();
+                    let mut plain = Vec::new();
+                    numbers.write_to(&mut plain);
+                    std::mem::take(fragments).write_to(&mut plain);
+                    with.scratch.clear();
+                    with.scratch
+                        .reserve(zstd::zstd_safe::compress_bound(plain.len()));
+                    // PANIC-FREE: the buffer holds zstd's bound for the bytes, so compressing fails
+                    // only where allocation does.
+                    with.compressor
+                        .compress_to_buffer(plain.as_slice(), &mut with.scratch)
+                        .expect("a site's numbers in memory compress");
+                    let mut bytes = Vec::with_capacity(4 + with.scratch.len());
+                    bytes.extend_from_slice(
+                        &u32::try_from(plain.len())
+                            .expect("a site's numbers fit u32 bytes")
+                            .to_le_bytes(),
+                    );
+                    bytes.extend_from_slice(&with.scratch);
+                    *packed = Some(bytes.into_boxed_slice());
+                    *whole = false;
+                },
+            );
     }
 
     /// The bytes site `site` holds compressed; zero for a site held whole throughout.
@@ -1173,27 +1178,31 @@ impl HeldSites {
             .zip(&self.packed[range.clone()])
             .zip(&mut self.whole[range])
             .zip(walked)
-            .for_each_init(line_decompressor, |with, ((((record, fragments), packed), whole), &walked)| {
-                let Some(packed) = packed else {
-                    return;
-                };
-                if walked && !*whole {
-                    let (length, frame) = packed.split_at(4);
-                    let length = u32::from_le_bytes(length.try_into().expect("four bytes")) as usize;
-                    // PANIC-FREE: the stage reads back only frames it compressed, at their length.
-                    let plain = with
-                        .decompress(frame, length)
-                        .expect("a site's numbers compressed here decompress");
-                    let mut bytes = plain.as_slice();
-                    record.put_numbers(RecordNumbers::read_from(&mut bytes));
-                    *fragments = PackedRecordFragments::read_from(&mut bytes);
-                    *whole = true;
-                } else if !walked && *whole {
-                    drop(record.take_numbers());
-                    *fragments = PackedRecordFragments::default();
-                    *whole = false;
-                }
-            });
+            .for_each_init(
+                line_decompressor,
+                |with, ((((record, fragments), packed), whole), &walked)| {
+                    let Some(packed) = packed else {
+                        return;
+                    };
+                    if walked && !*whole {
+                        let (length, frame) = packed.split_at(4);
+                        let length =
+                            u32::from_le_bytes(length.try_into().expect("four bytes")) as usize;
+                        // PANIC-FREE: the stage reads back only frames it compressed, at their length.
+                        let plain = with
+                            .decompress(frame, length)
+                            .expect("a site's numbers compressed here decompress");
+                        let mut bytes = plain.as_slice();
+                        record.put_numbers(RecordNumbers::read_from(&mut bytes));
+                        *fragments = PackedRecordFragments::read_from(&mut bytes);
+                        *whole = true;
+                    } else if !walked && *whole {
+                        drop(record.take_numbers());
+                        *fragments = PackedRecordFragments::default();
+                        *whole = false;
+                    }
+                },
+            );
     }
 
     /// The sites in `range`, as the window solve takes them.

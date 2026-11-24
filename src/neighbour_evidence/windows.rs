@@ -64,15 +64,26 @@ impl MarginThinning {
     ///
     /// If `text` is not a number from 0 to 1,000,000 with at most three decimals.
     pub fn parse(text: &str) -> Result<Option<Self>, String> {
-        let refuse = || format!("`{text}` is not a number of records a kb, 0 to 1000000, at most three decimals");
+        let refuse = || {
+            format!(
+                "`{text}` is not a number of records a kb, 0 to 1000000, at most three decimals"
+            )
+        };
         let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
         if fraction.len() > 3
             || whole.is_empty() && fraction.is_empty()
-            || !whole.chars().chain(fraction.chars()).all(|c| c.is_ascii_digit())
+            || !whole
+                .chars()
+                .chain(fraction.chars())
+                .all(|c| c.is_ascii_digit())
         {
             return Err(refuse());
         }
-        let whole: u32 = if whole.is_empty() { 0 } else { whole.parse().map_err(|_| refuse())? };
+        let whole: u32 = if whole.is_empty() {
+            0
+        } else {
+            whole.parse().map_err(|_| refuse())?
+        };
         let fraction: u32 = format!("{fraction:0<3}").parse().map_err(|_| refuse())?;
         if whole > 1_000_000 {
             return Err(refuse());
@@ -233,8 +244,7 @@ pub fn plan_window(
         // A record's skipped cost is at most what `held` counts for it, so the difference only
         // grows as the window reads further.
         let skipped = bytes.skipped.map_or(0, |skipped| {
-            skipped[near_start] - skipped[context_start] + skipped[context_end]
-                - skipped[near_end]
+            skipped[near_start] - skipped[context_start] + skipped[context_end] - skipped[near_end]
         });
         let held = bytes.held[context_end] - bytes.held[context_start] - skipped
             + bytes.core[core_end]

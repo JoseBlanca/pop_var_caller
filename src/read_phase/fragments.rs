@@ -333,7 +333,11 @@ impl PackedRecordFragments {
     /// them (pass spec §6, thinned margins).
     pub fn write_to(&self, out: &mut Vec<u8>) {
         let count = |out: &mut Vec<u8>, count: usize| {
-            out.extend_from_slice(&u32::try_from(count).expect("a record's reads fit u32").to_le_bytes());
+            out.extend_from_slice(
+                &u32::try_from(count)
+                    .expect("a record's reads fit u32")
+                    .to_le_bytes(),
+            );
         };
         count(out, self.samples.len());
         for sample in &self.samples {
@@ -518,7 +522,11 @@ mod tests {
         let forms = [
             vec![entry(7, 3, 1, 20), entry(2, 9, 0, 30), entry(7, 1, 3, 40)],
             vec![entry(7, 3, 5, 20), entry(2, 9, 0, 30)],
-            vec![entry(7, 3, 300, 20), entry(2, 9, 0, 30), entry(2, 100_000, 1, 9)],
+            vec![
+                entry(7, 3, 300, 20),
+                entry(2, 9, 0, 30),
+                entry(2, 100_000, 1, 9),
+            ],
             Vec::new(),
         ];
         let mut tight_compact_whole = Vec::new();

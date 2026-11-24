@@ -304,7 +304,10 @@ fn a_core_floor_fits_a_window_the_margin_floor_cannot() {
     let at_floor = plan_window(&positions, bytes, 20_000, true, &margin_floor_only)
         .expect("the contig is complete");
     assert!(at_floor.over_budget > 0, "{at_floor:?}");
-    assert_eq!((at_floor.core_bases, at_floor.margin_bases), (500_000, 500_000));
+    assert_eq!(
+        (at_floor.core_bases, at_floor.margin_bases),
+        (500_000, 500_000)
+    );
 
     let with_core_floor = WindowSizes {
         core_floor_bases: 100_000,

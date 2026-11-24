@@ -590,9 +590,7 @@ impl WindowLayout {
     /// pass spec §6, thinned margins).
     fn new(records: &[SiteRecord], core: &Range<usize>, walked: Option<&[bool]>) -> Self {
         let record_of_site: Vec<usize> = (0..records.len())
-            .filter(|&index| {
-                records[index].is_site() && walked.is_none_or(|walked| walked[index])
-            })
+            .filter(|&index| records[index].is_site() && walked.is_none_or(|walked| walked[index]))
             .collect();
         let mut site_of_record = vec![None; records.len()];
         for (site, &index) in record_of_site.iter().enumerate() {
@@ -970,9 +968,8 @@ pub fn refine_window_with_reads(
         "one fragment list a record, or none"
     );
     assert!(
-        walked.is_none_or(|walked| walked.len() == records.len() && walked[core.clone()]
-            .iter()
-            .all(|&walked| walked)),
+        walked.is_none_or(|walked| walked.len() == records.len()
+            && walked[core.clone()].iter().all(|&walked| walked)),
         "one walked flag a record, every core record walked"
     );
     let fragments = fragments.unwrap_or(&[]);
