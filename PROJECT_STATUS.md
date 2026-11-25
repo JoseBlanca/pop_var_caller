@@ -22,7 +22,12 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-11-24):** **refinement's solve, four exact speed-ups built**
+> - **Last completed task (2026-11-24):** **refinement's pipeline around the solve, three speed-ups
+> built** (branch `refine-pipeline`, [report](doc/devel/reports/implementations/refine_pipeline_build_2026-11-24.md)):
+> items R1 to R3 of the pipeline review on branch `pipeline-hunt`; output byte for byte main's; the
+> writing thread's own time −78 to −87% on drawn cohorts; tomato2's writing pass 43 → 41 s at 6
+> threads. R2 saves nothing measurable and raises peak memory 30–70 MB: owner to decide. Not merged.
+> - **Also 2026-11-24:** **refinement's solve, four exact speed-ups built**
 > (branch `refine-solve`, [report](doc/devel/reports/implementations/refine_solve_build_2026-11-24.md)):
 > items 4.1 to 4.4 of the solve review on branch `solve-hunt`; output byte for byte main's on 13
 > drawn cohorts; instructions −29% at 200 drawn samples, −40% at 800. Not merged.

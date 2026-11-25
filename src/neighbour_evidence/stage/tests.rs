@@ -73,17 +73,17 @@ fn run_stage(threads: usize) -> StageRun {
     (inputs, output, tally)
 }
 
-/// [`run_stage`], with `lines_read_together` lines waiting to be read at a time, and every window
-/// the stage planned.
-fn run_stage_reading(
-    threads: usize,
-    lines_read_together: usize,
-) -> (
+/// A [`StageRun`] and every window the stage planned.
+type StageRunAndPlans = (
     Vec<String>,
     Vec<(RecordPlace, Vec<u8>)>,
     RewriteTally,
     Vec<crate::neighbour_evidence::windows::WindowPlan>,
-) {
+);
+
+/// [`run_stage`], with `lines_read_together` lines waiting to be read at a time, and every window
+/// the stage planned.
+fn run_stage_reading(threads: usize, lines_read_together: usize) -> StageRunAndPlans {
     let cohort = test_cohort(CohortShape {
         samples: 20,
         founders: 4,
