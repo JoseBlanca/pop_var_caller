@@ -26,20 +26,20 @@ Skills and agents are instructed to leave it untouched.
 > built** (branch `refine-pipeline`, [report](doc/devel/reports/implementations/refine_pipeline_build_2026-11-24.md)):
 > items R1 to R3 of the pipeline review on branch `pipeline-hunt`; output byte for byte main's; the
 > writing thread's own time −78 to −87% on drawn cohorts; tomato2's writing pass 43 → 41 s at 6
-> threads. R2 saves nothing measurable and raises peak memory 30–70 MB: owner to decide. Not merged.
+> threads. R2 saved nothing measurable and raised peak memory 30–70 MB: reverted (1ee9488c, 2026-11-25). Merged to main.
 > - **Also 2026-11-24:** **refinement's solve, four exact speed-ups built**
 > (branch `refine-solve`, [report](doc/devel/reports/implementations/refine_solve_build_2026-11-24.md)):
 > items 4.1 to 4.4 of the solve review on branch `solve-hunt`; output byte for byte main's on 13
-> drawn cohorts; instructions −29% at 200 drawn samples, −40% at 800. Not merged.
+> drawn cohorts; instructions −29% at 200 drawn samples, −40% at 800. Merged to main.
 > - **Also 2026-11-24:** **refinement's window memory, five cuts built**
 > (branch `refine-mem`, [report](doc/devel/reports/implementations/refine_mem_build_2026-11-24.md)):
 > items 1, 2, 3, 4 and 8 of the memory review on branch `mem-hunt`; output identical where the
 > budget does not bind; the budget's count is lower, so the default budget wants re-measuring on
-> the tomato replay. Not merged.
+> the tomato replay. Merged to main.
 > - **Also 2026-11-24:** **fixes from the refinement-memory review**
 > (branch `refine-review-fixes`, [report](doc/devel/reports/implementations/refine_review_fixes_2026-11-24.md),
 > [review](doc/devel/reports/reviews/refine_memory_2026-11-24.md)): B1, M1, M2, M3, Mi1, Mi2 and the
-> nit fixed; Mi3 (zstd lengths place windows) left for the owner. Not merged.
+> nit fixed; Mi3 (zstd lengths place windows) left for the owner. Merged to main.
 > - **Before that (2026-11-23):** **thinned and packed refinement margins**
 > (branch `margin-density`, [report](doc/devel/reports/implementations/margin_thinning_2026-11-23.md)):
 > beyond 50 kb of the core, margins walk at most `--refine-margin-density` records a kb (default 5),

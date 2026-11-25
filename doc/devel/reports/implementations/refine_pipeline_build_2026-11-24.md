@@ -1,5 +1,11 @@
 # Refinement's pipeline around the solve: three speed-ups built (2026-11-24)
 
+> **2026-11-25: R2 is reverted.** The bgzf writer's thread of its own (c7082615) was reverted on
+> main in 1ee9488c, as this report recommends: it saved no time measurable at 2 or 6 threads and
+> raised tomato2's peak resident memory by 30 to 70 MB. The writer is as R1 left it. R1 and R3 are
+> on main, and their figures below stand. Where this report describes R2 below, it describes
+> what was built and measured, not what main holds.
+
 Branch `refine-pipeline`, from main bf887b45, which already holds the window-memory cuts
 ([refine_mem_build_2026-11-24.md](refine_mem_build_2026-11-24.md)) and the solve speed-ups
 ([refine_solve_build_2026-11-24.md](refine_solve_build_2026-11-24.md)). It builds items R1, R2 and
@@ -28,7 +34,7 @@ one commit each. R4 (skipping the window planner) and everything the review reje
   main and with R1, 513 to 562 MB with R2), more than the 12 MB its buffers hold. The bytes the
   program asks of the allocator do not rise beyond the buffers, so the rest is most likely the
   allocator keeping memory for the threads that now work at once. **The owner should decide
-  whether to keep R2** (see *Decisions for the owner*).
+  whether to keep R2** (see *Decisions for the owner*). It was reverted (note at the top).
 
 Measured on a laptop (macOS, arm64) that was quiet for the timed runs (one-minute load 2.4 to 5);
 at most six threads.
@@ -39,7 +45,7 @@ at most six threads.
 |---|---|---|
 | — | 25097147, f657c5c6 | `examples/refine_pipeline_probe.rs`, the review's timing tool, ported without its section timers; mimalloc as `pvc` uses it, and dhat when built with `dhat-heap`. |
 | R1 | 4bd13d61 | Arriving lines read into sites on the pool, a batch at a time. |
-| R2 | c7082615 | The multithreaded bgzf writer fed by a thread of its own. |
+| R2 | c7082615 | The multithreaded bgzf writer fed by a thread of its own. **Reverted in 1ee9488c (2026-11-25).** |
 | R3 | 19f46c33 | A line rewritten with its fields borrowed, into one buffer. |
 
 ### R1 — arriving lines read into sites on the pool
@@ -215,7 +221,7 @@ R3 asks for 29% fewer blocks (10.9 to 7.8 million on the same run) and the same 
 
 ## Decisions for the owner
 
-1. **Keep R2 or revert it?** It saves no time measurable at 2 or 6 threads on this laptop, on
+1. **Keep R2 or revert it?** **Settled 2026-11-25: reverted** on main in 1ee9488c. It saves no time measurable at 2 or 6 threads on this laptop, on
    drawn cohorts of 10 to 500 samples or on tomato2, and it raises tomato2's peak resident memory
    at 6 threads by 30 to 70 MB (the bytes the program asks for stay within its 12 MB). The review
    argued it matters for wide lines and many threads; neither was tested here. **Recommendation:
