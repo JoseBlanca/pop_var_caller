@@ -8,6 +8,14 @@ a kb, core floor at its default (the margin floor, 500 kb). Each run is a system
 10 s. Scripts and logs: `/media/tomato25_vcfs/pvc_work/refine_scale/` on kimura (`queue_f11e.sh`,
 `f11e_80/`, `f11e_65/`).
 
+> **Caveat (added 2026-11-25, later).** `examples/refine_replay.rs` declares no
+> `#[global_allocator]`, so every replay here, and those of 2026-11-22/23, ran on glibc malloc,
+> not the mimalloc `pvc` uses. With 48 threads glibc keeps freed memory in per-thread arenas, and
+> the peaks climb window by window under one budget (83.7 → 103.0 GB at 80 GB; 68.1 → 88.7 GB at
+> 65 GB) — the pattern of allocator retention, not of a fixed overhead. So the "+27 GB" below is
+> probably mostly glibc, and these peaks likely overstate what `pvc` holds. Not yet measured: a
+> replay on mimalloc, with the count logged a window, is the next step.
+
 ## Results
 
 | Run | Budget | Windows (core length) | Highest window peak | Anonymous memory, max | Wall | Fill check wrong |
