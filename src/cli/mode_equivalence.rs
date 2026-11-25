@@ -595,15 +595,25 @@ mod tests {
         drop(cohort);
     }
 
-    /// **Without the flag, the same failed run leaves nothing in `--tmp-dir`**, as before the
-    /// flag existed.
+    /// **Without the flag, the same failed run still keeps its scratch directory**, because it
+    /// stopped on refinement's memory after calling had ended (2026-11-25): removing it would throw
+    /// the calling away for a setting `pvc resume-calling` can change. Any other failure removes it
+    /// without the flag (`calling_run` tests).
     #[test]
-    fn a_run_that_fails_removes_its_scratch_by_default() {
+    fn a_run_stopped_by_refinement_memory_keeps_its_scratch_without_the_flag() {
         let (cohort, args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(false);
 
         run_call_from_psps(&args).expect_err("refinement cannot fit a one-byte window");
 
-        assert_eq!(what_the_tmp_dir_holds(&tmp_dir), vec![]);
+        let held = what_the_tmp_dir_holds(&tmp_dir);
+        assert_eq!(held.len(), 1, "one scratch directory is kept: {held:?}");
+        assert!(
+            held[0]
+                .1
+                .contains(&crate::run::paralog_filter::resume::RESUME_FILE_NAME.to_owned()),
+            "kept with what resuming needs: {held:?}"
+        );
+        std::fs::remove_dir_all(tmp_dir.join(&held[0].0)).expect("the test's to remove");
         drop(cohort);
     }
 
