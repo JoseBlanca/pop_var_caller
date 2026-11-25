@@ -1,0 +1,13 @@
+[package]
+name = "mimalloc_settings"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Sets pvc's mimalloc options at start-up: freed memory returned to the system at once."
+
+# The main crate forbids `unsafe`; calling mimalloc's C option functions needs it, so the call
+# lives in this crate of its own. `extended` only adds the bindings to mimalloc's wider C API; the
+# allocator compiled in is the one the `mimalloc` crate already builds (the same libmimalloc-sys).
+[dependencies]
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }

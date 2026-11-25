@@ -37,6 +37,14 @@ use pop_var_caller::cli::{
 use pop_var_caller::error_render::format_error_chain;
 
 fn main() {
+    // Freed memory goes back to the system at once, not a second later as mimalloc 3 does by
+    // default; `MIMALLOC_PURGE_DELAY` in the environment still wins. On a whole run (63 tomato
+    // samples, 8 Mb, refinement on, 6 threads, Linux) it took the peak resident memory from 6.8–7.0
+    // GB to 4.9 GB, for 3% more CPU time and 2% more wall time, the VCF unchanged
+    // (`doc/devel/reports/implementations/mimalloc_purge_delay_2026-11-25.md`).
+    // First thing, before any other thread starts.
+    #[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
+    mimalloc_settings::return_freed_memory_at_once();
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
     let matches = Cli::command().get_matches();

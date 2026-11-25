@@ -147,6 +147,9 @@ libdeflater = "1.26.1"
 libm = "=0.2.16"
 md-5 = "0.11"
 mimalloc = { version = "0.1", default-features = false, optional = true }
+# Sets mimalloc's purge delay to 0 at start-up (`src/main.rs`). Its own crate because it calls
+# mimalloc's C option functions, which needs `unsafe`, which this one forbids.
+mimalloc_settings = { path = "tools/mimalloc_settings", optional = true }
 # noodles-bam and noodles-csi are promoted from transitive (via
 # noodles-cram / noodles-sam) to explicit so the BAM/CSI symbols
 # used by src/bam/* are compile-checked against the manifest
@@ -239,7 +242,7 @@ dhat-heap = ["dep:dhat"]
 # has ever done that, and one that tried would turn CI red. Where the collision
 # matters — a measurement naming one allocator while running another — the
 # target refuses at startup instead (`ng_generic_walk_probe`).
-alloc-mimalloc = ["dep:mimalloc"]
+alloc-mimalloc = ["dep:mimalloc", "dep:mimalloc_settings"]
 # `alloc-mimalloc` is the default; `dhat-heap` is not, and a heap profile
 # needs `--no-default-features --features dhat-heap` so that mimalloc is
 # not also asked for. Targets offering both already gate their mimalloc
