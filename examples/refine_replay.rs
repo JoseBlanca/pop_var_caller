@@ -20,6 +20,13 @@
 //! thins the margins as `--refine-margin-density n`. The fill check's totals go to stderr.
 //!
 //! `header.vcf` is the run's header, through `#CHROM`; `entries` is what `spill_slice` printed.
+//!
+//! Runs on mimalloc, the allocator `pvc` declares, counting the bytes asked of it; built with
+//! `--no-default-features`, on the system allocator. Each window's line gives what the budget
+//! counted beside what was asked for and what was resident at the peak (`common/window_memory.rs`).
+#[path = "common/window_memory.rs"]
+mod window_memory;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -115,19 +122,6 @@ fn spill(path: &str, entries: &str) -> Result<SpillReaderWithFragments<BufReader
     ))
 }
 
-/// This process's peak resident memory, in GB, from the kernel.
-fn peak_gb() -> f64 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find_map(|line| line.strip_prefix("VmHWM:"))
-                .and_then(|kb| kb.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
-        })
-        .map_or(f64::NAN, |kb| kb * 1024.0 / 1e9)
-}
-
 /// The replay's output, and the lines of the window being written.
 struct Out {
     file: BufWriter<File>,
@@ -147,9 +141,23 @@ impl Out {
     }
 }
 
-/// Starts the kernel's count of this process's peak memory again from what it holds now.
-fn reset_peak() {
-    let _ = std::fs::write("/proc/self/clear_refs", "5");
+/// What the budget counted for the last window planned, in GB: in all, and of that, the records
+/// held outside it.
+fn counted(stage: &NeighbourEvidenceStage) -> String {
+    stage.last_window().map_or_else(
+        || "counted=-".to_string(),
+        |plan| {
+            format!(
+                "counted={:.2} counted_outside={:.2} records={} core_records={} core_kb={} margin_kb={}",
+                plan.bytes as f64 / 1e9,
+                plan.outside_bytes as f64 / 1e9,
+                plan.records(),
+                plan.core_end - plan.core_start,
+                plan.core_bases / 1_000,
+                plan.margin_bases / 1_000,
+            )
+        },
+    )
 }
 
 fn replay(args: &[String]) -> Result<ExitCode, Failure> {
@@ -198,6 +206,8 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
         first: None,
         last: 0,
     };
+    eprintln!("allocator: {}", window_memory::ALLOCATOR);
+    let memory = window_memory::WindowMemory::start();
     let started = Instant::now();
     let (mut pushed, mut written) = (0u64, 0u64);
     let mut window_started = Instant::now();
@@ -212,8 +222,8 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
             Err(StageStop::OverBudget(over)) => {
                 eprintln!("over budget after {pushed} entries: {over:?}");
                 eprintln!(
-                    "peak {:.1} GB, {:.0} s",
-                    peak_gb(),
+                    "{}, {:.0} s",
+                    memory.take().describe(1e9),
                     started.elapsed().as_secs_f64()
                 );
                 return Ok(ExitCode::from(3));
@@ -223,19 +233,22 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
         }
         pushed += 1;
         if out.lines_now > 0 {
-            // A window's core was written: what it held at its peak, and how long since the last.
+            // A window's core was written: what the budget counted for it, what it held at its
+            // peak, and how long since the last.
+            let peaks = memory.take();
             eprintln!(
-                "window core {}..{}: {} lines, peak {:.1} GB, {:.0} s since the last, {pushed} pushed",
+                "window core {}..{}: {} lines, peak {:.1} GB, {:.0} s since the last, {pushed} pushed; {}; {}",
                 out.first.unwrap_or(0),
                 out.last,
                 out.lines_now,
-                peak_gb(),
-                window_started.elapsed().as_secs_f64()
+                peaks.kernel_peak.unwrap_or(peaks.resident_peak) as f64 / 1e9,
+                window_started.elapsed().as_secs_f64(),
+                counted(&stage),
+                peaks.describe(1e9),
             );
             written += out.lines_now;
             out.lines_now = 0;
             out.first = None;
-            reset_peak();
             window_started = Instant::now();
         }
     }
@@ -247,6 +260,15 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
         }
         Err(StageStop::Write(why)) => return Err(why.into()),
         Err(StageStop::Stopped) => unreachable!("the replay stops at the first stop"),
+    }
+    if out.lines_now > 0 {
+        eprintln!(
+            "last windows: {} lines, {:.0} s; {}; {}",
+            out.lines_now,
+            window_started.elapsed().as_secs_f64(),
+            counted(&stage),
+            memory.take().describe(1e9),
+        );
     }
     written += out.lines_now;
     out.file.flush()?;
@@ -261,8 +283,7 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
         100.0 * disagreed as f64 / checked.max(1) as f64
     );
     eprintln!(
-        "done: {pushed} pushed, {written} written, peak {:.1} GB, {:.0} s",
-        peak_gb(),
+        "done: {pushed} pushed, {written} written, {:.0} s",
         started.elapsed().as_secs_f64()
     );
     Ok(ExitCode::SUCCESS)

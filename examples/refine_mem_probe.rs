@@ -21,9 +21,11 @@
 //! - `PROBE_STATS=1`: instead of running the stage, the average bytes one record holds a sample —
 //!   its line, its numbers, its read alleles, packed and in byte planes.
 //!
-//! Built with `--no-default-features --features dhat-heap`, dhat counts the bytes asked for and
-//! prints the peak at the end; with the default mimalloc, read the peak resident memory from
-//! `/usr/bin/time -l` (macOS) or `-v` (Linux). `RAYON_NUM_THREADS` sets the threads.
+//! Runs on mimalloc, the allocator `pvc` declares, counting the bytes asked of it, and prints with
+//! each window the peak of those bytes and of the resident memory since the window before
+//! (`common/window_memory.rs`); built with `--no-default-features`, on the system allocator. Built
+//! with `--no-default-features --features dhat-heap`, dhat counts the bytes asked for instead and
+//! prints the peak at the end. `RAYON_NUM_THREADS` sets the threads.
 #![allow(
     clippy::disallowed_methods,
     reason = "a research probe outside the portable-float guarantee (clippy.toml)"
@@ -47,9 +49,8 @@ use pop_var_caller::vcf::RecordPlace;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+#[path = "common/window_memory.rs"]
+mod window_memory;
 
 const MB: f64 = 1e6;
 
@@ -193,6 +194,8 @@ fn main() {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let (mut written, mut lines_in_window, mut windows) = (0_u64, 0_u64, 0_usize);
     let mut most_counted = 0_u64;
+    eprintln!("allocator: {}", window_memory::ALLOCATOR);
+    let memory = window_memory::WindowMemory::start();
     let started = Instant::now();
     let mut window_started = Instant::now();
     // Prints the last window planned and returns the bytes the budget counted for it.
@@ -202,13 +205,14 @@ fn main() {
         };
         eprintln!(
             "window {windows}: {lines} lines; counted {:.1} MB ({:.1} MB outside it) over {} \
-             records ({} core, core {} kb, margins {} kb); {seconds:.1} s",
+             records ({} core, core {} kb, margins {} kb); {seconds:.1} s; {}",
             plan.bytes as f64 / MB,
             plan.outside_bytes as f64 / MB,
             plan.records(),
             plan.core_end - plan.core_start,
             plan.core_bases / 1_000,
             plan.margin_bases / 1_000,
+            memory.take().describe(MB),
         );
         plan.bytes
     };

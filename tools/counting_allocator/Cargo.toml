@@ -1,0 +1,12 @@
+[package]
+name = "counting_allocator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "A global allocator wrapper that counts the bytes asked of it, and the process's resident memory, for the memory probes in examples/."
+
+# The main crate forbids `unsafe`; implementing `GlobalAlloc` and asking the kernel for the
+# resident memory on macOS need it, so they live in this crate of their own, used only by examples.
+[dependencies]
+libc = "0.2"

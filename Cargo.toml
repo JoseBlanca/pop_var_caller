@@ -267,6 +267,9 @@ bstr = "1"
 rustix = { version = "1", features = ["process", "time"] }
 criterion = "0.8.2"
 proptest = "1"
+# The memory probes' allocator wrapper (`refine_replay`, `refine_mem_probe`): the bytes asked for,
+# against the resident memory. Its own crate because it needs `unsafe`, which this one forbids.
+counting_allocator = { path = "tools/counting_allocator" }
 
 # The caller's binary. It was ng's experiment binary, `pop_var_caller_exp`,
 # until promotion step E2 gave it this name, which the deleted production
