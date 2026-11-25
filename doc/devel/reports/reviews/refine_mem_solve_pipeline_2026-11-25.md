@@ -274,3 +274,57 @@ These are the checklist items from the request that were traced and found to kee
 - **Borrowed rewrite.** Columns are joined in the same order with the same separators. Short
   columns are padded with `.`, long columns are kept, and `:PS` is appended to `FORMAT` exactly
   where it was before.
+
+## 11. Fixes (2026-11-25, branch `refine-review2`)
+
+Each finding was checked against 1ee9488c before it was fixed; all five were real. One commit each,
+each with a test that fails before the fix and passes after.
+
+| Finding | Commit | What changed |
+|---|---|---|
+| M1 | cf209170 | The running saving in `compress_held_lines` is an `i64`, and each total is adjusted by it with a checked signed add. The probe (3,000 one-sample 44-byte lines) is kept as `compress_held_lines_keeps_totals_when_a_line_grows`; under the `test` profile it panicked with `attempt to subtract with overflow` before the fix. |
+| M2 | 4222999c | Each core record adds, to the written results' total and to the core's count, `min(samples, 256)` times what one sample's solution holds there beyond the state it lets go: 35 bytes at two alleles, 9 at three, none at four or more. The solution's vectors are made at the length they are filled to. Test: `the_core_count_includes_a_chunk_of_solutions`. |
+| Mi1 | f75d1a8e | A dated note at the top of the pipeline report: R2 reverted in 1ee9488c; decision 1 marked settled. `PROJECT_STATUS.md` says the memory, solve, pipeline and review-fix branches are merged. |
+| Mi2 | b3b69e40 | A line's read alleles (12 bytes each, unpacked) count toward the 8 MB queue limit, and the comment states what the limit does not bound: a read batch's sites and packed reads, held through any window an earlier line completes. Test: `read_alleles_count_toward_the_queue_limit`. |
+| Mi3 | a2ebd0ca | The stage keeps what it stopped on. Handed more, it gives the same budget stop again, or the new `StageStop::Stopped` after a refused write (`VcfWriteError::RefinementStopped` in the writer). Test: `a_stopped_stage_refuses_further_lines`. |
+
+**M2, measured.** `refine_mem_probe` under dhat, on a 300-kb contig (one window, 901 core records
+of 2 to 6 alleles, 1 read a position), 6 threads:
+
+| | 20 samples | 200 samples |
+|---|---|---|
+| Solutions of one chunk, grown by pushing (before) | 1.62 MB | 16.8 MB |
+| The same, made at their length (after) | 1.44 MB | 14.5 MB |
+| Window count before → after | 2.9 → 3.3 MB | 28.0 → 32.0 MB |
+| Heap when the results are allocated / highest heap once solutions exist | 6.74 / 6.09 MB | 40.4 / 32.5 MB |
+
+So the solutions were real and uncounted, at 93 bytes a sample a core record, which is more than
+the 68 estimated here. But in these runs the heap still fell during the results phase, because
+each state let go holds more than the count charges it at. The new term makes that cover explicit
+instead of relying on uncounted state. On drawn cohorts the largest window count rises 12 to 14%
+at 20 and 300 samples on a contig shorter than one window, 6% at 100 samples with the core half
+the window, and not visibly (at 0.1 MB) at 10 samples or at 30 reads a position, nor where the
+rounds' store is the larger term (windows shrunk to a core a third of their length).
+
+**Output.** Hashes from `refine_mem_probe` match the code before M2 and Mi2 on seven drawn
+cohorts (10 to 300 samples, 1 to 30 reads a position, thinned margins and not, and a 4, 5 and 6 MB
+budget that shrinks windows to a core a third of their length). Where a 4 MB budget binds on
+windows that are mostly core (20 samples, 600-kb core, 150-kb margins), the plans change, as they
+should: the window edges move (the fifth window is counted at 2.4 MB rather than 4.0 MB), and the
+output differs.
+
+**Not done.** The ratio of real peak to count that the memory report quotes (1.09) was not
+measured again.
+
+**Validation**, at b3b69e40:
+
+- `cargo test --release --no-fail-fast`: 5,386 passed, 2 failed, 9 ignored. The two failures are
+  the tests that expect a panic only debug builds raise
+  (`alignment::left_align_structured::tests::an_offset_past_the_reference_panics`,
+  `genetics::tests::lgamma_panics_on_non_positive_in_debug`); they fail under `--release` on main
+  too.
+- `cargo test --lib -- neighbour_evidence` under the `test` profile (overflow checks on): 155
+  passed.
+- `cargo clippy --release --all-targets`: no warning in a touched file; the 11 it raises are
+  main's, in `parameter_estimation`, `run/census_fit.rs`, an example and the vendored
+  `noodles-cram`.
