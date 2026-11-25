@@ -632,6 +632,28 @@ At 2,176 samples and about 250 bytes a sample a record, 32 GB holds a window of 
 records, 2.2 Mb at 26 records a kilobase; the 500-kb floor is reached at about 3,000 samples, and
 past it the run stops (§2.2).
 
+**The run checks its expected peak against the memory it may use** (2026-11-25,
+`src/neighbour_evidence/peak.rs`, `refine_peak_guard_2026-11-25.md`). The process holds more
+than the budget counts: each walking thread's arrays, about 1.05 kB a walked record, and the
+allocator's slack, memory freed and not yet returned, measured at 12 to 25% of what is held under
+mimalloc's defaults (`refine_memory_overhead_2026-11-25.md`). On 2,176 tomato samples at 48 threads
+the peak was 103.0 GB at an 80-GB budget. So the run estimates
+
+```text
+peak = (counted + 1.05 kB × min(threads, samples) × walked records) × 1.16
+```
+
+and compares it with the smaller of the machine's memory and the control group's limit (cgroup v2
+`memory.max` or v1 `memory.limit_in_bytes`, of the process's group and every group above it; a
+systemd unit's `MemoryMax=` is one). It does so **before calling starts**, with *counted* the
+budget and *walked records* the budget over 170 bytes a sample, each capped by what a window of
+the longest contig could hold at 150 records a kb, and **again at every window**, with the
+window's own count and walked records, before it is solved. Above 90% of the limit the run stops,
+naming the estimate's parts, the budget and the thread count that would fit, unless
+`--refine-ignore-memory-limit` is given, when it warns and goes on. Where the limit cannot be read,
+the estimate is logged and nothing is checked. The check changes no window and no output: the
+thread count enters only the estimate.
+
 **Thinned margins** (`--refine-margin-density`, 2026-11-23). A margin is read only to tell which
 samples a record's haplotypes follow, and once a stretch has enough records to tell that, more say
 little. With a density `D` set, beyond 50 kb of the core (`NEAR_MARGIN_BASES`) a window's walks read

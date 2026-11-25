@@ -94,6 +94,12 @@ pub enum CallingRunError {
         limit: usize,
     },
 
+    /// **Refinement is expected to need more memory than the run may use**, judged before calling
+    /// starts (`neighbour_evidence_pass.md` §6, memory), and `--refine-ignore-memory-limit` was not
+    /// given. Refused here rather than after hours of calling.
+    #[error("{0}")]
+    RefinementOverMemory(crate::neighbour_evidence::peak::PeakTooClose),
+
     /// A bound that is not a bound.
     #[error(
         "--max-locus-span {asked}: a locus covers at least one reference base, so a \
@@ -912,6 +918,87 @@ pub fn neighbour_evidence_decision(
         decision.why
     );
     decision
+}
+
+/// **Whether refinement's expected peak fits the memory this run may use**, judged before calling
+/// starts (`neighbour_evidence_pass.md` §6, memory): from the window budget, the samples, the
+/// threads and the longest contig, against the smaller of the machine's memory and the control
+/// group's limit ([`crate::memory_limit`]). Logs the estimate where it fits, or where the limit
+/// cannot be read, and hands the limit to the decision so that every window is checked again once
+/// it is planned. Does nothing where refinement does not run. `ignore_limit` is
+/// `--refine-ignore-memory-limit`.
+///
+/// # Errors
+///
+/// [`CallingRunError::RefinementOverMemory`] if the estimate is above
+/// [`STOP_SHARE`](crate::neighbour_evidence::peak::STOP_SHARE) of the limit and `ignore_limit` is
+/// not set.
+pub fn check_refinement_memory(
+    metadata: VcfHeaderMetadata,
+    ignore_limit: bool,
+) -> Result<VcfHeaderMetadata, CallingRunError> {
+    let Some(decision) = metadata
+        .neighbour_evidence()
+        .filter(|decision| decision.ran)
+        .cloned()
+    else {
+        return Ok(metadata);
+    };
+    let longest_contig = metadata
+        .contigs()
+        .iter()
+        .map(|contig| contig.length)
+        .max()
+        .unwrap_or(0);
+    let decision = refinement_memory_checked(
+        decision,
+        crate::memory_limit::of_this_process(),
+        ignore_limit,
+        rayon::current_num_threads(),
+        longest_contig,
+    )
+    .map_err(CallingRunError::RefinementOverMemory)?;
+    Ok(metadata.the_neighbour_evidence_decision(decision))
+}
+
+/// [`check_refinement_memory`]'s judgement, given the limit and the threads.
+pub(crate) fn refinement_memory_checked(
+    decision: NeighbourEvidenceDecision,
+    limit: Option<crate::memory_limit::MemoryLimit>,
+    ignore_limit: bool,
+    threads: usize,
+    longest_contig: u64,
+) -> Result<NeighbourEvidenceDecision, crate::neighbour_evidence::peak::PeakTooClose> {
+    use crate::neighbour_evidence::peak::{self, MemoryGuard, PeakCheck, PeakEstimate, PeakMoment};
+    let samples = decision.inbreeding_by_sample.len();
+    let estimate_at = |budget: u64| {
+        PeakEstimate::before_any_window(
+            &crate::neighbour_evidence::windows::WindowSizes {
+                budget_bytes: budget,
+                ..decision.sizes
+            },
+            samples,
+            threads,
+            longest_contig,
+        )
+    };
+    let estimate = estimate_at(decision.sizes.budget_bytes);
+    let guard = MemoryGuard {
+        limit,
+        ignore_limit,
+    };
+    let found = peak::check(estimate, guard, PeakMoment::BeforeCalling, estimate_at)?;
+    let words = peak::fits_in_words(&estimate, &found, limit);
+    match found {
+        PeakCheck::Ignored(_) => tracing::warn!("refinement memory, before calling: {words}"),
+        PeakCheck::Fits { .. } | PeakCheck::NoLimit => {
+            tracing::info!("refinement memory, before calling: {words}");
+        }
+    }
+    Ok(NeighbourEvidenceDecision {
+        memory_guard: guard,
+        ..decision
+    })
 }
 
 /// **The ploidy this run was asked for, judged against what the caller can score.**

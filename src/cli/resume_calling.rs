@@ -101,6 +101,12 @@ pub struct ResumeCallingArgs {
     )]
     pub refine_margin_density: Option<calling_run::MarginDensity>,
 
+    /// Run genotype refinement even where its expected peak memory is above 90% of the memory
+    /// this run may use. Not taken from the stopped run: give it again to go on past the limit.
+    /// See `pvc call-from-psps --help`.
+    #[arg(long, help_heading = "Advanced")]
+    pub refine_ignore_memory_limit: bool,
+
     /// The share of drawn paths that must agree to phase two neighbouring sites together, in
     /// place of the stopped run's. See `pvc call-from-psps --help`.
     #[arg(long, value_parser = calling_run::parse_path_agreement, help_heading = "Advanced")]
@@ -178,6 +184,7 @@ pub fn run_resume_calling(args: &ResumeCallingArgs) -> Result<(), ResumeCallingC
     if let Some(decision) = metadata.neighbour_evidence().cloned() {
         metadata = metadata.the_neighbour_evidence_decision(the_decision_resumed(decision, args));
     }
+    let metadata = calling_run::check_refinement_memory(metadata, args.refine_ignore_memory_limit)?;
     tracing::info!(
         "resuming the run `{}`: {} samples, {} records on its spill, from {}",
         metadata.command_line(),

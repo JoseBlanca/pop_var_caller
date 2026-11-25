@@ -16,10 +16,13 @@
 //!   samples without reads and the fill check (§4.2, §4.3; phasing spec §4).
 //! - [`line`](mod@line) — reading a finished VCF line into the pass and writing it back re-called (§4.1).
 //! - [`stage`] — the pass as a stage in front of the writer, and whether a run uses it (§2, §5).
+//! - [`peak`] — the memory the pass is expected to hold at its peak, checked against what the run
+//!   may use (§6).
 
 pub mod fit;
 pub mod line;
 pub mod model;
+pub mod peak;
 pub mod phase;
 pub(crate) mod random;
 pub mod records;

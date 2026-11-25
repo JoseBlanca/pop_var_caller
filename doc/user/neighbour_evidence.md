@@ -146,6 +146,11 @@ kilobase. Four options, under *Advanced* in `--help`, set how large windows may 
   samples, where the densest stretches hold about 90 records a kilobase, a window then held 41%
   less memory and took half the time, with as many genotypes wrong; at 1 a kilobase and below, the
   simulated cohorts began to lose genotypes. `0` walks every record.
+- Before calling, and again at each window, pvc estimates the pass's peak memory — the window,
+  each thread's arrays and about 16% more for the memory allocator — and compares it with the
+  machine's memory, or the job's limit where that is lower (a systemd unit's `MemoryMax`, a
+  container's). Above 90% of it the run stops and says what to lower; `--refine-ignore-memory-limit`
+  runs it anyway. On 2,176 tomato samples at 48 threads the estimate is about 1.3 times the budget.
 
 ## How good the fills are: the fill check
 

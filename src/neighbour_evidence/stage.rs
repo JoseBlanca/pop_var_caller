@@ -21,6 +21,7 @@ use rayon::prelude::*;
 use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
+use super::peak::{MemoryGuard, PeakCheck, PeakEstimate, PeakMoment, PeakTooClose};
 use super::phase::{
     DISAGREEMENT_COST, EXTRA_PATHS_PER_ROUND, JoinRecord, LEAN_MIN, LastBlock, PassReadCounts,
     PathAgreement, SHARED_RECORDS_TO_JOIN, SWITCH_COST, WrittenPhase,
@@ -80,6 +81,10 @@ pub struct NeighbourEvidenceDecision {
     /// the margin floor and follows it ([`Self::with_window_floor`]), on a fresh run and on a
     /// resumed run given a new `--refine-window-floor` alike.
     pub(crate) core_floor_given: bool,
+    /// **What the memory check is given** (`--refine-ignore-memory-limit`, pass spec §6, memory):
+    /// the memory this run may use, and whether to go on past it. [`decide`] checks nothing;
+    /// a command sets it before calling starts. It changes no output.
+    pub memory_guard: MemoryGuard,
 }
 
 impl NeighbourEvidenceDecision {
@@ -274,6 +279,7 @@ pub fn decide(
         path_agreement: PathAgreement::DEFAULT,
         reads_in_draw: true,
         core_floor_given: false,
+        memory_guard: MemoryGuard::default(),
     }
 }
 
@@ -293,18 +299,22 @@ pub struct WindowOverBudget {
     pub budget: u64,
 }
 
-/// **Why the stage stopped handing lines on**: a window over its budget, or the writer refusing a
-/// line it was handed ([`NeighbourEvidenceStage::push_writing`]).
+/// **Why the stage stopped handing lines on**: a window over its budget, a window expected to need
+/// more memory than the run may use, or the writer refusing a line it was handed
+/// ([`NeighbourEvidenceStage::push_writing`]).
 #[derive(Debug)]
 pub enum StageStop<E> {
     /// A window holds more than the budget even at the smallest size.
     OverBudget(WindowOverBudget),
+    /// A window's expected peak is above the share of the run's memory limit the run stops at
+    /// ([`super::peak::STOP_SHARE`]), and `--refine-ignore-memory-limit` was not given.
+    OverMemory(PeakTooClose),
     /// Writing a line failed.
     Write(E),
     /// **The stage had already stopped on a refused write** and was handed more. A stop drops the
     /// lines it caught part-way through a batch, so a stage that went on would write a stream with
-    /// lines missing from its middle; it refuses instead. A stage stopped by its budget gives the
-    /// same [`Self::OverBudget`] again.
+    /// lines missing from its middle; it refuses instead. A stage stopped by its budget or the
+    /// memory limit gives the same stop again.
     Stopped,
 }
 
@@ -312,6 +322,7 @@ pub enum StageStop<E> {
 #[derive(Clone, Copy, Debug)]
 enum StopCause {
     OverBudget(WindowOverBudget),
+    OverMemory(PeakTooClose),
     Write,
 }
 
@@ -321,18 +332,9 @@ impl<E> From<WindowOverBudget> for StageStop<E> {
     }
 }
 
-/// What a stage that hands its lines to a vector can stop on: only the budget.
-fn over_budget(stop: StageStop<std::convert::Infallible>) -> WindowOverBudget {
-    match stop {
-        StageStop::OverBudget(over) => over,
-        StageStop::Write(never) => match never {},
-        // PANIC-FREE: a write into a vector is never refused, so a stage that hands its lines to
-        // one stops only on its budget, and repeats that stop.
-        StageStop::Stopped => {
-            unreachable!("a stage writing into a vector stops only on its budget")
-        }
-    }
-}
+/// **What a stage that hands its lines to a vector stops on**: its budget or the memory limit,
+/// never a write.
+pub type VectorStageStop = StageStop<std::convert::Infallible>;
 
 /// **How many of a core's lines are rewritten together**, on the pool, and handed on before the
 /// next ones are: a core's rewritten lines were all held at once before the first was written —
@@ -577,6 +579,11 @@ pub struct NeighbourEvidenceStage {
     last_window: Option<super::windows::WindowPlan>,
     /// What the stage stopped on, if it did: it then takes no more lines ([`StageStop::Stopped`]).
     stopped: Option<StopCause>,
+    /// The memory limit each window is checked against, and whether to go on past it.
+    memory_guard: MemoryGuard,
+    /// The highest peak expected of a window so far: the first window, and each window above
+    /// every one before it, is logged.
+    highest_expected_peak: u64,
 }
 
 impl NeighbourEvidenceStage {
@@ -629,6 +636,8 @@ impl NeighbourEvidenceStage {
             plans: Vec::new(),
             last_window: None,
             stopped: None,
+            memory_guard: decision.memory_guard,
+            highest_expected_peak: 0,
         }
     }
 
@@ -666,19 +675,19 @@ impl NeighbourEvidenceStage {
     ///
     /// # Errors
     ///
-    /// If a window this line completed holds more than the budget even at the smallest size.
+    /// If a window this line completed holds more than the budget even at the smallest size, or is
+    /// expected to need more memory than the run may use ([`StageStop::OverMemory`]).
     pub fn push(
         &mut self,
         place: RecordPlace,
         line: Vec<u8>,
         fragments: RecordFragments,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
-    ) -> Result<(), WindowOverBudget> {
+    ) -> Result<(), VectorStageStop> {
         self.push_writing(place, line, fragments, &mut |place, line| {
             ready.push((place, line));
             Ok(())
         })
-        .map_err(over_budget)
     }
 
     /// **Takes one line, as [`Self::push`], and hands each line it completes to `write`** in the
@@ -726,6 +735,7 @@ impl NeighbourEvidenceStage {
         match self.stopped {
             None => Ok(()),
             Some(StopCause::OverBudget(over)) => Err(StageStop::OverBudget(over)),
+            Some(StopCause::OverMemory(too_close)) => Err(StageStop::OverMemory(too_close)),
             Some(StopCause::Write) => Err(StageStop::Stopped),
         }
     }
@@ -735,6 +745,7 @@ impl NeighbourEvidenceStage {
         if let Err(stop) = &outcome {
             self.stopped = Some(match stop {
                 StageStop::OverBudget(over) => StopCause::OverBudget(*over),
+                StageStop::OverMemory(too_close) => StopCause::OverMemory(*too_close),
                 StageStop::Write(_) | StageStop::Stopped => StopCause::Write,
             });
         }
@@ -910,12 +921,11 @@ impl NeighbourEvidenceStage {
     pub fn finish(
         &mut self,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
-    ) -> Result<(), WindowOverBudget> {
+    ) -> Result<(), VectorStageStop> {
         self.finish_writing(&mut |place, line| {
             ready.push((place, line));
             Ok(())
         })
-        .map_err(over_budget)
     }
 
     /// **Finishes the current contig, as [`Self::finish`], handing its lines to `write`.**
@@ -1102,6 +1112,26 @@ impl NeighbourEvidenceStage {
                         .filter(|(walked, record)| **walked && record.is_site())
                         .count()
                 });
+                // **Checked before it is solved**: what the budget counted and the records the
+                // walks read are known now, and the walks' arrays are not yet made.
+                let walked_count = walked_records
+                    .unwrap_or_else(|| records.iter().filter(|record| record.is_site()).count());
+                check_the_windows_memory(
+                    self.memory_guard,
+                    &mut self.highest_expected_peak,
+                    PeakEstimate::for_window(
+                        plan.bytes,
+                        walked_count as u64,
+                        self.samples,
+                        rayon::current_num_threads(),
+                        self.sizes.budget_bytes,
+                    ),
+                    PeakMoment::Window {
+                        contig: self.contig.map_or(0, |contig| contig.0),
+                        position: self.positions[plan.core_start],
+                    },
+                )
+                .map_err(StageStop::OverMemory)?;
                 let solved = refine_window_with_reads(
                     records,
                     Some(fragments),
@@ -1431,6 +1461,57 @@ impl NeighbourEvidenceStage {
         self.first_site += sites_dropped;
         self.core_start -= keep_from;
     }
+}
+
+/// **Checks a planned window's expected peak against the run's memory limit** (pass spec §6,
+/// memory), before it is solved. The first window's estimate is logged, and each one higher than
+/// every window's before it in the debug log; a window above the limit's stop share stops the
+/// stage, unless `--refine-ignore-memory-limit` was given, when each such new highest is a
+/// warning. Without a limit nothing is stopped, and the estimates are logged the same way.
+fn check_the_windows_memory(
+    guard: MemoryGuard,
+    highest_expected_peak: &mut u64,
+    estimate: PeakEstimate,
+    moment: PeakMoment,
+) -> Result<(), PeakTooClose> {
+    let peak = estimate.peak_bytes();
+    let scale = |budget: u64| {
+        // A window counted at another budget holds, and walks, as much more or less of it.
+        let at = |bytes: u64| {
+            u64::try_from(
+                u128::from(bytes) * u128::from(budget) / u128::from(estimate.budget_bytes.max(1)),
+            )
+            .unwrap_or(u64::MAX)
+        };
+        PeakEstimate {
+            counted_bytes: at(estimate.counted_bytes),
+            walked_records: at(estimate.walked_records),
+            budget_bytes: budget,
+            ..estimate
+        }
+    };
+    let found = super::peak::check(estimate, guard, moment, scale)?;
+    if peak > *highest_expected_peak {
+        let first = *highest_expected_peak == 0;
+        *highest_expected_peak = peak;
+        let words = super::peak::fits_in_words(&estimate, &found, guard.limit);
+        let PeakMoment::Window { contig, position } = moment else {
+            return Ok(());
+        };
+        let which = if first {
+            "the first window"
+        } else {
+            "a window higher than any before it"
+        };
+        let line =
+            format!("refinement memory, {which} (contig {contig} position {position}): {words}");
+        match found {
+            PeakCheck::Ignored(_) => tracing::warn!("{line}"),
+            PeakCheck::Fits { .. } | PeakCheck::NoLimit if first => tracing::info!("{line}"),
+            PeakCheck::Fits { .. } | PeakCheck::NoLimit => tracing::debug!("{line}"),
+        }
+    }
+    Ok(())
 }
 
 /// **A running total over the held lines, less the lines in `joined`** (ascending): what a window

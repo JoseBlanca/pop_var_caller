@@ -398,3 +398,42 @@ fn a_round_is_cut_into_up_to_four_regions_a_thread_over_the_same_ground() {
         );
     }
 }
+
+/// **Refinement's memory is judged before calling**: tomato25's 2,176 samples at 70 GB and 48
+/// threads fit a 118-GB unit (92 GB expected, 78%) and the decision carries the limit on to every
+/// window; at 100 GB (131.8 GB expected) the run is refused, unless told to go on; and a run whose
+/// limit cannot be read goes on, unchecked.
+#[test]
+fn refinement_memory_is_judged_before_calling() {
+    use crate::memory_limit::{LimitSource, MemoryLimit};
+    let unit = Some(MemoryLimit {
+        bytes: 118_000_000_000,
+        source: LimitSource::ControlGroupV2,
+    });
+    let at = |budget: u64| {
+        decide(
+            NeighbourEvidenceSwitch::On,
+            &vec![0.9; 2_176],
+            Ploidy::try_new(2).expect("two"),
+        )
+        .with_window_bytes(budget)
+        .with_margin_thinning(
+            crate::neighbour_evidence::windows::MarginThinning::parse("5").expect("5"),
+        )
+    };
+    let fits = refinement_memory_checked(at(70_000_000_000), unit, false, 48, 90_000_000)
+        .expect("92 GB of 118");
+    assert_eq!(fits.memory_guard.limit, unit);
+    assert!(!fits.memory_guard.ignore_limit);
+
+    let refused = refinement_memory_checked(at(100_000_000_000), unit, false, 48, 90_000_000)
+        .expect_err("131.8 GB of 118");
+    assert_eq!(refused.budget_that_fits, Some(80_000_000_000));
+    let forced = refinement_memory_checked(at(100_000_000_000), unit, true, 48, 90_000_000)
+        .expect("told to go on");
+    assert!(forced.memory_guard.ignore_limit);
+
+    let unread = refinement_memory_checked(at(100_000_000_000), None, false, 48, 90_000_000)
+        .expect("nothing to check against");
+    assert_eq!(unread.memory_guard.limit, None);
+}

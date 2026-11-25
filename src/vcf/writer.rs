@@ -706,6 +706,13 @@ pub enum VcfWriteError {
     )]
     RefinementOverBudget(crate::neighbour_evidence::stage::WindowOverBudget),
 
+    /// **A refinement window is expected to need more memory than the run may use**
+    /// (`neighbour_evidence_pass.md` §6, memory): above the share of the memory limit the run stops
+    /// at, and `--refine-ignore-memory-limit` was not given. The message names the estimate, its
+    /// parts and what to change.
+    #[error("{0}")]
+    RefinementOverMemory(crate::neighbour_evidence::peak::PeakTooClose),
+
     /// **A line was handed to refinement after a write had already failed.** The writer reports
     /// the first failure; this one names a caller that went on after it, which would otherwise
     /// write a file with lines missing.
@@ -754,6 +761,9 @@ impl From<crate::neighbour_evidence::stage::StageStop<VcfWriteError>> for VcfWri
     fn from(stop: crate::neighbour_evidence::stage::StageStop<VcfWriteError>) -> Self {
         match stop {
             crate::neighbour_evidence::stage::StageStop::OverBudget(over) => over.into(),
+            crate::neighbour_evidence::stage::StageStop::OverMemory(too_close) => {
+                Self::RefinementOverMemory(too_close)
+            }
             crate::neighbour_evidence::stage::StageStop::Write(error) => error,
             crate::neighbour_evidence::stage::StageStop::Stopped => Self::RefinementStopped,
         }

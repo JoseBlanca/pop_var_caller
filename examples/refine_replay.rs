@@ -229,6 +229,9 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
                 return Ok(ExitCode::from(3));
             }
             Err(StageStop::Write(why)) => return Err(why.into()),
+            Err(StageStop::OverMemory(too_close)) => {
+                unreachable!("the replay's decision carries no memory limit: {too_close}")
+            }
             Err(StageStop::Stopped) => unreachable!("the replay stops at the first stop"),
         }
         pushed += 1;
@@ -259,6 +262,9 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
             return Ok(ExitCode::from(3));
         }
         Err(StageStop::Write(why)) => return Err(why.into()),
+        Err(StageStop::OverMemory(too_close)) => {
+            unreachable!("the replay's decision carries no memory limit: {too_close}")
+        }
         Err(StageStop::Stopped) => unreachable!("the replay stops at the first stop"),
     }
     if out.lines_now > 0 {

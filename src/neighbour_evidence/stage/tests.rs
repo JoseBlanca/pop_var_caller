@@ -874,12 +874,15 @@ fn a_window_over_budget_at_the_floor_stops_the_stage() {
     let mut output = Vec::new();
     let mut refused = None;
     for (index, line) in cohort.lines.iter().enumerate() {
-        if let Err(over) = stage.push(
+        if let Err(stop) = stage.push(
             place(0, 1 + index as u64 * 500),
             line.clone().into_bytes(),
             RecordFragments::default(),
             &mut output,
         ) {
+            let StageStop::OverBudget(over) = stop else {
+                panic!("{stop:?}");
+            };
             refused = Some(over);
             break;
         }
@@ -1106,7 +1109,7 @@ fn a_shrunken_window_counts_the_lines_held_outside_it() {
             _ => 440_001 + (index - 1_200) * 500,
         }
     };
-    let plans = |sizes: WindowSizes| -> Result<Vec<WindowPlan>, WindowOverBudget> {
+    let plans = |sizes: WindowSizes| -> Result<Vec<WindowPlan>, VectorStageStop> {
         let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
         decision.sizes = sizes;
         let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
@@ -1334,11 +1337,79 @@ fn read_alleles_count_toward_the_queue_limit() {
     stage
         .push(place(0, 1), line(), fragments, &mut output)
         .expect("within budget");
-    assert!(stage.arrived.is_empty(), "{} lines wait", stage.arrived.len());
+    assert!(
+        stage.arrived.is_empty(),
+        "{} lines wait",
+        stage.arrived.len()
+    );
     assert_eq!(stage.arrived_bytes, 0);
     let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
     stage
         .push(place(0, 1), line(), RecordFragments::default(), &mut output)
         .expect("within budget");
     assert_eq!(stage.arrived.len(), 1);
+}
+
+/// **A window expected to need more memory than the run may use stops the stage before it is
+/// solved**, naming the window and what its estimate is made of; told to go on past the limit
+/// (`--refine-ignore-memory-limit`), the stage writes exactly what it writes with no limit.
+#[test]
+fn a_window_over_the_memory_limit_stops_the_stage_unless_told_to_go_on() {
+    use crate::memory_limit::{LimitSource, MemoryLimit};
+    let cohort = join_cohort();
+    let run = |guard: MemoryGuard| -> Result<Vec<(RecordPlace, Vec<u8>)>, VectorStageStop> {
+        let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+        decision.sizes = WindowSizes {
+            core_bases: 200_000,
+            margin_bases: 200_000,
+            margin_floor_bases: 200_000,
+            core_floor_bases: 200_000,
+            budget_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+            thinning: None,
+        };
+        decision.memory_guard = guard;
+        let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+        let mut output = Vec::new();
+        for (index, line) in cohort.lines.iter().enumerate() {
+            stage.push(
+                place(0, 1 + index as u64 * 500),
+                line.clone().into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            )?;
+        }
+        stage.finish(&mut output)?;
+        Ok(output)
+    };
+    let unchecked = run(MemoryGuard::default()).expect("no limit to stop at");
+    // 1 MB: below what the budget counts for any window of 20 samples here.
+    let tiny = Some(MemoryLimit {
+        bytes: 1_000_000,
+        source: LimitSource::MachineMemory,
+    });
+    let stop = run(MemoryGuard {
+        limit: tiny,
+        ignore_limit: false,
+    })
+    .expect_err("the first window is over the limit");
+    let StageStop::OverMemory(too_close) = stop else {
+        panic!("{stop:?}");
+    };
+    assert_eq!(
+        too_close.moment,
+        PeakMoment::Window {
+            contig: 0,
+            position: 1
+        }
+    );
+    assert!(
+        too_close.estimate.counted_bytes > 1_000_000 && too_close.estimate.walked_records > 0,
+        "{too_close:?}"
+    );
+    let forced = run(MemoryGuard {
+        limit: tiny,
+        ignore_limit: true,
+    })
+    .expect("told to go on past the limit");
+    assert!(forced == unchecked, "the guard changed the output");
 }

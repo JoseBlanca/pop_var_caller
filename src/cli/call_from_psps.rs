@@ -279,7 +279,9 @@ pub struct CallFromPspsArgs {
     /// numbers and reads, and each sample's state while it is solved. Windows shrink to fit it,
     /// down to --refine-window-floor; a cohort whose smallest window still does not fit stops
     /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
-    /// walk's arrays, a few kilobytes a window record.
+    /// walk's arrays, about 1 kB a record it walks, and the memory allocator holds about a sixth
+    /// more: on 2,176 samples at 48 threads the process peaked at about 1.3 times the budget. The
+    /// run checks that peak against its memory before calling (see --refine-ignore-memory-limit).
     #[arg(
         long,
         default_value_t = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
@@ -326,6 +328,14 @@ pub struct CallFromPspsArgs {
         help_heading = "Advanced"
     )]
     pub refine_margin_density: calling_run::MarginDensity,
+
+    /// Run genotype refinement even where its expected peak memory is above 90% of the memory
+    /// this run may use: the machine's, or the job's limit where that is lower (a systemd
+    /// unit's MemoryMax, a container's). Without it the run stops, before calling and again at
+    /// any window that would go over, saying what the estimate is made of and what to lower
+    /// (--refine-window-bytes, --threads). With it, the run logs a warning and goes on.
+    #[arg(long, help_heading = "Advanced")]
+    pub refine_ignore_memory_limit: bool,
 
     /// The longest a refinement window's core and each margin may be, in bases, before the budget
     /// shrinks them (at most 1 Mb, the default margin; the default core is 2 Mb). For measurements
@@ -749,6 +759,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 core_max: args.refine_core_max,
             },
         ));
+    // **Before calling starts**, so that a run whose refinement cannot fit stops now, not after
+    // hours of calling.
+    let metadata = calling_run::check_refinement_memory(metadata, args.refine_ignore_memory_limit)?;
     // **Fragments are gathered only where the output will read them**, which the header just
     // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.
     // Elsewhere — any other ploidy — gathering them would cost the calling threads, the ordered

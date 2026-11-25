@@ -16,6 +16,7 @@ fn a_directory_with_no_resume_point_is_refused() {
         refine_window_bytes: None,
         refine_window_floor: None,
         refine_margin_density: None,
+        refine_ignore_memory_limit: false,
         refine_core_floor: None,
         phase_min_path_agreement: None,
     })
@@ -38,6 +39,7 @@ fn a_scratch_directory_that_is_not_there_is_refused() {
         refine_window_bytes: None,
         refine_window_floor: None,
         refine_margin_density: None,
+        refine_ignore_memory_limit: false,
         refine_core_floor: None,
         phase_min_path_agreement: None,
     })
@@ -60,6 +62,7 @@ fn no_resume_options() -> ResumeCallingArgs {
         refine_window_bytes: None,
         refine_window_floor: None,
         refine_margin_density: None,
+        refine_ignore_memory_limit: false,
         refine_core_floor: None,
         phase_min_path_agreement: None,
     }
