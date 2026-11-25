@@ -811,13 +811,19 @@ impl NeighbourEvidenceStage {
                     !far_walked[line_of_site[site + first_site - start]]
                 });
         }
-        // The running totals from the first compressed line on, less what each line saved.
-        let mut saved = 0;
+        // The running totals from the first compressed line on, less what each line saved. **The
+        // saving is signed**: zstd makes a line under about 60 bytes longer, by its frame header.
+        let mut saved: i64 = 0;
         for (index, held) in self.held.iter().enumerate().skip(from) {
             if let HeldText::Compressed { bytes, length } = &held.text {
-                saved += *length - bytes.len();
+                saved += *length as i64 - bytes.len() as i64;
             }
-            self.held_bytes[index + 1] -= saved as u64;
+            let total = &mut self.held_bytes[index + 1];
+            // PANIC-FREE: the total less the saving is the same sum with each line at its
+            // compressed length, which is not negative.
+            *total = total.checked_add_signed(-saved).expect(
+                "a running total stays at least the bytes its lines hold, compressed or not",
+            );
         }
         // What the sites packed hold so, from the same line on. The lines from `from` were pushed
         // after every block's records, so none is joined.

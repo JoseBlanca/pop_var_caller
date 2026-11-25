@@ -1201,3 +1201,32 @@ fn a_shrunken_window_counts_the_lines_held_outside_it() {
         100.0 * most_added(&at_floor)
     );
 }
+
+/// **A line zstd makes longer keeps the running totals exact** (code review 2026-11-25, M1).
+/// zstd adds a frame header to a line it cannot shrink, so a line under about 60 bytes comes back
+/// longer than it went in, and the running saving goes below zero. 3,000 one-sample filtered lines
+/// of 44 bytes each: with the saving held unsigned this panicked on overflow under the `test` and
+/// `soak` profiles. The kept totals are checked against each line's held bytes at every window
+/// ([`NeighbourEvidenceStage::check_the_kept_totals`]).
+#[test]
+fn compress_held_lines_keeps_totals_when_a_line_grows() {
+    let decision = decide(NeighbourEvidenceSwitch::On, &[0.95; 1], diploid());
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+    let mut output = Vec::new();
+    for index in 0..3_000u64 {
+        let line = format!(
+            "chr1\t{}\t.\tA\tG\t5\tLowQual\tAF=1\tGT\t1/1",
+            1 + index * 500
+        );
+        stage
+            .push(
+                place(0, 1 + index * 500),
+                line.into_bytes(),
+                RecordFragments::default(),
+                &mut output,
+            )
+            .expect("within budget");
+    }
+    stage.finish(&mut output).expect("within budget");
+    assert_eq!(output.len(), 3_000);
+}
