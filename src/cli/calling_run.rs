@@ -1139,6 +1139,12 @@ pub enum ScratchOnFailure {
     /// Left on disk, with everything in it, and its path logged — for looking at what the run
     /// had made before it stopped.
     Kept,
+    /// **Left on disk because refinement stopped on memory**, whatever `--keep-tmp-on-error`
+    /// said: over the window budget even at the smallest window, or its expected peak too close
+    /// to the run's memory limit. That stop comes after calling has ended, so the directory holds
+    /// everything `pvc resume-calling` needs, and removing it would throw away hours of calling
+    /// to a setting the user can change. Set by [`RunScratch::keep_if_refinement_stopped`].
+    KeptForResuming,
 }
 
 impl ScratchOnFailure {
@@ -1189,6 +1195,34 @@ impl RunScratch {
     pub fn the_run_succeeded(&mut self) {
         self.the_run_succeeded = true;
     }
+
+    /// **Keep the directory if `error` is refinement stopping on memory**
+    /// ([`ScratchOnFailure::KeptForResuming`]); any other error leaves the choice as it was.
+    pub fn keep_if_refinement_stopped(&mut self, error: &(dyn std::error::Error + 'static)) {
+        if refinement_stopped_on_memory(error) {
+            self.on_failure = ScratchOnFailure::KeptForResuming;
+        }
+    }
+}
+
+/// **Whether `error`, or any error under it, is refinement stopping on memory**: a window over
+/// the budget at its smallest, or one whose expected peak is too close to the memory limit.
+#[must_use]
+pub fn refinement_stopped_on_memory(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(this) = next {
+        if matches!(
+            this.downcast_ref::<crate::vcf::writer::VcfWriteError>(),
+            Some(
+                crate::vcf::writer::VcfWriteError::RefinementOverMemory(_)
+                    | crate::vcf::writer::VcfWriteError::RefinementOverBudget(_)
+            )
+        ) {
+            return true;
+        }
+        next = this.source();
+    }
+    false
 }
 
 impl Drop for RunScratch {
@@ -1196,13 +1230,18 @@ impl Drop for RunScratch {
         let Some(directory) = self.directory.take() else {
             return;
         };
-        if !self.the_run_succeeded && self.on_failure == ScratchOnFailure::Kept {
+        if !self.the_run_succeeded && self.on_failure != ScratchOnFailure::Removed {
             // A run that stopped after calling left what resuming needs; one that stopped before
             // left a spill nothing can finish.
             let resumable = crate::run::paralog_filter::resume::is_resumable(&directory);
+            let why = if self.on_failure == ScratchOnFailure::KeptForResuming {
+                "because refinement stopped on memory and calling had finished"
+            } else {
+                "as --keep-tmp-on-error asked"
+            };
             tracing::warn!(
-                "the run did not finish; its scratch directory is kept, as --keep-tmp-on-error \
-                 asked: {} — remove it once it is no longer needed{}",
+                "the run did not finish; its scratch directory is kept, {why}: {} — remove it \
+                 once it is no longer needed{}",
                 directory.display(),
                 if resumable {
                     format!(

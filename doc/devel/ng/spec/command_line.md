@@ -628,7 +628,10 @@ next run.
 
 **`--keep-tmp-on-error` keeps the directory of a run that fails**, and a run that fails after
 calling has ended can be finished from it: **`pvc resume-calling --scratch-dir <dir> --output
-<vcf>`** (2026-11-22). When calling ends, the run keeps beside its spill what the
+<vcf>`** (2026-11-22). **A run that refinement stops on memory keeps it without the flag**
+(2026-11-25): that stop — a window over its budget at its smallest, or one expected to need more
+than the run's memory limit allows — comes after calling, so removing the directory would throw
+away the calling for a setting `resume-calling` can change. When calling ends, the run keeps beside its spill what the
 hidden-duplication filter's passes take besides it — each sample's coverage histogram
 (`coverage-histograms.tsv`, every cell, the bin width by its bit pattern) and a manifest
 (`resume.json`: the spill's entry count and layout number, the ploidy, each sample's inbreeding by

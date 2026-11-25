@@ -202,7 +202,9 @@ pub struct CallFromAlignmentsArgs {
     pub tmp_dir: Option<PathBuf>,
 
     /// Keep the run's scratch directory, and the hidden-dup filter's spill in it, when the run
-    /// stops on an error. Its path is logged. A run that finishes removes it as usual.
+    /// stops on an error. Its path is logged. A run that finishes removes it as usual. A run
+    /// that refinement stops on memory, after calling, keeps it with or without this flag, so
+    /// `pvc resume-calling` can finish it.
     ///
     /// The spill holds every called record, so on a large cohort the kept directory can take
     /// terabytes: remove it once it is no longer needed.
@@ -980,7 +982,13 @@ pub fn run_call_from_alignments(
                 ploidy,
                 paralog_explanations.as_mut(),
             )
-            .map_err(|source| CallFromAlignmentsCliError::ParalogFilter { source })?,
+            .map_err(|source| {
+                // A stop on memory comes after calling: keep what resuming needs.
+                if let Some(scratch) = &mut scratch {
+                    scratch.keep_if_refinement_stopped(&source);
+                }
+                CallFromAlignmentsCliError::ParalogFilter { source }
+            })?,
         ),
         None => None,
     };

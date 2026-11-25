@@ -266,8 +266,8 @@ impl std::fmt::Display for PeakTooClose {
         if matches!(self.moment, PeakMoment::Window { .. }) {
             write!(
                 f,
-                " A run started with --keep-tmp-on-error and the hidden-duplication filter on \
-                 keeps its calls, and `pvc resume-calling` finishes it with the new options."
+                " With the hidden-duplication filter on, the run keeps its scratch directory \
+                 and its calls, and `pvc resume-calling` finishes it with the new options."
             )?;
         }
         Ok(())

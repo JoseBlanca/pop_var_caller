@@ -120,7 +120,7 @@ samples it was estimated on.
   `--hidden-dup-fdr 0` turns the check off, and the scratch space with it.
 - **A run that stops after calling can be finished without calling again.** With
   `--keep-tmp-on-error`, a run that stops on an error keeps its scratch directory, and its log
-  names it. Once calling has ended, that directory holds everything the check and the writing need,
+  names it. A run stopped by the refinement's memory check keeps it even without the flag. Once calling has ended, that directory holds everything the check and the writing need,
   so `pvc resume-calling --scratch-dir <the directory> --output calls.vcf.gz` finishes the run from
   it, as the stopped run would have. It may set its own `--refine-window-bytes`,
   `--refine-window-floor`, `--refine-core-floor`, `--refine-margin-density`,

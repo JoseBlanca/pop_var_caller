@@ -437,3 +437,52 @@ fn refinement_memory_is_judged_before_calling() {
         .expect("nothing to check against");
     assert_eq!(unread.memory_guard.limit, None);
 }
+
+/// An error that holds another, as the filter's errors hold the writer's.
+#[derive(Debug, thiserror::Error)]
+#[error("the run could not finish")]
+struct AnErrorAround(#[source] crate::vcf::writer::VcfWriteError);
+
+/// **Refinement stopping on memory keeps the scratch directory, without `--keep-tmp-on-error`**:
+/// the stop comes after calling, so the directory is what `pvc resume-calling` finishes from.
+#[test]
+fn a_run_stopped_by_refinement_memory_keeps_its_scratch_directory() {
+    let (mut scratch, file) = a_scratch_directory_holding_a_file(ScratchOnFailure::Removed);
+    let directory = scratch.path().to_path_buf();
+    let stop = AnErrorAround(crate::vcf::writer::VcfWriteError::RefinementOverBudget(
+        crate::neighbour_evidence::stage::WindowOverBudget {
+            contig: 0,
+            position: 1,
+            records: 10,
+            samples: 2,
+            bytes: 2_000,
+            budget: 1_000,
+        },
+    ));
+
+    scratch.keep_if_refinement_stopped(&stop);
+    drop(scratch);
+
+    assert_eq!(
+        std::fs::read(&file).expect("the file is still there"),
+        b"parked records"
+    );
+    std::fs::remove_dir_all(directory.parent().expect("a parent")).expect("the test's to remove");
+}
+
+/// **Any other error leaves the choice as it was**: removed without the flag.
+#[test]
+fn a_run_stopped_by_another_error_still_removes_its_scratch_directory() {
+    let (mut scratch, _) = a_scratch_directory_holding_a_file(ScratchOnFailure::Removed);
+    let directory = scratch.path().to_path_buf();
+    let other = AnErrorAround(crate::vcf::writer::VcfWriteError::RefinementStopped);
+
+    scratch.keep_if_refinement_stopped(&other);
+    drop(scratch);
+
+    assert!(
+        !directory.exists(),
+        "the scratch directory outlived a failed run"
+    );
+    std::fs::remove_dir_all(directory.parent().expect("a parent")).expect("the test's to remove");
+}

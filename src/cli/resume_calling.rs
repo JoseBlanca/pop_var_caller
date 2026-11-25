@@ -203,7 +203,11 @@ pub fn run_resume_calling(args: &ResumeCallingArgs) -> Result<(), ResumeCallingC
         point.ploidy,
         None,
     )
-    .map_err(|source| ResumeCallingCliError::ParalogFilter { source })?;
+    .map_err(|source| {
+        // Stopped on memory again: keep the directory for another try with other settings.
+        scratch.keep_if_refinement_stopped(&source);
+        ResumeCallingCliError::ParalogFilter { source }
+    })?;
 
     for line in paralog_filter::what_to_tell_the_operator(&filtered) {
         match line.trim_start().strip_prefix("warning: ") {
