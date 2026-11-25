@@ -29,7 +29,8 @@ use super::records::{RecordNumbers, SiteRecord};
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
     PHASING_ROUNDS, Phasing, RefinedRecord, held_solve_bytes, record_window_bytes,
-    refine_window_with_reads, round_store_bytes, window_key, written_result_bytes,
+    refine_window_with_reads, round_store_bytes, solution_chunk_bytes, window_key,
+    written_result_bytes,
 };
 use super::templates::MAX_TEMPLATES;
 use super::windows::{
@@ -779,7 +780,8 @@ impl NeighbourEvidenceStage {
             core = record_core;
             let samples = record.sample_count() as u64;
             store = samples * round_store_bytes(record.allele_count);
-            results = samples * written_result_bytes(record.allele_count);
+            results = samples * written_result_bytes(record.allele_count)
+                + solution_chunk_bytes(record.sample_count(), record.allele_count);
             if let Some(thinner) = &mut self.thinner {
                 far_walked = record.is_site() && thinner.walks(record.position);
                 if !far_walked {

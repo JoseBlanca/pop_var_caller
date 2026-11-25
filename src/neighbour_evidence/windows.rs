@@ -167,8 +167,9 @@ pub struct WindowBytes<'a> {
 /// **Two parts of a window's count the solve never holds at once**, as running totals like
 /// [`WindowBytes`]'s: the rounds' haplotype store, part of `held` at every record, which the solve
 /// lets go when the rounds end, and the core's written results, part of `core`, which it makes
-/// after. A window is counted at the larger of the store it walks and the results its core
-/// writes, not their sum (pass spec §6).
+/// after, with the solutions they are made from a chunk of samples at a time
+/// (`refine::solution_chunk_bytes`). A window is counted at the larger of the store it walks and
+/// the results its core writes, not their sum (pass spec §6).
 #[derive(Clone, Copy, Debug)]
 pub struct StoreAndResults<'a> {
     /// What `held` counts for the rounds' store at each record.
@@ -176,7 +177,8 @@ pub struct StoreAndResults<'a> {
     /// What a record skipped beyond the near margins does not hold of `store` — its store, as part
     /// of `WindowBytes::skipped`; zero for a record walked there. `None` without thinning.
     pub store_skipped: Option<&'a [u64]>,
-    /// What `core` counts for the written results at each record.
+    /// What `core` counts for the written results at each record, and the solutions they are made
+    /// from.
     pub results: &'a [u64],
 }
 

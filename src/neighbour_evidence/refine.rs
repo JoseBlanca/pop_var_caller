@@ -551,15 +551,16 @@ pub fn record_window_bytes(record: &SiteRecord) -> (u64, u64) {
     let samples = record.sample_count() as u64;
     (
         record.heap_bytes() as u64 + samples * held_solve_bytes(record.allele_count),
-        samples * core_solve_bytes(record.allele_count),
+        samples * core_solve_bytes(record.allele_count)
+            + solution_chunk_bytes(record.sample_count(), record.allele_count),
     )
 }
 
 /// **The bytes the solve holds for one sample at a record of a window's core** besides
 /// [`held_solve_bytes`]: the sums over its averaged rounds, and the record's result, its
-/// [`RefinedRecord`] (pass spec §6). Each sample's own result is made from its sums and copied
-/// into the records a few samples at a time ([`SOLUTIONS_AT_ONCE`]), so it is not counted, as the
-/// walks' arrays are not. The sums are one distribution's and the background's share, as a
+/// [`RefinedRecord`] (pass spec §6). Each sample's own result, made from its sums before it is
+/// copied into the records, is counted apart, once for the samples made together
+/// ([`solution_chunk_bytes`]). The sums are one distribution's and the background's share, as a
 /// phased window keeps them ([`KeptSums::OneDistribution`]); a window solved without phasing,
 /// which only the tests and the research probes solve, keeps a second distribution beyond this.
 #[must_use]
@@ -587,6 +588,38 @@ pub fn written_result_bytes(alleles: usize) -> u64 {
 /// fixed number rather than one per thread, so what is held does not depend on the thread count;
 /// large enough that a chunk keeps 96 threads busy.
 const SOLUTIONS_AT_ONCE: usize = 256;
+
+/// **The bytes a [`SolvedSite`] is counted at**: a record index and a posterior's start (8 bytes
+/// each), the background share (4) and the outcome (1), padded to 24.
+const SOLVED_SITE_BYTES: usize = 24;
+
+/// **The bytes a [`SampleSolution`]'s phase at one site is counted at**: an `Option<WrittenPhase>`,
+/// two alleles and a phase set of 8 bytes each and the option's tag, padded to 32.
+const SOLVED_PHASE_BYTES: usize = 32;
+
+/// **The bytes one sample's [`SampleSolution`] holds at a core record** of `alleles` alleles: the
+/// solved site, its phase and its posterior. Its vectors are made at the length they are filled
+/// to (`final_solution`), so this is what they hold.
+#[must_use]
+pub fn solution_bytes(alleles: usize) -> u64 {
+    let genotypes = alleles * (alleles + 1) / 2;
+    (SOLVED_SITE_BYTES + SOLVED_PHASE_BYTES + genotypes * std::mem::size_of::<f32>()) as u64
+}
+
+/// **What the results of one core record add beyond what a window is already counted at**, with
+/// `samples` samples (code review 2026-11-25, M2). The results are made [`SOLUTIONS_AT_ONCE`]
+/// samples at a time, each sample's [`SampleSolution`] held until the chunk is copied into the
+/// records; as each is made, that sample's state is let go, which the count charges at its sums
+/// ([`core_solve_bytes`]) and its phase ([`held_solve_bytes`]) at this record. So a chunk holds
+/// at most its samples' solutions less what their states were counted at, and only where a
+/// solution is the larger — at two or three alleles. It is counted with the written results
+/// ([`written_result_bytes`]), which the rounds' store is never held beside.
+#[must_use]
+pub fn solution_chunk_bytes(samples: usize, alleles: usize) -> u64 {
+    let genotypes = alleles * (alleles + 1) / 2;
+    let state_let_go = ((genotypes + 1) * std::mem::size_of::<f32>() + phase_bytes(alleles)) as u64;
+    samples.min(SOLUTIONS_AT_ONCE) as u64 * solution_bytes(alleles).saturating_sub(state_let_go)
+}
 
 /// **Where a window's records sit in its walks.** Three index spaces meet here, and every
 /// conversion goes through this type: a *record index* into the window's records, a *site* — a
@@ -1683,10 +1716,18 @@ fn final_solution(
                 .max_background_copy
                 .is_none_or(|most| background <= most)
     };
+    // At the length they are filled to at most, which `solution_bytes` counts: a vector grown by
+    // pushing holds up to twice that.
     let mut solution = SampleSolution {
-        sites: Vec::new(),
+        sites: Vec::with_capacity(layout.core_sites.len()),
         phases: Vec::new(),
-        posteriors: Vec::new(),
+        posteriors: Vec::with_capacity(
+            layout
+                .core_sites
+                .iter()
+                .map(|&site| records[layout.record_of_site[site]].genotype_count())
+                .sum(),
+        ),
         check: FillCheck::default(),
         read_counts: PassReadCounts::default(),
     };

@@ -1127,3 +1127,36 @@ fn a_sample_whose_far_evidence_was_skipped_is_still_written() {
         "{thinned} of 100 called thinned, {unthinned} unthinned"
     );
 }
+
+/// **The core's count covers the solutions a chunk of samples holds** (code review 2026-11-25,
+/// M2): a [`SampleSolution`] holds 68 bytes a sample at a two-allele core record and 80 at a
+/// three-allele one, against the 33 and 71 its state was counted at, so a window's results are
+/// counted with what a chunk of up to [`SOLUTIONS_AT_ONCE`] samples holds beyond that. At four or
+/// more alleles the state counted is the larger, and nothing is added.
+#[test]
+fn the_core_count_includes_a_chunk_of_solutions() {
+    // The written sizes match the layout on a 64-bit target.
+    assert_eq!(std::mem::size_of::<SolvedSite>(), SOLVED_SITE_BYTES);
+    assert_eq!(
+        std::mem::size_of::<Option<WrittenPhase>>(),
+        SOLVED_PHASE_BYTES
+    );
+    assert_eq!(solution_bytes(2), 68);
+    assert_eq!(solution_bytes(3), 80);
+    assert_eq!(solution_chunk_bytes(20, 2), 20 * (68 - 16 - 17));
+    assert_eq!(solution_chunk_bytes(1_000, 2), 256 * (68 - 16 - 17));
+    assert_eq!(solution_chunk_bytes(20, 3), 20 * (80 - 28 - 43));
+    assert_eq!(solution_chunk_bytes(1_000, 4), 0);
+    let cohort = test_cohort(CohortShape {
+        samples: 20,
+        records: 10,
+        ..SHAPE
+    });
+    for record in &cohort.records {
+        assert_eq!(
+            record_window_bytes(record).1,
+            20 * core_solve_bytes(record.allele_count)
+                + solution_chunk_bytes(20, record.allele_count),
+        );
+    }
+}
