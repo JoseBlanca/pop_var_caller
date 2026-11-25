@@ -1308,3 +1308,37 @@ fn a_stopped_stage_refuses_further_lines() {
         }
     }
 }
+
+/// **The read alleles a line arrives with count toward the queue's limit** (code review
+/// 2026-11-25, Mi2): at 30 reads a position they take 8 to 10 times a line's text, so a queue
+/// limited by text alone held about ten times [`BYTES_READ_TOGETHER`]. A short line whose read
+/// alleles alone reach the limit is read at once; the same line without them waits.
+#[test]
+fn read_alleles_count_toward_the_queue_limit() {
+    use crate::read_phase::fragments::FragmentAllele;
+    let decision = decide(NeighbourEvidenceSwitch::On, &[0.95; 1], diploid());
+    let line = || b"chr1\t1\t.\tA\tG\t5\tLowQual\tAF=1\tGT\t1/1".to_vec();
+    let entries = BYTES_READ_TOGETHER / std::mem::size_of::<FragmentAllele>() + 1;
+    let fragments = RecordFragments::from_entries(
+        (0..entries as u32)
+            .map(|fragment| FragmentAllele {
+                sample: 0,
+                fragment,
+                allele: 1,
+                error_phred: 30,
+            })
+            .collect(),
+    );
+    let mut output = Vec::new();
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+    stage
+        .push(place(0, 1), line(), fragments, &mut output)
+        .expect("within budget");
+    assert!(stage.arrived.is_empty(), "{} lines wait", stage.arrived.len());
+    assert_eq!(stage.arrived_bytes, 0);
+    let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+    stage
+        .push(place(0, 1), line(), RecordFragments::default(), &mut output)
+        .expect("within budget");
+    assert_eq!(stage.arrived.len(), 1);
+}

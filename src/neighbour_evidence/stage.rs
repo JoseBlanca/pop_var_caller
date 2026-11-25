@@ -36,7 +36,7 @@ use super::templates::MAX_TEMPLATES;
 use super::windows::{
     MarginThinning, NEAR_MARGIN_BASES, StoreAndResults, WindowBytes, WindowSizes, plan_window,
 };
-use crate::read_phase::fragments::{PackedRecordFragments, RecordFragments};
+use crate::read_phase::fragments::{FragmentAllele, PackedRecordFragments, RecordFragments};
 use crate::types::{ContigId, Ploidy};
 use crate::vcf::RecordPlace;
 
@@ -345,15 +345,25 @@ const LINES_REWRITTEN_TOGETHER: usize = 1_024;
 const LINES_COMPRESSED_TOGETHER: usize = 1_024;
 
 /// **How many arriving lines wait to be read into sites together**, on the pool, or fewer once
-/// their text reaches [`BYTES_READ_TOGETHER`]. Read one at a time on the one thread every line
-/// passes through, reading was the stage's largest serial step outside the solve: on 59 tomato
-/// samples at 2 threads, 2.7 s of the 10 s the writing pass spent outside it, with the pool idle.
+/// their text and read alleles reach [`BYTES_READ_TOGETHER`]. Read one at a time on the one thread
+/// every line passes through, reading was the stage's largest serial step outside the solve: on 59
+/// tomato samples at 2 threads, 2.7 s of the 10 s the writing pass spent outside it, with the pool
+/// idle.
 const LINES_READ_TOGETHER: usize = 1_024;
 
-/// **The most line text that waits to be read**, so that at thousands of samples, where a line is
-/// about 90 kB, the queue holds about 90 lines rather than 1,024. The sites read from them are held
-/// only until each line is taken, a moment later, and the budget does not count them, as it does
-/// not count the walks' arrays.
+/// **The most bytes that wait to be read**: the lines' text and the read alleles that arrive with
+/// them, 12 bytes each before they are packed. At thousands of samples, where a line is about
+/// 90 kB, the queue holds about 90 lines rather than 1,024. The read alleles count too because at
+/// 30 reads a position they take 8 to 10 times a line's text (on drawn cohorts: about 30 a sample
+/// a record, 364 bytes, against 37 to 45 of text). Counted by its text alone, the queue held about
+/// ten times this limit at 30 reads.
+///
+/// **What the limit does not bound**: once a batch is read, its sites — about half to two-thirds
+/// of its text (24 to 26 bytes a sample a record against 37 to 51 of text on the same cohorts) —
+/// and their read alleles, packed, are held until each line is taken. Lines are taken in order,
+/// and a line that completes a window is taken only after that window is solved, so the rest of
+/// the batch, up to 1,023 sites, is held through the solve. The budget does not count them, as it
+/// does not count the walks' arrays.
 const BYTES_READ_TOGETHER: usize = 8 << 20;
 
 /// **The zstd level held lines are compressed at.** On 800 tomato samples level 1 shrank a line
@@ -490,7 +500,8 @@ pub struct NeighbourEvidenceStage {
     reads_in_draw: bool,
     fits: Vec<SampleFit>,
     contig: Option<ContigId>,
-    /// Lines handed in and not yet taken, in arrival order, and the bytes of their text.
+    /// Lines handed in and not yet taken, in arrival order, and the bytes of their text and read
+    /// alleles ([`BYTES_READ_TOGETHER`]).
     arrived: Vec<ArrivedLine>,
     arrived_bytes: usize,
     /// How many lines wait before they are read: [`LINES_READ_TOGETHER`], or fewer in the tests
@@ -675,10 +686,10 @@ impl NeighbourEvidenceStage {
     /// rewritten lines are never all held at once.
     ///
     /// **A line is taken a little after it arrives.** Lines wait until [`LINES_READ_TOGETHER`]
-    /// have arrived, or their text reaches [`BYTES_READ_TOGETHER`], then are read into sites
-    /// together on the pool and taken one at a time in arrival order, exactly as each would have
-    /// been taken on arrival: the running totals, the margin thinner and the window plans see the
-    /// same lines in the same order, so the output does not depend on how many wait.
+    /// have arrived, or their text and read alleles reach [`BYTES_READ_TOGETHER`], then are read
+    /// into sites together on the pool and taken one at a time in arrival order, exactly as each
+    /// would have been taken on arrival: the running totals, the margin thinner and the window
+    /// plans see the same lines in the same order, so the output does not depend on how many wait.
     /// [`Self::finish_writing`] takes those still waiting.
     ///
     /// # Errors
@@ -695,7 +706,7 @@ impl NeighbourEvidenceStage {
         write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
     ) -> Result<(), StageStop<E>> {
         self.refuse_if_stopped()?;
-        self.arrived_bytes += line.len();
+        self.arrived_bytes += line.len() + fragments.len() * std::mem::size_of::<FragmentAllele>();
         self.arrived.push(ArrivedLine {
             place,
             line,
