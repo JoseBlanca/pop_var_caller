@@ -300,6 +300,18 @@ pub enum StageStop<E> {
     OverBudget(WindowOverBudget),
     /// Writing a line failed.
     Write(E),
+    /// **The stage had already stopped on a refused write** and was handed more. A stop drops the
+    /// lines it caught part-way through a batch, so a stage that went on would write a stream with
+    /// lines missing from its middle; it refuses instead. A stage stopped by its budget gives the
+    /// same [`Self::OverBudget`] again.
+    Stopped,
+}
+
+/// **What a stage stopped on**, kept so that it refuses every line handed in after.
+#[derive(Clone, Copy, Debug)]
+enum StopCause {
+    OverBudget(WindowOverBudget),
+    Write,
 }
 
 impl<E> From<WindowOverBudget> for StageStop<E> {
@@ -313,6 +325,11 @@ fn over_budget(stop: StageStop<std::convert::Infallible>) -> WindowOverBudget {
     match stop {
         StageStop::OverBudget(over) => over,
         StageStop::Write(never) => match never {},
+        // PANIC-FREE: a write into a vector is never refused, so a stage that hands its lines to
+        // one stops only on its budget, and repeats that stop.
+        StageStop::Stopped => {
+            unreachable!("a stage writing into a vector stops only on its budget")
+        }
     }
 }
 
@@ -546,6 +563,8 @@ pub struct NeighbourEvidenceStage {
     plans: Vec<super::windows::WindowPlan>,
     /// The last window planned and solved ([`Self::last_window`]).
     last_window: Option<super::windows::WindowPlan>,
+    /// What the stage stopped on, if it did: it then takes no more lines ([`StageStop::Stopped`]).
+    stopped: Option<StopCause>,
 }
 
 impl NeighbourEvidenceStage {
@@ -597,6 +616,7 @@ impl NeighbourEvidenceStage {
             #[cfg(test)]
             plans: Vec::new(),
             last_window: None,
+            stopped: None,
         }
     }
 
@@ -663,8 +683,9 @@ impl NeighbourEvidenceStage {
     /// # Errors
     ///
     /// If a window this line, or one that arrived before it and was still waiting, completed holds
-    /// more than the budget even at the smallest size, or `write` refuses a line. A stopped stage
-    /// is not fed again.
+    /// more than the budget even at the smallest size, or `write` refuses a line. **A stopped
+    /// stage takes no more lines**: handed one, it gives the same budget stop again, or
+    /// [`StageStop::Stopped`] after a refused write.
     pub fn push_writing<E>(
         &mut self,
         place: RecordPlace,
@@ -672,6 +693,7 @@ impl NeighbourEvidenceStage {
         fragments: RecordFragments,
         write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
     ) -> Result<(), StageStop<E>> {
+        self.refuse_if_stopped()?;
         self.arrived_bytes += line.len();
         self.arrived.push(ArrivedLine {
             place,
@@ -681,9 +703,30 @@ impl NeighbourEvidenceStage {
         if self.arrived.len() >= self.lines_read_together
             || self.arrived_bytes >= BYTES_READ_TOGETHER
         {
-            self.take_arrived_lines(write)?;
+            let taken = self.take_arrived_lines(write);
+            self.note_stop(taken)?;
         }
         Ok(())
+    }
+
+    /// The stop the stage already gave, if it gave one.
+    fn refuse_if_stopped<E>(&self) -> Result<(), StageStop<E>> {
+        match self.stopped {
+            None => Ok(()),
+            Some(StopCause::OverBudget(over)) => Err(StageStop::OverBudget(over)),
+            Some(StopCause::Write) => Err(StageStop::Stopped),
+        }
+    }
+
+    /// Keeps what `outcome` stopped on, if it stopped, and passes it on.
+    fn note_stop<E>(&mut self, outcome: Result<(), StageStop<E>>) -> Result<(), StageStop<E>> {
+        if let Err(stop) = &outcome {
+            self.stopped = Some(match stop {
+                StageStop::OverBudget(over) => StopCause::OverBudget(*over),
+                StageStop::Write(_) | StageStop::Stopped => StopCause::Write,
+            });
+        }
+        outcome
     }
 
     /// **Reads every waiting line into its site on the pool, then takes them one at a time**, in
@@ -871,8 +914,11 @@ impl NeighbourEvidenceStage {
         &mut self,
         write: &mut impl FnMut(RecordPlace, Vec<u8>) -> Result<(), E>,
     ) -> Result<(), StageStop<E>> {
-        self.take_arrived_lines(write)?;
-        self.finish_contig(write)
+        self.refuse_if_stopped()?;
+        let finished = self
+            .take_arrived_lines(write)
+            .and_then(|()| self.finish_contig(write));
+        self.note_stop(finished)
     }
 
     /// **Finishes the current contig** once every line of it handed in has been taken.

@@ -1230,3 +1230,81 @@ fn compress_held_lines_keeps_totals_when_a_line_grows() {
     stage.finish(&mut output).expect("within budget");
     assert_eq!(output.len(), 3_000);
 }
+
+/// **A stopped stage takes no more lines** (code review 2026-11-25, Mi3): a stop part-way through
+/// a batch drops the batch's other lines, so a stage handed more would write a stream with lines
+/// missing from its middle. After a budget stop it gives the same stop again; after a refused
+/// write, [`StageStop::Stopped`]; and in neither case does it hand on another line.
+#[test]
+fn a_stopped_stage_refuses_further_lines() {
+    let cohort = join_cohort();
+    let stage_with = |budget_bytes: u64| {
+        let mut decision = decide(NeighbourEvidenceSwitch::On, &[0.05; 20], diploid());
+        decision.sizes = WindowSizes {
+            core_bases: 200_000,
+            margin_bases: 200_000,
+            margin_floor_bases: 200_000,
+            core_floor_bases: 200_000,
+            budget_bytes,
+            thinning: None,
+        };
+        let mut stage = NeighbourEvidenceStage::new(&decision, vec![2_000_000]);
+        stage.lines_read_together = 7;
+        stage
+    };
+    let line = |index: usize| {
+        (
+            place(0, 1 + index as u64 * 500),
+            cohort.lines[index].clone().into_bytes(),
+        )
+    };
+    for budget in [
+        100_000,
+        crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+    ] {
+        let mut stage = stage_with(budget);
+        let mut handed = 0;
+        let mut write = |_: RecordPlace, _: Vec<u8>| -> Result<(), &'static str> {
+            handed += 1;
+            if handed == 300 {
+                Err("refused")
+            } else {
+                Ok(())
+            }
+        };
+        let mut next = 0;
+        let first_stop = loop {
+            let (at, text) = line(next);
+            next += 1;
+            if let Err(stop) = stage.push_writing(at, text, RecordFragments::default(), &mut write)
+            {
+                break stop;
+            }
+        };
+        let (at, text) = line(next);
+        let again = stage.push_writing(at, text, RecordFragments::default(), &mut write);
+        let at_finish = stage.finish_writing(&mut write);
+        match first_stop {
+            StageStop::OverBudget(over) => {
+                assert!(
+                    matches!(again, Err(StageStop::OverBudget(repeated)) if repeated == over),
+                    "{again:?}"
+                );
+                assert!(
+                    matches!(at_finish, Err(StageStop::OverBudget(repeated)) if repeated == over),
+                    "{at_finish:?}"
+                );
+                assert_eq!(handed, 0);
+            }
+            StageStop::Write("refused") => {
+                assert!(matches!(again, Err(StageStop::Stopped)), "{again:?}");
+                assert!(
+                    matches!(at_finish, Err(StageStop::Stopped)),
+                    "{at_finish:?}"
+                );
+                assert_eq!(handed, 300, "no line handed on after the refusal");
+            }
+            other => panic!("budget {budget}: {other:?}"),
+        }
+    }
+}

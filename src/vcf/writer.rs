@@ -706,6 +706,12 @@ pub enum VcfWriteError {
     )]
     RefinementOverBudget(crate::neighbour_evidence::stage::WindowOverBudget),
 
+    /// **A line was handed to refinement after a write had already failed.** The writer reports
+    /// the first failure; this one names a caller that went on after it, which would otherwise
+    /// write a file with lines missing.
+    #[error("genotype refinement stopped on an earlier write error and takes no more lines")]
+    RefinementStopped,
+
     /// **A record ran backwards.** A VCF's records are in genome order, and a consumer that
     /// indexes one would find the index disagreeing with the file rather than fail here.
     #[error(
@@ -749,6 +755,7 @@ impl From<crate::neighbour_evidence::stage::StageStop<VcfWriteError>> for VcfWri
         match stop {
             crate::neighbour_evidence::stage::StageStop::OverBudget(over) => over.into(),
             crate::neighbour_evidence::stage::StageStop::Write(error) => error,
+            crate::neighbour_evidence::stage::StageStop::Stopped => Self::RefinementStopped,
         }
     }
 }

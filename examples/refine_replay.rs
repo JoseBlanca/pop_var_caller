@@ -219,6 +219,7 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
                 return Ok(ExitCode::from(3));
             }
             Err(StageStop::Write(why)) => return Err(why.into()),
+            Err(StageStop::Stopped) => unreachable!("the replay stops at the first stop"),
         }
         pushed += 1;
         if out.lines_now > 0 {
@@ -245,6 +246,7 @@ fn replay(args: &[String]) -> Result<ExitCode, Failure> {
             return Ok(ExitCode::from(3));
         }
         Err(StageStop::Write(why)) => return Err(why.into()),
+        Err(StageStop::Stopped) => unreachable!("the replay stops at the first stop"),
     }
     written += out.lines_now;
     out.file.flush()?;

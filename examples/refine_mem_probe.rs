@@ -422,6 +422,7 @@ fn main() {
             Ok(()) => {}
             Err(StageStop::OverBudget(over)) => panic!("over budget: {over:?}"),
             Err(StageStop::Write(never)) => match never {},
+            Err(StageStop::Stopped) => unreachable!("the probe stops at the first stop"),
         }
         if lines_in_window > 0 {
             windows += 1;
@@ -471,6 +472,7 @@ fn main() {
         Ok(()) => {}
         Err(StageStop::OverBudget(over)) => panic!("over budget: {over:?}"),
         Err(StageStop::Write(never)) => match never {},
+        Err(StageStop::Stopped) => unreachable!("the probe stops at the first stop"),
     }
     most_counted = most_counted.max(report(
         windows + 1,
