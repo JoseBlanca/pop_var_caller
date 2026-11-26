@@ -1322,12 +1322,13 @@ mod walking_the_real_generator {
             62,
             "the covered positions of the generic segments"
         );
-        // `non_reference_reads` rather than an open-coded comparison: it is the one place the
-        // crate writes that test, and it counts only the observations that witnessed the whole
-        // locus, which a partial run's shorter bases would otherwise fail against.
+        // `non_reference_and_compared_reads` rather than an open-coded comparison: it is the
+        // one place the crate writes that test, and it counts only the observations that
+        // witnessed the whole locus, which a partial run's shorter bases would otherwise fail
+        // against.
         let carrying_a_non_reference_base = walked
             .iter()
-            .filter(|locus| locus.non_reference_reads() > 0)
+            .filter(|locus| locus.non_reference_and_compared_reads().0 > 0)
             .count();
         assert_eq!(
             carrying_a_non_reference_base, 3,
