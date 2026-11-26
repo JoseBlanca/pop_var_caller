@@ -61,6 +61,7 @@ use crate::types::GenomeRegion;
 #[derive(Debug)]
 pub(crate) struct InMemoryAlignedReadsReader {
     /// The header the records' `reference_sequence_id`s are resolved against.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     header: sam::Header,
     /// The script, in the order it will be handed back.
     records: Vec<RecordBuf>,
@@ -79,6 +80,10 @@ pub(crate) struct InMemoryAlignedReadsReader {
 }
 
 impl InMemoryAlignedReadsReader {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests build an in-memory reader")
+    )]
     pub(crate) fn new(header: sam::Header, records: Vec<RecordBuf>) -> Self {
         Self {
             header,
@@ -104,6 +109,10 @@ impl InMemoryAlignedReadsReader {
     /// unreadable, which is the condition the layers above are built to stop on. Nothing above
     /// ever asks twice — the filter fuses on the first one — so this is about the reader telling
     /// the truth rather than about a path anyone walks.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests build an in-memory reader")
+    )]
     pub(crate) fn with_failure_at_read(mut self, read_index: usize) -> Self {
         self.failing_read_index = Some(read_index);
         self
@@ -124,11 +133,19 @@ impl InMemoryAlignedReadsReader {
     /// preserve. Failing a *later* seek is what reaches it.
     ///
     /// A reader whose seek fails has not moved, so `next_index` is left where it was.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests build an in-memory reader")
+    )]
     pub(crate) fn with_failing_seek_at(mut self, seek_index: usize) -> Self {
         self.failing_seek_index = Some(seek_index);
         self
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests build an in-memory reader")
+    )]
     pub(crate) fn header(&self) -> &sam::Header {
         &self.header
     }

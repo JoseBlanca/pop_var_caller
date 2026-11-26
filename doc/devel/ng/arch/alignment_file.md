@@ -294,7 +294,7 @@ Every row read at the cited line.
 | `GenomePosition` | does not exist yet | **new, in `ng::types`** — introduced by [`sample_reads.md`](sample_reads.md) §1.1; used here by the order guard |
 | `MappedRead` (item) | [`bam/alignment_input.rs:78`](../../../../src/bam/alignment_input.rs) — `flag:80`, `ref_id:82` (`usize`), `pos:84` (`u64`, 1-based), `source_file_index:102` | reuse as-is |
 | index load | `load_alignment_index` [`bam/index_preflight.rs:120`](../../../../src/bam/index_preflight.rs) → `AlignmentIndex` (`:95`, `Crai`/`BamCsi`/`BamBai`, each `Arc`-wrapped) | call as-is; store the result on `AlignmentFile` |
-| index policy | `preflight_alignment_indexes` [`bam/index_preflight.rs:199`](../../../../src/bam/index_preflight.rs) (takes `build_if_missing`) | call as-is; also rejects mixed BAM+CRAM |
+| index policy | `preflight_alignment_indexes` [`bam/index_preflight.rs:199`](../../../../src/bam/index_preflight.rs) (takes `build_if_missing`) | call as-is. (It also rejected mixed BAM+CRAM lists; ng passes one file at a time, so that check could not fire and was removed on 2026-11-26.) |
 | `@SQ` comparison | `ContigList::first_disagreement` [`fasta/mod.rs:69`](../../../../src/fasta/mod.rs) — `pub(crate)`, returns `Result<(), String>` | call as-is; the `String` becomes `ContigReconcile.detail` |
 | MD5 wildcard rule | `ContigEntry`'s `PartialEq` [`fasta/mod.rs:43-55`](../../../../src/fasta/mod.rs) — absent MD5 matches anything | rely on it; no extra branch |
 | canonical contig table | `ReferenceInfo::contig_list()` [`ng/reference_info.rs:91`](../../../../src/ng/reference_info.rs) | call per open |
@@ -306,7 +306,7 @@ Every row read at the cited line.
 | whole-file siblings | `BamRecordSource` [`:379`](../../../../src/ng/read/filtering.rs), `CramRecordSource` [`:429`](../../../../src/ng/read/filtering.rs) | **model, not reuse** — the region impls are index-driven siblings |
 | the filter | `ReadFilter` [`ng/read/filtering.rs:581`](../../../../src/ng/read/filtering.rs) + `ReadFilterConfig` (`:47`), `ReadFilterCounts` (`:117`), `ReadFilterError` (`:550`) | compose per region; **extend** with a probe-free constructor (§5) |
 | reference access | `RawRefSeq` [`ng/ref_seq.rs:180`](../../../../src/ng/ref_seq.rs), `RefSeqError` (`:39`) | reuse; passed per query (§5) |
-| region-read mechanics | `BamFile`/`CramFile` [`bam/segment_reader.rs:457`, `:679`](../../../../src/bam/segment_reader.rs); `BinningIndex::query` (`:485`); `borrow_handle` (`:508`) | **model, not reuse** (spec §5, O3-file → rebuild) |
+| region-read mechanics | `BamFile`/`CramFile` in `bam/segment_reader.rs`; `BinningIndex::query`; `borrow_handle` — deleted on 2026-11-26 with the rest of that reader stack (`segment_merge`, `bam_input`, `cram_input`), which had no caller once `read/input/` was built; see git history before that date | **model, not reuse** (spec §5, O3-file → rebuild) |
 | `@HD SO` / `@SQ` / `@RG SM` extraction | `extract_header` [`bam/alignment_input.rs:292`](../../../../src/bam/alignment_input.rs), `extract_single_sample_name` (`:378`) — both **module-private** | **cannot reuse**; ng reads the `sam::Header` itself (§5) |
 
 ## 7. Open items

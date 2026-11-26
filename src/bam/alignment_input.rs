@@ -1,29 +1,16 @@
-//! Alignment-file input: header validation, the per-read filter
-//! cascade, and the shared `RecordBuf` → [`MappedRead`] conversion.
-//! Format-agnostic at the filter seam; per-format header reading lives
-//! in the sibling [`crate::bam::cram_input`] / [`crate::bam::bam_input`]
-//! modules, and the pooled per-segment read fetch lives in
-//! [`crate::bam::segment_reader`].
+//! The vocabulary every decoded read is spelled in: [`CigarOp`], the SAM
+//! `FLAG_*` bits, the read filters' `DEFAULT_*` thresholds, [`MappedRead`],
+//! and the per-read helpers the filters and the decoder share
+//! ([`cigar_to_ops`], [`cigar_ref_span`], [`cigar_is_bad`],
+//! [`read_exceeds_mismatch_fraction`], [`compute_adaptor_boundary`]).
 //!
-//! The CRAM-specific design rationale lives in
-//! `doc/devel/implementation_plans/per_sample_caller_cram_input.md`;
-//! the BAM extension plan that motivated lifting the shared surface out
-//! of the CRAM-named module lives in
-//! `doc/devel/implementation_plans/bam_input_support.md`.
+//! The reader that uses them is `crate::read::input`; the filter cascade is
+//! `crate::read::filtering`.
 
-use std::io;
-#[cfg(test)]
-use std::path::{Path, PathBuf};
-
-#[cfg(test)]
-use noodles_fasta as fasta;
-use noodles_sam as sam;
-
-#[cfg(test)]
-use crate::bam::errors::AlignmentInputError;
-#[cfg(test)]
 #[cfg(test)]
 use crate::fasta::ContigEntry;
+use noodles_sam as sam;
+
 /// One step of a read's CIGAR: what the aligner did there, and for how many bases.
 ///
 /// A read's placement against the reference is spelled out as a run of these — so many bases
@@ -78,14 +65,14 @@ pub enum CigarOp {
 /// convention.
 pub const DEFAULT_MIN_MAPQ: u8 = 20;
 
-/// Default for `AlignmentMergedReaderConfig::max_read_mismatch_fraction`.
+/// Default for `ReadFilterConfig::max_read_mismatch_fraction` (`crate::read::filtering`).
 /// 10% — comfortably outside the ~0.5-1% mismatch rate of normal
 /// Illumina at MAPQ 20+, inside the regime where adapter-runthrough,
 /// contamination, and chimeric tails live. See finding `F1` in
 /// `ia/reviews/pileup_freebayes_comparison_2026-05-08.md`.
 pub const DEFAULT_MAX_READ_MISMATCH_FRACTION: f32 = 0.10;
 
-/// Default for `AlignmentMergedReaderConfig::mismatch_bq_floor`. Matches
+/// Default for `ReadFilterConfig::mismatch_bq_floor`. Matches
 /// freebayes' `BQL2`. Mismatches whose raw base quality is below this
 /// floor do not count toward the mismatch fraction — keeps the filter
 /// from firing on genuinely low-quality bases (which the downstream
@@ -142,153 +129,6 @@ pub struct MappedRead {
     pub source_file_index: usize,
 }
 
-// ---------------------------------------------------------------------
-// Filter counts
-// ---------------------------------------------------------------------
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct FilterCounts {
-    pub unmapped: u64,
-    pub secondary: u64,
-    pub supplementary: u64,
-    pub qc_fail: u64,
-    pub duplicate: u64,
-    pub low_mapq: u64,
-    pub too_short: u64,
-    /// Reads dropped because their `M`-op mismatch fraction exceeded
-    /// `AlignmentMergedReaderConfig::max_read_mismatch_fraction`. See
-    /// finding `F1` in
-    /// `ia/reviews/pileup_freebayes_comparison_2026-05-08.md`.
-    pub high_mismatch_fraction: u64,
-    /// Reads dropped because their CIGAR contained an adjacent `I`/`D`
-    /// pair, or started/ended with a deletion (after stripping leading
-    /// soft/hard clips). See finding `G2` in
-    /// `ia/reviews/pileup_gatk_comparison_2026-05-08.md`.
-    pub bad_cigar: u64,
-    /// Reads dropped because the BAQ stage refused to produce a usable
-    /// per-base posterior (HMM overflow, ref window past chrom end,
-    /// CIGAR with `N`/no-match, etc.). There is no per-reason bucket (production's
-    /// `BaqSkipReason`, deleted with `src/pileup/`, had several); every BAQ skip reason
-    /// rolls up into this counter. Split
-    /// later if a deployment cares which reason dominates.
-    pub baq_rejected: u64,
-}
-
-impl FilterCounts {
-    /// Add `other`'s tallies into `self`, field by field. Used to total
-    /// the per-region readers' filter counts into one run summary when
-    /// the pileup is driven region by region.
-    pub fn merge(&mut self, other: &FilterCounts) {
-        // Exhaustive destructure (no `..`): a new FilterCounts field is a
-        // compile error here until it is explicitly folded in (review M3).
-        let FilterCounts {
-            unmapped,
-            secondary,
-            supplementary,
-            qc_fail,
-            duplicate,
-            low_mapq,
-            too_short,
-            high_mismatch_fraction,
-            bad_cigar,
-            baq_rejected,
-        } = *other;
-        self.unmapped += unmapped;
-        self.secondary += secondary;
-        self.supplementary += supplementary;
-        self.qc_fail += qc_fail;
-        self.duplicate += duplicate;
-        self.low_mapq += low_mapq;
-        self.too_short += too_short;
-        self.high_mismatch_fraction += high_mismatch_fraction;
-        self.bad_cigar += bad_cigar;
-        self.baq_rejected += baq_rejected;
-    }
-
-    /// Increment the field a [`classify_pre_decode`] drop falls into.
-    /// The single home for the `FilterBucket` → counter mapping, used by
-    /// the segment reader that applies the pre-decode flag/MAPQ filter.
-    pub(super) fn record_drop(&mut self, bucket: FilterBucket) {
-        match bucket {
-            FilterBucket::Unmapped => self.unmapped += 1,
-            FilterBucket::Secondary => self.secondary += 1,
-            FilterBucket::Supplementary => self.supplementary += 1,
-            FilterBucket::QcFail => self.qc_fail += 1,
-            FilterBucket::Duplicate => self.duplicate += 1,
-            FilterBucket::LowMapq => self.low_mapq += 1,
-            FilterBucket::BaqRejected => self.baq_rejected += 1,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------
-
-/// Tunable thresholds and per-flag toggles for the per-read filter
-/// cascade. `min_mapq` and `min_read_length` are `Option`s: `None` is
-/// the explicit "no minimum" state. Using `0` as a disable sentinel
-/// would make `Some(0)` and `None` redundant representations of the
-/// same behaviour; `Option` makes the absent state structurally
-/// distinct from any specific threshold.
-///
-/// **Why no `drop_secondary` / `drop_supplementary` toggles.** Both
-/// classes of non-primary alignment are unconditionally dropped — the
-/// pileup walker's per-record-closure semantics (`PileupRecord`,
-/// `AlleleObservation`, phase-chain slots) are defined only for
-/// primary alignments. A secondary alignment is a duplicated
-/// projection of a read already represented by its primary, and a
-/// supplementary alignment is a chunk of a chimeric read whose other
-/// chunks are tracked separately; admitting either would silently
-/// double-count alleles or break the one-slot-per-pair invariant.
-/// The drops are still surfaced via `FilterCounts.secondary` /
-/// `.supplementary` so users can audit how many records were
-/// removed, but there is no configuration that lets them through.
-/// A future BAM (or other) input path should mirror this policy, or
-/// document a strong reason and a redesign of the walker contract
-/// before diverging.
-#[derive(Debug, Clone, Copy)]
-pub struct AlignmentMergedReaderConfig {
-    /// `None` = no minimum; `Some(n)` = drop reads with MAPQ < n.
-    pub min_mapq: Option<u8>,
-    /// `None` = no minimum; `Some(n)` = drop reads with decoded SEQ
-    /// length < n.
-    pub min_read_length: Option<u32>,
-    /// Drop reads with `flag & 0x200` set.
-    pub drop_qc_fail: bool,
-    /// Drop reads with `flag & 0x400` set.
-    pub drop_duplicate: bool,
-    /// Default-on defence against contamination, adapter readthrough,
-    /// and other "the aligner placed it but it doesn't really belong
-    /// here" failure modes. `None` = filter disabled; `Some(x)` = drop
-    /// a read whose `M`-op mismatch fraction exceeds `x`.
-    ///
-    /// Mismatch fraction = `mismatches_with_bq_above_floor / m_op_bases_atgc`,
-    /// counting only positions where both the read base and the
-    /// reference base are in `{A, C, G, T}` (positions with `N` in
-    /// either are skipped from both numerator and denominator).
-    /// `mismatch_bq_floor` controls which mismatches count.
-    ///
-    /// Default `Some(0.10)` (`DEFAULT_MAX_READ_MISMATCH_FRACTION`).
-    /// Real BAQ-adjusted Illumina at MAPQ 20+ sits at ~0.5-1% mismatch
-    /// rate; 10% is comfortably outside that distribution. See finding
-    /// `F1` in
-    /// `ia/reviews/pileup_freebayes_comparison_2026-05-08.md`.
-    pub max_read_mismatch_fraction: Option<f32>,
-    /// BQ floor below which a mismatch does not count toward
-    /// `max_read_mismatch_fraction`. Default `10` (`DEFAULT_MISMATCH_BQ_FLOOR`),
-    /// matching freebayes' `BQL2`. `0` disables the floor (every
-    /// mismatch counts). Only meaningful when
-    /// `max_read_mismatch_fraction` is `Some`.
-    ///
-    /// At the `alignment_input` stage the BQ is the raw value from the
-    /// CRAM, *not* BAQ-adjusted (BAQ runs in a later stage). Filtering
-    /// on raw BQ is the correct level for this filter — we are
-    /// rejecting whole reads, not per-base evidence, and want to do
-    /// so before paying the BAQ cost.
-    pub mismatch_bq_floor: u8,
-}
-
 // SAM/BAM flag bit constants — used both inside this module and by
 // tests building synthetic records.
 pub const FLAG_PAIRED: u16 = 0x1;
@@ -302,198 +142,9 @@ pub const FLAG_QC_FAIL: u16 = 0x200;
 pub const FLAG_DUPLICATE: u16 = 0x400;
 pub const FLAG_SUPPLEMENTARY: u16 = 0x800;
 
-impl Default for AlignmentMergedReaderConfig {
-    fn default() -> Self {
-        Self {
-            min_mapq: Some(DEFAULT_MIN_MAPQ),
-            min_read_length: Some(DEFAULT_MIN_READ_LENGTH),
-            drop_qc_fail: true,
-            drop_duplicate: true,
-            max_read_mismatch_fraction: Some(DEFAULT_MAX_READ_MISMATCH_FRACTION),
-            mismatch_bq_floor: DEFAULT_MISMATCH_BQ_FLOOR,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Header validation
-// ---------------------------------------------------------------------
-
-// ---------------------------------------------------------------------
-// FASTA agreement
-// ---------------------------------------------------------------------
-
-// ---------------------------------------------------------------------
-// ContigInterval
-// ---------------------------------------------------------------------
-
-/// A 1-based inclusive position range within a single contig, used to
-/// narrow a segment read query (see
-/// [`crate::bam::segment_reader::AlignmentFile::get_reads_from_segment`])
-/// to a sub-contig region. `start <= end`, both `>= 1`.
-///
-/// The query yields every read whose reference footprint *overlaps*
-/// the range — including reads that start before `start` and extend
-/// into it — so a downstream pileup that clamps emitted columns to the
-/// range still has the flanking reads it needs for BAQ. Passing `None`
-/// to `query` (or a range that already spans the whole contig) reads
-/// the entire contig with no per-record overlap check.
-#[derive(Debug, Clone, Copy)]
-pub struct ContigInterval {
-    /// 1-based inclusive lower bound.
-    pub start: u32,
-    /// 1-based inclusive upper bound.
-    pub end: u32,
-}
-
-impl ContigInterval {
-    /// Whether `record`'s reference footprint `[alignment_start,
-    /// alignment_end]` overlaps this interval. A record with no mapped
-    /// position never overlaps.
-    pub(crate) fn overlaps_record(&self, record: &sam::alignment::RecordBuf) -> bool {
-        match (record.alignment_start(), record.alignment_end()) {
-            (Some(first), Some(last)) => {
-                usize::from(first) as u64 <= self.end as u64
-                    && usize::from(last) as u64 >= self.start as u64
-            }
-            _ => false,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Indexed pileup inputs (metadata + per-input handles for segment reads)
-// ---------------------------------------------------------------------
-
-pub(super) fn classify_pre_decode(
-    config: &AlignmentMergedReaderConfig,
-    rb: &sam::alignment::RecordBuf,
-) -> PreDecodeOutcome {
-    let flag = rb.flags().bits();
-
-    // Hit-rate-ordered cascade per
-    // `ia/feature_implementation_plans/per_sample_caller_cram_input.md`
-    // §"Filter precedence at each pulled record".
-
-    // 1. Duplicate (~10-30%).
-    if config.drop_duplicate && (flag & FLAG_DUPLICATE) != 0 {
-        return PreDecodeOutcome::Drop(FilterBucket::Duplicate);
-    }
-    // 2. Low MAPQ (~5-15%).
-    if let Some(min) = config.min_mapq {
-        let mapq = rb.mapping_quality().map(u8::from).unwrap_or(0);
-        if mapq < min {
-            return PreDecodeOutcome::Drop(FilterBucket::LowMapq);
-        }
-    }
-    // 3. Supplementary (~1-5%) — unconditionally dropped; see the
-    //    "Why no drop_secondary / drop_supplementary toggles" note
-    //    on `AlignmentMergedReaderConfig`.
-    if (flag & FLAG_SUPPLEMENTARY) != 0 {
-        return PreDecodeOutcome::Drop(FilterBucket::Supplementary);
-    }
-    // 4. Secondary (~1-5%) — unconditionally dropped; same rationale
-    //    as supplementary.
-    if (flag & FLAG_SECONDARY) != 0 {
-        return PreDecodeOutcome::Drop(FilterBucket::Secondary);
-    }
-    // 5. Unmapped (~0-5%) — always dropped. An unmapped read contributes
-    // no allele evidence and would otherwise trip the head-key invariant
-    // (no `reference_sequence_id`, no `alignment_start`).
-    if (flag & FLAG_UNMAPPED) != 0 {
-        return PreDecodeOutcome::Drop(FilterBucket::Unmapped);
-    }
-    // 6. QC fail (<1%).
-    if config.drop_qc_fail && (flag & FLAG_QC_FAIL) != 0 {
-        return PreDecodeOutcome::Drop(FilterBucket::QcFail);
-    }
-
-    PreDecodeOutcome::Keep
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum PreDecodeOutcome {
-    Keep,
-    Drop(FilterBucket),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) enum FilterBucket {
-    Unmapped,
-    Secondary,
-    Supplementary,
-    QcFail,
-    Duplicate,
-    LowMapq,
-    /// Bucket for reads the BAQ stage refused — incremented by the
-    /// pipeline integration in a later commit; no call site in
-    /// `alignment_input` itself today.
-    #[allow(dead_code)]
-    BaqRejected,
-}
-
 // ---------------------------------------------------------------------
 // Per-record conversion
 // ---------------------------------------------------------------------
-
-// `pub(crate)` (widened from `pub(super)`) so the ng read-filtering adapter
-// (`crate::read::filtering`) can reuse this decode path — the ng → existing
-// code dependency the read-filtering spec §7 (decision a) calls for.
-pub(crate) fn record_buf_to_mapped_read(
-    rb: &sam::alignment::RecordBuf,
-    source_file_index: usize,
-) -> io::Result<MappedRead> {
-    let qname = rb
-        .name()
-        .map(|n| AsRef::<[u8]>::as_ref(n).to_vec())
-        .unwrap_or_default();
-    let flag = rb.flags().bits();
-    let ref_id = rb.reference_sequence_id().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "record has no reference_sequence_id",
-        )
-    })?;
-    let pos = rb
-        .alignment_start()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "record has no alignment_start"))?
-        .get() as u64;
-    let mapq = rb.mapping_quality().map(u8::from).unwrap_or(0);
-    let cigar = cigar_to_ops(rb.cigar());
-    let seq: Vec<u8> = rb
-        .sequence()
-        .as_ref()
-        .iter()
-        .map(|b| b.to_ascii_uppercase())
-        .collect();
-    let qual = rb.quality_scores().as_ref().to_vec();
-    let mate_ref_id = rb.mate_reference_sequence_id();
-    let mate_pos = rb.mate_alignment_start().map(|p| p.get() as u64);
-    let template_length = rb.template_length();
-    let adaptor_boundary = compute_adaptor_boundary(
-        flag,
-        ref_id,
-        pos,
-        seq.len() as u32,
-        mate_ref_id,
-        mate_pos,
-        template_length,
-    );
-    Ok(MappedRead {
-        qname,
-        flag,
-        ref_id,
-        pos,
-        mapq,
-        cigar,
-        seq,
-        qual,
-        mate_ref_id,
-        mate_pos,
-        adaptor_boundary,
-        source_file_index,
-    })
-}
 
 /// Finding `G1` (adaptor-region per-base filter) — pure-logic
 /// boundary computation. Returns the 1-based reference position of
@@ -817,78 +468,10 @@ pub(crate) fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<Cig
 // ---------------------------------------------------------------------
 
 #[cfg(test)]
-fn with_fai_extension(fasta_path: &Path) -> PathBuf {
-    let mut buf = fasta_path.as_os_str().to_owned();
-    buf.push(".fai");
-    PathBuf::from(buf)
-}
-
-#[cfg(test)]
-/// Build the noodles FASTA [`fasta::Repository`] used by the CRAM slice
-/// decoder and the reader's F1/F3 read-reference checks.
-///
-/// The `Repository` is a whole-contig cache keyed by name: the first
-/// fetch of any base on a contig loads (and caches) that contig's entire
-/// sequence. It is `Clone` (an `Arc` bump) and `clear()`-able, so the
-/// pileup region loop builds it **once** and shares it across every
-/// region, clearing the cache only on contig transition to keep one
-/// contig resident. Building it per region — as `query` used to —
-/// reloads the whole contig for every region on it, the
-/// `--regions` performance regression this centralisation fixes. See
-/// `doc/devel/implementation_plans/fasta_reference_reading_unification.md`.
-///
-/// # Errors
-///
-/// - [`AlignmentInputError::MissingFastaIndex`] if the sibling `.fai`
-///   does not exist.
-/// - [`AlignmentInputError::Io`] if the indexed FASTA reader cannot be
-///   built (unreadable FASTA / malformed `.fai`).
-pub fn build_fasta_repository(fasta: &Path) -> Result<fasta::Repository, AlignmentInputError> {
-    let fai_path = with_fai_extension(fasta);
-    if !fai_path.exists() {
-        return Err(AlignmentInputError::MissingFastaIndex {
-            fasta_path: fasta.to_path_buf(),
-        });
-    }
-    let indexed_fasta_reader = noodles_fasta::io::indexed_reader::Builder::default()
-        .build_from_path(fasta)
-        .map_err(|source| AlignmentInputError::Io {
-            path: fasta.to_path_buf(),
-            source,
-        })?;
-    let adapter = fasta::repository::adapters::IndexedReader::new(indexed_fasta_reader);
-    Ok(fasta::Repository::new(adapter))
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     // --- Pure-type tests ---------------------------------------------
-
-    #[test]
-    fn p2_malformed_record_message_omits_empty_qname() {
-        let with_qname = AlignmentInputError::MalformedRecord {
-            path: PathBuf::from("/foo.cram"),
-            qname: Some("R1".into()),
-            source: io::Error::new(io::ErrorKind::InvalidData, "bad"),
-        };
-        assert!(
-            with_qname.to_string().contains("qname='R1'"),
-            "got {}",
-            with_qname
-        );
-        let no_qname = AlignmentInputError::MalformedRecord {
-            path: PathBuf::from("/foo.cram"),
-            qname: None,
-            source: io::Error::new(io::ErrorKind::InvalidData, "bad"),
-        };
-        assert!(
-            !no_qname.to_string().contains("qname"),
-            "qname clause leaked: {}",
-            no_qname
-        );
-    }
 
     #[test]
     fn p1_contig_list_md5_wildcard_equality() {
@@ -1236,28 +819,17 @@ mod tests {
 
     #[test]
     fn f1_default_config_has_filter_enabled_at_ten_percent() {
-        // Pin the default config: filter on, threshold 0.10, floor 10.
-        let cfg = AlignmentMergedReaderConfig::default();
-        assert_eq!(cfg.max_read_mismatch_fraction, Some(0.10));
-        assert_eq!(cfg.mismatch_bq_floor, 10);
+        // Pin the defaults: threshold 0.10, floor 10. That the read filter's
+        // default config uses them is pinned in `crate::read::filtering`.
         assert_eq!(DEFAULT_MAX_READ_MISMATCH_FRACTION, 0.10);
         assert_eq!(DEFAULT_MISMATCH_BQ_FLOOR, 10);
-    }
-
-    #[test]
-    fn f1_filter_counts_default_high_mismatch_fraction_is_zero() {
-        // The new field on FilterCounts must default to 0 — otherwise
-        // previously-default-comparing tests would silently break.
-        let counts = FilterCounts::default();
-        assert_eq!(counts.high_mismatch_fraction, 0);
     }
 
     // --- G1 adaptor-boundary helper: pure-logic tests ----------------
     //
     // These exercise `compute_adaptor_boundary` directly, with synthetic
-    // SAM-flag/TLEN/mate-pos inputs. Integration into MappedRead
-    // construction is covered by the Group B tests via the `flag` /
-    // `mate_pos` knobs already available on `RecordSpec`.
+    // SAM-flag/TLEN/mate-pos inputs. Its use in decoding a record is
+    // covered by `crate::read::aligned_read`'s tests.
 
     /// Build the standard "properly paired, FR orientation" flag for a
     /// forward-strand read whose mate is reverse-strand. Tests pass
@@ -1405,9 +977,8 @@ mod tests {
 
     // --- G2 cigar_is_bad helper: pure-logic tests --------------------
     //
-    // These exercise `cigar_is_bad` directly. Integration with the
-    // alignment_input filter cascade and the `FilterCounts.bad_cigar`
-    // counter is covered by the Group B tests below.
+    // These exercise `cigar_is_bad` directly. Its use in the read
+    // filter cascade is covered by `crate::read::filtering`'s tests.
 
     #[test]
     fn g2_well_formed_cigar_is_not_bad() {
@@ -1557,8 +1128,4 @@ mod tests {
         // before this point; this test pins the no-panic behaviour.
         assert!(!cigar_is_bad(&[]));
     }
-
-    // --- Real CRAM + FASTA fixtures (shared by Group C3) -------------
-
-    // --- Group C3: load_pileup_inputs (metadata + handles) ------------
 }

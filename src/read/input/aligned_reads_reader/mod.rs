@@ -94,17 +94,6 @@
 //! tested against a reader with no file behind it before any real input could hide a defect in
 //! it (spec §6, and the plan's principles).
 
-// Covers this module and `in_memory` below it, so the reason is stated once.
-// Narrowed after Milestone C: the BAM arm is live, and what is left unused is the in-memory
-// arm's constructor, which the cursor's own tests reach and nothing else does. The blanket
-// version of this said "remove at B1" and had outlived that by two milestones — a trigger
-// nobody checks is worse than no trigger.
-#![allow(
-    dead_code,
-    reason = "the in-memory arm is reached from tests and from the differential harness; it \
-              is permanent, not scaffolding (see the enum's own doc)"
-)]
-
 mod bam;
 mod bgzf_blocks;
 mod container;
@@ -150,6 +139,12 @@ pub(crate) enum AlignedReadsReader {
     /// what lets the forget rule be driven from a scripted list and compared against a plain
     /// scan of the same list, which is the oracle the first attempt at this feature did not
     /// have.
+    ///
+    /// Today only tests build one; the shipping readers are the other two arms.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "constructed only by tests and test harnesses")
+    )]
     InMemory(InMemoryAlignedReadsReader),
     /// A BAM, read through its index.
     Bam(BamAlignedReadsReader),
@@ -160,6 +155,10 @@ pub(crate) enum AlignedReadsReader {
 impl AlignedReadsReader {
     /// The header of the file these records came from — the `@SQ` list a decode resolves
     /// contig references against.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests ask a reader for its header")
+    )]
     pub(crate) fn header(&self) -> &sam::Header {
         match self {
             Self::InMemory(reader) => reader.header(),

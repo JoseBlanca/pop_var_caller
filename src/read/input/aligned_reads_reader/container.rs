@@ -221,6 +221,13 @@ impl DecodedContainer {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "tests fill a container from `RecordBuf`s; the decode fills it from CRAM records"
+        )
+    )]
     fn push(&mut self, record: &RecordBuf, owner: ReadGroupId) -> io::Result<()> {
         let name = record
             .name()
