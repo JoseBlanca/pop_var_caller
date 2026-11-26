@@ -129,9 +129,7 @@ pub struct Alignment {
 /// aligner was handed, exactly like [`RepeatInterval`] and for the same reason: ng speaks
 /// one width, so nothing narrows and no off-by-width bug is possible.
 ///
-/// A [`Range`] rather than ng's existing [`RegionSpan`], deliberately: `RegionSpan` is the
-/// region seam's *reference*-coordinate vocabulary, and this module knows no coordinates
-/// and no callers. The cost is that this type is not `Copy`.
+/// Each span is a [`Range`], so the type is not `Copy`.
 ///
 /// **Producer's invariant:** every span is well-formed, `start <= end`. Nothing enforces
 /// it — the aligner is the only producer — and an inverted range would read as a
@@ -140,7 +138,6 @@ pub struct Alignment {
 /// into an enormous length.
 ///
 /// [`RepeatInterval`]: crate::tandem_repeat::RepeatInterval
-/// [`RegionSpan`]: crate::tandem_repeat::RegionSpan
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepeatSpan {
     /// Both flanks anchored, so the span **pins the repeat's length**. The only variant

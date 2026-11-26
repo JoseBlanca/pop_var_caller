@@ -1,23 +1,16 @@
 //! A clean-room, use-agnostic short-period **tandem-repeat scanner** — a sequence
-//! primitive shared by the STR catalog and (later) the ng snp/str caller. Design:
+//! primitive shared by the repeat catalog and the caller's typed regions. Design:
 //! spec `doc/devel/ng/spec/ssr_repeat_scanner.md`, arch
 //! `doc/devel/ng/arch/ssr_repeat_scanner.md`.
 //!
-//! It exposes **three interfaces** over one detection core (a lag-`p` self-comparison
-//! plus a Ruzzo–Tompa maximal-scoring-segment pass):
-//!
-//! - a low-level **interval finder** — `find_tandem_repeats(seq, PeriodRange,
-//!   &ScanParams) -> Vec<RepeatInterval>` — raw, possibly-overlapping intervals, for
-//!   consumers that resolve overlaps themselves (the STR catalog); and
-//! - a mid-level **windowed scan** — `scan_windowed`, which yields one
-//!   `ScannedWindow` at a time (the core + margin geometry, every detection in the
-//!   fetched slice, and the two window rules — coverage clipped to cores, intervals
-//!   attributed by start — as methods the consumer applies to *its own* interval set)
-//!   and takes **no routing decision**; for a consumer that must inject its own policy
-//!   between detection and any merge — the typed-region generator, which is why this
-//!   layer is public (`typed_regions.md` §6.1); and
-//! - a high-level **region seam** — `RegionScanner`, a streaming iterator that yields
-//!   a gap-free repeat/satellite/unique tiling of the reference, built on the above.
+//! Its interface is one **interval finder**: [`find_tandem_repeats`] takes a sequence, a
+//! [`PeriodRange`] and the [`ScanParams`] and returns every tandem-repeat interval it finds —
+//! raw and possibly overlapping, each at its true period — and the consumer resolves overlaps
+//! itself. [`find_tandem_repeats_for_copy_floor`] is the same finder for a consumer that drops
+//! every interval below a copy floor: it returns the same intervals at or above the floor and
+//! leaves out most of those below it. The detection core is a lag-`p` self-comparison followed
+//! by a Ruzzo–Tompa maximal-scoring-segment pass. Its two consumers are the repeat catalog
+//! builder (`repeat_catalog`) and the typed-region generator (`region_typing`).
 //!
 //! The scanner holds **no consumer policy** (no purity floor, homopolymer rule, or
 //! period ceiling): a consumer passes the period range it wants, and that plus the two
@@ -27,19 +20,9 @@
 //! period-shifted copy; grow runs of matches) and our own code — **not** from the
 //! AGPL-v3 `TRF-mod` source, which was not read.
 //!
-//! Build status (incremental, per the impl plan): **the scanner plan's Milestones A–D are
-//! done** — the type vocabulary, the `find_tandem_repeats` interval finder (lag-`p`
-//! scoring + a Ruzzo–Tompa maximal-scoring-segment pass), the `RegionScanner` region seam
-//! (coverage-merge tiling, resident via `over_slice` and windowed-streaming via `stream`),
-//! and trf-mod parity. **Plus typed-regions B1**: `scan_windowed` promoted from a private
-//! whole-contig-eager helper to a public per-window stream (`typed_regions.md` §6.1).
-//!
 //! Visibility note: types are `pub` (matching the sibling ng modules, e.g. `types.rs`),
 //! not the arch doc's illustrative `pub(crate)` — the ng convention exposes its module
-//! vocabulary as reachable API, which also lets Milestone-A types be defined ahead of
-//! their Milestone-B/C consumers without tripping `dead_code`.
-
-use crate::fasta::ChromRefFetchError;
+//! vocabulary as reachable API.
 
 // ---------------------------------------------------------------------
 // Inputs — the scope and scoring knobs
@@ -96,11 +79,6 @@ pub enum PeriodRangeError {
     MinExceedsMax { min: u8, max: u8 },
 }
 
-/// The scanner's general default period range, 1..=6 — a named constant, not a magic
-/// literal. Each consumer overrides as it sees fit (the catalog / ng snp-str caller
-/// uses 2..=6); the value may change after empirical tuning.
-pub const DEFAULT_PERIODS: (u8, u8) = (1, 6);
-
 /// Default match reward: a lag-`p` match adds this to the running score.
 pub const DEFAULT_MATCH_REWARD: i32 = 2;
 /// Default mismatch penalty: a lag-`p` mismatch (or a non-ACGT base) subtracts this.
@@ -144,46 +122,6 @@ impl Default for ScanParams {
     }
 }
 
-/// Above this merged-repeat length a region is [`Region::Satellite`], not a genotypeable
-/// STR (satellite DNA; spec §3.6). Also bounds the streaming window halo. 1 kb is
-/// comfortably above any real STR locus.
-pub const DEFAULT_MAX_REPEAT_LEN: u64 = 1000;
-/// Default streaming window core (bp): a memory/I/O-granularity knob only — the region
-/// tiling is invariant to it.
-pub const DEFAULT_WINDOW_BP: u64 = 100_000;
-/// Default unique-gap bridging (0 = off): smoothing for the region tiling.
-pub const DEFAULT_MERGE_GAP: u64 = 0;
-/// Default minimum repeat-region length (0 = off): smoothing for the region tiling.
-pub const DEFAULT_MIN_REPEAT_LEN: u64 = 0;
-
-/// Region-seam shaping and streaming knobs — separate from [`ScanParams`] because they
-/// shape the **partition and the walk**, not the detection.
-///
-/// `Default` = `{ 1000, 100_000, 0, 0 }`: the 1 kb satellite cap, a 100 kb streaming
-/// window, and both smoothing knobs off (a pure coverage partition).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SegmentOptions {
-    /// Merged repeat coverage longer than this is emitted as [`Region::Satellite`].
-    pub max_repeat_len: u64,
-    /// The streaming window core in bp; a memory knob, region-count-invariant.
-    pub window_bp: u64,
-    /// Smoothing: bridge unique gaps shorter than this into the flanking repeat.
-    pub merge_gap: u64,
-    /// Smoothing: reclassify a repeat region shorter than this as unique.
-    pub min_repeat_len: u64,
-}
-
-impl Default for SegmentOptions {
-    fn default() -> Self {
-        Self {
-            max_repeat_len: DEFAULT_MAX_REPEAT_LEN,
-            window_bp: DEFAULT_WINDOW_BP,
-            merge_gap: DEFAULT_MERGE_GAP,
-            min_repeat_len: DEFAULT_MIN_REPEAT_LEN,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------
 // Output — the interval finder's natural shape
 // ---------------------------------------------------------------------
@@ -216,77 +154,20 @@ pub struct RepeatInterval {
     pub score: i32,
 }
 
-// ---------------------------------------------------------------------
-// Output — the region seam's tiling
-// ---------------------------------------------------------------------
-
-/// A half-open, 0-based coordinate pair (`[start, end)`) — the plain span the
-/// [`Region::Satellite`] / [`Region::Unique`] variants carry and the union
-/// [`RepeatRegion::span`] holds.
+/// A half-open, 0-based coordinate pair (`[start, end)`): all the period-multiple pass in
+/// [`find_tandem_repeats_for_copy_floor`] keeps of each tract it may search later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegionSpan {
+struct TractSpan {
     /// Start, inclusive (0-based).
-    pub start: u64,
+    start: u64,
     /// End, exclusive (0-based).
-    pub end: u64,
-}
-
-/// A genotypeable tandem repeat: merged repeat coverage no longer than
-/// [`SegmentOptions::max_repeat_len`]. It carries the merged span **and** the
-/// constituent intervals (periods may differ), so the caller can read the repeat
-/// structure without re-scanning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepeatRegion {
-    /// The union of `intervals`' spans.
-    pub span: RegionSpan,
-    /// The overlapping intervals merged into this region — non-empty, coordinate-ordered.
-    pub intervals: Box<[RepeatInterval]>,
-}
-
-/// One tile of the reference produced by [`RegionScanner`]. The tiles a scan yields are
-/// coordinate-ordered, pairwise non-overlapping, and cover the scanned span exactly;
-/// consecutive tiles never share a kind (each is maximal).
-///
-/// The three kinds are the caller's three routes: `Repeat` → the STR path, `Unique` →
-/// the SNP path, and `Satellite` → neither (mask/skip).
-///
-/// (`RegionScanner` lands in Milestone C; this enum is its yielded item, defined here
-/// with the rest of the vocabulary.)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Region {
-    /// A genotypeable tandem repeat (coverage ≤ `max_repeat_len`).
-    Repeat(RepeatRegion),
-    /// Repeat coverage longer than `max_repeat_len` — satellite DNA. Repetitive (so not
-    /// unique sequence) but too long to be a genotypeable STR, hence excluded from STR
-    /// analysis.
-    Satellite(RegionSpan),
-    /// No tandem-repeat coverage — unique sequence.
-    Unique(RegionSpan),
-}
-
-/// A region-seam iteration error. Only a reference-read failure surfaces here — the
-/// detection itself is infallible; a mid-scan [`ChromRefFetchError`] (corrupt/truncated
-/// reference) is fatal to the scan and fuses the iterator (spec §8). Construction-time
-/// validation of the period range is [`PeriodRangeError`], separately.
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum ScanError {
-    /// Reading the reference failed mid-scan.
-    #[error("reading the reference failed mid-scan")]
-    Fetch {
-        #[source]
-        source: ChromRefFetchError,
-    },
+    end: u64,
 }
 
 // ---------------------------------------------------------------------
 // The interval finder (Milestone B) — lag-p scoring + Ruzzo–Tompa
 // ---------------------------------------------------------------------
 
-/// Canonicalise an ACGT base to an uppercase byte, or `None` for any non-ACGT byte.
-/// A tandem-repeat match requires **both** compared bases to canonicalise equal (so an
-/// `N == N` never matches — the two `None`s are not equal by this function's use).
-#[inline]
 /// Whether `motif` is **primitive** — it does not tile under any shorter period that
 /// divides its length. `AAA` is not (it tiles under `A`); `ATAT` is not (tiles under
 /// `AT`); `AT` and `CAG` are. A period-1 motif is always primitive. Case-insensitive,
@@ -295,6 +176,7 @@ pub enum ScanError {
 /// This is what makes [`find_tandem_repeats`] honour its period range on each tract's
 /// *true* period: a non-primitive motif is an alias of a shorter-period repeat, and the
 /// shorter one is what the caller asked about.
+#[inline]
 fn is_primitive_motif(motif: &[u8]) -> bool {
     let p = motif.len();
     for q in 1..p {
@@ -322,7 +204,7 @@ fn is_primitive_motif(motif: &[u8]) -> bool {
 ///   (`None == None`). `0 == 0` preserves that.
 /// - the scoring closure in [`find_tandem_repeats`] required `(Some(a), Some(b))` with
 ///   `a == b`, so a non-ACGT byte matched **nothing**, not even another one. The
-///   explicit `!= 0` guard in [`bases_match`] preserves that.
+///   explicit `!= 0` guard where the scan compares two canonical bytes preserves that.
 static CANONICAL: [u8; 256] = {
     let mut table = [0u8; 256];
     table[b'A' as usize] = b'A';
@@ -335,15 +217,6 @@ static CANONICAL: [u8; 256] = {
     table[b't' as usize] = b'T';
     table
 };
-
-/// Do two bytes canonicalise to the **same ACGT base**? A non-ACGT byte matches nothing
-/// — an `N` beside an `N` is absence of evidence, not evidence of a repeat.
-#[inline]
-#[allow(dead_code)]
-fn bases_match(x: u8, y: u8) -> bool {
-    let cx = CANONICAL[x as usize];
-    cx != 0 && cx == CANONICAL[y as usize]
-}
 
 /// One open segment in the Ruzzo–Tompa working stack: `l`/`r` are the cumulative score
 /// strictly before the segment and through its end (so the segment's own score is
@@ -716,9 +589,9 @@ pub fn find_tandem_repeats_for_copy_floor(
 
     let mut out = Vec::new();
     let n = seq.len();
-    // Canonicalise ONCE, not twice per period. `bases_match` did two dependent table
-    // loads per scored position; over 6 periods that is 12 canonicalisations of every
-    // base, all of the same byte.
+    // Canonicalise ONCE, not twice per period. Looking both bytes up in the table at every
+    // scored position is two dependent loads; over 6 periods that is 12 canonicalisations of
+    // every base, all of the same byte.
     let mut canonical: Vec<u8> = Vec::with_capacity(n);
     canonical.extend(seq.iter().map(|&b| CANONICAL[b as usize]));
     for period in periods.min()..=periods.max() {
@@ -816,7 +689,7 @@ pub fn find_tandem_repeats_for_copy_floor(
     // list, and the search reads nothing but the span. Each list is sized once to its period's
     // count in `out` (sorted by period, so two binary searches give it): grown by doubling, a
     // list of 18 M spans leaves its outgrown buffers behind as resident memory.
-    let mut by_period: Vec<Vec<RegionSpan>> = (0..=max_period / 2)
+    let mut by_period: Vec<Vec<TractSpan>> = (0..=max_period / 2)
         .map(|period| {
             let from = out.partition_point(|iv| usize::from(iv.period) < period);
             let to = out.partition_point(|iv| usize::from(iv.period) <= period);
@@ -862,7 +735,7 @@ pub fn find_tandem_repeats_for_copy_floor(
         if !redundant && !nested {
             reach = (iv.period, iv.end);
             if let Some(list) = by_period.get_mut(usize::from(iv.period)) {
-                list.push(RegionSpan {
+                list.push(TractSpan {
                     start: iv.start,
                     end: iv.end,
                 });
@@ -871,158 +744,6 @@ pub fn find_tandem_repeats_for_copy_floor(
         !redundant
     });
     out
-}
-
-// ---------------------------------------------------------------------
-// The region seam (Milestone C) — repeat / satellite / unique tiling
-// ---------------------------------------------------------------------
-
-/// A merged repeat span (the union of overlapping/abutting intervals) plus the intervals
-/// that formed it — the intermediate between raw intervals and emitted [`Region`]s.
-/// Union a bag of half-open `[start, end)` spans into disjoint, start-sorted spans. The
-/// repeat **coverage** — the positions some repeat covers — independent of which intervals
-/// produced it (so it merges identically whether fed whole-contig intervals or windowed,
-/// clipped fragments).
-fn union_spans(mut spans: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
-    spans.sort_unstable();
-    let mut out: Vec<(u64, u64)> = Vec::new();
-    for (s, e) in spans {
-        match out.last_mut() {
-            Some(last) if s <= last.1 => last.1 = last.1.max(e),
-            _ => out.push((s, e)),
-        }
-    }
-    out
-}
-
-/// Build the final region tiling of `[0, n)` from two inputs kept **deliberately separate**:
-/// the repeat `coverage` (span-level, which classifies Repeat/Satellite and fixes the
-/// boundaries) and the exact `str_intervals` (which decorate each `Repeat` with its
-/// constituents). Splitting them is what makes the windowed path invariant: coverage
-/// coalesces satellite fragments across windows, while STR intervals — always ≤
-/// `max_repeat_len`, so captured whole by one window — are attached by start.
-///
-/// Steps: union the coverage into spans, apply the [`SegmentOptions`] smoothing (`merge_gap`
-/// bridges short unique gaps, `min_repeat_len` drops short repeat blips), classify each
-/// surviving span `Repeat` vs `Satellite` by `max_repeat_len` (attaching the `str_intervals`
-/// whose start lies in a `Repeat` span), and fill every gap with `Unique`. The output tiles
-/// `[0, n)` exactly, coordinate-ordered, with no two same-kind tiles adjacent.
-fn build_regions(
-    coverage: Vec<(u64, u64)>,
-    mut str_intervals: Vec<RepeatInterval>,
-    n: u64,
-    opts: &SegmentOptions,
-) -> Vec<Region> {
-    let mut spans = union_spans(coverage);
-
-    // Smoothing — bridge unique gaps shorter than `merge_gap`.
-    if opts.merge_gap > 0 {
-        let mut bridged: Vec<(u64, u64)> = Vec::new();
-        for (s, e) in spans {
-            match bridged.last_mut() {
-                Some(last) if s - last.1 < opts.merge_gap => last.1 = e,
-                _ => bridged.push((s, e)),
-            }
-        }
-        spans = bridged;
-    }
-    // Smoothing — drop repeat spans shorter than `min_repeat_len` (they become unique).
-    if opts.min_repeat_len > 0 {
-        spans.retain(|&(s, e)| e - s >= opts.min_repeat_len);
-    }
-
-    str_intervals.sort_by_key(|iv| (iv.start, iv.end));
-    let mut iv_idx = 0usize; // a single forward cursor into the start-sorted intervals
-
-    let mut out = Vec::new();
-    let mut pos = 0u64;
-    for (start, end) in spans {
-        if start > pos {
-            out.push(Region::Unique(RegionSpan {
-                start: pos,
-                end: start,
-            }));
-        }
-        let region_span = RegionSpan { start, end };
-        if end - start > opts.max_repeat_len {
-            out.push(Region::Satellite(region_span));
-        } else {
-            // Attach the intervals whose start lies in this span. Skipped intervals (in
-            // gaps, satellites, or dropped spans) are stepped over by the shared cursor.
-            while iv_idx < str_intervals.len() && str_intervals[iv_idx].start < start {
-                iv_idx += 1;
-            }
-            let lo = iv_idx;
-            while iv_idx < str_intervals.len() && str_intervals[iv_idx].start < end {
-                iv_idx += 1;
-            }
-            out.push(Region::Repeat(RepeatRegion {
-                span: region_span,
-                intervals: str_intervals[lo..iv_idx].to_vec().into_boxed_slice(),
-            }));
-        }
-        pos = end;
-    }
-    if pos < n {
-        out.push(Region::Unique(RegionSpan { start: pos, end: n }));
-    }
-    out
-}
-
-/// Tile a resident sequence into an ordered, gap-free run of [`Region`]s (spec §3.6). The
-/// **oracle** the windowed streaming path (`stream`) must reproduce (window-count invariance):
-/// its coverage is every interval's span and its STR intervals are all of them.
-fn tile(
-    seq: &[u8],
-    periods: PeriodRange,
-    params: &ScanParams,
-    opts: &SegmentOptions,
-) -> Vec<Region> {
-    let n = seq.len() as u64;
-    if n == 0 {
-        return Vec::new();
-    }
-    let intervals = find_tandem_repeats(seq, periods, params);
-    let coverage = intervals.iter().map(|iv| (iv.start, iv.end)).collect();
-    build_regions(coverage, intervals, n, opts)
-}
-
-/// Streams a repeat/satellite/unique tiling of a reference as an iterator of [`Region`]s —
-/// the routing seam the snp/ssr caller consumes (spec §3.6). Yields `Result<Region,
-/// ScanError>`.
-///
-/// Two constructors: [`over_slice`](Self::over_slice) tiles a resident sequence, and
-/// `stream` tiles a whole contig windowed through a `ChromRefFetcher`
-/// without holding it in memory. `stream` is **window-count invariant for the STR tiling** —
-/// it yields exactly the `Repeat`/`Unique` structure `over_slice` would, regardless of
-/// `window_bp`. A `Satellite` (a repeat longer than `max_repeat_len`, hence longer than a
-/// window's reach) may segment differently between the two, because its internal structure
-/// depends on global context a bounded window cannot see; that is harmless, since satellites
-/// are mask/skip regions, not genotyping targets (see `scan_windowed`).
-pub struct RegionScanner {
-    regions: std::vec::IntoIter<Region>,
-}
-
-impl RegionScanner {
-    /// Tile a small, already-resident sequence (spec §3.6). Infallible (yields only `Ok`).
-    pub fn over_slice(
-        seq: &[u8],
-        periods: PeriodRange,
-        params: &ScanParams,
-        opts: &SegmentOptions,
-    ) -> Self {
-        Self {
-            regions: tile(seq, periods, params, opts).into_iter(),
-        }
-    }
-}
-
-impl Iterator for RegionScanner {
-    type Item = Result<Region, ScanError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.regions.next().map(Ok)
-    }
 }
 
 #[cfg(test)]
@@ -1066,27 +787,11 @@ mod tests {
     // ---- Defaults ----------------------------------------------------------
 
     #[test]
-    fn default_periods_is_one_to_six() {
-        assert_eq!(DEFAULT_PERIODS, (1, 6));
-        // The named default range is itself a valid PeriodRange.
-        assert!(PeriodRange::new(DEFAULT_PERIODS.0, DEFAULT_PERIODS.1).is_ok());
-    }
-
-    #[test]
     fn scan_params_default_is_two_seven_two() {
         let p = ScanParams::default();
         assert_eq!(p.match_reward, 2);
         assert_eq!(p.mismatch_penalty, 7);
         assert_eq!(p.min_copies, 2);
-    }
-
-    #[test]
-    fn segment_options_default_is_cap_window_no_smoothing() {
-        let o = SegmentOptions::default();
-        assert_eq!(o.max_repeat_len, 1000);
-        assert_eq!(o.window_bp, 100_000);
-        assert_eq!(o.merge_gap, 0);
-        assert_eq!(o.min_repeat_len, 0);
     }
 
     // ---- Ruzzo–Tompa vs a brute-force oracle -------------------------------
@@ -1544,177 +1249,4 @@ mod tests {
             "every emitted interval has >= min_copies copies: {got:?}"
         );
     }
-
-    // ---- RegionScanner::over_slice (the region seam, C1) -------------------
-
-    /// A region's `(start, end, kind)` for the tiling-contract check — kind is 0 Repeat,
-    /// 1 Satellite, 2 Unique.
-    fn triple(r: &Region) -> (u64, u64, u8) {
-        match r {
-            Region::Repeat(rr) => (rr.span.start, rr.span.end, 0),
-            Region::Satellite(s) => (s.start, s.end, 1),
-            Region::Unique(s) => (s.start, s.end, 2),
-        }
-    }
-
-    fn regions_of(seq: &[u8], periods: PeriodRange, opts: &SegmentOptions) -> Vec<Region> {
-        RegionScanner::over_slice(seq, periods, &ScanParams::default(), opts)
-            .map(|r| r.unwrap())
-            .collect()
-    }
-
-    /// Every tiling is coordinate-ordered, gap-free over `[0, n)`, non-overlapping, and has
-    /// no two same-kind tiles adjacent.
-    fn assert_tiles(regions: &[Region], n: u64) {
-        let mut pos = 0u64;
-        let mut prev_kind: Option<u8> = None;
-        for r in regions {
-            let (s, e, kind) = triple(r);
-            assert_eq!(
-                s, pos,
-                "tile starts at {s}, expected {pos} (gap or overlap)"
-            );
-            assert!(e > s, "empty tile [{s}, {e})");
-            assert_ne!(Some(kind), prev_kind, "two same-kind tiles adjacent at {s}");
-            prev_kind = Some(kind);
-            pos = e;
-        }
-        assert_eq!(pos, n, "tiling must cover exactly [0, {n})");
-    }
-
-    #[test]
-    fn empty_input_yields_no_regions() {
-        assert!(regions_of(b"", p(1, 6), &SegmentOptions::default()).is_empty());
-    }
-
-    #[test]
-    fn a_lone_repeat_tiles_as_unique_repeat_unique() {
-        // Non-repetitive flanks around a clean (CAG)*8 tract.
-        let mut seq = b"TTGGA".to_vec();
-        for _ in 0..8 {
-            seq.extend_from_slice(b"CAG");
-        }
-        seq.extend_from_slice(b"GGTTA");
-        let regions = regions_of(&seq, p(3, 3), &SegmentOptions::default());
-        assert_tiles(&regions, seq.len() as u64);
-        let kinds: Vec<u8> = regions.iter().map(|r| triple(r).2).collect();
-        assert_eq!(kinds, vec![2, 0, 2], "Unique, Repeat, Unique: {regions:?}");
-        // The single Repeat covers the tract.
-        if let Region::Repeat(rr) = &regions[1] {
-            assert_eq!((rr.span.start, rr.span.end), (5, 5 + 24));
-        } else {
-            panic!("middle tile is the repeat");
-        }
-    }
-
-    #[test]
-    fn adjacent_repeats_of_different_periods_merge_into_one_region() {
-        // An (AT)*8 tract abutting a (CAG)*5 tract: two primitive repeats (period 2 and 3)
-        // whose coverage abuts, so the region tiling merges them into one `Repeat` region
-        // carrying both intervals. (Before the primitive-period fix this test used (AT)*10's
-        // 2/4/6 aliases to exercise the merge; a real repeat is now needed, because aliases
-        // no longer exist.)
-        let seq = b"ATATATATATATATATCAGCAGCAGCAGCAG"; // (AT)*8 then (CAG)*5
-        let regions = regions_of(seq, p(2, 6), &SegmentOptions::default());
-        assert_tiles(&regions, seq.len() as u64);
-        let repeats: Vec<_> = regions
-            .iter()
-            .filter_map(|r| match r {
-                Region::Repeat(rr) => Some(rr),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(repeats.len(), 1, "one merged repeat region: {regions:?}");
-        let periods: std::collections::BTreeSet<u8> =
-            repeats[0].intervals.iter().map(|iv| iv.period).collect();
-        assert_eq!(
-            periods,
-            std::collections::BTreeSet::from([2, 3]),
-            "the merged region carries both PRIMITIVE periods, no aliases: {:?}",
-            repeats[0].intervals
-        );
-    }
-
-    #[test]
-    fn a_repeat_over_the_cap_is_a_satellite() {
-        // The same (CAG)*8 = 24 bp tract, but with a 10 bp satellite cap → Satellite.
-        let mut seq = b"TTGGA".to_vec();
-        for _ in 0..8 {
-            seq.extend_from_slice(b"CAG");
-        }
-        seq.extend_from_slice(b"GGTTA");
-        let opts = SegmentOptions {
-            max_repeat_len: 10,
-            ..SegmentOptions::default()
-        };
-        let regions = regions_of(&seq, p(3, 3), &opts);
-        assert_tiles(&regions, seq.len() as u64);
-        assert_eq!(
-            regions.iter().map(|r| triple(r).2).collect::<Vec<_>>(),
-            vec![2, 1, 2],
-            "Unique, Satellite, Unique: {regions:?}"
-        );
-    }
-
-    #[test]
-    fn merge_gap_bridges_two_nearby_repeats() {
-        // Two (CAG)*5 tracts separated by a 12 bp non-repetitive gap → two intervals.
-        let mut seq = Vec::new();
-        for _ in 0..5 {
-            seq.extend_from_slice(b"CAG");
-        }
-        seq.extend_from_slice(b"TGACGTTGACGT"); // 12 bp gap the finder won't bridge
-        for _ in 0..5 {
-            seq.extend_from_slice(b"CAG");
-        }
-        // Off: two separate Repeats, a Unique gap between them.
-        let off = regions_of(&seq, p(3, 3), &SegmentOptions::default());
-        let repeats_off = off.iter().filter(|r| triple(r).2 == 0).count();
-        assert_eq!(repeats_off, 2, "without merge_gap, two repeats: {off:?}");
-        assert_tiles(&off, seq.len() as u64);
-        // On: a merge_gap wider than the 12 bp gap coalesces them into one Repeat.
-        let opts = SegmentOptions {
-            merge_gap: 20,
-            ..SegmentOptions::default()
-        };
-        let on = regions_of(&seq, p(3, 3), &opts);
-        assert_eq!(
-            on.iter().filter(|r| triple(r).2 == 0).count(),
-            1,
-            "with merge_gap, one bridged repeat: {on:?}"
-        );
-        assert_tiles(&on, seq.len() as u64);
-    }
-
-    #[test]
-    fn min_repeat_len_reclassifies_a_short_blip_as_unique() {
-        // An isolated (CAG)*3 = 9 bp tract, flanked.
-        let mut seq = b"TTGGA".to_vec();
-        for _ in 0..3 {
-            seq.extend_from_slice(b"CAG");
-        }
-        seq.extend_from_slice(b"GGTTA");
-        // Off: the 9 bp tract is a Repeat.
-        let off = regions_of(&seq, p(3, 3), &SegmentOptions::default());
-        assert!(
-            off.iter().any(|r| triple(r).2 == 0),
-            "a repeat is present: {off:?}"
-        );
-        // On: min_repeat_len = 20 drops it → the whole contig is one Unique tile.
-        let opts = SegmentOptions {
-            min_repeat_len: 20,
-            ..SegmentOptions::default()
-        };
-        let on = regions_of(&seq, p(3, 3), &opts);
-        assert_eq!(
-            on.iter().map(|r| triple(r).2).collect::<Vec<_>>(),
-            vec![2],
-            "the short repeat is reclassified unique, gaps merged: {on:?}"
-        );
-        assert_tiles(&on, seq.len() as u64);
-    }
-
-    // ---- scan_windowed (the streamed primitive, B1) -------------------------
-
-    // ---- RegionScanner::stream (windowed, C2) ------------------------------
 }
