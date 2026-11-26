@@ -13,8 +13,9 @@
 //! `ln m`.
 //!
 //! **What fixes the scale.** `m · Lₛ` is unchanged when every multiplier is doubled and every class
-//! rate halved, so a motif length's multipliers are scaled so that their geometric mean, each read
-//! group weighted by its reads, is one ([`scale_to_a_typical_read_group`]).
+//! rate halved, so a motif length's multipliers are fitted under the constraint that their
+//! geometric mean, each read group weighted by its reads, is one
+//! ([`fit_multipliers_of_a_typical_one`]).
 //!
 //! Nothing here reads the evidence: these are the functions the penalised fit calls between drawing
 //! its curves (`penalised_fit.rs`).
@@ -85,18 +86,21 @@ pub fn largest_log_multiplier(classes: &[ClassEvidence]) -> f64 {
     }
 }
 
-/// **One read group's multiplier with the classes held**: the maximum of
-/// [`log_multiplier_objective`], by Newton's method on `ln m` from `start`, each step halved until
-/// the objective does not fall, and held below [`largest_log_multiplier`].
-///
-/// With no class evidence the pull alone holds it at one; with a pull of zero and no slipped read it
-/// would run toward zero, so a run always pulls.
+/// [`fit_tilted_multiplier`] with no tilt: one read group's multiplier on its own. Only the tests
+/// call it; a run fits a motif length's read groups together.
+#[cfg(test)]
 pub fn fit_multiplier(classes: &[ClassEvidence], pull: f64, start: f64) -> f64 {
     fit_tilted_multiplier(classes, pull, 0.0, start)
 }
 
-/// [`fit_multiplier`] with `tilt · ln m` taken from the objective: the read group's share of a
-/// Lagrange term ([`fit_multipliers_of_a_typical_one`]).
+/// **One read group's multiplier with the classes held**: the maximum of
+/// [`log_multiplier_objective`] with `tilt · ln m` taken from it, by Newton's method on `ln m`
+/// from `start`, each step halved until the objective does not fall, and held below
+/// [`largest_log_multiplier`]. The tilt is the read group's share of a Lagrange term
+/// ([`fit_multipliers_of_a_typical_one`]).
+///
+/// With no class evidence and no tilt the pull alone holds it at one; with a pull of zero and no
+/// slipped read it would run toward zero, so a run always pulls.
 fn fit_tilted_multiplier(classes: &[ClassEvidence], pull: f64, tilt: f64, start: f64) -> f64 {
     let objective = |u: f64| {
         let (value, slope, curvature) = log_multiplier_objective(u, classes, pull);
@@ -232,6 +236,7 @@ pub fn fit_multipliers_of_a_typical_one(
 /// one**, and returns the factor every multiplier was divided by (spec §2.2). A class rate times
 /// that factor keeps every read group's slip rate where it was. Read groups with no weight do not
 /// move the mean, and are scaled with the rest.
+#[cfg(test)]
 pub fn scale_to_a_typical_read_group(multipliers: &mut [f64], weights: &[f64]) -> f64 {
     assert_eq!(multipliers.len(), weights.len(), "one weight a read group");
     let total: f64 = weights.iter().sum();
