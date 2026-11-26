@@ -163,6 +163,20 @@ fn fewer_threads_are_suggested_where_they_would_fit() {
         assert!(message.contains(expected), "{expected}: {message}");
     }
     assert!(!message.contains("upper bound"), "{message}");
+    // The whole line, as the implementation report quotes it.
+    assert_eq!(
+        message,
+        "refinement memory, window from contig 0 position 1: about 46.7 GB expected at its peak, \
+         117% of the 40.0 GB this run may use (the memory.max of the control group pvc runs in), \
+         above the 85% at which pvc warns; the run goes on. The estimate is 10.0 GB for a window \
+         as --refine-window-bytes counts it (20.0 GB allowed), 30.2 GB for 96 threads' working \
+         arrays (300,000 walked records at 1.05 kB each a thread), and 16% on top for the memory \
+         allocator. Within 85% would be --refine-window-bytes 14000000000 (14.0 GB) or less, or \
+         61 threads or fewer (--threads). If the system kills the run for memory after calling \
+         has ended, its scratch directory keeps the calls, and `pvc resume-calling --scratch-dir \
+         /scratch/pvc_tmp_ab12 --refine-window-bytes 14000000000` finishes it. Later windows \
+         warn again only where their estimate is higher still."
+    );
 }
 
 /// **The warning before calling**, as a person reads it, at tomato25's 100 GB on a 118-GB unit:
