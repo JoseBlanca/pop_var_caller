@@ -72,9 +72,9 @@ use super::{
     GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence,
     ReferenceBesideLocus,
 };
+use crate::cohort_observation::CohortObservation;
 use crate::locus_generation::{ReadWitness, SequenceObservation, SsrBundleDetail, SsrDetail};
 use crate::region_typing::run_parse::RunParse;
-use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::{AlleleId, GenomeRegion, SummedLogError};
 
 /// How far selection's pooled leftover and this narrowing's own sum may differ before the two
@@ -517,7 +517,7 @@ pub fn shape_ssr_bundle_locus<'a>(
 ///
 /// **Four counters do not survive on a partial, and none of them is read here.** The merge
 /// keeps a partial's reads and its error mass and drops its forward-strand count, its two MAPQ
-/// moments and its left-placed count ([`PartialObservation`](crate::run::cohort_merge::build::PartialObservation)).
+/// moments and its left-placed count ([`PartialObservation`](crate::cohort_observation::PartialObservation)).
 /// The repeat-tract model reads an observation's bases, its read group and its read count and
 /// nothing else — the site-quality artifact correction, which is what reads the other four,
 /// skips a tract by design (the `LocusEvidence::Ssr` arm of `summarise_condition`'s fold).
@@ -627,11 +627,11 @@ mod tests {
 
     use crate::calling::CandidateAlleles;
     use crate::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
-    use crate::locus_generation::LocusKind;
-    use crate::locus_generation::WitnessedLocusPositions;
-    use crate::run::cohort_merge::build::{
+    use crate::cohort_observation::{
         AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
     };
+    use crate::locus_generation::LocusKind;
+    use crate::locus_generation::WitnessedLocusPositions;
     use crate::types::{ContigId, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
     /// Two candidates' repeat counts, different from each other — the shape a tract's evidence
@@ -1134,8 +1134,8 @@ mod tests {
     /// censored term reads and nothing here reshapes them.
     #[test]
     fn the_partial_observations_are_borrowed_from_the_merges_own_rows() {
+        use crate::cohort_observation::PartialObservation;
         use crate::locus_generation::WitnessedLocusPositions;
-        use crate::run::cohort_merge::build::PartialObservation;
 
         let mut support = covering(0, vec![merge_row(0, 0, 4, -4.0)]);
         support.partials.push(PartialObservation {

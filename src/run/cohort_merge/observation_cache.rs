@@ -801,7 +801,7 @@ impl WindowedCohort<'static> {
     ///
     /// It covers no sample, holds no record and has no window at any position — which is what a
     /// caller assembling a cohort locus from records it already holds has to hand over
-    /// ([`CohortObservation::over`](super::build::CohortObservation::over)), and what every
+    /// ([`CohortObservation::over`](crate::cohort_observation::CohortObservation::over)), and what every
     /// fixture written before the coverage measurement existed means. A locus assembled through
     /// it gets an absent pair for every covering sample.
     ///
@@ -4023,8 +4023,9 @@ mod tests {
     /// gaps, which are what make the cache jump forward over ground nobody builds.
     #[test]
     fn a_builder_fed_from_the_cache_closes_the_loci_a_whole_stretch_would() {
+        use super::super::MaxCohortLocusSpan;
         use super::super::build::build_region;
-        use super::super::{MaxCohortLocusSpan, MinAltReads};
+        use crate::cohort_observation::MinAltReads;
 
         /// A seeded linear congruential generator — no dependency, and the seed is in the
         /// failure message.

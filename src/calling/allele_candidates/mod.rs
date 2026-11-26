@@ -41,9 +41,9 @@ pub mod ssr;
 mod ssr_production_differential;
 
 use crate::calling::CandidateAlleles;
-use crate::run::cohort_merge::build::SupportedAllele;
-use crate::run::cohort_merge::build::{CohortObservation, SampleSupport};
-use crate::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
+use crate::cohort_observation::SupportedAllele;
+use crate::cohort_observation::{CohortObservation, SampleSupport};
+use crate::cohort_observation::{MinAltObs, MinAltReadShare, MinAltReads};
 use crate::types::{AlleleId, GenomeRegion};
 use std::cmp::Ordering;
 
@@ -1202,8 +1202,8 @@ fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>)
 #[cfg(test)]
 pub(super) mod fixtures {
     use super::*;
+    use crate::cohort_observation::{AlleleSupport, PartialObservation, SupportedAllele};
     use crate::locus_generation::{LocusKind, WitnessedLocusPositions};
-    use crate::run::cohort_merge::build::{AlleleSupport, PartialObservation, SupportedAllele};
     use crate::types::{ContigId, GenomeRegion, Position, ReadGroupId};
     use std::num::NonZeroU32;
 

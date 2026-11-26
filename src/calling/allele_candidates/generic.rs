@@ -11,8 +11,8 @@ use super::{
     SelectionVerdict, compare_best_first, leftover_of, summarise_alleles,
 };
 use crate::calling::CandidateAlleles;
+use crate::cohort_observation::CohortObservation;
 use crate::locus_generation::LocusKind;
-use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::AlleleId;
 
 /// **Narrow one locus's allele table to the sequences worth calling over** (spec §3, §4).
@@ -197,8 +197,8 @@ mod tests {
     use super::super::UnmatchedSupport;
     use super::super::fixtures::*;
     use super::*;
-    use crate::run::cohort_merge::MinAltReads;
-    use crate::run::cohort_merge::build::SampleSupport;
+    use crate::cohort_observation::MinAltReads;
+    use crate::cohort_observation::SampleSupport;
     use crate::types::ReadGroupId;
 
     /// Narrow `observation` under a support rule of `floor` reads or `share`, and the default

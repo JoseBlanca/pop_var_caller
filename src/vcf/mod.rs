@@ -556,7 +556,7 @@ impl SampleCall {
 /// of reads, producing a `DP` under its own `AD` — which no VCF parser would reject.
 ///
 /// **What each column counts** (spec §7), in the merge's own terms
-/// ([`SampleSupport`](crate::run::cohort_merge::build::SampleSupport)):
+/// ([`SampleSupport`](crate::cohort_observation::SampleSupport)):
 ///
 /// | | counts | from |
 /// |---|---|---|

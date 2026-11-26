@@ -300,7 +300,7 @@ impl SampleLocusObservations {
 /// locus opens and how far it reaches come from [`region`](Self::region); whether any sample
 /// varied enough for the locus to be worth calling comes from the two counts, which are the
 /// numerator and the denominator of the keep rule
-/// (`run::cohort_merge::MinAltReads::reached_by`). Nothing else about an
+/// (`cohort_observation::MinAltReads::reached_by`). Nothing else about an
 /// observation is consulted until the locus has survived both verdicts and is being assembled.
 ///
 /// **The locus's kind is deliberately not here, because it is not a fact about an

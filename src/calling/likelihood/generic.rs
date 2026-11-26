@@ -8,9 +8,9 @@ use super::MAX_PLOIDY_COPIES;
 #[cfg(test)]
 use crate::calling::GenotypeIdx;
 use crate::calling::{CandidateAlleles, GenotypeTableView};
+use crate::cohort_observation::{LocusBorder, PartialObservation};
 use crate::float;
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
-use crate::run::cohort_merge::build::{LocusBorder, PartialObservation};
 use crate::types::{AlleleId, LogProb};
 
 /// How many bases a misread could have gone to — **three, and it is a physical fact rather
@@ -547,7 +547,7 @@ pub fn allele_is_compatible_with_partial(
 
 /// **Whether a carrier of `allele` could have shown what one partial row of the merge shows** —
 /// [`allele_is_compatible_with_partial`], read off the row, and honouring the row's
-/// [`sequence_may_run_on_past`](crate::run::cohort_merge::build::PartialObservation::sequence_may_run_on_past).
+/// [`sequence_may_run_on_past`](crate::cohort_observation::PartialObservation::sequence_may_run_on_past).
 ///
 /// A row marked to run on past a border covers the whole locus, but is compared as a read flush to
 /// that border alone is: the allele and then the reference past the locus must start with its
@@ -3747,7 +3747,7 @@ mod tests {
     }
     // ---- D1: reads that saw only part of the locus ----
 
-    use crate::run::cohort_merge::build::PartialObservation;
+    use crate::cohort_observation::PartialObservation;
 
     /// A partial read over the given locus runs, showing `bases`.
     fn partial(

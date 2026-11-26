@@ -54,8 +54,8 @@ use std::sync::OnceLock;
 use super::fixtures::{row, sample_showing};
 use super::ssr::{SsrSelectionConfig, build_ladder, rescue_occupied_neighbours, select_ssr};
 use super::{SelectionScratch, summarise_alleles};
+use crate::cohort_observation::CohortObservation;
 use crate::locus_generation::{LocusKind, SsrDetail};
-use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::{ContigId, GenomeRegion, Motif, Ploidy, Position};
 
 /// One tract of the fixture: the merge's allele table and every covering sample's reads on it.

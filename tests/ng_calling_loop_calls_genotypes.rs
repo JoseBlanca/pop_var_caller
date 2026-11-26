@@ -60,6 +60,8 @@ use pop_var_caller::calling::{
     LocusInference, ReadGroupCalibration, ReferenceBesideLocus, RepeatTractProvenance,
     SsrSampleEvidence,
 };
+use pop_var_caller::cohort_observation::CohortObservation;
+use pop_var_caller::cohort_observation::MinAltReads;
 use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
 };
@@ -78,8 +80,6 @@ use pop_var_caller::parameter_estimation::joint::stratum_fits::{
 use pop_var_caller::parameter_estimation::repeat_strata::{
     RepeatCount, Stratum as SsrStratum, StratumKey,
 };
-use pop_var_caller::run::cohort_merge::MinAltReads;
-use pop_var_caller::run::cohort_merge::build::CohortObservation;
 use pop_var_caller::run::cohort_merge::close::{ClosedLocus, SampleMembers, Verdict};
 use pop_var_caller::run::cohort_merge::observation_cache::WindowedCohort;
 use pop_var_caller::types::{

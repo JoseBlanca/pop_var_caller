@@ -50,12 +50,11 @@ use crate::calling::likelihood::generic::{
 };
 use crate::calling::quality::artifact_correction::correct_site_quality;
 use crate::calling::{CandidateAlleles, LocusInference, ReferenceBesideLocus, SampleGenotypeCall};
+use crate::cohort_observation::{CohortObservation, LocusBorder, PartialObservation};
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
-use crate::run::cohort_merge::build::{
-    CohortObservation, LocusBorder, LocusReads, PartialObservation,
-};
+use crate::run::cohort_merge::build::LocusReads;
 use crate::types::{GenomeRegion, Position};
 use crate::vcf::assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput};
 use crate::vcf::{FilterVerdict, MapqPool, PaddingBase, TractAnnotation};

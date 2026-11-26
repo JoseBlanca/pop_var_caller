@@ -22,9 +22,9 @@
 use std::collections::{BTreeMap, VecDeque};
 
 #[cfg(test)]
-use super::build::CohortObservation;
-#[cfg(test)]
 use super::build::RegionOutcome;
+#[cfg(test)]
+use crate::cohort_observation::CohortObservation;
 use crate::types::{GenomePosition, GenomeRegion};
 
 #[cfg(test)]

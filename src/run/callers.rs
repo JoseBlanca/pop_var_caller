@@ -42,6 +42,8 @@ use crate::calling::evidence_shaping::{
 use crate::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::calling::run_parameters::RunParameters;
 use crate::calling::{CallingScratch, FrozenParameters, LocusInference, ReferenceBesideLocus};
+use crate::cohort_observation::CohortObservation;
+use crate::cohort_observation::MinAltReads;
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::locus_generation::{
@@ -57,7 +59,6 @@ use crate::read_phase::fragments::RecordFragments;
 use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
-use crate::run::cohort_merge::build::CohortObservation;
 #[cfg(test)]
 use crate::run::cohort_merge::build::RegionOutcome;
 use crate::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
@@ -69,7 +70,6 @@ use crate::run::cohort_merge::serial::merge_cohort_handing_each_locus_over_cover
 use crate::run::cohort_merge::serial::merge_cohort_through_cache;
 use crate::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
-    MinAltReads,
 };
 use crate::run::depth_ceiling::DepthCeiling;
 use crate::run::edge_deletion_gathering::EdgeDeletionGatheringCounts;
@@ -2481,6 +2481,7 @@ mod tests {
     use super::*;
     use crate::calling::inference::CallingLoopConfig;
     use crate::calling::parameters_file::DeclaredInbreeding;
+    use crate::cohort_observation::{MinAltObs, MinAltReadShare};
     use crate::error_render::format_error_chain;
     use crate::locus_generation::pileup::MAX_RECORD_SPAN_CEILING;
     use crate::read::input::read_groups::build_read_groups;
@@ -2490,7 +2491,6 @@ mod tests {
     };
     use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion};
     use crate::regions::ContigBounds;
-    use crate::run::cohort_merge::{MinAltObs, MinAltReadShare};
     use crate::run::test_fixtures::index;
     use crate::types::{ContigId, GenomeRegion, Ploidy, Position};
     use std::num::NonZeroU32;
@@ -3901,12 +3901,12 @@ mod the_merge_over_walkers {
     use super::*;
     use crate::calling::inference::CallingLoopConfig;
     use crate::calling::parameters_file::DeclaredInbreeding;
+    use crate::cohort_observation::REFERENCE_ALLELE;
     use crate::read::input::read_groups::build_read_groups;
     use crate::read::input::test_fixtures::{
         fixture_reference_from_its_index, header, indexed_named_bam, matching_contigs,
         read_group_for, read_named_with_length,
     };
-    use crate::run::cohort_merge::build::REFERENCE_ALLELE;
     use crate::types::{ContigId, GenomeRegion, Ploidy, Position};
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record_buf::Sequence;
@@ -4601,12 +4601,12 @@ mod what_the_fixtures_above_could_not_distinguish {
     use super::*;
     use crate::calling::inference::CallingLoopConfig;
     use crate::calling::parameters_file::DeclaredInbreeding;
+    use crate::cohort_observation::{MinAltObs, MinAltReadShare};
     use crate::read::input::read_groups::build_read_groups;
     use crate::read::input::test_fixtures::{fixture_reference, fixture_reference_from_its_index};
     use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion};
     use crate::regions::ContigBounds;
     use crate::repeat_catalog::StrRepeatCriteria;
-    use crate::run::cohort_merge::{MinAltObs, MinAltReadShare};
     use crate::types::{ContigId, GenomeRegion, Ploidy, Position};
     use std::num::NonZeroU32;
     use std::path::PathBuf;
@@ -4905,8 +4905,8 @@ mod calling_joined_to_the_merge {
         StutterSubstitutionEmission, StutterSubstitutionScratch,
     };
     use crate::calling::parameters_file::DeclaredInbreeding;
+    use crate::cohort_observation::{MinAltObs, MinAltReadShare};
     use crate::read::input::test_fixtures::fixture_reference_from_its_index;
-    use crate::run::cohort_merge::{MinAltObs, MinAltReadShare};
     use crate::types::{ContigId, Ploidy, Position};
     use std::num::NonZeroU32;
 
