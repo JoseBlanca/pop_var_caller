@@ -375,10 +375,32 @@ fn build_index(input: &Path, kind: AlignmentFileKind) -> std::io::Result<()> {
     match kind {
         AlignmentFileKind::Cram => {
             let index = noodles_cram::fs::index(input)?;
-            noodles_cram::crai::fs::write(crai_path_for(input), &index)
+            write_then_rename(&crai_path_for(input), |partial| {
+                noodles_cram::crai::fs::write(partial, &index)
+            })
         }
         AlignmentFileKind::Bam => build_csi_for_bam(input),
     }
+}
+
+/// Write a file through `write` under a temporary name beside `path`, then rename it to `path`.
+///
+/// **An index cut short must never sit at the name the next run reads.** Written in place, a
+/// build interrupted part-way — a full disk, a killed run — left a truncated index there, which
+/// every later run loaded and failed on until someone deleted it by hand. A rename within one
+/// directory replaces the name in one step, so `path` holds the whole new index or nothing new.
+/// A failed write removes its temporary file; a killed run can leave one, under a name no run
+/// reads.
+fn write_then_rename(
+    path: &Path,
+    write: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let partial = append_extension(path, "partial");
+    let written = write(&partial).and_then(|()| std::fs::rename(&partial, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 /// Build a `.csi` next to `bam_path` by scanning the BAM once and
@@ -404,7 +426,10 @@ fn build_csi_for_bam(bam_path: &Path) -> std::io::Result<()> {
     populate_binning_index(&mut reader, &mut indexer, reference_sequence_count)?;
 
     let index = indexer.build(reference_sequence_count);
-    noodles_csi::fs::write(bam_index_path_for(bam_path, BAM_INDEX_BUILD_FORMAT), &index)
+    write_then_rename(
+        &bam_index_path_for(bam_path, BAM_INDEX_BUILD_FORMAT),
+        |partial| noodles_csi::fs::write(partial, &index),
+    )
 }
 
 /// Walk `reader` once and add a chunk per record to `indexer`.
@@ -628,6 +653,29 @@ mod tests {
             chain.contains("names reference sequence 7, and the header lists 1"),
             "{chain}"
         );
+    }
+
+    /// **A build that fails while writing leaves no file at the index's name**, so the next run
+    /// finds the index missing (and builds it again) rather than loading half of one. Checked on
+    /// the write itself, because a real build cannot be made to fail half-way on demand.
+    #[test]
+    fn an_index_write_that_fails_part_way_leaves_nothing_at_the_index_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let index = dir.path().join("sample.bam.csi");
+        let files_in_dir = || fs::read_dir(dir.path()).expect("list").count();
+
+        let error = write_then_rename(&index, |partial| {
+            fs::write(partial, b"the first half of an ind")?;
+            Err(std::io::Error::other("no space left on device"))
+        })
+        .expect_err("the write failed");
+        assert_eq!(error.to_string(), "no space left on device");
+        assert!(!index.exists(), "a partial index sits at the index path");
+        assert_eq!(files_in_dir(), 0, "the partial file was left behind");
+
+        write_then_rename(&index, |partial| fs::write(partial, b"a whole index")).expect("written");
+        assert_eq!(fs::read(&index).expect("read"), b"a whole index");
+        assert_eq!(files_in_dir(), 1, "only the index itself remains");
     }
 
     #[test]
