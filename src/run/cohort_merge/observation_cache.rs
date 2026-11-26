@@ -45,6 +45,7 @@ mod round_view;
 pub use round_view::RoundView;
 
 use super::CohortLocusBuilderRegionsLen;
+pub use crate::locus_generation::LocusSummary;
 use crate::locus_generation::SampleLocusObservations;
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RefSeq, RefSeqError};
 use crate::run::explain::{DroppedLoci, ExplainRegions};
@@ -91,161 +92,6 @@ pub struct ReferenceUnreadable {
     /// What the reference fetch hit.
     #[source]
     pub source: RefSeqError,
-}
-
-/// What the merge knows about one sample's observation **before** it decides to build
-/// anything.
-///
-/// **These are the whole of what closing a cohort locus reads *per observation*.** Where the
-/// locus opens and how far it reaches come from [`region`](Self::region); whether any sample
-/// varied enough for the locus to be worth calling comes from the two counts, which are the
-/// numerator and the denominator of the keep rule
-/// ([`MinAltReads::reached_by`](super::MinAltReads::reached_by)). Nothing else about an
-/// observation is consulted until the locus has survived both verdicts and is being assembled.
-///
-/// **The locus's kind is deliberately not here, because it is not a fact about an
-/// observation.** The width bound applies to generic loci and not to repeat tracts, whose span
-/// the reference fixes — but that verdict is passed once on the closed locus, reading the kind
-/// the opening observation carried, not once per member. The only per-member read of a kind is
-/// a release assertion that a locus never mixes the two, which is structurally guaranteed by
-/// segments being the reference's own partition. Putting a kind in this type would have cost
-/// every observation a field to serve a check that cannot fire, and would have obliged a
-/// summary drawn from a psp record's head to answer something that record's head does not
-/// carry (the owner's ruling of 2026-09-04 keeps the tag in the body).
-///
-/// **Why that set has a name.** A sample whose observations are stored in a psp can answer all
-/// four without decoding the evidence they describe, because a stored record's head carries
-/// them (`spec/psp_file_format.md` §4.3) — so a run over stored files can decide which loci are
-/// worth building before it builds any of them, and at about one position in a hundred varying,
-/// most are never built at all (`spec/cohort_merge_psp_path.md` §2). While the closing walk
-/// reached into each record for each fact separately, no source could supply the facts without
-/// supplying the record; naming them is what lets one exist.
-///
-/// **Direct mode derives them from the record it is already holding**, at the cost it already
-/// paid — [`of`](Self::of) is the same pair of reads and the same single walk over the
-/// sequences that the closing walk made inline before this type existed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocusSummary {
-    /// **The region's three parts, held apart rather than as a `GenomeRegion`**, so that this
-    /// type stays 32 bytes. A `GenomeRegion` carries four bytes of padding after its contig that
-    /// no field outside it can use; held apart, the contig shares an eight-byte slot with a
-    /// count. The size is not cosmetic: every held record of every sample carries one, and
-    /// growing it from 32 to 40 bytes — which the discarded-read count did while it sat beside a
-    /// `GenomeRegion` — cost the 63-sample tomato benchmark's calling pass 12% of its CPU
-    /// (2026-09-29, measured with an unused four-byte field alone). [`region`](Self::region)
-    /// puts them back together.
-    contig: ContigId,
-    start: Position,
-    end: Position,
-    /// The reads that showed something other than the reference — the keep rule's numerator.
-    pub non_reference_reads: u32,
-    /// The reads whose whole sequence over the locus was compared against the reference — the
-    /// keep rule's denominator, and neither read depth nor the reads that merely covered the
-    /// ground.
-    pub reads_compared_with_reference: u32,
-    /// The reads the per-position read cap discarded here — with
-    /// [`reads_compared_with_reference`](Self::reads_compared_with_reference), what the
-    /// coverage measurement takes as the locus's depth. **Zero from a psp written before format
-    /// 1.1**, whose record heads do not carry it (`psp::RecordHead::reads_discarded_by_cap`).
-    pub reads_discarded_by_cap: u32,
-}
-
-impl LocusSummary {
-    /// A summary from its parts: the reference the observation covers, first base to last, and
-    /// its three read counts.
-    #[must_use]
-    pub fn new(
-        region: GenomeRegion,
-        non_reference_reads: u32,
-        reads_compared_with_reference: u32,
-        reads_discarded_by_cap: u32,
-    ) -> Self {
-        Self {
-            contig: region.contig,
-            start: region.start,
-            end: region.end,
-            non_reference_reads,
-            reads_compared_with_reference,
-            reads_discarded_by_cap,
-        }
-    }
-
-    /// The reference the observation covers, first base to last.
-    #[must_use]
-    pub fn region(&self) -> GenomeRegion {
-        GenomeRegion {
-            contig: self.contig,
-            start: self.start,
-            end: self.end,
-        }
-    }
-
-    /// The summary of a record already in hand — direct mode's only path, and the psp path's
-    /// oracle.
-    ///
-    /// **Both counts come from one walk of the record's sequences**, which is why they are
-    /// taken together here rather than read one at a time: they filter on the same witness and
-    /// read the same support, so asking separately walks the observations twice. What that
-    /// saves grows with the reads at a position rather than with the cohort.
-    #[must_use]
-    pub fn of(observation: &SampleLocusObservations) -> Self {
-        let (non_reference_reads, reads_compared_with_reference) =
-            observation.non_reference_and_compared_reads();
-        Self::new(
-            observation.region,
-            non_reference_reads,
-            reads_compared_with_reference,
-            observation.reads_discarded_by_cap,
-        )
-    }
-
-    /// **A record its sample's source did not keep, because a read group there was deeper than
-    /// the run's depth ceiling** ([`depth_ceiling`](crate::run::depth_ceiling)). It carries only
-    /// where the record lay: the closing walk still chains through it, and judges any locus that
-    /// takes it in as one to drop for the whole cohort.
-    ///
-    /// **Told apart by a pair of counts no real record can have** — more non-reference reads than
-    /// reads compared, when the first is by definition a subset of the second — rather than by a
-    /// field. A field would take this type past 32 bytes, which is what every held record of
-    /// every sample pays for (see the note on `contig`).
-    #[must_use]
-    pub fn over_depth_ceiling(region: GenomeRegion) -> Self {
-        Self::new(region, u32::MAX, 0, 0)
-    }
-
-    /// Whether this is the stand-in for a record over the depth ceiling
-    /// ([`over_depth_ceiling`](Self::over_depth_ceiling)).
-    #[must_use]
-    pub fn is_over_depth_ceiling(self) -> bool {
-        self.non_reference_reads > self.reads_compared_with_reference
-    }
-
-    /// Where the observation begins, as a whole-genome position.
-    #[must_use]
-    pub fn start_position(self) -> GenomePosition {
-        GenomePosition {
-            contig: self.region().contig,
-            position: self.region().start.min(self.region().end),
-        }
-    }
-
-    /// The last reference position the observation covers, as a whole-genome position.
-    #[must_use]
-    pub fn reach_position(self) -> GenomePosition {
-        GenomePosition {
-            contig: self.region().contig,
-            position: self.reach(),
-        }
-    }
-
-    /// The last reference position the observation covers.
-    ///
-    /// Saturating for the reason [`SampleLocusObservations::reach`] is: a region ending at the
-    /// coordinate ceiling must not wrap a comparison the closing walk makes on every record.
-    #[must_use]
-    pub fn reach(self) -> Position {
-        self.region().end.max(self.region().start)
-    }
 }
 
 /// One sample's observations in coordinate order, **and the place a record goes when the
@@ -317,6 +163,36 @@ impl Drawn {
             Self::Built(record) => LocusSummary::of(record),
             Self::Kept { summary, .. } => *summary,
             Self::OverDepthCeiling { region, .. } => LocusSummary::over_depth_ceiling(*region),
+        }
+    }
+}
+
+/// A draw's evidence, borrowed ([`EvidenceForOneRecord`], the shape
+/// [`for_each_reported_depth`] takes).
+///
+/// **It lives here, beside [`Drawn`], and not in `window_coverage`**, because `window_coverage`
+/// must not import from `run`: this file already imports `window_coverage`, and an impl there
+/// naming `Drawn` made the two modules import each other. The cache's own holder never calls
+/// it — it keeps a summary and its evidence apart and builds the borrowed shape directly — so
+/// its callers are the depth rule's tests, which state each case as a draw.
+impl<'a> From<&'a Drawn> for EvidenceForOneRecord<'a> {
+    fn from(drawn: &'a Drawn) -> Self {
+        match drawn {
+            // `summary: _` rather than `..`: the summary is right there in the variant and
+            // naming it is what makes ignoring it a decision, so a third field on
+            // `Drawn::Kept` fails to compile here.
+            Drawn::Built(record) => Self::InHand(record),
+            Drawn::Kept { body, summary: _ } => Self::Kept(body.clone()),
+            // Never measured — `observe` skips a record over the depth ceiling before it asks
+            // for evidence — but it still names the slot the record's evidence would be in.
+            Drawn::OverDepthCeiling {
+                stand_in: StandIn::Record(record),
+                region: _,
+            } => Self::InHand(record),
+            Drawn::OverDepthCeiling {
+                stand_in: StandIn::Body(body),
+                region: _,
+            } => Self::Kept(body.clone()),
         }
     }
 }

@@ -25,11 +25,12 @@
 //! than configured, so the two sides' histograms are cut on different axes and only the windows
 //! are still comparable.
 //!
-//! **Which way this module depends.** The accumulator depends on nothing above it; [`depth`],
-//! the rule that turns a drawn record into covered positions, names two types from the cohort
-//! merge (`Drawn` and `LocusSummary`), and at plan step C2 the merge will call back into this
-//! module — so from C2 the two import each other. Rust compiles that and nothing will flag it;
-//! what it costs is that neither module can be moved or read without the other.
+//! **Which way this module depends.** On `locus_generation` and `types`, and on nothing in
+//! `run`: the cohort merge calls into this module, never the reverse. [`depth`], the rule that
+//! turns a record into covered positions, takes the record's
+//! [`LocusSummary`](crate::locus_generation::LocusSummary), which lives beside the record it
+//! summarises for that reason. Only `depth`'s tests name a merge type, the merge's `Drawn`, to
+//! state each case in the two shapes the merge draws.
 
 mod accumulator;
 /// The rule that turns a drawn record into covered positions. **`pub` since plan step C3**, whose

@@ -50,8 +50,7 @@
 
 use core::ops::Range;
 
-use crate::locus_generation::{LocusKind, SampleLocusObservations};
-use crate::run::cohort_merge::observation_cache::{Drawn, LocusSummary, StandIn};
+use crate::locus_generation::{LocusKind, LocusSummary, SampleLocusObservations};
 use crate::types::{GenomePosition, Position};
 
 /// Call `report` once for every reference position this record speaks for, with this sample's
@@ -126,43 +125,19 @@ pub fn for_each_reported_depth<E>(
 }
 
 /// One record's evidence, in whichever form its holder has it — the borrowed counterpart of
-/// [`Drawn`], which owns what it carries.
+/// the merge's [`Drawn`], which owns what it carries.
 ///
 /// **Two shapes because two holders answer differently**, and it is the same split [`Drawn`]
 /// makes: direct mode has the record, a run over stored files has the bytes and builds on
 /// demand. A borrowed form exists because the merge's cache keeps the two apart — one array of
 /// records, one of byte ranges — rather than keeping the `Drawn` it drew.
+///
+/// [`Drawn`]: crate::run::cohort_merge::observation_cache::Drawn
 pub enum EvidenceForOneRecord<'a> {
     /// The record itself, already built.
     InHand(&'a SampleLocusObservations),
     /// Where the source is holding it — meaningful only to that source.
     Kept(Range<usize>),
-}
-
-/// A draw's evidence, borrowed. **It lives here and not on [`Drawn`]** because it is this
-/// module that wants the borrowed shape: the cache's own holder keeps a summary and its
-/// evidence apart and never builds a [`Drawn`] to convert. Written the other way round, the
-/// merge would name a `window_coverage` type in a method it does not itself call.
-impl<'a> From<&'a Drawn> for EvidenceForOneRecord<'a> {
-    fn from(drawn: &'a Drawn) -> Self {
-        match drawn {
-            // `summary: _` rather than `..`: the summary is right there in the variant and
-            // naming it is what makes ignoring it a decision, so a third field on
-            // `Drawn::Kept` fails to compile here.
-            Drawn::Built(record) => Self::InHand(record),
-            Drawn::Kept { body, summary: _ } => Self::Kept(body.clone()),
-            // Never measured — `observe` skips a record over the depth ceiling before it asks
-            // for evidence — but it still names the slot the record's evidence would be in.
-            Drawn::OverDepthCeiling {
-                stand_in: StandIn::Record(record),
-                region: _,
-            } => Self::InHand(record),
-            Drawn::OverDepthCeiling {
-                stand_in: StandIn::Body(body),
-                region: _,
-            } => Self::Kept(body.clone()),
-        }
-    }
 }
 
 /// The positions a built record reports, and the depth at each, decided by its kind.
@@ -220,6 +195,7 @@ mod tests {
     use crate::locus_generation::{
         LocusLen, ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
     };
+    use crate::run::cohort_merge::observation_cache::Drawn;
     use crate::types::{ContigId, GenomeRegion, Motif, ReadGroupId, SummedLogError};
 
     /// The contig every fixture here sits on; which one is never the point.
