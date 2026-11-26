@@ -22,6 +22,8 @@
 //!   hidden-duplication filter's statistics built on them.
 //! - [`parameter_estimation`] — the error rates, heterozygosity and inbreeding the caller runs on,
 //!   measured from the cohort's own loci before anything is called.
+//! - [`cohort_observation`] — what the cohort merge hands the calling steps: one assembled
+//!   cohort locus, each sample's evidence over it, and the rule that decides it is built.
 //! - [`calling`], [`genetics`] — candidate alleles, read likelihoods, genotype priors, the loop
 //!   that fits each site's allele frequencies, and site quality.
 //! - [`neighbour_evidence`], [`read_phase`] — refinement with the samples a sample shares stretches
@@ -84,6 +86,7 @@ pub mod alignment;
 pub mod bam;
 pub mod calling;
 pub mod cli;
+pub mod cohort_observation;
 pub mod error_render;
 pub mod fasta;
 pub mod float;
