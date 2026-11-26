@@ -564,24 +564,6 @@ pub enum JointFitError {
         second: String,
         field: &'static str,
     },
-    /// Samples whose read groups were identified separately, so two of them claim one read
-    /// group. **Refuses rather than merging**: the fit keys a sequencing-error rate on the read
-    /// group alone, so a cohort that merged sixty-three libraries into one would report one
-    /// rate and say nothing about the sixty-three.
-    ///
-    /// **Raised where the cohort is built, not here.**
-    /// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new) makes the check
-    /// before a single section is read, and a caller turns its refusal into this with `?`.
-    #[error(
-        "samples {first} and {second} both claim read group {read_group}; a read group belongs \
-         to one sample, so these censuses had their read groups minted separately and their \
-         libraries would be fitted as one"
-    )]
-    SharedReadGroup {
-        first: String,
-        second: String,
-        read_group: ReadGroupId,
-    },
     /// **Two samples declare one `@RG ID`**, which is unique across a whole run — so these
     /// censuses were not built from one cohort. Raised where the cohort is built.
     #[error(
@@ -976,11 +958,6 @@ impl From<CohortRefusal> for JointFitError {
                 first: refusal.first,
                 second: refusal.second,
                 field: refusal.field,
-            },
-            CohortRefusal::SharedReadGroup(refusal) => Self::SharedReadGroup {
-                first: refusal.first,
-                second: refusal.second,
-                read_group: refusal.read_group,
             },
             CohortRefusal::SharedDeclaredId(refusal) => Self::SharedDeclaredId {
                 first: refusal.first,

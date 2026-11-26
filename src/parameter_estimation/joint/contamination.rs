@@ -2320,8 +2320,8 @@ mod tests {
             .map(|s| {
                 // **Plant `s`'s library `k` is a read group of its own**, because a library is
                 // one plant's DNA preparation and no two plants ever share one. So the panel's
-                // identifiers run `s * libraries + k` and the cohort's door — which refuses two
-                // samples that claim one read group — has nothing to catch here.
+                // identifiers run `s * libraries + k`, one per library, as a run-wide
+                // numbering would give them.
                 let held = (0..libraries.len())
                     .map(|k| {
                         let here = slot(s, k);
