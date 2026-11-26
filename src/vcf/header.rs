@@ -13,6 +13,7 @@
 //! *run* someone can fix, so it is a `Result`, which is what production's header builder does
 //! for the same reason ([`src/vcf/header.rs`](../../../vcf/header.rs)).
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use thiserror::Error;
@@ -644,6 +645,28 @@ const FORMAT_DECLARATIONS: &[&str] = &[
     r#"##FORMAT=<ID=REPCNB,Number=.,Type=String,Description="STR bundle records only: each called allele's copies in every run, joined by _, GT order">"#,
 ];
 
+/// **A provenance value as it can sit on one header line**: each newline, carriage return and
+/// tab written as the two characters `\n`, `\r` and `\t`.
+///
+/// The command line and the paths are the user's text, and a path may hold any of the three. A
+/// newline left as it is would end the header line early, and the rest of the value would start
+/// a line without `##`, which makes the file invalid VCF. Any other value comes back unchanged.
+fn on_one_line(value: &str) -> Cow<'_, str> {
+    if !value.contains(['\n', '\r', '\t']) {
+        return Cow::Borrowed(value);
+    }
+    let mut escaped = String::with_capacity(value.len() + 8);
+    for character in value.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    Cow::Owned(escaped)
+}
+
 /// **The whole header, as the file's text**, ending with a newline so the first record follows
 /// directly.
 ///
@@ -688,7 +711,7 @@ pub fn header_text(metadata: &VcfHeaderMetadata, ploidy: Ploidy) -> String {
         ("pvcParameters", metadata.parameters_source().to_string()),
     ] {
         if !value.is_empty() {
-            lines.push(format!("##{key}={value}"));
+            lines.push(format!("##{key}={}", on_one_line(&value)));
         }
     }
 
@@ -1064,6 +1087,36 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         assert!(text.contains("##pvcLog=pvc_calls.log\n"));
         // And `##source` is derived, so it is always there.
         assert!(text.contains("##source=pvc "));
+    }
+
+    /// **A newline in the command line or a path cannot split a header line.** Every line of the
+    /// header must start with `#`; an argument or a path holding `\n`, `\r` or `\t` is written
+    /// with those as two-character escapes, and an ordinary value is written as it came.
+    #[test]
+    fn a_newline_in_a_provenance_value_stays_on_its_line() {
+        let metadata = VcfHeaderMetadata::try_new(
+            Vec::new(),
+            vec!["one".to_string()],
+            "pvc call --reference odd\nname.fa\r --out a\tb.vcf".to_string(),
+            "/genomes/odd\nname.fa".to_string(),
+            "pvc_calls.log".to_string(),
+            "defaults".to_string(),
+        )
+        .expect("a well-formed header");
+
+        let text = header_text(&metadata, Ploidy::try_new(2).expect("diploid"));
+        for line in text.lines() {
+            assert!(line.starts_with('#'), "a header line without '#': {line:?}");
+        }
+        assert!(
+            text.contains("##commandline=pvc call --reference odd\\nname.fa\\r --out a\\tb.vcf\n"),
+            "got {text}"
+        );
+        assert!(
+            text.contains("##reference=/genomes/odd\\nname.fa\n"),
+            "got {text}"
+        );
+        assert_eq!(on_one_line("/genomes/ref.fa"), "/genomes/ref.fa");
     }
 
     #[test]
