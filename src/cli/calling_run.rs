@@ -634,7 +634,7 @@ pub fn report_neighbour_evidence(finished: &FinishedVcf, vcf_path: &Path) {
         "neighbour-evidence pass: {} records re-called; {} genotypes called ({} of them where the \
          sample had no reads), {} left ./. where the sample had no reads, {} changed; {} alleles \
          and {} records dropped as no longer called; {} repeat counts unknown",
-        run_output::with_thousands(tally.sites),
+        run_output::with_thousands(tally.records_recalled),
         run_output::with_thousands(tally.called),
         run_output::with_thousands(tally.called_without_reads),
         run_output::with_thousands(tally.withheld),
