@@ -509,40 +509,54 @@ pub(crate) fn container_at(
     offset: u64,
     reference: &dyn SliceReference,
 ) -> io::Result<Option<Arc<DecodedContainer>>> {
-    let mut cache = shared.lock();
-    let claim = loop {
-        match cache.claim(offset) {
-            Some(claim) => break claim,
-            None => {
-                cache = shared
-                    .settled
-                    .wait(cache)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
-        }
-    };
-    drop(cache);
+    shared.held_or_decoded(offset, || {
+        decode_container_at(reader, header, resolution, offset, reference)
+    })
+}
 
-    match claim {
-        Claim::Ready(container) => Ok(Some(container)),
-        Claim::YoursToDecode => {
-            // **The lock is not held across the decode**, which is what the claim is for: a
-            // decode is milliseconds, and holding the lock through one would put the readers in
-            // a queue behind the prefetcher instead of letting them run past it.
-            let decoded = match decode_container_at(reader, header, resolution, offset, reference) {
-                Ok(Some(container)) => Some(Arc::new(container)),
-                Ok(None) => None,
-                Err(error) => {
-                    // Released before the error leaves, so no waiter is left promised a
-                    // container nobody is going to decode.
-                    shared.lock().finished(offset, None);
-                    shared.settled.notify_all();
-                    return Err(error);
+impl SharedContainers {
+    /// The container at `offset` if it is held, the one another thread is decoding if there is
+    /// one, and otherwise what `decode` makes of it — which is then held for the next asker.
+    fn held_or_decoded(
+        &self,
+        offset: u64,
+        decode: impl FnOnce() -> io::Result<Option<DecodedContainer>>,
+    ) -> io::Result<Option<Arc<DecodedContainer>>> {
+        let mut cache = self.lock();
+        let claim = loop {
+            match cache.claim(offset) {
+                Some(claim) => break claim,
+                None => {
+                    cache = self
+                        .settled
+                        .wait(cache)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
-            };
-            shared.lock().finished(offset, decoded.as_ref());
-            shared.settled.notify_all();
-            Ok(decoded)
+            }
+        };
+        drop(cache);
+
+        match claim {
+            Claim::Ready(container) => Ok(Some(container)),
+            Claim::YoursToDecode => {
+                // **The lock is not held across the decode**, which is what the claim is for: a
+                // decode is milliseconds, and holding the lock through one would put the readers
+                // in a queue behind the prefetcher instead of letting them run past it.
+                let decoded = match decode() {
+                    Ok(Some(container)) => Some(Arc::new(container)),
+                    Ok(None) => None,
+                    Err(error) => {
+                        // Released before the error leaves, so no waiter is left promised a
+                        // container nobody is going to decode.
+                        self.lock().finished(offset, None);
+                        self.settled.notify_all();
+                        return Err(error);
+                    }
+                };
+                self.lock().finished(offset, decoded.as_ref());
+                self.settled.notify_all();
+                Ok(decoded)
+            }
         }
     }
 }
