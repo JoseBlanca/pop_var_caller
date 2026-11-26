@@ -1,10 +1,6 @@
-//! Test fixtures for Group B tests of `alignment_input` — synthetic CRAM
-//! and FASTA files written to a tempdir, exercising the noodles
-//! writer and `AlignmentMergedReader::new`'s file-open / header-parsing
-//! path.
-//!
-//! See `ia/feature_implementation_plans/per_sample_caller_cram_input.md`
-//! §"Test-fixture helpers".
+//! Test fixtures: synthetic CRAM and FASTA files written to a tempdir with
+//! the noodles writer, for the tests of the read input, the reference
+//! readers and the commands that open alignment files.
 
 use std::fs::File;
 use std::io::{self, Write as IoWrite};
@@ -194,25 +190,4 @@ fn length_for(contig: &ContigSpec, overrides: &HeaderOverrides) -> u64 {
         .find(|(n, _)| n == &contig.name)
         .map(|(_, replacement)| *replacement)
         .unwrap_or(contig.length)
-}
-
-/// Write a 26-byte CRAM file definition with a non-3 major version.
-/// Enough to exercise `read_file_definition()` returning a 4.x tag —
-/// the rejection happens before any container is decoded, so we do
-/// not need a full file body.
-///
-/// CRAM file definition layout (per the CRAM 3.x spec, identical for
-/// 4.x): 4 magic bytes ("CRAM"), 1 major byte, 1 minor byte,
-/// 20-byte file ID. Total 26 bytes.
-pub(crate) fn build_cram_with_major_version(
-    major: u8,
-    minor: u8,
-) -> io::Result<(TempDir, PathBuf)> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("forced_version.cram");
-    let mut file = File::create(&path)?;
-    file.write_all(b"CRAM")?;
-    file.write_all(&[major, minor])?;
-    file.write_all(&[0u8; 20])?;
-    Ok((dir, path))
 }

@@ -18,10 +18,7 @@
 //! §2 "Index pre-flight".
 //!
 //! Both CRAM (`.cram` + `.crai`) and BAM (`.bam` + `.csi`/`.bai`)
-//! inputs are accepted. The classification + missing-index pass
-//! also rejects mixed `.cram` + `.bam` inputs in one invocation —
-//! the merge downstream wants one format per sample and the
-//! all-or-nothing rule keeps both code and error messages clean.
+//! inputs are accepted.
 //!
 //! `noodles_cram::fs::index` stream-walks the source file once to
 //! collect container offsets, so an index build costs roughly one
@@ -78,10 +75,9 @@ pub const CSI_DEPTH: u8 = 6;
 /// across rayon workers via the `Arc` payload.
 ///
 /// Drivers that need per-region random access call
-/// [`load_alignment_index`] once per input at startup, wrap the
-/// result in this enum, and build one pooled
-/// [`AlignmentFile`](crate::bam::segment_reader::AlignmentFile) per input
-/// from it (`run_pileup`). Each worker pays one `Arc::clone` to get its
+/// [`load_alignment_index`] once per input when it is opened
+/// (`crate::read::input`), wrap the result in this enum, and hold it for
+/// the life of the run. Each worker pays one `Arc::clone` to get its
 /// own handle on the already-parsed index; no per-worker disk reads or
 /// re-parsing.
 ///
@@ -98,19 +94,6 @@ pub enum AlignmentIndex {
     Crai(Arc<noodles_cram::crai::Index>),
     BamCsi(Arc<noodles_csi::Index>),
     BamBai(Arc<noodles_bam::bai::Index>),
-}
-
-impl AlignmentIndex {
-    /// User-facing name for an [`AlignmentIndex`] variant, used in
-    /// [`crate::bam::errors::AlignmentInputError::AlignmentIndexFormatMismatch`]
-    /// messages. Mirror of [`AlignmentFileKind::display_name`].
-    pub(crate) fn display_name(&self) -> &'static str {
-        match self {
-            Self::Crai(_) => "CRAI",
-            Self::BamCsi(_) => "CSI",
-            Self::BamBai(_) => "BAI",
-        }
-    }
 }
 
 /// Load an alignment index from disk. The expected location is the
@@ -195,38 +178,20 @@ pub fn load_alignment_index(input: &Path) -> Result<AlignmentIndex, AlignmentInd
 /// - [`AlignmentIndexError::UnsupportedExtension`] — an input's
 ///   extension is neither `.cram` nor `.bam`; we do not guess the
 ///   file format here.
-/// - [`AlignmentIndexError::MixedAlignmentFileFormats`] — the
-///   input list mixes `.cram` and `.bam` files. One format per
-///   invocation only; mixed-format support is an explicit
-///   non-goal in `doc/devel/implementation_plans/bam_input_support.md`.
 pub fn preflight_alignment_indexes(
     inputs: &[PathBuf],
     build_if_missing: bool,
 ) -> Result<(), AlignmentIndexError> {
-    // First pass: classify + find missing inputs + reject mixed
-    // formats. Done before any build so a `--build-map-file-index`
-    // run with one unbuildable input does not partially build the
-    // others before failing.
+    // First pass: classify + find missing inputs. Done before any
+    // build so a `--build-map-file-index` run with one unbuildable
+    // input does not partially build the others before failing.
     let mut missing: Vec<(usize, AlignmentFileKind)> = Vec::new();
-    let mut first_seen: Option<(usize, AlignmentFileKind)> = None;
     for (idx, input) in inputs.iter().enumerate() {
         let kind = AlignmentFileKind::from_path(input).ok_or_else(|| {
             AlignmentIndexError::UnsupportedExtension {
                 path: input.clone(),
             }
         })?;
-        match first_seen {
-            None => first_seen = Some((idx, kind)),
-            Some((first_idx, first_kind)) if first_kind != kind => {
-                return Err(AlignmentIndexError::MixedAlignmentFileFormats {
-                    first_path: inputs[first_idx].clone(),
-                    first_format: first_kind.display_name(),
-                    other_path: input.clone(),
-                    other_format: kind.display_name(),
-                });
-            }
-            Some(_) => {}
-        }
         if existing_index_for(input, kind).is_none() {
             missing.push((idx, kind));
         }
@@ -271,10 +236,9 @@ pub fn preflight_alignment_indexes(
 /// extension only. We do not sniff the file's magic bytes — an
 /// explicit extension is required.
 ///
-/// `pub(crate)` so
-/// [`crate::bam::alignment_input::load_pileup_inputs`] can use the same
-/// classifier when dispatching per-input header reads (avoids two
-/// different "which format is this path" rules drifting apart).
+/// `pub(crate)` so the reader (`crate::read::input`) dispatches on the
+/// same rule rather than a second "which format is this path" test
+/// that could drift from this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AlignmentFileKind {
     Cram,
@@ -287,17 +251,6 @@ impl AlignmentFileKind {
             Some("cram") => Some(Self::Cram),
             Some("bam") => Some(Self::Bam),
             _ => None,
-        }
-    }
-
-    /// User-facing format name embedded in error messages. Same
-    /// strings appear in [`AlignmentIndexError`] /
-    /// [`crate::bam::errors::AlignmentInputError`] mixed-format
-    /// messages.
-    pub(crate) fn display_name(self) -> &'static str {
-        match self {
-            Self::Cram => "CRAM",
-            Self::Bam => "BAM",
         }
     }
 }
@@ -432,19 +385,12 @@ fn build_csi_for_bam(bam_path: &Path) -> std::io::Result<()> {
     )
 }
 
-/// Walk `reader` once and add a chunk per record to `indexer`.
-/// Shared body between [`build_csi_for_bam`] (production CSI
-/// build) and `crate::bam::bam_input::tests::build_bai_in_memory`
-/// (test fixture, LinearIndex parameterisation for `.bai`). Same
-/// chunk_start / chunk_end / alignment-context shape across the
-/// two callers; the indexer's type parameter is the only thing
-/// that differs.
+/// Walk `reader` once and add a chunk per record to `indexer`: the body
+/// of [`build_csi_for_bam`], generic over the indexer so a `.bai`
+/// (linear-index) build could reuse it.
 ///
 /// Integration-test fixtures in `tests/common/mod.rs` carry their
-/// own copy because the test crate is outside `crate::bam` and
-/// cannot reach `pub(crate)` items. Reducing the production +
-/// in-crate-test duplication to one helper is the achievable
-/// part of the Mi9 cleanup; the integration-test copy stays.
+/// own copy because the test crate cannot reach `pub(crate)` items.
 ///
 /// # Errors
 ///
@@ -811,67 +757,6 @@ mod tests {
                 // points the user at the file the build would
                 // create.
                 assert_eq!(expected_index_path, dir.path().join("sample.bam.csi"));
-            }
-            other => panic!("unexpected error variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn preflight_errors_on_mixed_cram_and_bam() {
-        let dir = TempDir::new().expect("tempdir");
-        let cram = dir.path().join("first.cram");
-        let bam = dir.path().join("second.bam");
-        // Touch all four to keep the test focused on the
-        // mixed-format check (no missing-index noise).
-        touch(&cram);
-        touch(&dir.path().join("first.cram.crai"));
-        touch(&bam);
-        touch(&dir.path().join("second.bam.csi"));
-
-        let err = preflight_alignment_indexes(&[cram.clone(), bam.clone()], false)
-            .expect_err("preflight should reject mixed cram + bam");
-        match err {
-            AlignmentIndexError::MixedAlignmentFileFormats {
-                first_path,
-                first_format,
-                other_path,
-                other_format,
-            } => {
-                assert_eq!(first_path, cram);
-                assert_eq!(first_format, "CRAM");
-                assert_eq!(other_path, bam);
-                assert_eq!(other_format, "BAM");
-            }
-            other => panic!("unexpected error variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn preflight_rejects_bam_first_then_cram_too() {
-        // Reverse the input order to confirm the check is
-        // order-independent (and that the first-seen rule fires
-        // on whichever format appears first).
-        let dir = TempDir::new().expect("tempdir");
-        let bam = dir.path().join("first.bam");
-        let cram = dir.path().join("second.cram");
-        touch(&bam);
-        touch(&dir.path().join("first.bam.csi"));
-        touch(&cram);
-        touch(&dir.path().join("second.cram.crai"));
-
-        let err = preflight_alignment_indexes(&[bam.clone(), cram.clone()], false)
-            .expect_err("preflight should reject mixed bam + cram");
-        match err {
-            AlignmentIndexError::MixedAlignmentFileFormats {
-                first_path,
-                first_format,
-                other_path,
-                other_format,
-            } => {
-                assert_eq!(first_path, bam);
-                assert_eq!(first_format, "BAM");
-                assert_eq!(other_path, cram);
-                assert_eq!(other_format, "CRAM");
             }
             other => panic!("unexpected error variant: {other:?}"),
         }

@@ -27,8 +27,9 @@
 //!
 //! The decode is a copy of production's assembly, **not** of its logic:
 //! `compute_adaptor_boundary` and `cigar_to_ops` stay production's and are
-//! called from here. Field-for-field parity against production's decode of the
-//! same record is a test in this module.
+//! called from here. Production's decode itself (`record_buf_to_mapped_read`)
+//! was deleted with the reader stack it served; this module's tests keep it as
+//! the reference that [`decode_record`] is compared against field by field.
 //!
 //! Design: `doc/devel/ng/spec/read_groups.md` §8,
 //! `doc/devel/ng/arch/read_groups.md` §1.4.
@@ -318,8 +319,7 @@ impl AlignedRead {
 mod tests {
     use super::*;
     use crate::bam::alignment_input::{
-        FLAG_DUPLICATE, FLAG_MATE_REVERSE_STRAND, FLAG_PAIRED, FLAG_REVERSE_STRAND,
-        record_buf_to_mapped_read,
+        FLAG_DUPLICATE, FLAG_MATE_REVERSE_STRAND, FLAG_PAIRED, FLAG_REVERSE_STRAND, MappedRead,
     };
     use crate::read::input::test_fixtures::{read_named, read_named_with_length};
 
@@ -328,6 +328,70 @@ mod tests {
     use noodles_sam::alignment::record::cigar::op::Kind;
     use noodles_sam::alignment::record::{Flags, MappingQuality};
     use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+    /// Production's decode, frozen as the parity test's reference.
+    ///
+    /// It was `bam::alignment_input::record_buf_to_mapped_read`, whose only other
+    /// callers were in the reader stack deleted on 2026-11-26. Kept here verbatim
+    /// so [`decode_record`] is still checked against an independent assembly of
+    /// the same fields rather than against itself.
+    fn record_buf_to_mapped_read(
+        rb: &RecordBuf,
+        source_file_index: usize,
+    ) -> io::Result<MappedRead> {
+        let qname = rb
+            .name()
+            .map(|n| AsRef::<[u8]>::as_ref(n).to_vec())
+            .unwrap_or_default();
+        let flag = rb.flags().bits();
+        let ref_id = rb.reference_sequence_id().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record has no reference_sequence_id",
+            )
+        })?;
+        let pos = rb
+            .alignment_start()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "record has no alignment_start")
+            })?
+            .get() as u64;
+        let mapq = rb.mapping_quality().map(u8::from).unwrap_or(0);
+        let cigar = cigar_to_ops(rb.cigar());
+        let seq: Vec<u8> = rb
+            .sequence()
+            .as_ref()
+            .iter()
+            .map(|b| b.to_ascii_uppercase())
+            .collect();
+        let qual = rb.quality_scores().as_ref().to_vec();
+        let mate_ref_id = rb.mate_reference_sequence_id();
+        let mate_pos = rb.mate_alignment_start().map(|p| p.get() as u64);
+        let template_length = rb.template_length();
+        let adaptor_boundary = compute_adaptor_boundary(
+            flag,
+            ref_id,
+            pos,
+            seq.len() as u32,
+            mate_ref_id,
+            mate_pos,
+            template_length,
+        );
+        Ok(MappedRead {
+            qname,
+            flag,
+            ref_id,
+            pos,
+            mapq,
+            cigar,
+            seq,
+            qual,
+            mate_ref_id,
+            mate_pos,
+            adaptor_boundary,
+            source_file_index,
+        })
+    }
 
     /// A read whose mate makes `compute_adaptor_boundary` return `Some`.
     ///

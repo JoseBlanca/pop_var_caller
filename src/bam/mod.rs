@@ -1,57 +1,25 @@
-//! Mapped-read file input — BAM and CRAM.
+//! Mapped-read file input — BAM and CRAM: the shared read vocabulary and the index check.
 //!
-//! Named `bam/` (not `cram/`) because BAM is the more common name for
-//! mapped-read files. The module hosts the format-agnostic header-
-//! validation + per-read filter surface (in [`alignment_input`]) plus
-//! two per-format open helpers ([`cram_input`] and [`bam_input`]); the
-//! actual per-segment read fetch lives in [`segment_reader`] /
-//! [`segment_merge`].
+//! The reader itself is [`crate::read::input`]. What stays here is what it and the rest of the
+//! crate share:
 //!
-//! - [`alignment_input`] — validates a list of coordinate-sorted
-//!   alignment files for one sample (their `@SQ` headers against each
-//!   other, a single sample name, coordinate sort order) via
-//!   `alignment_input::load_pileup_inputs`, and owns the
-//!   format-agnostic per-read filter cascade
-//!   ([`alignment_input::AlignmentMergedReaderConfig`]) plus the shared
-//!   `RecordBuf` → [`alignment_input::MappedRead`] conversion the
-//!   segment readers feed through.
-//! - [`errors`] — typed I/O errors raised by the alignment-file
-//!   readers. Reused downstream by the BAQ stream and the cohort
-//!   CLI's error bridge, which is why they live here at the
-//!   module root rather than inside `alignment_input`.
-//! - [`index_preflight`] — `.crai` / `.bai` / `.csi` detection +
-//!   opt-in auto-build for callers that need per-contig random
-//!   access (e.g. the per-chromosome parallel `var-calling-from-bam`
-//!   driver).
+//! - [`alignment_input`] — the vocabulary a decoded read is spelled in: [`CigarOp`]
+//!   (used crate-wide), the SAM `FLAG_*` bits, the read filters' `DEFAULT_*` thresholds,
+//!   [`MappedRead`], and the per-read helpers the filters and the decoder share.
+//! - [`errors`] — [`errors::AlignmentIndexError`], raised by the index check.
+//! - [`index_preflight`] — `.crai` / `.bai` / `.csi` detection and opt-in building, for the
+//!   commands that need per-contig random access.
 //!
-//! The walk's input starts here: a [`MappedRead`](alignment_input::MappedRead) becomes ng's
-//! [`PreparedRead`](crate::read::PreparedRead) in read preparation. CIGAR ops are
-//! [`CigarOp`](alignment_input::CigarOp), defined here and used crate-wide.
+//! A decoded read becomes a [`MappedRead`] and then ng's
+//! [`PreparedRead`](crate::read::PreparedRead) in read preparation.
+//!
+//! [`CigarOp`]: alignment_input::CigarOp
+//! [`MappedRead`]: alignment_input::MappedRead
 
 pub mod alignment_input;
-// `bam_input` and `cram_input` are the per-format record-stream
-// decoders. They expose only `pub(super)` items consumed by
-// `alignment_input`; no caller outside `crate::bam` references
-// them. `pub(crate)` keeps the path scope honest.
-pub(crate) mod bam_input;
-pub(crate) mod cram_input;
-// Test fixtures: synthetic FASTA and CRAM files written to a tempdir. Used by this module's
-// tests, `fasta`'s, and ng's; it lived in `pileup::per_sample` until promotion step C16.
+// Test fixtures: synthetic FASTA and CRAM files written to a tempdir. Used by the read input's
+// tests, `fasta`'s and the commands'.
 #[cfg(test)]
 pub(crate) mod cram_files;
 pub mod errors;
 pub mod index_preflight;
-// Test fixtures: synthetic `RecordBuf`s from minimal field specs, for `alignment_input`'s tests;
-// it lived in `pileup::per_sample` until promotion Milestone D deleted that module.
-#[cfg(test)]
-pub(crate) mod record_specs;
-// The shared indexed-segment read source: pooled, thread-safe
-// per-segment read queries over one BAM/CRAM. Reuses the per-format
-// scanners' decode helpers; adds reader ownership + a pool. Consumed
-// by the SSR Stage-1 fetcher (and, later, the SNP `--regions` path).
-pub(crate) mod segment_reader;
-// The multi-file coordinate merge over `segment_reader` — one sample's
-// per-file segment streams k-way-merged into the coordinate-sorted stream
-// the pileup walker consumes. Increment #5 (SNP `--regions` retrofit); no
-// production consumer until `run_pileup` is flipped onto it.
-pub(crate) mod segment_merge;
