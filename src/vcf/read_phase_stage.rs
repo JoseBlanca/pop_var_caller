@@ -12,10 +12,10 @@
 //! Eligible records without such a fragment are skipped, not treated as gaps.
 //!
 //! **Blocks.** A sample's phaseable records are walked left to right, and each is linked to the
-//! one before it when the reads' log-odds reaches [`LINK_MIN`](super::link::LINK_MIN) either way. Before it joins, it is
+//! one before it when the reads' log-odds reaches [`LINK_MIN`](crate::read_phase::link::LINK_MIN) either way. Before it joins, it is
 //! tested against every earlier record of the block within [`READ_REACH`] — a pair whose mates
 //! cover records 1 and 3, with 2 in the gap between them, links 1 and 3 but is never counted for
-//! 1–2 or 2–3 — and a contradiction at [`BREAK_MIN`](super::link::BREAK_MIN) ends the block
+//! 1–2 or 2–3 — and a contradiction at [`BREAK_MIN`](crate::read_phase::link::BREAK_MIN) ends the block
 //! instead. A block of one record
 //! is written unphased. `PS` is the `POS` of the block's first record, which is written `a|b` with
 //! its lower allele on copy 0.
@@ -30,11 +30,11 @@ use std::fmt::Write as _;
 
 use ahash::AHashMap;
 
-use super::fragments::{FragmentAllele, READ_REACH, RecordFragments};
-use super::link::{GQ_MIN, Heterozygote, Relation, score_read_link};
+use super::RecordPlace;
+use super::line_fields::{LineFields, parse_genotype};
+use crate::read_phase::fragments::{FragmentAllele, READ_REACH, RecordFragments};
+use crate::read_phase::link::{GQ_MIN, Heterozygote, Relation, score_read_link};
 use crate::types::ContigId;
-use crate::vcf::RecordPlace;
-use crate::vcf::line_fields::{LineFields, parse_genotype};
 
 /// What the stage did, for the run's report.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +134,7 @@ enum Join {
     RefusedByAnEarlierRecord,
     /// No open block, no record of it within reach, or no link at [`LINK_MIN`]: the block ends.
     ///
-    /// [`LINK_MIN`]: super::link::LINK_MIN
+    /// [`LINK_MIN`]: crate::read_phase::link::LINK_MIN
     NoLink,
 }
 

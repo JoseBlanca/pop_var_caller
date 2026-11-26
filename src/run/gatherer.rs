@@ -56,6 +56,7 @@ use crate::repeat_catalog::{RepeatCatalog, StrRepeatCriteria};
 use crate::run::psp_writer_line::{PspTrailer, PspWriterLine};
 use crate::types::{Bp, ContigId, ReadGroupId};
 
+use super::read_filter_provenance::read_filter_parameters;
 use super::walker::{WalkReference, generic_path_generators};
 use super::{RunError, RunSegments, Segmentation, WalkProgress};
 
@@ -396,7 +397,7 @@ impl SampleObservationGatherer {
     /// subcommand, the command line, when the run started. The gatherer overwrites what it
     /// knows better: the input basenames from the files it actually opens, and the read
     /// filters recorded as provenance parameters
-    /// ([`ReadFilterConfig::provenance_parameters`]).
+    /// ([`read_filter_parameters`]).
     ///
     /// # Defaults
     ///
@@ -658,7 +659,7 @@ fn header_for(
         })
         .collect();
     provenance.input_reference = reference_basename.clone();
-    provenance.record_parameters(inputs.read_filters.provenance_parameters());
+    provenance.record_parameters(read_filter_parameters(&inputs.read_filters));
     // **The read cap the file was written under**, so a run reading it can tell whether its own
     // cap is tighter and has to be applied again as the records are decoded.
     provenance.record_parameters([(

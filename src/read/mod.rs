@@ -38,16 +38,13 @@ pub mod prepared_read;
 mod reference_free_first_filter;
 
 pub use aligned_read::AlignedRead;
-#[cfg(test)]
-pub use filtering::READ_FILTER_PROVENANCE_KEYS;
-pub use filtering::{READ_FILTER_PROVENANCE_PREFIX, ReadFilterConfig};
+pub use filtering::ReadFilterConfig;
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
 // **`ReadFilterConfig` is the only one of step 1's *types* re-exported here, because it is
 // the only one anything outside the crate names** — four `examples/` build one to drive a
-// walk. `READ_FILTER_PROVENANCE_KEYS` rides beside it since A4: it names the header keys
-// `ReadFilterConfig::provenance_parameters` can write, and a caller re-recording a policy
-// clears the family by this list.
+// walk. How a policy is recorded in a psp header lives in `run::read_filter_provenance`,
+// beside the walk that writes it and the calling stage that reads it back.
 // `ReadFilter`, `RecordSource`, `ReadFilterError`, `RawAlignedRead` and `NoodlesRawAlignedRead`
 // were re-exported too and had no caller outside this crate at all; the first two are deleted
 // outright and the rest are named by their defining path. `ReadFilterCounts` stays `pub`: it is

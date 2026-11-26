@@ -44,6 +44,7 @@ pub mod psp_caller;
 pub mod psp_prefetch;
 pub mod psp_source;
 pub mod psp_writer_line;
+pub mod read_filter_provenance;
 pub mod records;
 pub mod report;
 pub mod segments;

@@ -14,11 +14,12 @@
 //!   fragments by the fragment keeper on the ordered thread (`run::fragment_keeper`, §2.4).
 //! - [`link`] — what the fragments say about one link between two heterozygous records: its
 //!   log-odds, and the thresholds both phase writers judge it by (§2.5).
-//! - [`stage`] — the writer's stage that phases from reads alone where refinement does not run
-//!   (§2.6).
+//!
+//! The writer's stage that phases from reads alone where refinement does not run (§2.6) uses these
+//! and lives in [`crate::vcf::read_phase_stage`], beside the VCF line format it parses and
+//! rewrites; this module imports nothing from `vcf`.
 
 pub mod capture;
 pub mod fragments;
 pub mod link;
 pub mod record_reads;
-pub mod stage;

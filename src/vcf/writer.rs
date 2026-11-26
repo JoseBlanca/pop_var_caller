@@ -33,12 +33,12 @@ use thiserror::Error;
 use super::VcfRecord;
 use super::encode::record_line;
 use super::header::{VcfHeaderMetadata, header_text, writes_phase_from_reads_alone};
+use super::read_phase_stage::{ReadPhaseStage, ReadPhaseTally};
 use crate::neighbour_evidence::line::RewriteTally;
 use crate::neighbour_evidence::phase::PassReadCounts;
 use crate::neighbour_evidence::refine::FillCheck;
 use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
 use crate::read_phase::fragments::RecordFragments;
-use crate::read_phase::stage::{ReadPhaseStage, ReadPhaseTally};
 use crate::types::{GenomePosition, Ploidy, Position};
 
 /// The 28-byte empty-block marker every well-formed bgzf file ends with.
