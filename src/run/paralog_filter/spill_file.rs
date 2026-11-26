@@ -54,9 +54,9 @@ const BUFFER_BYTES: usize = 64 * 1024;
 ///
 /// One of these exists for one run. Pass one appends to it; [`Self::finish_writing`] flushes it;
 /// passes two and three each open their own cursor over it with [`Self::read`]. Dropping one
-/// named with [`Self::beside`] unlinks the file; one named with [`Self::in_directory`] is left to
-/// the run's scratch directory, which removes it or, after a failed run with
-/// `--keep-tmp-on-error`, keeps it.
+/// named with `Self::beside` (a constructor only tests use) unlinks the file; one named with
+/// [`Self::in_directory`] is left to the run's scratch directory, which removes it or, after a
+/// failed run with `--keep-tmp-on-error`, keeps it.
 ///
 /// The name follows the convention the VCF writer already uses for `<output>.tmp`: beside the
 /// output rather than in a scratch directory anywhere else, so that the spill lands on the

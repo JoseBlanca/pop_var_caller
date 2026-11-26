@@ -990,3 +990,32 @@ fn generic_path_only_psps_fit_to_an_empty_stutter_section_without_a_catalog() {
         "the refusal says why: {chain}"
     );
 }
+
+/// **A file its own reader refuses comes back as `RefusedByItsOwnReader`**, carrying the
+/// validator's refusal as its source, and a file the reader accepts comes back unchanged.
+///
+/// The wrapping is what tells a person the refusal is a bug in this build and not something they
+/// typed. A format version of zero is refused by every build, so it stands in for any mismatch
+/// between the writer and the validator.
+#[test]
+fn a_file_its_own_reader_refuses_is_refused_as_such() {
+    use crate::calling::parameters_file::ParametersFileError;
+    use crate::calling::parameters_file::tests::a_file_using_every_shape;
+
+    let accepted = a_file_using_every_shape();
+    assert_eq!(
+        a_file_the_next_run_can_read(accepted.clone()).expect("the fixture is a usable file"),
+        accepted
+    );
+
+    let mut refused = a_file_using_every_shape();
+    refused.format_version = 0;
+    let error = a_file_the_next_run_can_read(refused).expect_err("version 0 is refused");
+    let EstimateParametersCliError::RefusedByItsOwnReader { source } = &error else {
+        panic!("refused as a file its own reader refuses, not as {error:?}");
+    };
+    assert!(
+        matches!(**source, ParametersFileError::Meaningless { ref field, .. } if field == "format_version"),
+        "the validator's refusal names the field: {source}"
+    );
+}

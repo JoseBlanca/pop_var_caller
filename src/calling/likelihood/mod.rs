@@ -126,7 +126,6 @@
 //! a per-locus loop is for.
 
 pub mod generic;
-pub mod run_context;
 pub mod ssr;
 pub mod ssr_emission;
 pub mod stutter_rates;

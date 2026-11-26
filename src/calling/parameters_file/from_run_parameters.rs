@@ -535,7 +535,7 @@ impl ParametersFile {
 /// **`[misread_after_runs]` from what the run scores under** — `None` where the run holds no
 /// read group's table, so a file written under the defaults says nothing and reads back the same.
 fn misread_after_runs_of(run: &RunParameters) -> Option<MisreadAfterRuns> {
-    use crate::calling::likelihood::run_context::{DistanceAfterRun, RunEntry};
+    use crate::misread_context::{DistanceAfterRun, RunEntry};
     if run.misread_after_runs().is_empty() {
         return None;
     }

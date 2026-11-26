@@ -67,8 +67,8 @@ use super::{
     ParametersFileError, RepeatTracts, ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome,
     Warrant, WarrantedValue, between_locus_share_of, concentration_error_of,
 };
-use crate::calling::likelihood::run_context::RunEntry;
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
+use crate::misread_context::RunEntry;
 use crate::parameter_estimation::joint::stratum_fits::{
     STATED_FLAT_CONCENTRATION, STATED_OWN_SHARES_CONCENTRATION,
 };
@@ -139,7 +139,7 @@ impl ParametersFile {
     /// no read is counted and both rates are 0, so their binomial error is exactly 0; refusing it
     /// would refuse the fit's own output.
     fn the_misread_table_holds_one_row_an_entry(&self) -> Result<(), ParametersFileError> {
-        use crate::calling::likelihood::run_context::ENTRY_COUNT;
+        use crate::misread_context::ENTRY_COUNT;
         let Some(misread) = &self.misread_after_runs else {
             return Ok(());
         };

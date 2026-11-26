@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 
 use crate::memory_limit::MemoryLimit;
 use crate::neighbour_evidence::windows::{NEAR_MARGIN_BASES, WindowSizes};
+use crate::progress_text::with_thousands;
 
 /// **The walks' working arrays, bytes a walked record a thread**: the templates' allele shares, the
 /// sample's likelihoods, posteriors and drawn paths. *Measured* 2026-11-25 at 1.04 to 1.07 kB on the
@@ -402,19 +403,6 @@ fn threads_that_fit(estimate: PeakEstimate, limit: u64) -> Option<u64> {
     (1..estimate.walking_threads)
         .rev()
         .find(|&threads| fits(threads))
-}
-
-/// A count with its thousands marked: `189,240`.
-fn with_thousands(number: u64) -> String {
-    let digits = number.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
 }
 
 /// Bytes as a person reads them here: `92.2 GB`.

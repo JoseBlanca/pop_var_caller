@@ -1035,12 +1035,12 @@ impl StoredSample {
     /// The read filters a psp's header recorded, and nothing else out of its provenance.
     ///
     /// **Every key the filters spell with their own prefix, not a fixed list.** The fixed list
-    /// exists — [`READ_FILTER_PROVENANCE_KEYS`], which the filters' own tests hold every key
-    /// against — and taking it would drop a key a *later* ng recorded and this build does not
-    /// know, so two files written months apart under different policies would compare equal on
-    /// the difference that matters. Matching the prefix keeps the unknown key in the
-    /// comparison, where it shows up as a setting one file records and the other does not,
-    /// which is the truth.
+    /// exists — `run::read_filter_provenance::READ_FILTER_PROVENANCE_KEYS`, built for tests
+    /// only, which the filters' own tests hold every key against — and taking it would drop a
+    /// key a *later* ng recorded and this build does not know, so two files written months apart
+    /// under different policies would compare equal on the difference that matters. Matching the
+    /// prefix keeps the unknown key in the comparison, where it shows up as a setting one file
+    /// records and the other does not, which is the truth.
     fn read_filters_of(header: &Header) -> BTreeMap<String, ParameterValue> {
         header
             .writer

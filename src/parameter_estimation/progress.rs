@@ -1,7 +1,7 @@
 //! **Where parameter estimation has got to**, stated as `tracing` events
-//! ([`crate::cli::run_output`]): a stage's start and its milestones go to the terminal and the
-//! log, the once-a-minute updates are a progress line drawn in place, and the details are the
-//! log's alone.
+//! ([`crate::cli::run_output`] draws them): a stage's start and its milestones go to the terminal
+//! and the log, the once-a-minute updates are a progress line drawn in place, and the details are
+//! the log's alone.
 //!
 //! Estimating a whole-genome cohort's parameters takes hours and writes nothing until the
 //! parameters file at the end, so a person watching it cannot tell a long fit from a hung one.
@@ -22,7 +22,12 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::cli::run_output::PROGRESS;
+use crate::progress_text::{PROGRESS, kibibytes_in_status};
+/// The size and duration styles estimation's lines print, under the names its stages call them
+/// by. Durations go below a second here (`350ms`), unlike a run's closing lines.
+pub(crate) use crate::progress_text::{
+    elapsed_text_to_the_millisecond as duration, size_in_bytes as size,
+};
 
 /// The shortest time between two "where it is" lines of one stage.
 const BETWEEN_LINES: Duration = Duration::from_secs(60);
@@ -98,18 +103,7 @@ fn memory() -> String {
 /// [`memory`] as read from the text of `/proc/self/status`: the suffix when both `VmRSS` and
 /// `VmHWM` are there, nothing otherwise.
 fn memory_in_status(status: &str) -> String {
-    let field = |name: &str| {
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|rest| {
-                rest.trim()
-                    .trim_end_matches("kB")
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-            })
-    };
+    let field = |name: &str| kibibytes_in_status(status, name);
     match (field("VmRSS:"), field("VmHWM:")) {
         (Some(now), Some(most)) => format!(
             "; memory {}, at most {} so far",
@@ -132,58 +126,14 @@ pub(crate) fn detail(line: impl std::fmt::Display) {
     tracing::debug!("estimating: {line}");
 }
 
-/// A size in bytes as the progress lines print it: whole mebibytes below one gibibyte, where one
-/// decimal of a gibibyte would read `0.0` for a cohort of a few hundred samples, and gibibytes to
-/// one decimal above.
-pub(crate) fn size(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    const GIB: f64 = 1024.0 * MIB;
-    let bytes = bytes as f64;
-    if bytes < GIB {
-        format!("{:.0} MiB", bytes / MIB)
-    } else {
-        format!("{:.1} GiB", bytes / GIB)
-    }
-}
-
 /// Kibibytes as gibibytes to one decimal.
 pub(crate) fn gibibytes(kibibytes: u64) -> String {
     format!("{:.1} GiB", kibibytes as f64 / (1024.0 * 1024.0))
 }
 
-/// A duration as `1h12m`, `12m05s`, `42s` or `350ms`.
-pub(crate) fn duration(took: Duration) -> String {
-    let seconds = took.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else if seconds > 0 {
-        format!("{seconds}s")
-    } else {
-        format!("{}ms", took.as_millis())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Whole mebibytes below a gibibyte, gibibytes to one decimal above.
-    #[test]
-    fn a_size_reads_in_mebibytes_below_a_gibibyte() {
-        assert_eq!(size(364_000_000), "347 MiB");
-        assert_eq!(size(7_895_160_000), "7.4 GiB");
-    }
-
-    #[test]
-    fn durations_are_read_at_the_largest_unit() {
-        assert_eq!(duration(Duration::from_millis(350)), "350ms");
-        assert_eq!(duration(Duration::from_secs(42)), "42s");
-        assert_eq!(duration(Duration::from_secs(12 * 60 + 5)), "12m05s");
-        assert_eq!(duration(Duration::from_secs(3600 + 12 * 60 + 59)), "1h12m");
-    }
 
     /// **The memory suffix reads `VmRSS` and `VmHWM` from the status text**, in gibibytes, and is
     /// empty when either is missing.
