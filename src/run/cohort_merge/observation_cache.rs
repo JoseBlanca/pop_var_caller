@@ -1122,7 +1122,11 @@ impl<S> ObservationCache<S> {
     /// members would be built from another record's body. This is what such a driver adds to
     /// the index.
     ///
+    /// **Only the round driver, a test reference, reads it**; the streaming driver reads the
+    /// same prefix off its sealed round ([`RoundView`]).
+    ///
     /// PROTOTYPE (2026-09-09 concurrency review).
+    #[cfg(test)]
     pub(super) fn window_starts_into(&self, span: GenomeRegion, into: &mut Vec<usize>) {
         let left_edge = GenomePosition {
             contig: span.contig,

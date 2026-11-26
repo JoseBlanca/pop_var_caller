@@ -2,9 +2,9 @@
 //! regions are still being built, and a thread that finishes a region takes the next one, whichever
 //! round it belongs to (`spec/cohort_merge_overlapping_rounds.md`).
 //!
-//! [`super::rounds::merge_and_call_in_rounds`] reads a round's ground, builds its regions on the
-//! pool, and waits for the slowest before reading the next: while it reads, no region is built, and
-//! while the slowest region finishes, the other threads wait. Here each round's records are sealed
+//! The round driver (`rounds::merge_and_call_in_rounds`, compiled for tests only) reads a round's
+//! ground, builds its regions on the pool, and waits for the slowest before reading the next: while
+//! it reads, no region is built, and while the slowest region finishes, the other threads wait. Here each round's records are sealed
 //! once read ([`ObservationCache::seal_round`]), so its regions read the seal and not the cache, and
 //! the cache is free to read on.
 //!
@@ -126,7 +126,8 @@ struct Round<T, E> {
 }
 
 /// Merge and call the cohort over `analysed` with no barrier between rounds — the arguments, the
-/// result and the order of what reaches `take` are [`super::rounds::merge_and_call_in_rounds`]'s.
+/// result and the order of what reaches `take` are the round driver's
+/// (`rounds::merge_and_call_in_rounds`, the tests' reference).
 ///
 /// # Errors
 ///

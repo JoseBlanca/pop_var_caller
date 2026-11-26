@@ -39,7 +39,9 @@ pub mod close;
 mod frontier;
 pub mod observation_cache;
 pub mod recorded_windows;
-pub mod rounds;
+/// The round driver, kept as the streaming driver's test reference: no run uses it.
+#[cfg(test)]
+mod rounds;
 pub mod serial;
 pub mod stream;
 

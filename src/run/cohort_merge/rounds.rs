@@ -1,9 +1,9 @@
 //! **A round of building regions, each region built *and called* on a worker**, with the
 //! results folded back in genome order.
 //!
-//! **No calling run uses this driver now; it is kept as the stream's reference.** Calling from
-//! stored files moved to [`super::stream`] on 2026-11-13, and calling from alignments merges one
-//! region at a time. The stream's tests compare what it hands over, and the error it ends with,
+//! **No calling run uses this driver now; it is kept as the stream's reference and compiled for
+//! tests only.** Calling from stored files moved to [`super::stream`] on 2026-11-13, and calling
+//! from alignments merges one region at a time. The stream's tests compare what it hands over, and the error it ends with,
 //! against this driver's, which is simpler to check by reading: a round is read, then built,
 //! then handed over, with nothing overlapping. Both hand their regions over through [`Frontier`].
 //!
