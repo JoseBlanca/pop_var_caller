@@ -1866,7 +1866,7 @@ pub struct StatedConstants {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
     use crate::parameter_estimation::joint::loci::ReferenceDigest;
@@ -1976,7 +1976,7 @@ mod tests {
     ///   in slippage group 0, and read group 2 sits in slippage group 1, so the map is not the
     ///   identity;
     /// - **one string needs escaping and one float needs full precision** (above).
-    pub(super) fn a_file_using_every_shape() -> ParametersFile {
+    pub(crate) fn a_file_using_every_shape() -> ParametersFile {
         ParametersFile {
             format_version: FORMAT_VERSION,
             ploidy: 2,
