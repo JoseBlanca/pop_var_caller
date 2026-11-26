@@ -26,13 +26,6 @@
 //! rather than around the calling loop because the eligible set is a function of the
 //! observations and the candidate table alone
 //! (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5).
-//!
-//! **Which is why a non-test build expects everything here to be dead.** The expectation rather
-//! than an `allow`, so that the first real caller — `select_ssr`, which the steps after this one
-//! build — turns the line below into a compile error and deletes it. Under `cfg(test)` nothing is
-//! exempted: the tests in this file are what exercise the ladder today, and they must keep
-//! failing when it is wrong.
-#![cfg_attr(not(test), expect(dead_code))]
 
 use super::summarise_alleles;
 use super::{
@@ -166,6 +159,7 @@ impl RepeatLadder {
     /// # Panics
     ///
     /// On a rung this ladder does not hold.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     #[inline]
     pub(super) fn table_indices_at(&self, rung: usize) -> &[u32] {
         let rung = self.rung_at(rung);
@@ -244,6 +238,7 @@ impl RepeatLadder {
     /// On an unbuilt ladder. The alternative is answering 0, which is a legal repeat count — a
     /// tract a deletion removed entirely — so a caller could not tell the two apart.
     #[inline]
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     pub(super) fn modal_repeat_count(&self) -> u32 {
         self.assert_built();
         self.modal_repeat_count
@@ -683,6 +678,13 @@ pub(super) fn promote_rungs_for_sample(
 /// length always has a rung and may have no reads. Promoting it would put forward a length the
 /// cohort never showed — and would gain nothing even if it did, since the reference sequence is
 /// admitted first and exempt from the bar regardless of whether its rung was promoted.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only tests call it; select_ssr calls rescue_occupied_neighbours_by"
+    )
+)]
 pub(super) fn rescue_occupied_neighbours(
     ladder: &RepeatLadder,
     ploidy: Ploidy,
