@@ -698,7 +698,7 @@ pub const MIN_CONTAMINANT_FREQUENCY: f64 = 1e-12;
 /// are a property of the locus, so they are summed once per locus per iteration; the frequency a
 /// given sample's contaminant is drawn against leaves that sample's own copies out, so it is a
 /// property of `(locus, sample)` and is filled by
-/// [`fill_contaminant_allele_frequencies`] below. This is the same split the genotype prior
+/// [`fill_shared_contaminant_allele_frequencies`] and [`fill_own_batch_contaminant_row`] below. This is the same split the genotype prior
 /// makes between the cohort's copies and the leave-one-out concentration it hands each sample.
 ///
 /// `expected_copies_by_sample` is sample-major, `allele_count` to a sample, in the run's sample
@@ -779,6 +779,11 @@ pub fn fill_batch_allele_copies(
 /// Fill one sample's contaminant allele frequencies, per sequencing batch — spec §3.6's `q(o)`,
 /// **with this sample's own copies left out of its own batch**.
 ///
+/// **Test-only: the all-in-one version of the pair the calling loop runs.** The loop fills the
+/// rows every sample shares once a pass ([`fill_shared_contaminant_allele_frequencies`]) and
+/// each sample's own batch row ([`fill_own_batch_contaminant_row`]); together they write what
+/// this writes. The tests pin the leave-one-out rules through this one.
+///
 /// **This is a lookup and not a fit.** The caller's loop already estimates how many copies of
 /// each allele every sample carries; a batch's frequency is those copies added up over the
 /// samples that ran together, divided by the copies they hold in total. Nothing is estimated
@@ -827,6 +832,7 @@ pub fn fill_batch_allele_copies(
 /// sample holding materially more copies than the batch it is part of — the sample's own copies
 /// are one addend of that sum, so the two count paths have gone out of step, which is
 /// `fill_sample_concentration`'s own check for the same subtraction.
+#[cfg(test)]
 #[must_use]
 pub fn fill_contaminant_allele_frequencies(
     batch_copies: &[f64],
@@ -939,8 +945,8 @@ fn normalise_batch_rows(out: &mut [f64], allele_count: usize, first_batch: usize
 /// **The frequencies every sample of the locus shares**: each batch's copies made a
 /// distribution, nobody left out. A sample is scored against these rows for every batch but its
 /// own, whose row [`fill_own_batch_contaminant_row`] writes with the sample taken out; together
-/// they are what [`fill_contaminant_allele_frequencies`] writes for that sample, number for
-/// number.
+/// they are what `fill_contaminant_allele_frequencies` (the all-in-one fill the tests keep as an
+/// oracle) writes for that sample, number for number.
 ///
 /// **Why two halves.** The whole table, refilled per sample, costs `batches × alleles` a sample a
 /// pass for one row that differs; at 2,176 tomato samples in 103 batches that was an eighth of
@@ -948,8 +954,8 @@ fn normalise_batch_rows(out: &mut [f64], allele_count: usize, first_batch: usize
 ///
 /// # Panics
 ///
-/// As [`fill_contaminant_allele_frequencies`], on shapes that disagree and on a batch whose copies
-/// sum to something not finite.
+/// **In release as well as debug**, on shapes that disagree and on a batch whose copies sum to
+/// something not finite.
 #[must_use]
 pub fn fill_shared_contaminant_allele_frequencies(
     batch_copies: &[f64],
@@ -978,12 +984,14 @@ pub fn fill_shared_contaminant_allele_frequencies(
 }
 
 /// **One sample's own batch row**: that batch's copies with the sample's own taken out, made a
-/// distribution — the row [`fill_contaminant_allele_frequencies`] writes at `own_batch`. Returns
+/// distribution — the row `fill_contaminant_allele_frequencies` writes at `own_batch`. Returns
 /// whether nothing was left to read a frequency off.
 ///
 /// # Panics
 ///
-/// As [`fill_contaminant_allele_frequencies`].
+/// **In release as well as debug**, on shapes that do not agree, on a batch the copy table has no
+/// row for, and on a batch whose copies sum to something not finite. **In debug**, on a sample
+/// holding materially more copies than the batch it is part of.
 pub fn fill_own_batch_contaminant_row(
     batch_copies: &[f64],
     own_copies: SampleAlleleCopies<'_>,
@@ -1043,7 +1051,8 @@ pub fn fill_own_batch_contaminant_row(
 /// assembly's own `samples × observations × genotypes × passes`, about 1.5 × 10⁶ at ten
 /// observations and a six-allele diploid. **Roughly twenty times the work the assembly does.**
 /// Held apart, the expensive checks are made once per assembly and
-/// [`with_frequencies`](Self::with_frequencies) is what a row costs.
+/// `with_frequencies` (and, on the calling path, [`with_checked_frequencies`](Self::with_checked_frequencies))
+/// is what a row costs.
 ///
 /// **What is still per row, and where it would bite.** `with_frequencies` range-checks the
 /// table it is handed, which is `batches × alleles`, and the fill above it rewrites the whole
@@ -1051,7 +1060,7 @@ pub fn fill_own_batch_contaminant_row(
 /// allele's worth of work — and it stays small for a plate-sized batching. It becomes the
 /// dominant cost only where a run declares roughly as many batches as it has samples, which
 /// nothing produces today, and closing it means changing what
-/// [`fill_contaminant_allele_frequencies`] writes rather than what this checks.
+/// `fill_contaminant_allele_frequencies` writes rather than what this checks.
 ///
 /// It also states in the type which half is which, which is the distinction §6.1's tier table
 /// turns on: the fraction is a property of the *library* and frozen before calling; the
@@ -1147,6 +1156,7 @@ impl<'a> FrozenContamination<'a> {
     ///
     /// On a frequency table that is not `batch_count × allele_count` entries, and on an entry
     /// outside `[0, 1]`.
+    #[cfg(test)]
     #[must_use]
     pub fn with_frequencies(
         self,
@@ -1177,12 +1187,13 @@ impl<'a> FrozenContamination<'a> {
     }
 
     /// **Check a locus's shared frequency table once**, for every sample of the pass to be
-    /// scored against ([`Self::with_checked_frequencies`]): what [`Self::with_frequencies`]
+    /// scored against ([`Self::with_checked_frequencies`]): what `with_frequencies`
     /// checks per sample, done once a pass, since the shared rows are the same for every sample.
     ///
     /// # Panics
     ///
-    /// As [`Self::with_frequencies`].
+    /// On a table that is not `batch_count × allele_count` entries, and on an entry outside
+    /// `[0, 1]`.
     #[must_use]
     pub fn check_frequencies(
         &self,
@@ -1211,8 +1222,8 @@ impl<'a> FrozenContamination<'a> {
 
     /// **The mixture one sample is scored against, from the locus's shared table and its own
     /// batch's row** ([`fill_own_batch_contaminant_row`]): the mixture
-    /// [`Self::with_frequencies`] gives over the table
-    /// [`fill_contaminant_allele_frequencies`] writes for that sample, read for read.
+    /// `with_frequencies` gives over the table
+    /// `fill_contaminant_allele_frequencies` writes for that sample, read for read.
     ///
     /// # Panics
     ///
@@ -1281,7 +1292,8 @@ impl<'a> FrozenContamination<'a> {
 /// a single row and every read group reads the cohort frequency; a run that declares no
 /// batching loses nothing it had, and nothing here branches on the batching's absence.
 /// [`fill_batch_allele_copies`] sums each batch's copies once per locus per iteration, and
-/// [`fill_contaminant_allele_frequencies`] turns them into this table **once per sample**,
+/// [`fill_shared_contaminant_allele_frequencies`] with [`fill_own_batch_contaminant_row`] turn
+/// them into this table **once per sample**,
 /// leaving that sample's own copies out of its own batch — a contaminant is somebody else, so
 /// the individual being scored is not in the population its contaminant is drawn from.
 ///
@@ -1482,7 +1494,7 @@ impl<'a> ContaminationMixture<'a> {
     /// cohort frequency.
     ///
     /// **Zero is unreachable from the producer and reachable in a test**, which is worth
-    /// keeping apart: [`fill_contaminant_allele_frequencies`] floors an allele the batch's
+    /// keeping apart: [`fill_own_batch_contaminant_row`] floors an allele the batch's
     /// *other* samples never showed at [`MIN_CONTAMINANT_FREQUENCY`]. What this accessor
     /// promises is only that it returns what it was given.
     ///

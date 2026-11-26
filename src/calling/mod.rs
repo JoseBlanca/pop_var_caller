@@ -67,16 +67,6 @@ pub mod quality;
 pub mod run_parameters;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
-#[cfg(test)]
-pub use likelihood::GenericEvidenceBuffer;
-/// Re-exported for a different reason from [`genotype_table`]'s three, and the reason is
-/// worth stating: **without a `use` of it that has to compile, deleting `pub mod
-/// likelihood;` orphans the whole module silently.** The crate still builds, clippy is
-/// still clean, and `cargo test --lib calling::likelihood` reports `0 passed; ok` —
-/// a green run naming a module that is no longer compiled. With this line the same
-/// deletion is `error[E0432]: unresolved import`.
-#[cfg(test)]
-pub use likelihood::generic::genotype_log_likelihood_row;
 pub use likelihood::generic::{
     ERROR_SPREAD_BASES, NO_ERROR_SPREAD, ReferenceBesideLocus, WrongReadCharge,
     WrongReadChargeTable, allele_is_compatible_with_partial, fill_wrong_read_charges,
@@ -86,8 +76,7 @@ pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericObservation, GenericRowScratch,
     GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY, ReadGroupCalibration,
     ReadGroupParameters, SsrRowScratch, SsrSampleEvidence, fill_batch_allele_copies,
-    fill_contaminant_allele_frequencies, fill_own_batch_contaminant_row,
-    fill_shared_contaminant_allele_frequencies,
+    fill_own_batch_contaminant_row, fill_shared_contaminant_allele_frequencies,
 };
 
 use crate::calling::genotype_prior::SpectrumSeed;
