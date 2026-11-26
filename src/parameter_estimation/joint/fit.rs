@@ -63,6 +63,7 @@ use super::contamination::{
 };
 
 mod determined;
+mod inbreeding;
 mod information;
 mod settled;
 mod standard_errors;
@@ -71,6 +72,7 @@ pub use determined::{
     DensityReport, DeterminedShare, DuplicatedReport, ReportedNumber, SEPARATION_LOG_LIKELIHOOD,
     STATED_FREQUENCY,
 };
+pub use inbreeding::fitted_inbreeding_of;
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
 use settled::{
     AGREEMENT_FRACTION, DECREMENT_THRESHOLD, EarlierAnswer, SETTLED_FRACTION, agrees,
@@ -3695,7 +3697,7 @@ impl Coordinate {
     /// returns a point between about a third and a half of the width beside the end, never the end
     /// itself, and the code that reads these numbers may rely on that. The one that does turns an
     /// excess into an inbreeding coefficient
-    /// ([`fitted_inbreeding_of`](crate::run::census_fit::fitted_inbreeding_of)): a coefficient
+    /// ([`fitted_inbreeding_of`]): a coefficient
     /// must be below 1, and on 59 tomato samples a Newton step clamped onto an excess of exactly 1
     /// had two nearly fully inbred samples written with no coefficient, as outcrossers.
     ///
@@ -5892,7 +5894,7 @@ mod tests {
                 )]
                 .into_iter()
                 .collect();
-                let coefficients = crate::run::census_fit::fitted_inbreeding_of(&hom_excess);
+                let coefficients = fitted_inbreeding_of(&hom_excess);
                 let coefficient = coefficients["nearly_fully_inbred"].value.get();
                 assert!(
                     coefficient < 1.0 && coefficient > 0.999_999,
@@ -8661,7 +8663,7 @@ mod whole_fit_tests {
                 .map(|(sample, _)| sample)
                 .collect();
             assert!(on_one.is_empty(), "{samples} samples: on 1: {on_one:?}");
-            let coefficients = crate::run::census_fit::fitted_inbreeding_of(&fit.hom_excess);
+            let coefficients = fitted_inbreeding_of(&fit.hom_excess);
             assert_eq!(
                 coefficients.len(),
                 samples,

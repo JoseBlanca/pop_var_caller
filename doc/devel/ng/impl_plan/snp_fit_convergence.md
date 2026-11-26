@@ -377,7 +377,7 @@ samples once, after B5.
   *Depends:* D2. *Source:* as E2.
   *Done 2026-10-17:* main refitted (every number equal to `t2_59.parameters.toml`'s). **A defect
   found:** the Newton target puts two samples' homozygote excess exactly on its bound of 1, and
-  `fitted_inbreeding_of` (`run/census_fit.rs`), which assumes the fit never returns 1, drops them
+  `fitted_inbreeding_of` (then `run/census_fit.rs`, now `parameter_estimation/joint/fit/inbreeding.rs`), which assumes the fit never returns 1, drops them
   to F = 0 `defaulted`. With it, 94 records lost, 1,331 added and 4,766 of 17.2 million genotypes
   changed, 4,314 in those two samples; with their F restored by hand, 3 lost, 4 added and 52
   changed (GQ ≤ 5). To fix before merging. Report §3.

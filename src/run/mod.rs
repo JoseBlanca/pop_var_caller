@@ -55,6 +55,8 @@ pub(crate) mod test_fixtures;
 mod tract_junction_ownership;
 pub mod walker;
 
+/// Re-exported for the `estimate-parameters` driver; it lives in the fit it reads.
+pub use crate::parameter_estimation::joint::fit::fitted_inbreeding_of;
 #[cfg(test)]
 pub use callers::CalledCohort;
 pub use callers::{
@@ -69,8 +71,8 @@ pub use census_cohort::{
 };
 pub use census_fit::{
     CohortFit, CohortFitError, CohortTractStrata, every_read_group_pooled, fit_a_cohort,
-    fitted_inbreeding_of, homozygote_excess_in_cohort_order, parameters_file_of,
-    parameters_from_the_fit, refuse_another_selection, the_tract_strata_of_a_cohort,
+    homozygote_excess_in_cohort_order, parameters_file_of, parameters_from_the_fit,
+    refuse_another_selection, the_tract_strata_of_a_cohort,
 };
 pub use census_freshness::{
     CensusVerdict, CensusesToRegenerate, JudgedPsp, THE_COMMAND_THAT_REWRITES_A_PSP,
