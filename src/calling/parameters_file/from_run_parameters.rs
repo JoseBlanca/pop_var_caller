@@ -3268,18 +3268,18 @@ mod tests {
         );
     }
 
-    /// **A fit whose own-fit error is 0 beside a penalised number stops `estimate-parameters`
-    /// before it writes the file**, with the validator's message naming the class.
+    /// **A fit whose own-fit error is 0 beside a penalised number is refused by the file's own
+    /// validator**, with a message naming the class — the check `estimate-parameters` runs before
+    /// it writes the file.
     ///
     /// The writer passes a penalised number's own-fit error through unchecked, and the penalised
     /// fit can produce an exact 0 (it clamps a negative variance to 0). A calling run refuses an
     /// error of 0, so without the check the run would write a file the next run cannot read. The
-    /// check is `estimate-parameters`'s own; it is tested here because the fixtures that build a
-    /// run from a fit's outcomes are here.
+    /// check is `estimate-parameters`'s own, and is `validate()` with its error wrapped; it is
+    /// tested here, on `validate()` directly, because the fixtures that build a run from a fit's
+    /// outcomes are here.
     #[test]
     fn a_fit_with_an_error_of_zero_beside_a_penalised_number_stops_before_writing() {
-        use crate::cli::EstimateParametersCliError;
-        use crate::cli::estimate_parameters::a_file_the_next_run_can_read;
         use crate::parameter_estimation::joint::ssr_fit::StratumError;
         let StratumOutcome::Fitted(mut class) = a_class_on_penalised_curves() else {
             panic!("the fixture class is fitted");
@@ -3306,13 +3306,11 @@ mod tests {
             the_runs_substitution_rates(),
         );
 
-        let refused = a_file_the_next_run_can_read(projected(&run, &read_groups))
+        let refused = projected(&run, &read_groups)
+            .validate()
             .expect_err("a file with an error of 0 is one a calling run refuses");
-        let EstimateParametersCliError::RefusedByItsOwnReader { source } = &refused else {
-            panic!("refused as a file its own reader refuses, not as {refused:?}");
-        };
         assert_eq!(
-            source.to_string(),
+            refused.to_string(),
             "the parameters file cannot be used: \
              repeat_tracts.slippage_by_stratum_and_group[period = 2, reference_repeats = 6, \
              slippage_group = 0].share_of_reads_that_slip_origin.own_fit_standard_error is 0, \
@@ -3595,7 +3593,6 @@ mod tests {
     /// byte for byte.
     #[test]
     fn the_penalised_fits_own_outcomes_survive_the_whole_trip() {
-        use crate::cli::estimate_parameters::a_file_the_next_run_can_read;
         let outcomes = the_penalised_fits_outcomes_on_a_drawn_cohort(12);
         let concentrations: Vec<Option<f64>> = outcomes
             .iter()
@@ -3622,7 +3619,8 @@ mod tests {
             ),
             the_runs_substitution_rates(),
         );
-        a_file_the_next_run_can_read(projected(&run, &read_groups))
+        projected(&run, &read_groups)
+            .validate()
             .unwrap_or_else(|error| panic!("estimate-parameters writes the file: {error}"));
         let file = after_the_whole_trip(
             &run,
@@ -3648,7 +3646,6 @@ mod tests {
     /// an F, and the fallback is the built-in F, marked `defaulted`.
     #[test]
     fn the_penalised_fits_own_outcomes_at_one_sample_survive_the_whole_trip() {
-        use crate::cli::estimate_parameters::a_file_the_next_run_can_read;
         let outcomes = the_penalised_fits_outcomes_on_a_drawn_cohort(1);
         for outcome in &outcomes {
             if let StratumOutcome::Fitted(fit) = outcome {
@@ -3676,7 +3673,7 @@ mod tests {
             BTreeMap::new(),
             diploid(),
         );
-        a_file_the_next_run_can_read(ParametersFile::of_run(
+        ParametersFile::of_run(
             &run,
             &read_groups,
             &the_counts_of(&run, &rates),
@@ -3684,7 +3681,8 @@ mod tests {
             &A_REFERENCE,
             a_census(),
             &StrRepeatCriteria::default(),
-        ))
+        )
+        .validate()
         .unwrap_or_else(|error| panic!("estimate-parameters writes the file: {error}"));
         let file = after_the_whole_trip(&run, &read_groups, &rates, &inbreeding);
         assert!(
