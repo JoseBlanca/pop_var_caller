@@ -43,10 +43,10 @@
 //! the read likelihood is handed the merge's own rows and partials, so a partial read is never
 //! scored as complete and never counted twice.
 
-use crate::locus_generation::{FlankDeletion, HeldFlank, LocusLen, ReadWitness};
-use crate::run::cohort_merge::build::{
+use crate::cohort_observation::{
     AlleleSupport, CohortObservation, PartialObservation, SampleSupport, SupportedAllele,
 };
+use crate::locus_generation::{FlankDeletion, HeldFlank, LocusLen, ReadWitness};
 
 /// **The locus with every deciding partial read added to its sample's support rows**, or `None`
 /// where no partial read of any sample singles out one allele — the caller then selects over the
@@ -251,7 +251,7 @@ mod tests {
     /// and what the witnesses are laid against.
     fn locus_spanning_its_reference(
         alleles: &[&[u8]],
-        per_sample: Vec<crate::run::cohort_merge::build::SampleSupport>,
+        per_sample: Vec<crate::cohort_observation::SampleSupport>,
     ) -> CohortObservation {
         let mut observation = locus_of(alleles, per_sample);
         observation.region.end =
@@ -261,7 +261,7 @@ mod tests {
 
     fn segment(
         alleles: &[&[u8]],
-        per_sample: Vec<crate::run::cohort_merge::build::SampleSupport>,
+        per_sample: Vec<crate::cohort_observation::SampleSupport>,
     ) -> CohortObservation {
         let mut observation = locus_spanning_its_reference(alleles, per_sample);
         observation.kind = LocusKind::Ssr(SsrDetail {

@@ -64,7 +64,7 @@ use std::num::NonZeroU32;
 use crate::calling::{
     CallingScratch, CandidateAlleles, FrozenParameters, LocusEvidence, LocusInference,
 };
-use crate::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
+use crate::cohort_observation::{MinAltObs, MinAltReadShare, MinAltReads};
 
 /// Stop the frequency loop when the largest change in the cohort's expected allele copies,
 /// **divided by the number of chromosomes in the cohort**, falls below this.

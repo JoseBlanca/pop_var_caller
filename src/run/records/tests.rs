@@ -6,13 +6,13 @@ use crate::calling::allele_candidates::generic::select_generic;
 use crate::calling::allele_candidates::{CandidateSelectionConfig, SelectionScratch};
 use crate::calling::quality::ArtifactTestCounts;
 use crate::calling::{ExpectedAlleleCopies, RepeatTractProvenance};
+use crate::cohort_observation::{
+    AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
+};
 use crate::locus_generation::{LocusKind, WitnessedLocusPositions};
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
 use crate::ref_seq::InMemoryRefSeq;
-use crate::run::cohort_merge::build::{
-    AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
-};
 use crate::types::{AlleleId, ContigId, Genotype, Phred, ReadGroupId};
 use crate::window_coverage::WindowCoverage;
 

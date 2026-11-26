@@ -3140,12 +3140,12 @@ mod tests {
         LocusEvidence, LocusInference, ReadGroupCalibration, SampleGenotypeCall, SsrSampleEvidence,
         UNWRITTEN_SCRATCH_VALUE,
     };
+    use crate::cohort_observation::PartialObservation;
     use crate::locus_generation::{
         LocusKind, ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
     };
     use crate::parameter_estimation::Provenance;
     use crate::parameter_estimation::joint::stratum_fits::StratumFits;
-    use crate::run::cohort_merge::build::PartialObservation;
     use crate::types::{
         AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position, ReadGroupId,
         SummedLogError,

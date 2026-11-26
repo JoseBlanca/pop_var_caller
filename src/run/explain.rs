@@ -30,10 +30,10 @@ use crate::calling::{
     CallingScratch, CandidateAlleles, GenotypeIdx, GenotypeTable, LocusInference,
     ReferenceBesideLocus, SampleGenotypeCall, partial_row_fits_allele,
 };
+use crate::cohort_observation::{CohortObservation, LocusBorder};
 use crate::fasta::ContigList;
 use crate::locus_generation::{LocusKind, LocusLen, ReadWitness, SequenceObservation};
 use crate::regions::{BedError, ContigBounds, RegionSet};
-use crate::run::cohort_merge::build::{CohortObservation, LocusBorder};
 use crate::types::{ContigId, GenomeRegion, Phred, Ploidy};
 use crate::vcf::VcfRecord;
 

@@ -15,12 +15,14 @@
 //! **What the walk counts is per sample, and that is what the keep rule needs.** Each
 //! sample's non-reference reads and the reads they were drawn from are accumulated apart
 //! from every other sample's, because the rule asks whether *some one sample* showed
-//! enough — see [`super::MinAltReads`] for why the cohort's sum is the wrong question.
+//! enough — see [`MinAltReads`](crate::cohort_observation::MinAltReads) for why the
+//! cohort's sum is the wrong question.
 //! The cohort total is still reported on each closed locus, as the locus's size in
 //! evidence rather than as a decision.
 
+use super::MaxCohortLocusSpan;
 use super::observation_cache::{LocusSummary, WindowedCohort};
-use super::{MaxCohortLocusSpan, MinAltReads};
+use crate::cohort_observation::MinAltReads;
 use crate::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::types::{GenomePosition, GenomeRegion};
 
@@ -1082,8 +1084,8 @@ impl<'a> Iterator for LocusCloser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
+    use crate::cohort_observation::{MinAltObs, MinAltReadShare};
     use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
     use crate::types::Motif;
     use crate::types::{ContigId, Position, ReadGroupId};

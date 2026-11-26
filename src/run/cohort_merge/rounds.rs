@@ -41,18 +41,20 @@
 
 use rayon::prelude::*;
 
-use super::build::{CohortObservation, LocusReads, build_region_handing_over_windowed};
+use super::build::{LocusReads, build_region_handing_over_windowed};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
+use crate::cohort_observation::CohortObservation;
 // **The organiser's own frontier helpers, not a second pair.** The rule below is
 // `Organiser::resolve_and_release`'s, and two spellings of "where does this span begin" is
 // exactly the drift this module keeps its shared fixtures in one place to avoid.
 use super::organise::{first_base_of, last_base_of};
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
-    MinAltReads, refuse_malformed_analysed_regions,
+    refuse_malformed_analysed_regions,
 };
+use crate::cohort_observation::MinAltReads;
 use crate::locus_generation::SampleLocusObservations;
 use crate::types::{GenomePosition, GenomeRegion};
 
@@ -325,13 +327,14 @@ impl Frontier {
 
 #[cfg(test)]
 mod tests {
+    use super::super::MaxCohortLocusSpan;
     use super::super::fixtures::{
         KeepingSource, in_flight, member, region, source_of, three_samples_over_six_hundred_bases,
         width,
     };
     use super::super::serial::merge_cohort_handing_each_locus_over;
-    use super::super::{MaxCohortLocusSpan, MinAltReads};
     use super::*;
+    use crate::cohort_observation::MinAltReads;
     use crate::locus_generation::SampleLocusObservations;
 
     /// What one driver made of a fixture, in the shape both drivers can be compared in: each

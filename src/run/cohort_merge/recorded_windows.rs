@@ -165,7 +165,7 @@ const ABSENT_FROM_THE_RUN: &str = "-";
 /// **A sample with no window is written down rather than omitted**, as an *absent* pair — two
 /// `NaN`s. That is what "no window" looks like by the time it reaches here: the merge's own
 /// three-way distinction collapses on the way to the record
-/// ([`CohortObservation`](super::build::CohortObservation)'s own `window_coverage`), so **no run
+/// ([`CohortObservation`](crate::cohort_observation::CohortObservation)'s own `window_coverage`), so **no run
 /// writes the row's `-` form**, which survives on the reading side alone. What the comparison
 /// reads is a row present against a row missing, and a row is missing only where a locus became
 /// no record.

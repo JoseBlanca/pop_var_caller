@@ -77,11 +77,11 @@ use pop_var_caller::calling::allele_candidates::generic::select_generic;
 use pop_var_caller::calling::allele_candidates::{
     CandidateSelectionConfig, MaxCandidateAlleles, SelectionScratch,
 };
-use pop_var_caller::locus_generation::LocusKind;
-use pop_var_caller::run::cohort_merge::build::{
+use pop_var_caller::cohort_observation::{
     AlleleSupport, CohortObservation, SampleSupport, SupportedAllele,
 };
-use pop_var_caller::run::cohort_merge::{MinAltObs, MinAltReadShare, MinAltReads};
+use pop_var_caller::cohort_observation::{MinAltObs, MinAltReadShare, MinAltReads};
+use pop_var_caller::locus_generation::LocusKind;
 use pop_var_caller::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 use pop_var_caller::window_coverage::WindowCoverage;
 

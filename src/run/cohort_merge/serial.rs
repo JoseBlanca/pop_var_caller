@@ -19,16 +19,15 @@
 //! over this same cache; the loci that differ once builders see different windows are what the
 //! organiser's overlap resolution settles (spec §6.1).
 
-use super::build::{CohortObservation, LocusReads, build_region_handing_over_windowed};
+use super::build::{LocusReads, build_region_handing_over_windowed};
 #[cfg(test)]
 use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
-use super::{
-    CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
-    refuse_malformed_analysed_regions,
-};
+use super::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, refuse_malformed_analysed_regions};
+use crate::cohort_observation::CohortObservation;
+use crate::cohort_observation::MinAltReads;
 #[cfg(test)]
 use crate::locus_generation::SampleLocusObservations;
 use crate::types::{GenomePosition, GenomeRegion};
@@ -350,8 +349,8 @@ mod tests {
         source_of, three_samples_over_six_hundred_bases, width,
     };
     use super::super::organise::{Organiser, RegionIndex};
-    use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
+    use crate::cohort_observation::{MinAltObs, MinAltReadShare};
     use crate::locus_generation::SampleLocusObservations;
     use crate::locus_generation::{LocusKind, SequenceObservation};
     use crate::types::{ContigId, Position};
@@ -739,7 +738,7 @@ mod tests {
         assert_eq!(deleting.reads_composed_across_records, 0);
         assert_eq!(
             deleting.pooled_support_for(1),
-            crate::run::cohort_merge::build::AlleleSupport {
+            crate::cohort_observation::AlleleSupport {
                 num_reads: minted.num_obs,
                 num_fwd: f64::from(minted.num_fwd),
                 q_sum: minted.q_sum.nats(),
@@ -753,12 +752,12 @@ mod tests {
 
         assert_eq!(
             substituting.pooled_support_for(0),
-            crate::run::cohort_merge::build::AlleleSupport::default(),
+            crate::cohort_observation::AlleleSupport::default(),
             "neither sample's reads showed the reference over the whole locus",
         );
         assert_eq!(
             deleting.pooled_support_for(0),
-            crate::run::cohort_merge::build::AlleleSupport::default(),
+            crate::cohort_observation::AlleleSupport::default(),
         );
     }
 
@@ -1259,8 +1258,8 @@ mod tests {
 
     /// A cohort observation over `span`, for the guard's own tests — what it reads is the
     /// ground, and nothing else.
-    fn locus_over(span: GenomeRegion) -> crate::run::cohort_merge::build::CohortObservation {
-        crate::run::cohort_merge::build::CohortObservation {
+    fn locus_over(span: GenomeRegion) -> crate::cohort_observation::CohortObservation {
+        crate::cohort_observation::CohortObservation {
             allele_flank_deletions: Vec::new(),
             region: span,
             alleles: Vec::new(),

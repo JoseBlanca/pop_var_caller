@@ -41,10 +41,10 @@ use super::{
 };
 use crate::calling::CandidateAlleles;
 use crate::calling::likelihood::ssr_emission::respelled_over;
+use crate::cohort_observation::MinAltReads;
+use crate::cohort_observation::{CohortObservation, SampleSupport};
 use crate::locus_generation::{FlankDeletion, LocusKind, SsrBundleDetail, SsrDetail};
 use crate::region_typing::run_parse::{RunParse, parse_into_runs};
-use crate::run::cohort_merge::MinAltReads;
-use crate::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::types::{AlleleId, GenomeRegion, Motif, Ploidy};
 
 /// **One locus's observed tract sequences, grouped by how many repeats they carry.**

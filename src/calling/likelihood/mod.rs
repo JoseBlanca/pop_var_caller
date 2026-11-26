@@ -132,6 +132,7 @@ pub mod ssr_emission;
 pub mod stutter_rates;
 
 use crate::calling::genotype_prior::{COUNT_PATH_DESYNC_THRESHOLD, SampleAlleleCopies};
+use crate::cohort_observation::{PartialObservation, SupportedAllele};
 use crate::float;
 use crate::locus_generation::{LocusLen, ReadWitness, SequenceObservation, SsrDetail};
 use crate::parameter_estimation::calibration::MintedReadErrors;
@@ -139,7 +140,6 @@ use crate::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
 };
 use crate::parameter_estimation::{Estimate, Provenance};
-use crate::run::cohort_merge::build::{PartialObservation, SupportedAllele};
 use crate::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, Ploidy, ReadGroupId,
 };
@@ -1566,7 +1566,7 @@ fn check_frequency_entries(rows: &[f64], allele_count: usize, first_batch: usize
 /// that a field which would make copying expensive — anything owning heap — has to be argued
 /// for rather than arriving unnoticed.
 ///
-/// [`AlleleSupport`]: crate::run::cohort_merge::build::AlleleSupport
+/// [`AlleleSupport`]: crate::cohort_observation::AlleleSupport
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct GenericObservation {
     /// Which allele these reads showed — `a(o)` in the formula, an index into the locus's
@@ -1600,7 +1600,7 @@ pub struct GenericObservation {
     /// **Counted against each record's own position, not the cohort locus's first base**, by
     /// the mint that produced it; nothing re-anchors it, so where a locus spans several of a
     /// sample's records this mixes as many questions as it has records. Carried forward from
-    /// [`AlleleSupport::placed_left`](crate::run::cohort_merge::build::AlleleSupport::placed_left),
+    /// [`AlleleSupport::placed_left`](crate::cohort_observation::AlleleSupport::placed_left),
     /// whose own comment is the one to read before drawing a conclusion from it. A fraction,
     /// as [`Self::forward_reads`] is.
     pub placed_left_reads: f64,
@@ -2511,8 +2511,8 @@ pub(crate) mod test_batching {
 mod tests {
     use super::test_batching::{ALL_IN_ONE_BATCH, one_batch};
     use super::*;
+    use crate::cohort_observation::AlleleSupport;
     use crate::locus_generation::WitnessedLocusPositions;
-    use crate::run::cohort_merge::build::AlleleSupport;
     use crate::types::Motif;
 
     /// A merge row with every field distinguishable, so a field crossed with another one

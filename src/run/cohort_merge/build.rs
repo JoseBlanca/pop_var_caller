@@ -34,11 +34,11 @@
 
 use ahash::AHashMap;
 
+use super::MaxCohortLocusSpan;
 use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::observation_cache::WindowedCohort;
-use super::{MaxCohortLocusSpan, MinAltReads};
-pub use crate::cohort_observation::{
-    AlleleSupport, CohortObservation, LocusBorder, PartialObservation, REFERENCE_ALLELE,
+use crate::cohort_observation::{
+    AlleleSupport, CohortObservation, MinAltReads, PartialObservation, REFERENCE_ALLELE,
     SampleSupport, SupportedAllele,
 };
 use crate::locus_generation::{
@@ -2101,9 +2101,10 @@ fn offset_within(locus_region: GenomeRegion, member_region: GenomeRegion) -> usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cohort_observation::{MinAltObs, MinAltReadShare, MinAltReads};
     use crate::locus_generation::{HeldFlank, LocusKind, SsrDetail};
+    use crate::run::cohort_merge::MaxCohortLocusSpan;
     use crate::run::cohort_merge::close::LocusCloser;
-    use crate::run::cohort_merge::{MaxCohortLocusSpan, MinAltObs, MinAltReadShare, MinAltReads};
     use crate::types::{ContigId, Motif, Position, ReadGroupId};
 
     fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {

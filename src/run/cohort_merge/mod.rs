@@ -340,7 +340,7 @@ pub(super) mod fixtures {
                 // Destructured for the same reason, one level down: a field `CohortObservation`
                 // gains is a compile error here rather than a comparison that quietly stops
                 // covering it.
-                let super::build::CohortObservation {
+                let crate::cohort_observation::CohortObservation {
                     region,
                     alleles,
                     per_sample,
@@ -490,9 +490,6 @@ pub(super) mod fixtures {
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use crate::cohort_observation::non_zero_default;
-pub use crate::cohort_observation::{
-    DEFAULT_MIN_ALT_OBS, DEFAULT_MIN_ALT_READ_SHARE, MinAltObs, MinAltReadShare, MinAltReads,
-};
 use crate::types::GenomeRegion;
 
 /// The widest cohort locus the caller undertakes to build, in reference bases.
@@ -698,6 +695,9 @@ pub(super) fn refuse_malformed_analysed_regions(analysed: &[GenomeRegion]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cohort_observation::{
+        DEFAULT_MIN_ALT_OBS, DEFAULT_MIN_ALT_READ_SHARE, MinAltObs, MinAltReadShare, MinAltReads,
+    };
 
     /// Both spellings of each default — the constant a command line will advertise and
     /// the typed value a run will use — pinned to the documented number, so the two

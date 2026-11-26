@@ -57,15 +57,17 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use super::build::{CohortObservation, LocusReads, build_region_handing_over_windowed};
+use super::build::{LocusReads, build_region_handing_over_windowed};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, RoundView, building_regions_of,
 };
 use super::rounds::{CalledRegion, Frontier};
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
-    MinAltReads, refuse_malformed_analysed_regions,
+    refuse_malformed_analysed_regions,
 };
+use crate::cohort_observation::CohortObservation;
+use crate::cohort_observation::MinAltReads;
 use crate::locus_generation::SampleLocusObservations;
 use crate::run::side_pool::SidePool;
 use crate::types::{GenomePosition, GenomeRegion, Position};
