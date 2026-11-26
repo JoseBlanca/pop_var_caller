@@ -558,8 +558,8 @@ struct SampleWindow<S> {
     held_bodies: Vec<core::ops::Range<usize>>,
     /// Whether this source has ever kept a body — latched, so an emptied window still says so.
     keeps_evidence: bool,
-    /// Where the last observation drawn from `source` began — the ordering check's memory.
-    last_drawn: Option<GenomePosition>,
+    /// The last base of the last observation drawn from `source` — the ordering check's memory.
+    last_drawn_reach: Option<GenomePosition>,
     /// This sample's window-coverage measurement, at whatever stage the pass has reached it.
     ///
     /// **One per sample and never shared**, because a window is over *that sample's* covered
@@ -733,7 +733,7 @@ impl<S: ObservationSource> SampleWindow<S> {
             source,
             spent: _,
             keeps_evidence: _,
-            last_drawn: _,
+            last_drawn_reach: _,
         } = self;
         // **Where the arena's left edge lands, read before the drain moves it.** The first
         // survivor's body is the earliest one that can still be built; when nothing survives,
@@ -971,7 +971,7 @@ impl<S> ObservationCache<S> {
                     held_summaries: Vec::new(),
                     held_bodies: Vec::new(),
                     keeps_evidence: false,
-                    last_drawn: None,
+                    last_drawn_reach: None,
                     window_coverage: WindowCoverageInProgress::new(),
                 })
                 .collect(),
@@ -1074,7 +1074,7 @@ impl<S> ObservationCache<S> {
                     held_summaries: _,
                     held_bodies: _,
                     keeps_evidence: _,
-                    last_drawn: _,
+                    last_drawn_reach: _,
                 } = window;
                 let WindowCoverageInProgress {
                     accumulator,
@@ -1809,9 +1809,10 @@ where
             // dominates every held record: each one starting at or before it widened the chain to
             // its own reach, and at most one record begins past it, which is the last. On a contig
             // the cover is *leaving* there is no chain reach to lean on, and `held.last()` is the
-            // furthest only while reaches are monotone — which nothing here checks, since
-            // `draw_next` compares starts. A record reaching past its successor would then have
-            // ground the fetch never read, and the measurement would panic on a missing base.
+            // furthest only while reaches are monotone. `draw_next` now refuses a record that
+            // begins inside the one before it, which keeps them monotone; the maximum is kept
+            // anyway, because it costs a pass over a short window and a record reaching past its
+            // successor would otherwise have ground the fetch never read.
             let furthest = if on_the_regions_own_contig {
                 held.last().map(|summary| summary.reach())
             } else {
@@ -1935,7 +1936,7 @@ where
             spent: _,
             spare: _,
             keeps_evidence: _,
-            last_drawn: _,
+            last_drawn_reach: _,
         } = self;
         let first_new = window_coverage.first_not_yet_observed(held_summaries);
         for index in first_new..held_summaries.len() {
@@ -1996,21 +1997,26 @@ where
         // sample short of one record's positions with nothing to say so. Refusing the shape here
         // is what keeps the cursor's representation adequate to what the window can hold.
         //
-        // **It is still not the disjointness the window is really read by.** Two records that
-        // start apart and overlap pass this, and `build_region`'s own producer-guarantee
-        // assertion is what catches them — deliberately, since
-        // `parallel.rs`'s `a_builder_that_panics_leaves_the_cache_in_the_callers_hands_and_advanced`
-        // passes exactly such a pair through this cache to reach it.
+        // **After the previous record's last base, not merely after its start**, because that
+        // disjointness is what the window is read by. [`first_reaching_summary`] bisects a
+        // sample's records on their reaches, which finds the first record reaching a position
+        // only while reaches never decrease. A record beginning inside the one before it —
+        // 100–130 then 105–105 — breaks that: a search for 110 lands past 100–130, so a window
+        // starts too late and eviction drops the record with nothing failing. The psp reader
+        // already refuses such a pair; this is the check for direct mode, where the only other
+        // one is `build_region`'s, reached only by loci that get built. Comparing against the
+        // last base rather than the start is still one comparison per observation drawn, and it
+        // includes the start check, since a record's last base is never before its first.
         let start = summary.start_position();
-        if let Some(previous) = self.last_drawn {
+        if let Some(previous_reach) = self.last_drawn_reach {
             assert!(
-                start > previous,
+                start > previous_reach,
                 "this sample's source is not in coordinate order: {} does not begin after \
-                 {previous:?}",
+                 the last base of the record before it, {previous_reach:?}",
                 summary.region(),
             );
         }
-        self.last_drawn = Some(start);
+        self.last_drawn_reach = Some(summary.reach_position());
 
         Ok(Some(next))
     }
@@ -2096,6 +2102,11 @@ fn summaries_on(held: &[LocusSummary], contig: ContigId) -> &[LocusSummary] {
     &held[from..to]
 }
 
+/// The index of the first of `held` whose last base is at or after `position`.
+///
+/// A bisection, so it is right only while the reaches never decrease along `held` — which
+/// `SampleWindow::draw_next` guarantees by refusing a record that begins at or before the last
+/// base of the one before it.
 fn first_reaching_summary(held: &[LocusSummary], position: GenomePosition) -> usize {
     held.partition_point(|summary| summary.reach_position() < position)
 }
@@ -3653,7 +3664,9 @@ mod tests {
     /// **A cover that failed can be made again**, and the sample whose source failed is drawn
     /// on from where it stopped — which is why nothing latches on `Err`. The reach is rebuilt
     /// by re-reading the held window, so the retry still reaches 70 without re-reading the
-    /// source, and what was drawn before the failure is still there.
+    /// source, and what was drawn before the failure is still there. The record after the
+    /// failure begins at 71, the first base past 48–70, because one sample's records may not
+    /// overlap.
     #[test]
     fn a_cover_can_be_made_again_after_a_failure() {
         let (steady, _steady_drawn) = source_over(&[region(45, 45)]);
@@ -3661,7 +3674,7 @@ mod tests {
             remaining: vec![
                 Ok(observation_over(region(48, 70))),
                 Err(SourceFailed("the block would not decode")),
-                Ok(observation_over(region(60, 60))),
+                Ok(observation_over(region(71, 71))),
             ]
             .into_iter(),
             drawn: Rc::new(Cell::new(0)),
@@ -3675,7 +3688,7 @@ mod tests {
 
         assert_eq!(
             handed_out(&cache, region(40, 50)),
-            vec![vec![region(45, 45)], vec![region(48, 70), region(60, 60)]],
+            vec![vec![region(45, 45)], vec![region(48, 70), region(71, 71)]],
             "the failed sample was drawn on, and the re-read window still reached 70",
         );
     }
@@ -3736,24 +3749,21 @@ mod tests {
         let _ = cache.cover(region(40, 50));
     }
 
-    /// **A source whose records overlap is refused by the measurement's own order check, and it
-    /// is refused for the right reason.**
+    /// **A source whose records overlap is refused as out of order, not blamed on the ground.**
     ///
-    /// Two things had to be right for that. The ground a cover reads on a contig it is *leaving*
-    /// has no chain reach to lean on, so it is the furthest reach of what that contig holds —
-    /// taking the last held record's would be right only while reaches are monotone, which
-    /// nothing checks, since `draw_next` compares starts. Here a repeat tract reaches to 1,500
-    /// and the record after it stops at 400, so a ground ending at 400 leaves the tract's own
-    /// positions with no base, and the cover panics **blaming its own ground computation** for
-    /// what is a fact about the source. With the ground right, the stream reaches the
-    /// accumulator and its order check says what is really wrong — and says it in release, which
-    /// is the profile this repository ships.
+    /// The ground a cover reads on a contig it is *leaving* has no chain reach to lean on, so it
+    /// is the furthest reach of what that contig holds. Here a repeat tract reaches to 1,500 and
+    /// the record after it stops at 400, so a ground ending at the last record's 400 would leave
+    /// the tract's own positions with no base, and the cover would panic **blaming its own
+    /// ground computation** for what is a fact about the source. The draw refuses the pair
+    /// first, naming the order — and says it in release, which is the profile this repository
+    /// ships.
     ///
     /// **Nothing mints such a pair today** — the generic walk's records are disjoint — but a run
     /// over stored files reads them from a file, and `draw_next`'s own comment already says an
     /// out-of-order source is a fact about the file rather than a bug in this crate.
     #[test]
-    #[should_panic(expected = "observed out of order")]
+    #[should_panic(expected = "does not begin after the last base of the record before it")]
     fn a_source_whose_records_overlap_is_refused_naming_the_order_and_not_the_ground() {
         let mut tract = observation_over(region_on(0, 300, 1_500));
         tract.kind = LocusKind::Ssr(crate::locus_generation::SsrDetail {
@@ -3784,6 +3794,20 @@ mod tests {
         let mut cache = ObservationCache::over_fixture(vec![source]);
 
         let _ = cache.cover(region(40, 50));
+    }
+
+    /// **A record that begins inside the one before it is refused**, though its start is later.
+    /// The window search finds a sample's first record reaching a position by bisecting on the
+    /// reaches, which is right only while they never decrease: here 100–130 reaches 130 and the
+    /// 105 after it reaches only 105, so a search for 110 lands past the first record and a
+    /// window — and the eviction behind it — would lose it without a word.
+    #[test]
+    #[should_panic(expected = "does not begin after")]
+    fn a_source_whose_record_begins_inside_the_one_before_is_refused() {
+        let (source, _drawn) = source_over(&[region(100, 130), region(105, 105)]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+
+        let _ = cache.cover(region(100, 140));
     }
 
     /// And one that goes back to an **earlier contig** is refused too, though its positions
