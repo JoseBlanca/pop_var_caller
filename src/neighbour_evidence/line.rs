@@ -32,6 +32,9 @@ const PER_ALTERNATIVE_INFO: [&str; 4] = ["AF", "AC", "MQALT", "MQDIFF"];
 pub struct RewriteTally {
     /// Lines that were sites of the walk.
     pub sites: u64,
+    /// Lines where the pass re-called at least one sample. A site whose every sample came back
+    /// unchanged is rewritten but not counted.
+    pub records_recalled: u64,
     /// Sample columns re-called and written with a genotype.
     pub called: u64,
     /// Of those, columns whose reads said nothing — `./.` before the pass (§4.2).
@@ -55,6 +58,7 @@ impl RewriteTally {
     pub fn add(&mut self, other: RewriteTally) {
         let RewriteTally {
             sites,
+            records_recalled,
             called,
             called_without_reads,
             withheld,
@@ -64,6 +68,7 @@ impl RewriteTally {
             repeat_counts_unknown,
         } = other;
         self.sites += sites;
+        self.records_recalled += records_recalled;
         self.called += called;
         self.called_without_reads += called_without_reads;
         self.withheld += withheld;
@@ -190,6 +195,13 @@ pub(crate) fn rewrite_line(
         })
         .collect();
     tally.sites += 1;
+    if refined
+        .outcomes
+        .iter()
+        .any(|outcome| *outcome != Outcome::Unchanged)
+    {
+        tally.records_recalled += 1;
+    }
 
     // Each allele's repeat count, from the first input column that names it (§4.1).
     let mut repeat_counts: Vec<Option<String>> = vec![None; allele_count];

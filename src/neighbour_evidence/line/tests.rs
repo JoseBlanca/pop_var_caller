@@ -341,3 +341,31 @@ fn short_columns_keep_every_field_the_pass_does_not_write() {
         ["0/1:20:5:3,2:30,0,40:0.01,0.98,0.01:.", "0/0:20:.:.:.:.:.",]
     );
 }
+
+/// **A site where no sample was re-called is not counted as re-called.** The line still goes
+/// through the rewrite, but the log's "records re-called" count must say what the pass changed.
+#[test]
+fn a_site_with_every_sample_unchanged_is_not_counted_as_recalled() {
+    let source = line(
+        &[
+            "1/1:20:5:0,5:60,15,0:0,0.01,0.99",
+            "0/0:20:5:5,0:0,15,60:0.99,0.01,0",
+        ],
+        "C",
+        "AF=0.5;AC=2;AN=4;DP=10",
+        BIALLELIC_FORMAT,
+    );
+    let (_, unchanged) = rewrite(
+        &source,
+        vec![Outcome::Unchanged, Outcome::Unchanged],
+        vec![0.0, 0.01, 0.99, 0.99, 0.01, 0.0],
+    );
+    assert_eq!(unchanged.records_recalled, 0);
+
+    let (_, recalled) = rewrite(
+        &source,
+        vec![Outcome::Unchanged, Outcome::Called],
+        vec![0.0, 0.01, 0.99, 0.99, 0.01, 0.0],
+    );
+    assert_eq!(recalled.records_recalled, 1);
+}
