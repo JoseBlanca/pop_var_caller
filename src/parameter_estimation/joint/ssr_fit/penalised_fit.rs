@@ -466,7 +466,7 @@ pub enum Smoothing {
 
 /// **How a refit chooses its curve's penalty strength**, under [`Smoothing::MarginalLikelihood`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StrengthSearch {
+enum StrengthSearch {
     /// Over the whole range searched.
     Wide,
     /// Within two natural-log units of the strength held, widening when the best lands on an edge.
@@ -597,8 +597,6 @@ pub struct ParameterCurve {
     pub unfactorised_fits_kept: usize,
 }
 
-impl ParameterCurve {}
-
 /// **The curves of one motif length.**
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmoothCurves {
@@ -616,8 +614,8 @@ pub struct SmoothCurves {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PenalisedPeriodFit {
     /// One entry per class handed in, in the same order: `None` for a class with no reads at any
-    /// locus, which is not fitted. The curves still give such a class a value
-    /// (`ParameterCurve::at`).
+    /// locus, which is not fitted. The curves still give such a class a value, its entry in
+    /// [`ParameterCurve::values`].
     pub classes: Vec<Option<PenalisedClass>>,
     /// `None` when no class had reads.
     pub curves: Option<SmoothCurves>,
@@ -732,9 +730,8 @@ pub enum UndeterminedErrors {
 /// (multipliers are not fitted here). The allele window is `fit.allele_span`.
 ///
 /// With [`PenalisedFitConfig::pair_alternations`] above zero, the between-locus share is then read
-/// off pairs of samples at a locus, as `fit_class_by_counting_with_pairs`
-/// does, its curve penalised like every other: each round of pairs alternates with penalised
-/// counting at the shares held.
+/// off pairs of samples at a locus, its curve penalised like every other: each round of pairs
+/// alternates with penalised counting at the shares held.
 ///
 /// **Memory: one class's evidence table at a time.** Every round, and the standard errors, visit
 /// the classes one after another and use the threads inside each class, over its loci and distinct
@@ -1711,11 +1708,6 @@ impl Period {
             .collect()
     }
 
-    /// **The multipliers' step of a round** (spec `str_library_stutter.md` §3.1, step 3): every
-    /// read group's multiplier with the curves just drawn held, from the round's expected counts,
-    /// under the constraint that their geometric mean, each weighted by its reads, is one
-    /// ([`fit_multipliers_of_a_typical_one`]). Returns how far, in natural-log units, the
-    /// multiplier that moved most moved.
     /// **Every number a round moves, on the scale the fit draws it on**: per class, its slip rate,
     /// shorter share and fall-off as logits, its spread and allele-length shares as logarithms; then
     /// every multiplier as a logarithm.
@@ -1854,6 +1846,11 @@ impl Period {
         }
     }
 
+    /// **The multipliers' step of a round** (spec `str_library_stutter.md` §3.1, step 3): every
+    /// read group's multiplier with the curves just drawn held, from the round's expected counts,
+    /// under the constraint that their geometric mean, each weighted by its reads, is one
+    /// ([`fit_multipliers_of_a_typical_one`]). Returns how far, in natural-log units, the
+    /// multiplier that moved most moved.
     fn update_multipliers(&mut self, counts: &[Option<ClassCounts>], pull: f64) -> f64 {
         let Some(old) = self.multipliers.clone() else {
             return 0.0;
@@ -3091,7 +3088,7 @@ fn multiplied_level_slope(counts: &ClassCounts, multipliers: &[f64], eta: f64) -
 /// **The counts one curve is fitted to**, per grid point (a repeat count). A point whose counts are
 /// all zero carries no evidence and takes the curve's value.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CurveData {
+enum CurveData {
     /// `successes` out of `trials` at each point; the unbounded number is the logit of the
     /// probability.
     Binomial {
@@ -3126,7 +3123,7 @@ pub(crate) enum CurveData {
 /// **One read group's reads at one point of a [`CurveData::MultipliedBinomial`]**: its multiplier,
 /// and its expected slipped and exactly-read reads there.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct MultipliedReads {
+struct MultipliedReads {
     pub multiplier: f64,
     pub slipped: f64,
     pub exact: f64,
@@ -3345,7 +3342,7 @@ impl CurveData {
 /// (`block` numbers a point, point-major), its penalty strength, and how much each bend's penalty
 /// is eased.
 #[derive(Debug, Clone)]
-pub(crate) struct CurveState {
+struct CurveState {
     points: usize,
     block: usize,
     values: Vec<f64>,

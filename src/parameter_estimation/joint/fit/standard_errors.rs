@@ -1591,10 +1591,10 @@ pub(super) const IDENTIFIED_SHARE: f64 = 1e-8;
 
 /// A symmetric matrix inverted over the parameters it identifies: which were kept and which dropped
 /// (positions in the matrix given), and the inverse over the kept ones, in their order.
-pub(in crate::parameter_estimation::joint) struct Identified {
-    pub kept: Vec<usize>,
-    pub dropped: Vec<usize>,
-    pub inverse: Vec<f64>,
+struct Identified {
+    kept: Vec<usize>,
+    dropped: Vec<usize>,
+    inverse: Vec<f64>,
 }
 
 /// Invert a symmetric `n × n` matrix (row-major) over the parameters it identifies: a Cholesky
@@ -1604,11 +1604,7 @@ pub(in crate::parameter_estimation::joint) struct Identified {
 ///
 /// Only `+ − × ÷` and `sqrt`, each rounded exactly, in a fixed order: the same bits on every
 /// platform.
-pub(in crate::parameter_estimation::joint) fn invert_identified(
-    matrix: &[f64],
-    n: usize,
-    reference: &[f64],
-) -> Identified {
+fn invert_identified(matrix: &[f64], n: usize, reference: &[f64]) -> Identified {
     let mut kept: Vec<usize> = (0..n).collect();
     let mut dropped = Vec::new();
     loop {

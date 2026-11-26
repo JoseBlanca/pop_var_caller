@@ -34,9 +34,9 @@
 //! Three things the census route needs that are not the fit, and that calling reads too — so they
 //! are shared vocabulary rather than a route's internals:
 //!
-//! - [`depth_bins`] — the depth ladder a census codes its depths on, and the ladder a run's cells
-//!   are keyed by. Two samples binned under different edges hold codes that mean different
-//!   depths, which is why the ladder's digest is one of the settings a fit refuses on.
+//! - [`depth_bins`] — the depth ladder a census codes its depths on. Two samples binned under
+//!   different edges hold codes that mean different depths, which is why the ladder's digest is
+//!   one of the settings a fit refuses on.
 //! - [`calibration`] — what a library's own base qualities *claimed*, summed as the loci go past.
 //!   A base-quality calibration is fitted from that and the measured error rate together.
 //! - [`repeat_strata`] — how a repeat tract's stratum is named: a motif period, the reference's

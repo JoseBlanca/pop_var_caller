@@ -1068,16 +1068,6 @@ impl StratumFits {
         self.stutter_multipliers.get(&(read_group, period))
     }
 
-    /// Every read group and motif length with a multiplier, in read-group order and then in motif
-    /// length.
-    pub fn each_stutter_multiplier(
-        &self,
-    ) -> impl Iterator<Item = (ReadGroupId, u8, &StutterMultiplier)> {
-        self.stutter_multipliers
-            .iter()
-            .map(|((read_group, period), multiplier)| (*read_group, *period, multiplier))
-    }
-
     /// The read groups this run declared a slippage group for, in order.
     pub fn read_groups(&self) -> impl Iterator<Item = ReadGroupId> {
         self.slippage_group_of.keys().copied()
@@ -1632,7 +1622,7 @@ mod tests {
         let fitted_on_a_subset = StratumOutcome::Fitted(Box::new(StratumFit {
             standard_errors: Some(StratumErrors {
                 slippage: vec![errors(0.001, 0.02, 0.03), errors(0.004, 0.05, 0.06)],
-                allele_length_variation: vec![StratumError::NoShare; 3],
+                allele_length_variation: vec![StratumError::TooFewLoci; 3],
                 concentration: StratumError::Estimated(0.5),
             }),
             stratum: stratum(2, 10),
@@ -1710,7 +1700,7 @@ mod tests {
                     shorter_share: StratumError::Estimated(0.04),
                     fall_off: StratumError::Estimated(0.07),
                 })],
-                allele_length_variation: vec![StratumError::NoShare; 3],
+                allele_length_variation: vec![StratumError::TooFewLoci; 3],
                 concentration: StratumError::NotPlaced,
             }),
             stratum: stratum(2, 10),

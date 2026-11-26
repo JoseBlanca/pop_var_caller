@@ -18,11 +18,9 @@
 //! sample's genotype probabilities, and every sample's alleles among the lengths; the slip rate, the
 //! shorter share, the fall-off and the shares then follow from the expected counts.
 //!
-//! **Why the file is named for the expected counts.** The penalised fit ([`penalised_fit`])
-//! becomes the production fit, and what it takes from here is that first step — `expected_counts` and [`ClassCounts`] — and the
-//! likelihood of pairs of samples ([`SamplePairs`]). The counting fit's own drivers
-//! (`fit_class_by_counting*`) stay here as the zero-penalty answer the penalised fit's tests
-//! compare against.
+//! **Why the file is named for the expected counts.** The penalised fit ([`penalised_fit`]) is the
+//! production fit, and what it takes from here is that first step — the expected counts
+//! ([`ClassCounts`]) — and the likelihood of pairs of samples ([`SamplePairs`]).
 
 use ahash::AHashMap;
 use smallvec::SmallVec;
@@ -44,14 +42,14 @@ pub fn concentration_stopped_inside_its_search(estimate: f64) -> bool {
     estimate > lowest * 1.01 && estimate < highest / 1.01
 }
 
-/// **The expected counts one round gathers over a class, or over one tract of it**
-/// (`expected_counts`, `expected_counts_by_tract`): every read shared
-/// between "read exactly" and "slipped", every sample's alleles shared among the lengths, given
-/// the class's current numbers. Each of the class's numbers is a closed-form function of them.
+/// **The expected counts one round gathers over a class** (`ScoredDistinctRows::expected_counts`):
+/// every read shared between "read exactly" and "slipped", every sample's alleles shared among the
+/// lengths, given the class's current numbers. Each of the class's numbers is a closed-form
+/// function of them.
 ///
 /// **They are also the objective's slope.** The slope of the log of a sum over hidden genotypes
 /// and slips is the expected slope of the log-likelihood that knew them (Fisher's identity), and
-/// that slope is a function of these counts alone (`counting_fit_errors`).
+/// that slope is a function of these counts alone.
 #[derive(Debug, Clone, Default)]
 pub struct ClassCounts {
     /// Per allele class, how many independent allele draws.
@@ -579,10 +577,10 @@ impl ReadModel {
         let read_span = evidence.read_span;
         let (rates, rate_of_read_group) = match keying {
             RowKeying::Pooled => {
-                let read_groups = one_stutter_for_every_read_group(evidence);
-                let mut distributions =
-                    ReadDistributionsByLevel::of(&[slippage], &read_groups, span, read_span);
-                let per_allele = distributions.read_distribution_by_allele.swap_remove(0);
+                // Every read group at the class's one stutter: multiplier one, the class's level.
+                let per_allele = (-span..=span)
+                    .map(|allele| slippage.read_probabilities(allele, read_span))
+                    .collect();
                 (
                     vec![ReadModelAtRate::of(slippage, per_allele, &genotypes)],
                     Vec::new(),
@@ -1265,20 +1263,6 @@ pub(super) fn read_model_of(
     )
 }
 
-/// Every read group of `evidence` scored at the class's one stutter: one slippage group, every
-/// multiplier one. The counting fit does not fit read groups apart.
-fn one_stutter_for_every_read_group(evidence: &StratumEvidence) -> Vec<ReadGroupStutter> {
-    evidence
-        .read_groups
-        .iter()
-        .map(|read_group| ReadGroupStutter {
-            slippage_group: 0,
-            stutter_multiplier: 1.0,
-            ..*read_group
-        })
-        .collect()
-}
-
 /// One sample's reads at a tract, its read groups summed bucket by bucket, written over `reads`,
 /// which holds one count a bucket.
 fn pool_reads_into(sample: &SampleTractReads, reads: &mut [u32]) {
@@ -1843,10 +1827,9 @@ mod tests {
         let classes = allele_classes_in(allele_span);
         let genotypes = genotype_pairs(classes);
         let read_span = evidence.read_span;
-        let read_groups = one_stutter_for_every_read_group(&evidence);
-        let distributions =
-            ReadDistributionsByLevel::of(&[at], &read_groups, allele_span, read_span);
-        let per_allele = &distributions.read_distribution_by_allele[0];
+        let per_allele: Vec<Vec<f64>> = (-allele_span..=allele_span)
+            .map(|allele| at.read_probabilities(allele, read_span))
+            .collect();
         let mut posteriors: Vec<Vec<f64>> = Vec::new();
         for tract in &evidence.tracts {
             for sample in &tract.samples {
@@ -1857,8 +1840,17 @@ mod tests {
                 let posterior: Vec<f64> = genotypes
                     .iter()
                     .map(|(a, b)| {
-                        let mut ln_likelihood = 0.0;
-                        add_ln_reads(&mut ln_likelihood, per_allele, &reads, *a, *b);
+                        // Each read from either allele with even odds.
+                        let ln_likelihood: f64 = reads
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, count)| **count > 0)
+                            .map(|(bucket, count)| {
+                                let probability =
+                                    0.5 * (per_allele[*a][bucket] + per_allele[*b][bucket]);
+                                f64::from(*count) * float::ln(probability.max(1e-300))
+                            })
+                            .sum();
                         let prior = if a == b {
                             one_draw_chance * shares[*a] + two_draw_chance * shares[*a] * shares[*a]
                         } else {
@@ -2172,6 +2164,76 @@ mod tests {
             assert!(
                 (got - slipped).abs() < 1e-10,
                 "read group {group}: {got} slipped reads against {slipped}"
+            );
+        }
+    }
+
+    /// **A library's score does not depend on the number the cohort gives it**: one sample through
+    /// three libraries at multipliers one, two and three scores, to within rounding, the same as
+    /// the same three libraries numbered in another order, and each library's slipped reads
+    /// follow it to its new number. Ported from the test that pinned this on the per-read-group
+    /// scoring the fit no longer runs.
+    #[test]
+    fn a_samples_score_does_not_depend_on_the_order_its_libraries_are_numbered_in() {
+        let allele_span = 2;
+        let class = Slippage {
+            level: 0.05,
+            shorter_share: 0.75,
+            fall_off: 0.3,
+        };
+        let libraries = [
+            (1.0, vec![0, 1, 6, 0, 0]),
+            (2.0, vec![0, 2, 5, 0, 1]),
+            (3.0, vec![1, 0, 4, 2, 0]),
+        ];
+        let shares = [0.1, 0.2, 0.4, 0.2, 0.1];
+        // `order[i]` is the library numbered `i`.
+        let scored_in = |order: [usize; 3]| {
+            let mut evidence = draw_stratum(class, &spectrum_of(5), 1.0, 1.0, 1, 1, 3, 2, 1);
+            evidence.tracts = vec![TractReads {
+                samples: vec![SampleTractReads {
+                    sample: 0,
+                    by_read_group: order
+                        .iter()
+                        .enumerate()
+                        .map(|(index, library)| {
+                            (ReadGroupIndex(index as u32), libraries[*library].1.clone())
+                        })
+                        .collect(),
+                }],
+            }];
+            evidence.read_groups = order
+                .iter()
+                .enumerate()
+                .map(|(index, library)| ReadGroupStutter {
+                    stutter_multiplier: libraries[*library].0,
+                    ..ReadGroupStutter::in_group(ReadGroupId(index as u32), 0)
+                })
+                .collect();
+            evidence.check_read_groups();
+            let distinct = DistinctRows::keyed(&evidence, &[0.3], RowKeying::ByReadGroup);
+            expected_counts_by_distinct_rows(&evidence, &distinct, class, &shares, 0.6, allele_span)
+        };
+        let in_order = scored_in([0, 1, 2]);
+        let reordered = [2, 0, 1];
+        let renumbered = scored_in(reordered);
+        let close = |what: &str, a: f64, b: f64| {
+            assert!(
+                (a - b).abs() <= 1e-12 * a.abs().max(1.0),
+                "{what}: in order {a}, renumbered {b}"
+            );
+        };
+        close(
+            "log-likelihood",
+            in_order.log_likelihood,
+            renumbered.log_likelihood,
+        );
+        close("slipped", in_order.slipped, renumbered.slipped);
+        for (number, library) in reordered.iter().enumerate() {
+            close(
+                "a library's slipped reads",
+                in_order.read_groups[*library].slipped,
+                renumbered.read_groups[number].slipped,
             );
         }
     }

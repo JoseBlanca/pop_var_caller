@@ -589,14 +589,6 @@ pub struct SlippageErrors {
 pub enum StratumError {
     /// The error, on the number's own scale.
     Estimated(f64),
-    /// **The tracts do not tell it apart from the stratum's other numbers**: once they are accounted
-    /// for, the log-likelihood is not curved downwards in its direction — flat, or a saddle.
-    ///
-    /// **Only the counting fit's research errors produce it** (`counting_fit_errors`, which the
-    /// fitting bench and two examples call). The penalised fit, the one a run uses, never does:
-    /// it reports that case as [`StratumError::NotPlaced`] (the mapping in
-    /// `doc/devel/ng/arch/str_penalised_fit.md` §1.4), so no parameters file or run log carries it.
-    NotIdentified,
     /// **The tracts do not place it**: its error on the scale the number is fitted on — logit for a
     /// slippage number, log for the concentration, a log-ratio for a share — is above
     /// [`NOT_PLACED`], so a one-error interval spans odds or a size hundreds of times apart. Where
@@ -604,10 +596,10 @@ pub enum StratumError {
     /// carrying its curvature to the number's own scale would report an error hundreds of times
     /// too small. Also a number in `[0, 1]` — a slippage number or
     /// a share — whose error, on its own scale, is wider than that whole range: the SNP/indel fit's
-    /// "wider than its range" (spec §3.2).
+    /// "wider than its range" (spec §3.2). And a number the tracts do not tell apart from the
+    /// stratum's others, where the log-likelihood is not curved downwards in its direction
+    /// (`doc/devel/ng/arch/str_penalised_fit.md` §1.4).
     NotPlaced,
-    /// **A length class with no share at all**, held at zero and never fitted.
-    NoShare,
     /// **Withheld: too few loci for the error to be trusted.** Two rules, for two different
     /// reasons (`str_penalised_fit.md` §2.6, §7):
     ///
@@ -646,7 +638,7 @@ impl StratumError {
     pub fn value(self) -> Option<f64> {
         match self {
             Self::Estimated(error) => Some(error),
-            Self::NotIdentified | Self::NotPlaced | Self::NoShare | Self::TooFewLoci => None,
+            Self::NotPlaced | Self::TooFewLoci => None,
         }
     }
 }
@@ -829,15 +821,6 @@ const _: () = assert!(
     "the allele window must reach past the recorded offsets"
 );
 
-/// Scales `weights` to sum to one. Only the bench's cohort draws and the tests use it.
-#[cfg(test)]
-fn normalise(weights: &mut [f64]) {
-    let total: f64 = weights.iter().sum();
-    for weight in weights.iter_mut() {
-        *weight /= total;
-    }
-}
-
 /// **How many allele classes a window of `allele_span` repeats either side holds**: `2 × span + 1`,
 /// from `-allele_span` to `+allele_span`.
 fn allele_classes_in(allele_span: i32) -> usize {
@@ -845,7 +828,7 @@ fn allele_classes_in(allele_span: i32) -> usize {
 }
 
 // ---------------------------------------------------------------------
-// The likelihood
+// Genotypes
 // ---------------------------------------------------------------------
 
 /// The genotypes of a diploid over `classes` allele lengths, unordered pairs.
@@ -853,253 +836,6 @@ fn genotype_pairs(classes: usize) -> Vec<(usize, usize)> {
     (0..classes)
         .flat_map(|first| (first..classes).map(move |second| (first, second)))
         .collect()
-}
-
-/// One tract's read likelihoods, in the form an integral over the tract's length frequencies
-/// sweeps over cheaply. The fitting bench's held-out score
-/// (`bench_fixtures::fit_bench::score_locus`) is what reads them now; the climb's 256-point
-/// average, which they were built for, went with the climb.
-///
-/// **Rescaled out of log space, once.** The inner loop is *for each point of the integral, for
-/// each sample, sum over genotypes*, so doing it in logs would cost one `exp` per genotype per
-/// sample **per point**. Subtracting each sample's largest log-likelihood makes the inner sum a
-/// plain dot product, and the offsets are added back at the end.
-///
-/// **Compiled only for the bench and the tests**, with the per-read-group scoring it relies on:
-/// production fits collapse every read group to one distribution before scoring.
-#[cfg(test)]
-struct TractLikelihoods {
-    /// One row a sample-with-reads, over the genotypes, **laid end to end in one buffer**: row
-    /// `r` is `scaled[r * width..][..width]`.
-    ///
-    /// **Flat and not a vector of vectors**, because the innermost loop sweeps a row against the
-    /// genotype prior in vector lanes: separate heap blocks a sample cost a dependent load before
-    /// each row and leave the rows scattered, where one buffer keeps them contiguous and lets the
-    /// loop walk the whole tract without leaving cache.
-    scaled: Vec<f64>,
-    /// Σ over those samples of the log-likelihood each row was divided by.
-    ln_offset: f64,
-}
-
-/// **The read-length distributions a stratum's reads are scored under**: one for each slippage group
-/// and multiplier that some read group is scored at, and which of them each read group uses.
-///
-/// **One distribution for all the read groups of a slippage group that share a multiplier**, not
-/// one for each read group: a sample whose read groups use the same distribution has their counts
-/// summed before the logarithm, as the evidence did when it summed them into the slippage group.
-/// With every multiplier one, the distributions are the slippage groups' and every sum is the one
-/// the fit made before read groups were kept apart, to the bit (`str_library_stutter.md` §3.1).
-struct ReadDistributionsByLevel {
-    /// Per distribution, per allele offset, the probability of each read bucket. **In
-    /// slippage-group order, then by multiplier**, so a sample's rows are summed in the order the
-    /// slippage groups were.
-    read_distribution_by_allele: Vec<Vec<Vec<f64>>>,
-    /// Per read group, the position of its distribution in `read_distribution_by_allele`. Read only
-    /// by the per-read-group scoring of [`TractLikelihoods`], so compiled only where that is.
-    #[cfg(test)]
-    distribution_of_read_group: Vec<usize>,
-}
-
-impl ReadDistributionsByLevel {
-    fn of(
-        slippage: &[Slippage],
-        read_groups: &[ReadGroupStutter],
-        allele_span: i32,
-        read_span: i32,
-    ) -> Self {
-        // Each distinct (slippage group, multiplier), the multiplier by its bits so that a
-        // multiplier sorts and compares the same way in both places.
-        let key = |read_group: &ReadGroupStutter| {
-            (
-                read_group.slippage_group as usize,
-                read_group.stutter_multiplier.to_bits(),
-            )
-        };
-        let mut group_and_multiplier: Vec<(usize, u64)> = read_groups.iter().map(key).collect();
-        group_and_multiplier.sort_unstable_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then(f64::from_bits(left.1).total_cmp(&f64::from_bits(right.1)))
-        });
-        group_and_multiplier.dedup();
-        #[cfg(test)]
-        let distribution_of_read_group = read_groups
-            .iter()
-            .map(|read_group| {
-                let (group, multiplier) = key(read_group);
-                // PANIC-FREE: every read group's key was put in the list just above.
-                group_and_multiplier
-                    .binary_search_by(|(held_group, held_multiplier)| {
-                        held_group.cmp(&group).then(
-                            f64::from_bits(*held_multiplier).total_cmp(&f64::from_bits(multiplier)),
-                        )
-                    })
-                    .expect("every read group's slippage group and multiplier is listed")
-            })
-            .collect();
-        let read_distribution_by_allele = group_and_multiplier
-            .iter()
-            .map(|(group, multiplier)| {
-                let class = slippage[*group];
-                let scored = Slippage {
-                    level: read_group_level(class.level, f64::from_bits(*multiplier)),
-                    shorter_share: class.shorter_share,
-                    fall_off: class.fall_off,
-                };
-                (-allele_span..=allele_span)
-                    .map(|allele| scored.read_probabilities(allele, read_span))
-                    .collect()
-            })
-            .collect();
-        Self {
-            read_distribution_by_allele,
-            #[cfg(test)]
-            distribution_of_read_group,
-        }
-    }
-
-    /// The read-length distribution from each allele that `read_group`'s reads are scored under.
-    #[cfg(test)]
-    fn of_read_group(&self, read_group: ReadGroupIndex) -> &[Vec<f64>] {
-        &self.read_distribution_by_allele[self.distribution_of_read_group[read_group.get()]]
-    }
-
-    /// **One sample's reads, one row for each distribution its read groups use**, in distribution
-    /// order, for a sample with several read groups. Read groups using one distribution have their
-    /// counts summed into `summed_by_distribution`, a scratch buffer whose count vectors are reused
-    /// from one sample to the next; the rows returned are the part of it in use, so they last until
-    /// it is next used.
-    #[cfg(test)]
-    fn rows_by_distribution<'a>(
-        &self,
-        sample: &SampleTractReads,
-        summed_by_distribution: &'a mut Vec<(usize, Vec<u32>)>,
-    ) -> &'a [(usize, Vec<u32>)] {
-        let mut used = 0;
-        for (read_group, counts) in &sample.by_read_group {
-            let distribution = self.distribution_of_read_group[read_group.get()];
-            if let Some((_, sum)) = summed_by_distribution[..used]
-                .iter_mut()
-                .find(|(held, _)| *held == distribution)
-            {
-                for (into, reads) in sum.iter_mut().zip(counts) {
-                    *into += reads;
-                }
-            } else if let Some((held, sum)) = summed_by_distribution.get_mut(used) {
-                *held = distribution;
-                sum.clone_from(counts);
-                used += 1;
-            } else {
-                summed_by_distribution.push((distribution, counts.clone()));
-                used += 1;
-            }
-        }
-        let rows = &mut summed_by_distribution[..used];
-        rows.sort_unstable_by_key(|(distribution, _)| *distribution);
-        rows
-    }
-}
-
-/// **Adds to `total` the log-likelihood of one read group's `counts` under the genotype of alleles
-/// `first` and `second`**, each read drawn from either allele with even odds; `per_allele` is the
-/// read group's read-length distribution from each allele.
-#[cfg(test)]
-#[inline(always)]
-fn add_ln_reads(
-    total: &mut f64,
-    per_allele: &[Vec<f64>],
-    counts: &[u32],
-    first: usize,
-    second: usize,
-) {
-    for (bucket, reads) in counts.iter().enumerate() {
-        if *reads == 0 {
-            continue;
-        }
-        let probability = 0.5 * (per_allele[first][bucket] + per_allele[second][bucket]);
-        *total += f64::from(*reads) * float::ln(probability.max(1e-300));
-    }
-}
-
-#[cfg(test)]
-impl TractLikelihoods {
-    /// `distributions` holds the read-length distributions the tract's read groups are scored
-    /// under.
-    fn of(
-        tract: &TractReads,
-        distributions: &ReadDistributionsByLevel,
-        genotypes: &[(usize, usize)],
-    ) -> Self {
-        let width = genotypes.len();
-        let mut scaled: Vec<f64> = Vec::with_capacity(tract.samples.len() * width);
-        let mut ln_offset = 0.0;
-        let mut summed_by_distribution: Vec<(usize, Vec<u32>)> = Vec::new();
-        for sample in &tract.samples {
-            let start = scaled.len();
-            // **A sample with one read group — every sample of a cohort of one read group a sample
-            // — runs the loop the fit ran before read groups were kept apart**, with its
-            // distribution fetched once: going through the general path below cost that case 1.75
-            // times the time (review of step H1, 400 tracts of 200 samples at three reads).
-            if let [(read_group, counts)] = sample.by_read_group.as_slice() {
-                let per_allele = distributions.of_read_group(*read_group);
-                scaled.extend(genotypes.iter().map(|(first, second)| {
-                    let mut total = 0.0;
-                    add_ln_reads(&mut total, per_allele, counts, *first, *second);
-                    total
-                }));
-            } else {
-                let rows = distributions.rows_by_distribution(sample, &mut summed_by_distribution);
-                scaled.extend(genotypes.iter().map(|(first, second)| {
-                    let mut total = 0.0;
-                    for (distribution, counts) in rows {
-                        let per_allele = &distributions.read_distribution_by_allele[*distribution];
-                        add_ln_reads(&mut total, per_allele, counts, *first, *second);
-                    }
-                    total
-                }));
-            }
-            let row = &mut scaled[start..];
-            let largest = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            ln_offset += largest;
-            for value in row {
-                *value = float::exp(*value - largest);
-            }
-        }
-        Self { scaled, ln_offset }
-    }
-}
-
-// ---------------------------------------------------------------------
-// Small numerics
-// ---------------------------------------------------------------------
-
-// Only the cohort draw and the tests use this.
-
-#[cfg(test)]
-fn ln_gamma(x: f64) -> f64 {
-    // Lanczos, g = 7, n = 9 — the same coefficients the harnesses carry.
-    const COEFFICIENTS: [f64; 9] = [
-        0.999_999_999_999_809_9,
-        676.520_368_121_885_1,
-        -1_259.139_216_722_402_8,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507_343_278_686_905,
-        -0.138_571_095_265_720_12,
-        9.984_369_578_019_572e-6,
-        1.505_632_735_149_311_6e-7,
-    ];
-    if x < 0.5 {
-        return float::ln(std::f64::consts::PI / float::sin(std::f64::consts::PI * x))
-            - ln_gamma(1.0 - x);
-    }
-    let x = x - 1.0;
-    let mut series = COEFFICIENTS[0];
-    for (index, coefficient) in COEFFICIENTS.iter().enumerate().skip(1) {
-        series += coefficient / (x + index as f64);
-    }
-    let t = x + 7.5;
-    0.5 * float::ln(std::f64::consts::TAU) + (x + 0.5) * float::ln(t) - t + float::ln(series)
 }
 
 // ---------------------------------------------------------------------
@@ -1426,17 +1162,48 @@ pub fn gather_strata(
 /// A stratum drawn at a known truth, for anything that has to fit evidence it already knows
 /// the answer to.
 ///
-/// **Compiled under `cfg(test)` and under the `bench-fixtures` feature, and nowhere else.** The
-/// fit's tests and the research bench (`examples/ng_str_fit_bench.rs`) need drawn strata, and they
-/// need the *same* ones: a second generator would be a second thing to keep agreeing, and a bench
-/// drawn differently from the tests would be measuring a workload no test has ever checked.
-///
-/// Nothing here is production code: a release build without the feature compiles none of it.
+/// **Compiled only under `cfg(test)`**: nothing here is production code. The fit's tests share
+/// one generator so that they all draw the same strata.
 #[cfg(test)]
 pub mod bench_fixtures {
     use super::*;
 
     pub mod cohort_draw;
+
+    /// Scales `weights` to sum to one.
+    fn normalise(weights: &mut [f64]) {
+        let total: f64 = weights.iter().sum();
+        for weight in weights.iter_mut() {
+            *weight /= total;
+        }
+    }
+
+    /// The log of the gamma function, by Lanczos's approximation.
+    fn ln_gamma(x: f64) -> f64 {
+        // Lanczos, g = 7, n = 9 — the same coefficients the harnesses carry.
+        const COEFFICIENTS: [f64; 9] = [
+            0.999_999_999_999_809_9,
+            676.520_368_121_885_1,
+            -1_259.139_216_722_402_8,
+            771.323_428_777_653_1,
+            -176.615_029_162_140_6,
+            12.507_343_278_686_905,
+            -0.138_571_095_265_720_12,
+            9.984_369_578_019_572e-6,
+            1.505_632_735_149_311_6e-7,
+        ];
+        if x < 0.5 {
+            return float::ln(std::f64::consts::PI / float::sin(std::f64::consts::PI * x))
+                - ln_gamma(1.0 - x);
+        }
+        let x = x - 1.0;
+        let mut series = COEFFICIENTS[0];
+        for (index, coefficient) in COEFFICIENTS.iter().enumerate().skip(1) {
+            series += coefficient / (x + index as f64);
+        }
+        let t = x + 7.5;
+        0.5 * float::ln(std::f64::consts::TAU) + (x + 0.5) * float::ln(t) - t + float::ln(series)
+    }
 
     /// A reproducible stream, the same one the harnesses use.
     struct Rng(u64);
@@ -1859,194 +1626,6 @@ mod tests {
                 fall_off: 0.3,
             },
         ]
-    }
-
-    /// One tract read by one sample through two read groups, `first`'s reads through read group 0
-    /// and `second`'s through read group 1.
-    fn one_sample_through_two_read_groups(first: &[u32], second: &[u32]) -> TractReads {
-        TractReads {
-            samples: vec![SampleTractReads {
-                sample: 0,
-                by_read_group: vec![
-                    (ReadGroupIndex(0), first.to_vec()),
-                    (ReadGroupIndex(1), second.to_vec()),
-                ],
-            }],
-        }
-    }
-
-    /// A tract's likelihood table and its offset, as bits.
-    fn the_bits_of(likelihoods: &TractLikelihoods) -> Vec<u64> {
-        let mut bits: Vec<u64> = likelihoods.scaled.iter().map(|x| x.to_bits()).collect();
-        bits.push(likelihoods.ln_offset.to_bits());
-        bits
-    }
-
-    /// **Read groups at different levels are scored under different distributions, and read groups
-    /// at one level under one**: two read groups of one slippage group at one multiplier share a
-    /// distribution, a read group at another multiplier has its own, and read groups of two
-    /// slippage groups never share — and the distributions run in slippage-group order, then by
-    /// multiplier.
-    #[test]
-    fn a_read_distribution_is_one_slippage_group_at_one_multiplier() {
-        let slippage = two_groups_slippage();
-        let read_group = |group: u32, multiplier: f64| ReadGroupStutter {
-            id: ReadGroupId(0),
-            slippage_group: group,
-            stutter_multiplier: multiplier,
-        };
-        let distributions = ReadDistributionsByLevel::of(
-            &slippage,
-            &[
-                read_group(1, 1.0),
-                read_group(0, 2.0),
-                read_group(0, 1.0),
-                read_group(0, 1.0),
-            ],
-            1,
-            1,
-        );
-        assert_eq!(distributions.distribution_of_read_group, vec![2, 1, 0, 0]);
-        let doubled = Slippage {
-            level: 0.2,
-            ..slippage[0]
-        };
-        assert_eq!(
-            distributions.read_distribution_by_allele[1][1],
-            doubled.read_probabilities(0, 1)
-        );
-        assert_eq!(
-            distributions.read_distribution_by_allele[2][1],
-            slippage[1].read_probabilities(0, 1)
-        );
-    }
-
-    /// **A sample's rows are summed in distribution order, not in the order its read groups are
-    /// listed**: a sample whose read group 0 is in slippage group 1 and read group 1 in group 0
-    /// scores to the bit as the same reads listed the other way round.
-    #[test]
-    fn tract_likelihoods_do_not_depend_on_the_order_a_samples_libraries_are_listed_in() {
-        let slippage = two_groups_slippage();
-        let genotypes = genotype_pairs(3);
-        let (one, other) = ([3, 7, 2], [5, 1, 9]);
-        let inverted = [
-            ReadGroupStutter::in_group(ReadGroupId(0), 1),
-            ReadGroupStutter::in_group(ReadGroupId(1), 0),
-        ];
-        let in_order = [
-            ReadGroupStutter::in_group(ReadGroupId(0), 0),
-            ReadGroupStutter::in_group(ReadGroupId(1), 1),
-        ];
-        let listed_against_the_groups = TractLikelihoods::of(
-            &one_sample_through_two_read_groups(&one, &other),
-            &ReadDistributionsByLevel::of(&slippage, &inverted, 1, 1),
-            &genotypes,
-        );
-        let listed_with_the_groups = TractLikelihoods::of(
-            &one_sample_through_two_read_groups(&other, &one),
-            &ReadDistributionsByLevel::of(&slippage, &in_order, 1, 1),
-            &genotypes,
-        );
-        assert_eq!(
-            the_bits_of(&listed_against_the_groups),
-            the_bits_of(&listed_with_the_groups)
-        );
-    }
-
-    /// **Two read groups of one sample and one slippage group at different multipliers are scored
-    /// apart**: the sample scores to the bit as if the second read group were in a group of its own
-    /// at the doubled level, and not as the two read groups' reads summed at the class rate.
-    #[test]
-    fn a_samples_libraries_at_two_multipliers_are_two_rows() {
-        let class = two_groups_slippage()[0];
-        let genotypes = genotype_pairs(3);
-        let (one, other) = ([3, 7, 2], [5, 1, 9]);
-        let at_two_multipliers = [
-            ReadGroupStutter::in_group(ReadGroupId(0), 0),
-            ReadGroupStutter {
-                stutter_multiplier: 2.0,
-                ..ReadGroupStutter::in_group(ReadGroupId(1), 0)
-            },
-        ];
-        let scored = TractLikelihoods::of(
-            &one_sample_through_two_read_groups(&one, &other),
-            &ReadDistributionsByLevel::of(&[class], &at_two_multipliers, 1, 1),
-            &genotypes,
-        );
-        let doubled = Slippage {
-            level: class.level * 2.0,
-            ..class
-        };
-        let in_two_groups = TractLikelihoods::of(
-            &one_sample_through_two_read_groups(&one, &other),
-            &ReadDistributionsByLevel::of(
-                &[class, doubled],
-                &[
-                    ReadGroupStutter::in_group(ReadGroupId(0), 0),
-                    ReadGroupStutter::in_group(ReadGroupId(1), 1),
-                ],
-                1,
-                1,
-            ),
-            &genotypes,
-        );
-        assert_eq!(the_bits_of(&scored), the_bits_of(&in_two_groups));
-        let summed: Vec<u32> = one.iter().zip(&other).map(|(a, b)| a + b).collect();
-        let at_the_class_rate = TractLikelihoods::of(
-            &TractReads {
-                samples: vec![SampleTractReads {
-                    sample: 0,
-                    by_read_group: vec![(ReadGroupIndex(0), summed)],
-                }],
-            },
-            &ReadDistributionsByLevel::of(
-                &[class],
-                &[ReadGroupStutter::in_group(ReadGroupId(0), 0)],
-                1,
-                1,
-            ),
-            &genotypes,
-        );
-        assert_ne!(the_bits_of(&scored), the_bits_of(&at_the_class_rate));
-    }
-
-    /// **Two read groups of one slippage group at a multiplier of one score to the bit as one
-    /// read group holding their summed reads**, which is the claim on [`ReadDistributionsByLevel`]:
-    /// read groups sharing a distribution have their counts summed before the logarithm.
-    #[test]
-    fn tract_likelihoods_of_two_libraries_at_multiplier_one_equal_their_summed_reads() {
-        let class = two_groups_slippage()[0];
-        let genotypes = genotype_pairs(3);
-        let (one, other) = ([3, 7, 2], [5, 1, 9]);
-        let kept_apart = TractLikelihoods::of(
-            &one_sample_through_two_read_groups(&one, &other),
-            &ReadDistributionsByLevel::of(
-                &[class],
-                &[
-                    ReadGroupStutter::in_group(ReadGroupId(0), 0),
-                    ReadGroupStutter::in_group(ReadGroupId(1), 0),
-                ],
-                1,
-                1,
-            ),
-            &genotypes,
-        );
-        let summed = TractLikelihoods::of(
-            &TractReads {
-                samples: vec![SampleTractReads {
-                    sample: 0,
-                    by_read_group: vec![(ReadGroupIndex(0), vec![8, 8, 11])],
-                }],
-            },
-            &ReadDistributionsByLevel::of(
-                &[class],
-                &[ReadGroupStutter::in_group(ReadGroupId(0), 0)],
-                1,
-                1,
-            ),
-            &genotypes,
-        );
-        assert_eq!(the_bits_of(&kept_apart), the_bits_of(&summed));
     }
 
     /// **A read group in a slippage group the evidence does not declare is refused by name**, by
