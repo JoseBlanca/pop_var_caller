@@ -285,31 +285,17 @@ pub fn too_wide(span: u64, kind: &LocusKind, max_cohort_locus_span: MaxCohortLoc
     bounded_by_policy(kind) && span > u64::from(max_cohort_locus_span.get())
 }
 
-/// [`judge`], or the quiet half of it alone when the walk has no records to read a kind from.
+/// A closed locus's verdict: too quiet, too wide, or build.
 ///
-/// **A walk over stored evidence cannot pass the width verdict and does not try.** The bound
-/// governs generic loci and not repeat tracts, so passing it needs the locus's kind, and a kind
-/// lives in a record — which such a walk has not built and, for a quiet locus, never will. So
-/// the width half moves to whoever resolves the members, which is the one place a kind is in
-/// hand ([`too_wide`]). The quiet half is unaffected: it reads the summaries' two counts and
-/// nothing else, which is what keeps a quiet locus free either way.
-fn judge_here<'k>(
-    deferred: bool,
-    span: u64,
-    some_sample_reached_the_threshold: bool,
-    kind: impl FnOnce() -> &'k LocusKind,
-    max_cohort_locus_span: MaxCohortLocusSpan,
-) -> Verdict {
-    if !some_sample_reached_the_threshold {
-        return Verdict::TooQuiet;
-    }
-    if deferred {
-        return Verdict::Build;
-    }
-    judge(span, true, kind, max_cohort_locus_span)
-}
-
+/// **`width_deferred`: a walk over stored evidence cannot pass the width verdict and does not
+/// try.** The bound governs generic loci and not repeat tracts, so passing it needs the locus's
+/// kind, and a kind lives in a record — which such a walk has not built and, for a quiet locus,
+/// never will. So the width half moves to whoever resolves the members, which is the one place
+/// a kind is in hand ([`too_wide`]), and a locus that is not quiet is judged `Build` here. The
+/// quiet half is unaffected: it reads the summaries' two counts and nothing else, which is what
+/// keeps a quiet locus free either way.
 fn judge<'k>(
+    width_deferred: bool,
     span: u64,
     some_sample_reached_the_threshold: bool,
     kind: impl FnOnce() -> &'k LocusKind,
@@ -330,6 +316,9 @@ fn judge<'k>(
     // in them, which is the class worth knowing about.
     if !some_sample_reached_the_threshold {
         return Verdict::TooQuiet;
+    }
+    if width_deferred {
+        return Verdict::Build;
     }
 
     if too_wide(span, kind(), max_cohort_locus_span) {
@@ -1065,7 +1054,7 @@ impl<'a> Iterator for LocusCloser<'a> {
             verdict: if some_member_over_the_depth_ceiling {
                 Verdict::OverDepthCeiling
             } else {
-                judge_here(
+                judge(
                     self.observations_per_sample.is_empty(),
                     span_of(region),
                     some_sample_reached_the_threshold,
@@ -1917,22 +1906,45 @@ mod tests {
         let quiet = false;
 
         assert_eq!(
-            judge(narrow, loud, || &LocusKind::Generic, max_span(10)),
+            judge(false, narrow, loud, || &LocusKind::Generic, max_span(10)),
             Verdict::Build
         );
         assert_eq!(
-            judge(narrow, quiet, || &LocusKind::Generic, max_span(10)),
+            judge(false, narrow, quiet, || &LocusKind::Generic, max_span(10)),
             Verdict::TooQuiet
         );
         assert_eq!(
-            judge(wide, loud, || &LocusKind::Generic, max_span(10)),
+            judge(false, wide, loud, || &LocusKind::Generic, max_span(10)),
             Verdict::Failed
         );
         assert_eq!(
-            judge(wide, quiet, || &LocusKind::Generic, max_span(10)),
+            judge(false, wide, quiet, || &LocusKind::Generic, max_span(10)),
             Verdict::TooQuiet,
             "qualifies for both: the quiet verdict is the one that stands, so that no kind \
              has to be found out for a locus nobody varied at"
+        );
+
+        // **A walk that defers the width verdict never reads the kind**: a locus that is not
+        // quiet is built whatever its width, and a quiet one is still too quiet.
+        assert_eq!(
+            judge(
+                true,
+                wide,
+                loud,
+                || unreachable!("the kind is not read"),
+                max_span(10)
+            ),
+            Verdict::Build
+        );
+        assert_eq!(
+            judge(
+                true,
+                wide,
+                quiet,
+                || unreachable!("the kind is not read"),
+                max_span(10)
+            ),
+            Verdict::TooQuiet
         );
     }
 
