@@ -398,9 +398,9 @@ pub struct TypedRegionConfig {
     pub scan: ScanParams,
     /// The satellite cap: a tract longer than this is a `Satellite`, not an STR.
     ///
-    /// **Also the detection margin of anything that scans in pieces** — the catalog's
-    /// builder scans whole contigs and so has none, but `RegionScanner` still does, and
-    /// the two must be the same number (spec §2.6): a margin exists to capture whole any
+    /// **Also the detection margin of anything that scans in pieces** — nothing does now:
+    /// the catalog's builder scans whole contigs and so has none. A scanner that did would
+    /// have to use this same number (spec §2.6): a margin exists to capture whole any
     /// repeat that is not a satellite, so it is exactly the length at which a repeat
     /// becomes one.
     pub max_str_len: Bp,

@@ -1,12 +1,12 @@
 //! ng alignment — lining a read up against a reference stretch.
 //!
 //! This is a **folder, not a file**, because it holds competing implementations that get
-//! compared: the three aligner and normalizer traits will live here in `mod.rs` and each
+//! compared: the aligner and normalizer traits live here in `mod.rs` and each
 //! algorithm sits in its own file beside its siblings — as does the shared [`emission`]
 //! component (`doc/devel/ng/arch/alignment.md` §Module home). File names say
 //! which trait an algorithm implements and whether it is repeat-aware, because both are
-//! load-bearing — the best-path and marginal families implement *different* traits, and
-//! every repeat-aware algorithm has an affine counterpart it must not be confused with.
+//! load-bearing — an aligner and a normalizer implement *different* traits, and every
+//! repeat-aware algorithm has an affine counterpart it must not be confused with.
 //!
 //! **It is not a pipeline step, and it knows none.** Step 2 (read preparation) and step 7
 //! (read likelihood) both call it; it knows about neither. It takes sequences and returns
@@ -15,16 +15,11 @@
 //!
 //! Landed so far: [`Alignment`] and [`RepeatSpan`], the two output shapes; [`RepeatGeometry`]
 //! and [`RepeatContext`], which tell a repeat-aware algorithm where the repeat sits and how it
-//! slips; the [`BestPathAligner`] and `MarginalAligner` traits they meet at; and the two
+//! slips; the [`BestPathAligner`] trait they meet at; and the two
 //! shared components, the [`emission`] scoring every aligner uses and the [`stutter`] model;
 //! and the first algorithm, [`ssr_best_path_flat_gap`] — the repeat-aware delimiter, which is
 //! this module's **only byte-parity oracle** against production (`delimit_parity`, test-only; since
-//! promotion step C10 against production's recorded answers).
-//! The `MarginalAligner` trait has two implementations: algorithm 5
-//! (`ssr_marginal_sequence` — the sequence-versus-sequence marginal, a linear-space port of
-//! production's `align_subst`, byte-parity-checked against it) and algorithm 6
-//! (`ssr_marginal_whole_read` — the whole-read two-regime forward, new code with no port
-//! oracle, run with fixed synthetic qualities). Still to come in
+//! promotion step C10 against production's recorded answers). Still to come in
 //! `doc/devel/ng/impl_plan/alignment_best_path.md`: the affine aligner (E, gated).
 
 #[cfg(test)]
@@ -43,8 +38,6 @@ pub use emission::{BaseScores, Emission, FlatEmission, PerQualityEmission};
 pub use stutter::{StutterModel, StutterRates};
 
 use crate::bam::alignment_input::CigarOp;
-#[cfg(test)]
-use crate::types::LogProb;
 use crate::types::{BaseQual, Bp, DomainError, Motif};
 use std::ops::Range;
 
@@ -129,9 +122,7 @@ pub struct Alignment {
 /// aligner was handed, exactly like [`RepeatInterval`] and for the same reason: ng speaks
 /// one width, so nothing narrows and no off-by-width bug is possible.
 ///
-/// A [`Range`] rather than ng's existing [`RegionSpan`], deliberately: `RegionSpan` is the
-/// region seam's *reference*-coordinate vocabulary, and this module knows no coordinates
-/// and no callers. The cost is that this type is not `Copy`.
+/// Each span is a [`Range`], so the type is not `Copy`.
 ///
 /// **Producer's invariant:** every span is well-formed, `start <= end`. Nothing enforces
 /// it — the aligner is the only producer — and an inverted range would read as a
@@ -140,7 +131,6 @@ pub struct Alignment {
 /// into an enormous length.
 ///
 /// [`RepeatInterval`]: crate::tandem_repeat::RepeatInterval
-/// [`RegionSpan`]: crate::tandem_repeat::RegionSpan
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepeatSpan {
     /// Both flanks anchored, so the span **pins the repeat's length**. The only variant
@@ -483,102 +473,10 @@ pub trait BestPathAligner: Sized {
     ) -> Self::Output;
 }
 
-#[cfg(test)]
-/// The total probability the reference produced this read, summed over **every** line-up
-/// rather than the single best one — one number, returned as a natural logarithm.
-///
-/// This is the [`BestPathAligner`]'s twin: the same recurrence under a different reduction.
-/// Where the best-path aligner takes the largest predecessor and traces the winning line-up
-/// back, this **adds up all predecessors** and keeps only the total (the *forward*
-/// algorithm), so it needs no traceback and returns a probability, not a placement. The two
-/// answer different questions — "where does this read go" versus "how likely is this
-/// reference to have produced it" — which is why they are separate traits (spec §3, §7).
-///
-/// # Why the result is a logarithm, and why that is a contract
-///
-/// The returned [`LogProb`] is fixed by the interface, not by any one implementation: a
-/// caller multiplies these across every read at a locus to form a genotype likelihood, and
-/// that product underflows a linear `f64` invisibly. The decisive reason is the failure
-/// mode — in logarithms an impossible line-up reaches `-∞`, which a caller can see and act
-/// on; in linear space it reaches `0`, indistinguishable from a value that merely got too
-/// small to represent (spec §7). **The contract fixes only the returned value:** an
-/// implementation is free to run its matrix in ordinary probabilities and take a single
-/// logarithm at the end (safe at repeat sizes), which is what production's ported
-/// `align_subst` does — so parity against it stays checkable in either space.
-///
-/// # What varies between implementations
-///
-/// - `Output` is not an associated type here, unlike [`BestPathAligner`]: a marginal is
-///   *always* one [`LogProb`], so there is nothing to vary.
-/// - `Context` is `()` for the sequence-versus-sequence marginal (algorithm 5), which needs
-///   nothing locus-specific — it compares two bare sequences under a fixed error rate — and
-///   [`RepeatContext`] for the whole-read forward (algorithm 6), which needs the repeat's
-///   geometry to know where its flanks end. As on [`BestPathAligner`], `Context` carries a
-///   lifetime and is passed by value: the repeat context *is* two borrowed references, so a
-///   plain associated type could only name it as `RepeatContext<'static>` and force every
-///   caller to own its locus data forever. `Copy` because it is two pointers or nothing at
-///   all; taking a reference to it would only add indirection.
-/// - `Scratch` is the reused forward-matrix buffer, per-algorithm, never one shared type.
-///
-/// # The read carries no qualities, deliberately
-///
-/// `read` is a bare `&[u8]`, not a [`ReadBases`]: production's marginal scores with a
-/// **single flat error rate**, not per-base qualities (spec §5.1, §7). That choice is
-/// load-bearing beyond this trait — per-base qualities are per *read*, so keeping them would
-/// stop identical-sequence reads collapsing into one tallied row (spec §9) — so it is fixed
-/// in the signature rather than left to each implementation. An implementation that wanted
-/// per-base qualities would take them the same way [`BestPathAligner`] does.
-///
-/// # Contract
-///
-/// **Pure per call**, exactly as [`BestPathAligner`]: the output is a function of the
-/// arguments and the implementation's own constructor state (its emission model), with no
-/// hidden mutation beyond `Scratch` — so the result never depends on call order or thread
-/// count, which the cohort's byte-identity guarantee rests on. `Scratch` is caller-owned and
-/// reused; an implementation that allocates per call is a defect, not a slow path. There is
-/// **no tie-break rule** to state — a sum has no ties to break, which is one of the things
-/// that makes the marginal simpler than the best path.
-///
-/// **No `Result`, deliberately** (arch §3). A line-up that cannot happen is an *answer*, not
-/// a failure: it returns `LogProb(f64::NEG_INFINITY)`, the value the logarithm contract
-/// exists to make visible. As with [`BestPathAligner`], the one condition a repeat-aware
-/// implementation cannot check cheaply — that the geometry fits the reference
-/// ([`RepeatGeometry::fits_reference`]) — is the caller's to uphold, a documented
-/// precondition plus a debug assertion, not an error variant.
-///
-/// The `Sized` supertrait is deliberate and matches [`BestPathAligner`]: implementations are
-/// selected by generic type parameter, never behind `dyn`, because this runs per read across
-/// a whole cohort (spec §7, arch §4). Stating it makes that a compile error, not a
-/// convention.
-pub trait MarginalAligner: Sized {
-    /// The reused forward-matrix buffer — allocated per worker, never per read. As on
-    /// [`BestPathAligner::Scratch`], `Default` must decide nothing that changes a result:
-    /// scratch is buffers only, empty and grown on demand.
-    type Scratch: Default;
-    /// `()` for the sequence-versus-sequence marginal; [`RepeatContext`] for the whole-read
-    /// forward. Generic over the lifetime and `Copy`, for the reason spelled out on
-    /// [`BestPathAligner::Context`].
-    type Context<'a>: Copy;
-
-    /// Sum the probability of `read` against `reference` over every line-up, as a natural
-    /// logarithm.
-    ///
-    /// `read` and `reference` are bare stretches of bases — this module knows no
-    /// coordinates and no callers. Neither carries qualities (see above). An unreachable
-    /// line-up returns `LogProb(f64::NEG_INFINITY)`, not an error.
-    fn marginal_probability(
-        &self,
-        read: &[u8],
-        reference: &[u8],
-        context: Self::Context<'_>,
-        scratch: &mut Self::Scratch,
-    ) -> LogProb;
-}
-
 /// Rewrite an existing alignment into its canonical **left-most** spelling, in place.
 ///
-/// This is a different task from the two aligners above, and a different trait for it: the
-/// aligners *compute* an alignment from two sequences, while this *rewrites* one that already
+/// This is a different task from the aligner above, and a different trait for it: an
+/// aligner *computes* an alignment from two sequences, while this *rewrites* one that already
 /// exists. The same insertion or deletion can be written at several equivalent positions when
 /// it sits in or near a repeat — the gap can slide without changing a single base of the
 /// result — and equivalent alignments spelled differently look like different variants, so
@@ -586,7 +484,7 @@ pub trait MarginalAligner: Sized {
 /// left as it can go without introducing a mismatch, and merges adjacent gaps of the same
 /// kind. Nothing about the alignment's quality changes; only its spelling (spec §6).
 ///
-/// It shares **no machinery** with [`BestPathAligner`] and `MarginalAligner`: no dynamic
+/// It shares **no machinery** with [`BestPathAligner`]: no dynamic
 /// programming, no matrix, no scratch. It is in this module only because it operates on
 /// alignments, and it is a separate trait because it is a separate task (spec §1, §6).
 ///
@@ -609,14 +507,14 @@ pub trait MarginalAligner: Sized {
 ///
 /// # Contract
 ///
-/// **Pure per call**, like the two aligner traits: the output is a function of the arguments
+/// **Pure per call**, like [`BestPathAligner`]: the output is a function of the arguments
 /// and the implementation's own constructor state, with no hidden state — so the result never
 /// depends on call order or thread count. There is no `Scratch` associated type, because these
 /// algorithms fill no matrix; a normalizer that wants a reusable buffer owns it as its own
 /// field. **No `Result`:** an alignment that is already leftmost is normalized to itself, an
 /// answer rather than a failure, so `normalize` returns nothing and mutates in place.
 ///
-/// The `Sized` supertrait matches [`BestPathAligner`] and `MarginalAligner`: implementations
+/// The `Sized` supertrait matches [`BestPathAligner`]: implementations
 /// are selected by generic type parameter, never behind `dyn`. Normalization runs per read as
 /// the caller walks a cohort, and the module's rule is static dispatch throughout (spec §7,
 /// arch §4). Stating it makes that a compile error rather than a convention.
@@ -943,144 +841,6 @@ mod tests {
     // `align_assigns_a_junction_gap_to_the_block_on_its_five_prime_side`,
     // `align_returns_unanchored_for_an_empty_reference`, and a debug-build test that the
     // two documented preconditions are asserted.
-
-    // ---- A2: the `MarginalAligner` trait ---------------------------------------------
-    //
-    // A2 lands the trait with **no algorithm**. The two impls below are `#[cfg(test)]`
-    // compile-time anchors, not implementations of the plan's algorithms 5 or 6: their
-    // bodies are trivial, deterministic stand-ins whose only job is to prove the trait
-    // can be met at both `Context` shapes the plan names.
-
-    /// Algorithm-5 shape: a marginal that needs nothing locus-specific, so `Context = ()`.
-    /// Its stand-in body treats an equal-length pair as reachable and any length mismatch
-    /// as impossible — enough to exercise the signature and the `-∞` sentinel the
-    /// logarithm contract exists for.
-    struct UnitContextMarginal;
-    impl MarginalAligner for UnitContextMarginal {
-        type Scratch = ();
-        type Context<'a> = ();
-        fn marginal_probability(
-            &self,
-            read: &[u8],
-            reference: &[u8],
-            _context: (),
-            _scratch: &mut (),
-        ) -> LogProb {
-            if read.len() == reference.len() {
-                LogProb(0.0)
-            } else {
-                LogProb(f64::NEG_INFINITY)
-            }
-        }
-    }
-
-    /// Algorithm-6 shape: a marginal whose `Context<'a> = RepeatContext<'a>` — a
-    /// **borrowed** context. This impl existing at all is the load-bearing proof: it is
-    /// only expressible because `Context` is generic over a lifetime. Collapse the GAT to
-    /// a plain `type Context` and this stops compiling, which is exactly the regression the
-    /// anchor guards against. Named to parallel [`UnitContextMarginal`] — both say what
-    /// their `Context` associated type *is*.
-    struct RepeatContextMarginal;
-    impl MarginalAligner for RepeatContextMarginal {
-        type Scratch = ();
-        type Context<'a> = RepeatContext<'a>;
-        fn marginal_probability(
-            &self,
-            read: &[u8],
-            _reference: &[u8],
-            context: RepeatContext<'_>,
-            _scratch: &mut (),
-        ) -> LogProb {
-            // Read through the borrowed geometry, so the borrowed-context path is actually
-            // exercised rather than merely declared.
-            LogProb(-(context.geometry.left_flank_len.get() as f64) - read.len() as f64)
-        }
-    }
-
-    /// Drive an aligner **through a generic bound**, which is the only place the
-    /// `Context: Copy` and `Scratch: Default` bounds actually bite: a *concrete* impl
-    /// compiles whether or not the trait requires them, so a test using concrete types
-    /// pins neither. Here `scratch` comes from `Default` and `context` is passed once and
-    /// then reused — so both bounds are load-bearing, and dropping either from the trait
-    /// makes this helper fail to compile. Returns both scores so a caller can check the
-    /// reuse produced the same answer.
-    fn marginal_reusing_context<A: MarginalAligner>(
-        aligner: &A,
-        read: &[u8],
-        reference: &[u8],
-        context: A::Context<'_>,
-    ) -> (LogProb, LogProb) {
-        let mut scratch = A::Scratch::default();
-        let first = aligner.marginal_probability(read, reference, context, &mut scratch);
-        // Reusing `context` after passing it once by value relies on `Context: Copy`.
-        let second = aligner.marginal_probability(read, reference, context, &mut scratch);
-        (first, second)
-    }
-
-    /// Algorithm-5 shape is implementable, and an unreachable line-up comes back as the
-    /// `-∞` sentinel — the value the logarithm contract exists to make visible — rather
-    /// than an error.
-    #[test]
-    fn marginal_aligner_returns_the_negative_infinity_sentinel_for_an_unreachable_line_up() {
-        let mut scratch = ();
-        let free = UnitContextMarginal;
-        assert_eq!(
-            free.marginal_probability(b"ACGT", b"ACGT", (), &mut scratch)
-                .get(),
-            0.0
-        );
-        assert_eq!(
-            free.marginal_probability(b"ACGT", b"ACG", (), &mut scratch)
-                .get(),
-            f64::NEG_INFINITY
-        );
-    }
-
-    /// Algorithm-6 shape is implementable: a **borrowed** `RepeatContext<'a>` can be the
-    /// `Context`, which is only possible because `Context` is a GAT and not a plain
-    /// associated type. The body reads the borrowed geometry, so the borrow is exercised.
-    #[test]
-    fn marginal_aligner_supports_a_borrowed_repeat_context() {
-        let mut scratch = ();
-        let geometry = geometry(3, 2);
-        let stutter = StutterModel::hipstr_shipped();
-        let context = RepeatContext {
-            geometry: &geometry,
-            stutter: &stutter,
-        };
-        assert_eq!(
-            RepeatContextMarginal
-                .marginal_probability(b"ACGTA", b"ACGTA", context, &mut scratch)
-                .get(),
-            -3.0 - 5.0
-        );
-    }
-
-    /// The `Context: Copy` and `Scratch: Default` bounds are load-bearing — and **only a
-    /// generic caller can prove it**, because a concrete impl compiles regardless. This
-    /// drives both stand-ins through [`marginal_reusing_context`], whose body builds
-    /// scratch via `Default` and reuses the context after passing it once; remove either
-    /// bound from the trait and that helper no longer compiles. (This is the guard the
-    /// first anchor test could not provide, since it used concrete types throughout.)
-    #[test]
-    fn marginal_aligner_copy_context_and_default_scratch_bind_through_a_generic_caller() {
-        // `()` context.
-        let (first, second) = marginal_reusing_context(&UnitContextMarginal, b"ACGT", b"ACGT", ());
-        assert_eq!(first.get(), 0.0);
-        assert_eq!(second.get(), 0.0);
-
-        // Borrowed `RepeatContext`, reused across the helper's two reads.
-        let geometry = geometry(3, 2);
-        let stutter = StutterModel::hipstr_shipped();
-        let context = RepeatContext {
-            geometry: &geometry,
-            stutter: &stutter,
-        };
-        let (first, second) =
-            marginal_reusing_context(&RepeatContextMarginal, b"ACGTA", b"ACGTA", context);
-        assert_eq!(first.get(), -3.0 - 5.0);
-        assert_eq!(second.get(), -3.0 - 5.0);
-    }
 
     // ---- A1: the `AlignmentNormalizer` trait -----------------------------------------
     //

@@ -329,6 +329,7 @@ impl<E> From<WindowOverBudget> for StageStop<E> {
 }
 
 /// **What a stage that hands its lines to a vector stops on**: its budget, never a write.
+#[cfg(test)]
 pub type VectorStageStop = StageStop<std::convert::Infallible>;
 
 /// **How many of a core's lines are rewritten together**, on the pool, and handed on before the
@@ -668,15 +669,12 @@ impl NeighbourEvidenceStage {
         &self.read_counts
     }
 
-    /// **Takes one line**, its place already checked against the line before it by the writer,
-    /// and appends to `ready` every line whose window is complete. `fragments` are the line's reads
-    /// that reach another record (read phase spec §2.4). Lines are taken a batch at a time
-    /// ([`Self::push_writing`]), so a window is solved, and its lines appended, when the batch
-    /// holding the line that completes it is taken, or at [`Self::finish`].
+    /// [`Self::push_writing`], appending each line it completes to `ready`.
     ///
     /// # Errors
     ///
     /// If a window this line completed holds more than the budget even at the smallest size.
+    #[cfg(test)]
     pub fn push(
         &mut self,
         place: RecordPlace,
@@ -690,9 +688,12 @@ impl NeighbourEvidenceStage {
         })
     }
 
-    /// **Takes one line, as [`Self::push`], and hands each line it completes to `write`** in the
-    /// order they arrived, a chunk of a core at a time ([`LINES_REWRITTEN_TOGETHER`]) — so a core's
-    /// rewritten lines are never all held at once.
+    /// **Takes one line**, its place already checked against the line before it by the writer,
+    /// **and hands each line it completes to `write`** in the order they arrived, a chunk of a
+    /// core at a time ([`LINES_REWRITTEN_TOGETHER`]) — so a core's rewritten lines are never all
+    /// held at once. `fragments` are the line's reads that reach another record (read phase spec
+    /// §2.4). A window is solved, and its lines handed on, when the batch holding the line that
+    /// completes it is taken (below), or at [`Self::finish_writing`].
     ///
     /// **A line is taken a little after it arrives.** Lines wait until [`LINES_READ_TOGETHER`]
     /// have arrived, or their text and read alleles reach [`BYTES_READ_TOGETHER`], then are read
@@ -910,12 +911,12 @@ impl NeighbourEvidenceStage {
         self.count_resident_bytes_from(from);
     }
 
-    /// **Finishes the current contig**: solves its remaining windows and appends their lines to
-    /// `ready`. Called at a contig change and at the end of the input.
+    /// [`Self::finish_writing`], appending the lines to `ready`.
     ///
     /// # Errors
     ///
     /// As [`Self::push`].
+    #[cfg(test)]
     pub fn finish(
         &mut self,
         ready: &mut Vec<(RecordPlace, Vec<u8>)>,
@@ -926,7 +927,9 @@ impl NeighbourEvidenceStage {
         })
     }
 
-    /// **Finishes the current contig, as [`Self::finish`], handing its lines to `write`.**
+    /// **Finishes the current contig**: takes the lines still waiting, solves its remaining
+    /// windows and hands their lines to `write`. Called at the end of the input; a line on a new
+    /// contig finishes the one before by itself.
     ///
     /// # Errors
     ///
