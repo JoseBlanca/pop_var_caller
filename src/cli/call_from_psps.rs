@@ -487,6 +487,11 @@ pub enum CallFromPspsCliError {
         path: PathBuf,
     },
 
+    /// **The run would hold more files open than this process may**: one a psp, checked before
+    /// any is opened (`crate::open_files`).
+    #[error(transparent)]
+    NotEnoughFileDescriptors(#[from] crate::open_files::PspsOverTheLimit),
+
     /// The ground or the catalog this run would call over could not be worked out.
     ///
     /// **Transparent**, so the sentence is the shared one every mode renders.
@@ -533,12 +538,18 @@ pub enum CallFromPspsCliError {
 /// **The psps this run calls, with every directory expanded** — the rule every psp-taking command
 /// shares ([`psps_named`]), with its refusals dressed in this command's words.
 fn psps_named_by(args: &CallFromPspsArgs) -> Result<Vec<PathBuf>, CallFromPspsCliError> {
-    psps_named(&args.psps).map_err(|refusal| match refusal {
+    let psps = psps_named(&args.psps).map_err(|refusal| match refusal {
         PspArgumentRefusal::Unlistable { path, source } => {
             CallFromPspsCliError::PspDirectory { path, source }
         }
         PspArgumentRefusal::Empty { path } => CallFromPspsCliError::NoPspsInDirectory { path },
-    })
+    })?;
+    // Every psp stays open for the run: refused now, not at "Too many open files" part-way.
+    crate::open_files::refuse_more_psps_than_the_limit(
+        psps.len(),
+        crate::open_files::DescriptorLimit::of_this_process(),
+    )?;
+    Ok(psps)
 }
 
 /// Call `--psp`'s cohort and write `--output`. Prints a summary when it finishes.

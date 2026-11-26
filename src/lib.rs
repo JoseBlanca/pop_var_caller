@@ -92,6 +92,7 @@ pub mod iter_ext;
 pub mod locus_generation;
 pub mod memory_limit;
 pub mod neighbour_evidence;
+pub mod open_files;
 pub mod paralog;
 pub mod parameter_estimation;
 pub mod psp;

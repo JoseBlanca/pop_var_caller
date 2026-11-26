@@ -2208,86 +2208,68 @@ pub(super) fn refuse_parameters_assembled_for_another_cohort(
     Ok(())
 }
 
-/// Descriptors one alignment file needs while a run holds it open.
+/// Descriptors one **BAM** needs while a run holds it open: **4**.
 ///
-/// **Measured, on the 63-accession tomato cohort** — `examples/ng_open_cohort_descriptors.rs`,
-/// which opens that cohort through [`AlignedFilesVariantCaller::open`] and counts
-/// `/proc/self/fd` at three points. The number is right and spec §7.1a's reason for it — "a CRAM
-/// and its index are two descriptors each" — is not, so what was counted is written here instead:
+/// **Measured 2026-11-26** (`doc/devel/reports/implementations/
+/// refine_memory_warn_and_open_files_2026-11-26.md`), with `lsof` sampled through whole
+/// `call-from-alignments` runs on tomato1, and accounted for in the code:
 ///
-/// - **63 open alignment files cost one descriptor between them** (3 → 4). An index is parsed
-///   into memory at open and an open
-///   [`AlignmentFile`](crate::read::input::open_bam::AlignmentFile) keeps no handle, so
-///   neither half of the spec's sentence is where the cost is.
-/// - **A cursor over a BAM costs 2 a file** (4 → 130 for 63 cursors, 2.00 a file): one for the
-///   file's own reader, and one for the reference reader [`AlignmentFile::cursor`] mints for the
-///   mismatch filter, which opens the FASTA. A run holds one cursor per file for the whole walk
-///   (spec §5.1), so this is the shape the refusal has to size for.
-/// - *(2026-10-15, arithmetic, not re-measured.)* A BAM's own descriptor has moved from the
-///   cursor to the open file: [`AlignmentFile::open`] opens it once, and every cursor on the
-///   file inflates through it, by way of one shared block cache
-///   (`aligned_reads_reader/bgzf_blocks.rs`). So the first bullet no longer holds for a BAM —
-///   an open BAM keeps one handle — but the total is still 2 a file with one cursor, and each
-///   cursor beyond the first now costs one descriptor rather than two.
+/// - **1 for the file**: [`AlignmentFile::open`] opens it once, and every cursor on it reads
+///   through one shared block cache (`aligned_reads_reader/bgzf_blocks.rs`). The index is parsed
+///   into memory and holds none.
+/// - **3 on the reference**, one a cursor: a sample's walker holds three locus generators (the
+///   pileup, the repeat tract and the repeat bundle), each with its own cursor, and every cursor
+///   mints a reference reader for the mismatch filter, which opens the FASTA.
 ///
-/// **Milestone E can move it**: spec §11's question 2 puts several callers in flight, and nobody
-/// has counted what that opens. Re-run the probe there.
-const DESCRIPTORS_A_BAM_NEEDS: u64 = 2;
+/// 10 single-BAM samples held 10 BAM and 68 FASTA descriptors: 4 a file and 4 a sample
+/// ([`DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES`]), less 2 not yet opened when sampled.
+///
+/// **Until 2026-11-26 this was 2**, counted when a sample had one generator; with three, a run
+/// could pass the check and fail at "Too many open files".
+const DESCRIPTORS_A_BAM_NEEDS: u64 = 4;
 
-/// Descriptors one **CRAM** needs — a BAM's, and one more.
+/// Descriptors one **CRAM** needs: **11**, measured as above.
 ///
-/// **Arithmetic, not measurement, and that is the difference from the constant above.** The
-/// tomato cohort the probe was run on is BAM, so nothing has counted a CRAM cohort's descriptors.
-/// What is known is where the third comes from: a CRAM stores its reads as differences from the
-/// reference, so its decode reads bases too, and it does that through a reference reader of its
-/// own rather than sharing the mismatch filter's (`alignment_cursor.md` §10 point 1). That reader
-/// opens the FASTA at `AlignmentFile::cursor`, because the servability check fetches through it.
+/// - **4 for the file**: each of the three generators' cursors opens a CRAM reader of its own,
+///   and the file's container prefetcher, started by the first cursor and shared by the rest,
+///   opens one more.
+/// - **7 on the reference**: two a cursor — the mismatch filter's reader and the decode's, which
+///   reads the bases a CRAM stores its reads as differences from — and one for the prefetcher's
+///   decode.
 ///
-/// **Counted apart rather than folded into one figure**, because rounding a BAM up to three would
-/// refuse cohorts that fit: at a thousand samples it demands a thousand descriptors nothing opens.
-/// The guard must never sit *below* what the code opens — this constant's neighbour records that
-/// failing once already — but sitting needlessly above it turns a safety check into a limit of its
-/// own.
-///
-/// **Re-run `examples/ng_open_cohort_descriptors.rs` on a CRAM cohort** to replace this with a
-/// measurement; the expectation it should meet is 3 a file.
-const DESCRIPTORS_A_CRAM_NEEDS: u64 = 3;
+/// 10, 30 and 63 single-CRAM samples, at 1 to 32 threads, held exactly 4 CRAM descriptors a file
+/// and 11 FASTA descriptors a sample less 2 to 22 not yet opened when sampled: 15 a sample with
+/// [`DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES`]. **Until 2026-11-26 this was 3** (arithmetic,
+/// never measured), and 157 CRAMs on rick passed the check at 817 and failed under 1,024.
+const DESCRIPTORS_A_CRAM_NEEDS: u64 = 11;
 
-/// Descriptors one sample's **locus generator** holds, on top of what its files cost.
-///
-/// **Measured after the merge was driven over walkers, and the count changed** —
-/// `examples/ng_open_cohort_descriptors.rs` again, on the same 63 tomato accessions. A generator
-/// keeps two reference accessors of its own: one for the walk's REF fetches and one for the read
-/// preparer. Each is a `WindowedRefSeq`, each opens a reader on the FASTA at its first fetch, and
-/// each holds it for the run. They are per **sample**, not per file, so this is a second term in
-/// the arithmetic rather than a correction to the first.
-///
-/// **This was missing and the refusal was wrong in the unsafe direction**: 63 samples over 63
-/// files were budgeted 158 descriptors and the walking run held **253**, so a run could pass the
-/// check and then die at `EMFILE` — the exact failure the check exists to prevent. Counted:
-/// 3 before any sample opened, 4 with every file open, 130 with a cursor on each, **256** once
-/// the generators' accessors were fetched through.
-const DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES: u64 = 2;
+/// Descriptors one sample's walker holds on top of what its files cost: **4**, the reference
+/// accessors of its generators — the pileup's, its read preparer's, the repeat tract's and the
+/// repeat bundle's. Each is a `WindowedRefSeq`, opens the FASTA at its first fetch and holds it
+/// for the run. They are per **sample**, not per file, so a sample sequenced across four lanes
+/// pays them once.
+const DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES: u64 = 4;
 
 /// Descriptors a run needs for everything that is not per file or per sample: the three standard
-/// streams, the reference and its index, the repeat catalog, the output and its index, and — from
-/// 2026-09-01 — the reference accessor a writing run reads its padding bases from
-/// ([`call_cohort_handing_each_record_over`](AlignedFilesVariantCaller::call_cohort_handing_each_record_over))
-/// — **nine** — plus 23 of slack for whatever the runtime holds open on its own. The constant
-/// did not move; what the ninth spent is slack.
+/// streams, the log, the scratch directory's spill, the output and its index, the repeat catalog
+/// and the reference accessor a writing run reads its padding bases from — 5 to 7 were open in
+/// the measured runs — plus slack for whatever the runtime holds open on its own. **32**; the slack
+/// is the formula's safety margin, since the per-file and per-sample terms count exactly what the
+/// code opens.
 pub(super) const DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES: u64 = 32;
 
 /// A run that would run out of file descriptors refuses now, naming the arithmetic.
 ///
-/// **The count is of files, not of samples**, because a sample sequenced across four lanes is
-/// four files. With one BAM a sample (two a file plus two a sample), a Linux soft limit of 1,024
-/// is reached at 248 samples and macOS's 256 at 56 — while the memory bill spec §7.2 budgets is
-/// 500 kB a sample, so 1,000 samples is
-/// 500 MB. The descriptors bind first, by a wide margin.
+/// **Every sample's files are open at once, for the whole walk, whatever the thread count**: the
+/// run builds one walker a sample before it reads, and the threads share them. So the need is set
+/// by the files and the samples alone. **The count is of files, not of samples**, because a sample
+/// sequenced across four lanes is four files. At one CRAM a sample (15 descriptors), Linux's
+/// default soft limit of 1,024 is reached at 66 samples and macOS's 256 at 14.
 fn refuse_without_descriptor_headroom(read_groups: &ReadGroups) -> Result<(), RunError> {
-    // `current` is the soft limit — what this process may open now.
-    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
-    refuse_if_more_descriptors_are_needed_than_allowed(read_groups, limit)
+    refuse_if_more_descriptors_are_needed_than_allowed(
+        read_groups,
+        crate::open_files::DescriptorLimit::of_this_process(),
+    )
 }
 
 /// The decision, with the limit passed in.
@@ -2296,20 +2278,18 @@ fn refuse_without_descriptor_headroom(read_groups: &ReadGroups) -> Result<(), Ru
 /// far above any cohort a test can build, so a check that read it inline would have a branch no
 /// fixture could reach — and an unreachable refusal is one nobody has read the message of.
 ///
-/// `None` means the platform reports no limit at all, and then there is nothing to refuse
-/// against.
+/// An unlimited soft limit (`None`) has nothing to refuse against.
 fn refuse_if_more_descriptors_are_needed_than_allowed(
     read_groups: &ReadGroups,
-    limit: Option<u64>,
+    limit: crate::open_files::DescriptorLimit,
 ) -> Result<(), RunError> {
     let files: std::collections::BTreeSet<&std::path::Path> = read_groups
         .iter()
         .map(|(_, read_group)| read_group.file.as_ref())
         .collect();
-    // **Counted by format, because a CRAM costs one more than a BAM** — its decode reads the
-    // reference through a reader of its own. A path this run cannot classify is counted as a
-    // CRAM: the cursor would refuse it later either way, and the safe direction for a *budget*
-    // is the larger figure.
+    // **Counted by format, because a CRAM costs more than a BAM.** A path this run cannot classify
+    // is counted as a CRAM: the cursor would refuse it later either way, and the safe direction
+    // for a *budget* is the larger figure.
     let cram_files = files
         .iter()
         .filter(|path| AlignmentFileKind::from_path(path) != Some(AlignmentFileKind::Bam))
@@ -2317,13 +2297,15 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
     let bam_files = files.len() - cram_files;
     let samples = read_groups.read_groups_per_sample().len();
     let needed = descriptors_needed_for(bam_files, cram_files, samples);
-
-    let Some(limit) = limit else {
-        return Ok(());
+    // For the samples that would fit: this cohort's samples at their average cost.
+    let a_sample = (needed - DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES)
+        .div_ceil(samples.max(1) as u64);
+    let samples_at = |fewer: usize| {
+        fewer as u64 * a_sample + DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES
     };
-
-    if needed > limit {
-        return Err(RunError::NotEnoughFileDescriptors {
+    match crate::open_files::DescriptorShortfall::judge(needed, limit, samples, samples_at) {
+        None => Ok(()),
+        Some(shortfall) => Err(RunError::NotEnoughFileDescriptors {
             samples,
             bam_files,
             cram_files,
@@ -2331,15 +2313,14 @@ fn refuse_if_more_descriptors_are_needed_than_allowed(
             per_cram: DESCRIPTORS_A_CRAM_NEEDS,
             per_sample: DESCRIPTORS_A_SAMPLE_NEEDS_BESIDES_ITS_FILES,
             allowance: DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES,
-            needed,
-            limit,
-        });
+            remedy: shortfall.remedy(),
+            shortfall,
+        }),
     }
-    Ok(())
 }
 
-/// How many descriptors a walking run needs: **two terms and an allowance**, because two of the
-/// four a sample costs are per file and two are per sample.
+/// How many descriptors a walking run needs: **two terms and an allowance** — what each file
+/// costs, what each sample costs besides, and the run's own.
 fn descriptors_needed_for(bam_files: usize, cram_files: usize, samples: usize) -> u64 {
     bam_files as u64 * DESCRIPTORS_A_BAM_NEEDS
         + cram_files as u64 * DESCRIPTORS_A_CRAM_NEEDS
@@ -3074,6 +3055,14 @@ mod construction_checks {
     // The descriptor headroom
     // -----------------------------------------------------------------
 
+    /// A soft limit of `soft` descriptors under an unlimited hard one.
+    pub(super) fn soft_limit(soft: u64) -> crate::open_files::DescriptorLimit {
+        crate::open_files::DescriptorLimit {
+            soft: Some(soft),
+            hard: None,
+        }
+    }
+
     /// **The refusal names the limit, the count and what to do about it.** Raising the limit is
     /// the operator's to do, so a message that does not say so leaves them nowhere.
     #[test]
@@ -3081,7 +3070,7 @@ mod construction_checks {
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
         let read_groups = build_read_groups(std::slice::from_ref(&a)).expect("read groups");
 
-        let error = refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, Some(4))
+        let error = refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, soft_limit(4))
             .expect_err("one file needs more than four descriptors, allowance included");
 
         match &error {
@@ -3089,15 +3078,14 @@ mod construction_checks {
                 samples,
                 bam_files,
                 cram_files,
-                needed,
-                limit,
+                shortfall,
                 ..
             } => {
                 assert_eq!(*samples, 1);
                 assert_eq!(*bam_files, 1);
                 assert_eq!(*cram_files, 0, "a BAM is not counted as a CRAM");
-                assert_eq!(*needed, descriptors_needed_for(1, 0, 1));
-                assert_eq!(*limit, 4);
+                assert_eq!(shortfall.needed, descriptors_needed_for(1, 0, 1));
+                assert_eq!(shortfall.soft, 4);
             }
             other => panic!("expected NotEnoughFileDescriptors, got {other:?}"),
         }
@@ -3107,7 +3095,7 @@ mod construction_checks {
         // needs, what it may open, and the two numbers those come from.
         let message = error.to_string();
         assert!(
-            message.contains("needs 36 open files"),
+            message.contains("needs 40 files open at once"),
             "names what it needs: {message}",
         );
         assert!(
@@ -3115,21 +3103,21 @@ mod construction_checks {
             "names the limit, not just a digit of it: {message}",
         );
         assert!(
-            message.contains("1 BAMs at 2 each and 0 CRAMs at 3 each"),
+            message.contains("1 BAMs at 4 each and 0 CRAMs at 11 each"),
             "shows both per-file terms, because a CRAM costs one more than a BAM and an \
              operator has to be able to reproduce the total: {message}",
         );
         assert!(
-            message.contains("1 samples at 2 more each"),
+            message.contains("1 samples at 4 more each"),
             "and the per-sample term, which is the one a file count cannot stand in for: \
              {message}",
         );
         assert!(
-            message.contains("and 32 for the reference"),
+            message.contains("and 32 for the log"),
             "and the part that is neither: {message}",
         );
         assert!(
-            message.contains("ulimit -n 36"),
+            message.contains("`ulimit -n 1024`"),
             "gives the command with the number in it: {message}",
         );
     }
@@ -3143,15 +3131,21 @@ mod construction_checks {
 
         refuse_if_more_descriptors_are_needed_than_allowed(
             &read_groups,
-            Some(descriptors_needed_for(1, 0, 1)),
+            soft_limit(descriptors_needed_for(1, 0, 1)),
         )
         .expect("exactly enough is enough");
-        refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, None)
-            .expect("no limit reported is no refusal");
+        refuse_if_more_descriptors_are_needed_than_allowed(
+            &read_groups,
+            crate::open_files::DescriptorLimit {
+                soft: None,
+                hard: None,
+            },
+        )
+        .expect("no limit reported is no refusal");
     }
 
-    /// **The count has two terms and they move independently**, because two of the four
-    /// descriptors a one-file sample costs belong to the file and two to the sample.
+    /// **The count has two terms and they move independently**, because of the eight
+    /// descriptors a one-BAM sample costs, four belong to the file and four to the sample.
     ///
     /// **It was one term until the merge was driven over walkers**, and that was wrong in the
     /// unsafe direction: 63 samples over 63 files were budgeted 158 and the walking run held
@@ -3169,14 +3163,19 @@ mod construction_checks {
             descriptors_needed_for(1, 0, 3),
             "three samples sharing one file pay for one file and three walks",
         );
-        // **A CRAM costs one more than a BAM, and the budget has to know.** Its decode reads
-        // the reference through a reader of its own, which opens the FASTA at cursor
-        // construction — so a guard that priced a CRAM as a BAM would pass a cohort that then
-        // meets `EMFILE`, which is the failure this whole check exists to prevent.
+        // **A CRAM costs seven more than a BAM, and the budget has to know.** Each of its three
+        // cursors opens a CRAM reader and a decode reference reader of its own, and its
+        // prefetcher one of each, where a BAM's cursors share one handle: a guard that priced a
+        // CRAM as a BAM would pass a cohort that then meets `EMFILE` — rick's 157 CRAMs, 2026-11-25.
         assert_eq!(
             descriptors_needed_for(0, 1, 1),
-            descriptors_needed_for(1, 0, 1) + 1,
-            "a CRAM costs one descriptor more than a BAM: its decode's reference reader",
+            descriptors_needed_for(1, 0, 1) + 7,
+            "a CRAM costs seven descriptors more than a BAM",
+        );
+        // **The measured cost of one single-CRAM sample**: 15 descriptors (tomato1, 2026-11-26).
+        assert_eq!(
+            descriptors_needed_for(0, 1, 1) - descriptors_needed_for(0, 0, 0),
+            15
         );
         assert_eq!(
             descriptors_needed_for(0, 0, 0),
@@ -3605,20 +3604,23 @@ mod checks_that_needed_their_own_fixtures {
         let read_groups = build_read_groups(&[first, second]).expect("read groups");
         assert_eq!(read_groups.read_groups_per_sample().len(), 1, "one sample");
 
-        let error = refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, Some(4))
-            .expect_err("two files need more than four descriptors");
+        let error = refuse_if_more_descriptors_are_needed_than_allowed(
+            &read_groups,
+            super::construction_checks::soft_limit(4),
+        )
+        .expect_err("two files need more than four descriptors");
 
         match &error {
             RunError::NotEnoughFileDescriptors {
                 samples,
                 bam_files,
-                needed,
+                shortfall,
                 ..
             } => {
                 assert_eq!(*samples, 1);
                 assert_eq!(*bam_files, 2);
                 assert_eq!(
-                    *needed,
+                    shortfall.needed,
                     descriptors_needed_for(2, 0, 1),
                     "two files and one sample, each counted on its own term",
                 );
@@ -3635,20 +3637,23 @@ mod checks_that_needed_their_own_fixtures {
         let read_groups = build_read_groups(std::slice::from_ref(&both)).expect("read groups");
         assert_eq!(read_groups.read_groups_per_sample().len(), 2, "two samples");
 
-        let error = refuse_if_more_descriptors_are_needed_than_allowed(&read_groups, Some(4))
-            .expect_err("one file still needs more than four descriptors");
+        let error = refuse_if_more_descriptors_are_needed_than_allowed(
+            &read_groups,
+            super::construction_checks::soft_limit(4),
+        )
+        .expect_err("one file still needs more than four descriptors");
 
         match &error {
             RunError::NotEnoughFileDescriptors {
                 samples,
                 bam_files,
-                needed,
+                shortfall,
                 ..
             } => {
                 assert_eq!(*samples, 2);
                 assert_eq!(*bam_files, 1);
                 assert_eq!(
-                    *needed,
+                    shortfall.needed,
                     descriptors_needed_for(1, 0, 2),
                     "one file and two samples, each counted on its own term",
                 );

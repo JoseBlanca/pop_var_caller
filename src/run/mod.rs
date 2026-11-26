@@ -311,12 +311,14 @@ pub enum RunError {
     /// asking them to act on: how many alignment files, what each costs, what the run needs
     /// besides them, and the command that raises it (spec §7.1a).
     #[error(
-        "this run needs {needed} open files and this process may open {limit}: \
-         {bam_files} BAMs at {per_bam} each and {cram_files} CRAMs at {per_cram} each, \
-         {samples} samples at \
-         {per_sample} more each for the reference bases their walks read, and {allowance} for \
-         the reference, the repeat catalog and the output. \
-         Raise the limit with: ulimit -n {needed}, or call fewer samples at once"
+        "this run needs {} files open at once and this process may open {} (its soft limit, \
+         `ulimit -n`): {bam_files} BAMs at {per_bam} each and {cram_files} CRAMs at {per_cram} \
+         each, {samples} samples at {per_sample} more each for the reference bases their walks \
+         read, and {allowance} for the log, the output, the scratch files and slack. Every \
+         sample's files stay open for the whole run, so the thread count does not change this. \
+         {remedy}",
+        shortfall.needed,
+        shortfall.soft
     )]
     NotEnoughFileDescriptors {
         /// How many samples the run holds — what an operator counts their cohort in.
@@ -324,24 +326,23 @@ pub enum RunError {
         /// How many BAMs those samples are spread over. **Files are what the arithmetic is
         /// over**, not samples: a sample sequenced across four lanes is four files.
         bam_files: usize,
-        /// How many CRAMs, counted apart because they cost more (see [`per_cram`](Self::NotEnoughFileDescriptors::per_cram)).
+        /// How many CRAMs, counted apart because they cost more.
         cram_files: usize,
-        /// Descriptors one BAM needs: its reader, and the reference reader the cursor over it
-        /// holds for the mismatch filter.
+        /// Descriptors one BAM needs: its reader, and a reference reader for each of its
+        /// three cursors.
         per_bam: u64,
-        /// Descriptors one CRAM needs — one more than a BAM, because a CRAM stores its reads
-        /// as differences from the reference and its decode reads the bases through a
-        /// reference reader of its own.
+        /// Descriptors one CRAM needs: a CRAM reader for each of its three cursors and its
+        /// prefetcher, and two reference readers a cursor and one for the prefetcher.
         per_cram: u64,
-        /// Descriptors one **sample** needs on top of its files: the two reference accessors
-        /// its locus generator holds for the run.
+        /// Descriptors one **sample** needs on top of its files: the four reference accessors
+        /// its locus generators hold for the run.
         per_sample: u64,
         /// Descriptors the run needs besides those two terms.
         allowance: u64,
-        /// The three above, combined.
-        needed: u64,
-        /// What this process may open — the soft `RLIMIT_NOFILE`.
-        limit: u64,
+        /// What the run needs, the limits, and the samples that fit.
+        shortfall: crate::open_files::DescriptorShortfall,
+        /// What to do, in words: the `ulimit -n` to give, or whom to ask.
+        remedy: String,
     },
 
     /// The repeat catalog was built on a different reference from the one this run calls

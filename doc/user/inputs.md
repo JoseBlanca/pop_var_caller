@@ -64,10 +64,10 @@ pvc ignores these reads:
 
 ## Open-file limit
 
-A one-step (direct mode) run keeps every alignment open for the whole run: 2 open files per BAM,
-3 per CRAM, 2 more per sample, plus 32. The default limit is 256 open files on macOS and 1,024 on
-most Linux systems. With one BAM per sample, that is reached at 56 samples on macOS and 248 on
-Linux; with one CRAM per sample, at 44 and 198.
+A one-step (direct mode) run keeps every alignment open for the whole run: 4 open files per BAM,
+11 per CRAM, 4 more per sample, plus 32, whatever the number of threads. The default limit is 256
+open files on macOS and 1,024 on most Linux systems. With one BAM per sample, that is reached at 28
+samples on macOS and 124 on Linux; with one CRAM per sample, at 14 and 66.
 
 pvc checks this before starting, and if the limit is too low it says which value to set:
 
@@ -75,5 +75,6 @@ pvc checks this before starting, and if the limit is too low it says which value
 ulimit -n 4096
 ```
 
-A psp-mode run keeps one file open per sample, so it reaches the limit later. See
+A psp-mode run keeps one file open per sample, so it reaches the limit later; it checks the same
+way before starting. See
 [Calling § Large cohorts](calling.md#large-cohorts).

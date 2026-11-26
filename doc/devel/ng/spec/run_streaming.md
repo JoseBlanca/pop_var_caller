@@ -913,6 +913,16 @@ six thousand.
 **What a run must do about it is refuse with a message that names the limit and the sample count**,
 in the same shape §5.1 asks for when the memory bill does not fit — not die at file 1,020 with an
 operating-system error. Raising the limit is the operator's to do, and the message should say so.
+
+**Measured 2026-11-26, and the counts above were low** (`refine_memory_warn_and_open_files_2026-11-26.md`).
+A sample's walker holds three locus generators, each with its own cursor, so a CRAM file costs
+11 descriptors (4 on the CRAM, 7 on the reference) and a BAM 4 (1 and 3), and every sample 4 more
+for its generators' reference accessors: 15 for a single-CRAM sample. Indexes are parsed into
+memory and hold none. Every sample's files stay open for the whole walk, so the thread count does
+not change the need. The refusal (`src/run/callers.rs`, `src/open_files.rs`) names the soft and
+hard limits and the `ulimit -n` to give; `call-from-psps` and `estimate-parameters` check one
+descriptor a psp the same way. Under the old count, 157 CRAMs on rick passed the check at 817 and
+failed under 1,024.
 **This constrains nothing about the encoding**; it is a check at construction, beside the header
 checks of §6.2.
 

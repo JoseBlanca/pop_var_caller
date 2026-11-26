@@ -89,7 +89,7 @@ samples it was estimated on.
 ## Large cohorts
 
 - **Use psp mode.** Writing psps can be spread over as many machines as you like, one sample per
-  command, and the calling step keeps one open file per sample instead of four or five.
+  command, and the calling step keeps one open file per sample instead of 8 to 15.
 - **Raise the open-file limit** if pvc asks you to (`ulimit -n`). It checks before starting and
   says which value to set.
 - **Memory while calling.** pvc builds loci a stretch of genome at a time, and shortens the

@@ -717,6 +717,10 @@ repository and nothing chromosome-sized.
    is arithmetic** — no CRAM cohort's descriptors have been counted, and
    `examples/ng_open_cohort_descriptors.rs` on one is what would replace it.
 
+   *(2026-11-26: counted, with `lsof` on tomato1 CRAMs and BAMs. A sample's three generators hold a
+   cursor each, so a CRAM costs 11 — 4 CRAM readers, the prefetcher's among them, and 7 reference
+   readers — and a BAM 4, plus 4 a sample; `run_streaming.md` §7.1a.)*
+
    **The alternative was sharing the cursor's own reader**, reached either as an argument threaded
    down `read_next` or as an `Arc` handle cloned into the CRAM reader. Both save the descriptor and
    the 9 kb; both make this the first place in the tree where two consumers share one window, which

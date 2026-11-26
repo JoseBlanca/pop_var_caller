@@ -234,6 +234,11 @@ pub enum EstimateParametersCliError {
         path: PathBuf,
     },
 
+    /// **The run would hold more files open than this process may**: one a psp, checked before
+    /// any is opened (`crate::open_files`).
+    #[error(transparent)]
+    NotEnoughFileDescriptors(#[from] crate::open_files::PspsOverTheLimit),
+
     /// The cohort's psps could not be opened as one cohort.
     #[error("opening the cohort of psps")]
     PspCohort {
@@ -1042,12 +1047,18 @@ fn as_typed(path: &std::path::Path) -> String {
 fn psps_named_by(
     args: &EstimateParametersArgs,
 ) -> Result<Vec<PathBuf>, EstimateParametersCliError> {
-    psps_named(&args.psps).map_err(|refusal| match refusal {
+    let psps = psps_named(&args.psps).map_err(|refusal| match refusal {
         PspArgumentRefusal::Unlistable { path, source } => {
             EstimateParametersCliError::PspDirectory { path, source }
         }
         PspArgumentRefusal::Empty { path } => {
             EstimateParametersCliError::NoPspsInDirectory { path }
         }
-    })
+    })?;
+    // Every psp stays open for the run: refused now, not at "Too many open files" part-way.
+    crate::open_files::refuse_more_psps_than_the_limit(
+        psps.len(),
+        crate::open_files::DescriptorLimit::of_this_process(),
+    )?;
+    Ok(psps)
 }
