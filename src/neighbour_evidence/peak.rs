@@ -21,18 +21,24 @@
 //! walks one sample at a time. It is estimated twice:
 //!
 //! - **before calling starts** ([`PeakEstimate::before_any_window`]), from the budget, the samples,
-//!   the threads and the longest contig, so that a run that cannot fit stops before hours of
-//!   calling. *counted* is the budget, or what a window of the longest contig could hold at
+//!   the threads and the longest contig, so that a run likely not to fit is warned of before
+//!   hours of calling. *counted* is the budget, or what a window of the longest contig could hold at
 //!   [`RECORDS_A_KB_CEILING`] if that is less; *walked records* is what a window counted at the
 //!   budget walks at [`COUNTED_BYTES_A_SAMPLE_WALKED_RECORD`], or what such a window could walk,
 //!   if less. Both are upper bounds where the cohort is small and the window is set by its length;
 //! - **at every window** ([`PeakEstimate::for_window`]), from what the budget counted for it and the
 //!   records it walks, both known exactly once it is planned.
 //!
-//! **A run stops when the estimate is above [`STOP_SHARE`] of the memory it may use** (the smaller
-//! of the machine's memory and its control group's limit, [`crate::memory_limit`]), unless
-//! `--refine-ignore-memory-limit` was given. The constants were measured on Linux on a drawn cohort
-//! of 300 samples at up to 6 threads and on 2,176 tomato samples at 48 threads; see each one.
+//! **A run warns when the estimate is above [`WARN_SHARE`] of the memory it may use** (the smaller
+//! of the machine's memory and its control group's limit, [`crate::memory_limit`]), and never
+//! stops for it (owner, 2026-11-26): the estimate is approximate, and a stop at a window would come
+//! after what may be days of calling. A run the system kills for memory after calling has ended
+//! leaves its scratch directory, with the resume point, behind, and `pvc resume-calling` with a
+//! smaller `--refine-window-bytes` finishes it; the warning says so, with the budget to give. The
+//! constants were measured on Linux on a drawn cohort of 300 samples at up to 6 threads and on
+//! 2,176 tomato samples at 48 threads; see each one.
+
+use std::path::{Path, PathBuf};
 
 use crate::memory_limit::MemoryLimit;
 use crate::neighbour_evidence::windows::{NEAR_MARGIN_BASES, WindowSizes};
@@ -73,11 +79,12 @@ pub const RECORDS_A_KB_CEILING: u64 = 150;
 /// 6 to 7%.
 pub const ALLOCATOR_SLACK: f64 = 0.16;
 
-/// **The share of the memory limit above which the run stops**: 90%. The estimate is the middle of
-/// what was measured; the peaks measured lay up to 8% above it (the slack's spread, 12 to 25%
-/// around 16%) and the rest of what the program holds within 5% of the count either way, so a
-/// run stopping at 90% keeps about 11% for those, and stops before the system would kill it.
-pub const STOP_SHARE: f64 = 0.90;
+/// **The share of the memory limit above which the run warns**: 85% (owner, 2026-11-26). The
+/// estimate is the middle of what was measured; the peaks measured lay up to 8% above it (the
+/// slack's spread, 12 to 25% around 16%) and the rest of what the program holds within 5% of the
+/// count either way. An estimate at 85% leaves about 18% (1 / 0.85) for that spread, so a run
+/// that is not warned of is very unlikely to be killed; one that is may still fit.
+pub const WARN_SHARE: f64 = 0.85;
 
 /// **The expected peak of refinement**, and the parts it is made of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,15 +193,18 @@ impl PeakEstimate {
     }
 }
 
-/// **What the memory check is given**: the limit, if it could be read, and whether
-/// `--refine-ignore-memory-limit` asked the run to go on past it. The default checks nothing: a
-/// decision made outside a command, such as a test's, carries no limit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MemoryGuard {
+/// **What the memory check is given**: the limit, if it could be read, and the scratch directory a
+/// run killed for memory could be resumed from. The default checks nothing: a decision made outside
+/// a command, such as a test's, carries no limit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MemoryWatch {
     /// The memory this process may use; `None` where it could not be read.
     pub limit: Option<MemoryLimit>,
-    /// `--refine-ignore-memory-limit`.
-    pub ignore_limit: bool,
+    /// **The run's scratch directory**, where it keeps one: with the hidden-duplication filter on,
+    /// calling parks its records there and writes the resume point there once it ends, so a run
+    /// killed during refinement can be finished from it. `None` with the filter off, where
+    /// refinement runs while calling still runs and nothing is kept.
+    pub scratch_dir: Option<PathBuf>,
 }
 
 /// **When the estimate was made**: before calling, or at a window about to be solved.
@@ -207,125 +217,137 @@ pub enum PeakMoment {
     Window { contig: u32, position: u64 },
 }
 
-/// **Refinement is expected to need more of the memory limit than [`STOP_SHARE`]**: the estimate,
-/// the limit and when it was made. Its message is what the run stops with.
+/// **Refinement is expected to need more of the memory limit than [`WARN_SHARE`]**: the estimate,
+/// the limit, when it was made, and what would bring it within the share. The run goes on;
+/// [`Self::warning`] is what it logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PeakTooClose {
+pub struct PeakNearLimit {
     pub estimate: PeakEstimate,
     pub limit: MemoryLimit,
     pub moment: PeakMoment,
-    /// The largest `--refine-window-bytes` the estimate fits within [`STOP_SHARE`] of the limit at
+    /// The largest `--refine-window-bytes` the estimate fits within [`WARN_SHARE`] of the limit at
     /// this run's threads; `None` where the threads' arrays alone do not fit.
     pub budget_that_fits: Option<u64>,
     /// The most threads that fit at this budget, where fewer than the run's but at least one.
     pub threads_that_fit: Option<u64>,
 }
 
-impl std::fmt::Display for PeakTooClose {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl PeakNearLimit {
+    /// **The warning a run logs**, naming the estimate, its parts, the limit, what would fit, and,
+    /// where the run keeps a scratch directory (`scratch_dir`), the command that finishes a run
+    /// the system killed for memory.
+    #[must_use]
+    pub fn warning(&self, scratch_dir: Option<&Path>) -> String {
         let peak = self.estimate.peak_bytes();
-        let when = match self.moment {
-            PeakMoment::BeforeCalling => String::new(),
-            PeakMoment::Window { contig, position } => {
-                format!(" in its window from contig {contig} position {position}")
-            }
+        let (when, bound) = match self.moment {
+            PeakMoment::BeforeCalling => (
+                "before calling".to_owned(),
+                " This is an upper bound: no window is planned yet, so each is taken to be as \
+                 large as --refine-window-bytes and the longest contig allow; each window is \
+                 estimated again once it is planned."
+                    .to_owned(),
+            ),
+            PeakMoment::Window { contig, position } => (
+                format!("window from contig {contig} position {position}"),
+                String::new(),
+            ),
         };
-        write!(
-            f,
-            "genotype refinement is expected to need about {}{when}, {:.0}% of the {} this run \
-             may use ({}), and pvc stops above {:.0}% so that the system does not kill the run part \
-             of the way through. The estimate is {}. ",
+        let mut text = format!(
+            "refinement memory, {when}: about {} expected at its peak, {:.0}% of the {} this run \
+             may use ({}), above the {:.0}% at which pvc warns; the run goes on.{bound} The \
+             estimate is {}.",
             gb(peak),
             share(peak, self.limit.bytes) * 100.0,
             gb(self.limit.bytes),
             self.limit.source,
-            STOP_SHARE * 100.0,
+            WARN_SHARE * 100.0,
             self.estimate.parts_in_words()
-        )?;
+        );
         let mut remedies = Vec::new();
         if let Some(budget) = self.budget_that_fits {
             remedies.push(format!(
-                "lower --refine-window-bytes to {budget} ({}) or less",
+                "--refine-window-bytes {budget} ({}) or less",
                 gb(budget)
             ));
         }
         if let Some(threads) = self.threads_that_fit {
-            remedies.push(format!("run on {threads} threads or fewer (--threads)"));
+            remedies.push(format!("{threads} threads or fewer (--threads)"));
         }
-        remedies.push(
-            "give --refine-ignore-memory-limit to run anyway, if this run's peak is known to be \
-             lower"
-                .to_owned(),
-        );
-        let last = remedies.pop().unwrap_or_default();
-        if remedies.is_empty() {
-            write!(f, "To go on, {last}.")?;
-        } else {
-            write!(f, "To go on, {}, or {last}.", remedies.join(", "))?;
+        if !remedies.is_empty() {
+            text.push_str(&format!(
+                " Within {:.0}% would be {}.",
+                WARN_SHARE * 100.0,
+                remedies.join(", or ")
+            ));
+        }
+        let smaller = match (self.budget_that_fits, self.threads_that_fit) {
+            (Some(budget), _) => format!("--refine-window-bytes {budget}"),
+            (None, Some(threads)) => format!("--threads {threads}"),
+            (None, None) => "--refine-window-bytes <a smaller budget>".to_owned(),
+        };
+        match scratch_dir {
+            Some(directory) => text.push_str(&format!(
+                " If the system kills the run for memory after calling has ended, its scratch \
+                 directory keeps the calls, and `pvc resume-calling --scratch-dir {} {smaller}` \
+                 finishes it.",
+                directory.display()
+            )),
+            None => text.push_str(
+                " This run keeps no scratch directory to resume from (the hidden-duplication \
+                 filter is off), so a run the system kills for memory has to be started again.",
+            ),
         }
         if matches!(self.moment, PeakMoment::Window { .. }) {
-            write!(
-                f,
-                " With the hidden-duplication filter on, the run keeps its scratch directory \
-                 and its calls, and `pvc resume-calling` finishes it with the new options."
-            )?;
+            text.push_str(" Later windows warn again only where their estimate is higher still.");
         }
-        Ok(())
+        text
     }
 }
 
-/// **What the check found**, where the run goes on.
+/// **What the check found.** The run goes on whatever it found.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PeakCheck {
     /// The limit could not be read: nothing to check against.
     NoLimit,
-    /// The estimate is within [`STOP_SHARE`] of the limit; `share` is its share of the limit.
+    /// The estimate is within [`WARN_SHARE`] of the limit; `share` is its share of the limit.
     Fits { share: f64 },
-    /// Above it, and `--refine-ignore-memory-limit` asked the run to go on.
-    Ignored(PeakTooClose),
+    /// Above it: the run warns.
+    NearLimit(PeakNearLimit),
 }
 
-/// **Checks an estimate against the limit**: goes on where it fits, or where the limit could not
-/// be read or the person asked to go on past it.
+/// **Checks an estimate against the limit**: whether it fits within [`WARN_SHARE`] of it, and if
+/// not, what would.
 ///
 /// `budget_at` gives the estimate the run would make with another budget, at the same threads;
 /// it finds the budget to suggest.
-///
-/// # Errors
-///
-/// If the estimate is above [`STOP_SHARE`] of the limit and the limit is not ignored.
+#[must_use]
 pub fn check(
     estimate: PeakEstimate,
-    guard: MemoryGuard,
+    limit: Option<MemoryLimit>,
     moment: PeakMoment,
     budget_at: impl Fn(u64) -> PeakEstimate,
-) -> Result<PeakCheck, PeakTooClose> {
-    let Some(limit) = guard.limit else {
-        return Ok(PeakCheck::NoLimit);
+) -> PeakCheck {
+    let Some(limit) = limit else {
+        return PeakCheck::NoLimit;
     };
     let peak = estimate.peak_bytes();
-    if !above_the_stop(peak, limit.bytes) {
-        return Ok(PeakCheck::Fits {
+    if !above_the_warning(peak, limit.bytes) {
+        return PeakCheck::Fits {
             share: share(peak, limit.bytes),
-        });
+        };
     }
-    let too_close = PeakTooClose {
+    PeakCheck::NearLimit(PeakNearLimit {
         estimate,
         limit,
         moment,
         budget_that_fits: largest_budget_that_fits(estimate.budget_bytes, limit.bytes, budget_at),
         threads_that_fit: threads_that_fit(estimate, limit.bytes),
-    };
-    if guard.ignore_limit {
-        Ok(PeakCheck::Ignored(too_close))
-    } else {
-        Err(too_close)
-    }
+    })
 }
 
-/// Whether `peak` is above [`STOP_SHARE`] of `limit`.
-fn above_the_stop(peak: u64, limit: u64) -> bool {
-    share(peak, limit) > STOP_SHARE
+/// Whether `peak` is above [`WARN_SHARE`] of `limit`.
+fn above_the_warning(peak: u64, limit: u64) -> bool {
+    share(peak, limit) > WARN_SHARE
 }
 
 /// `part` as a share of `whole`.
@@ -334,15 +356,15 @@ fn share(part: u64, whole: u64) -> f64 {
     part as f64 / whole.max(1) as f64
 }
 
-/// **The largest budget whose estimate is within the stop**, rounded down to a whole GB (to a tenth
-/// of one below 1 GB), found by halving: the estimate does not fall as the budget grows. `None`
-/// where even a budget of nothing is over it.
+/// **The largest budget whose estimate is within the warning share**, rounded down to a whole GB
+/// (to a tenth of one below 1 GB), found by halving: the estimate does not fall as the budget
+/// grows. `None` where even a budget of nothing is over it.
 fn largest_budget_that_fits(
     budget: u64,
     limit: u64,
     budget_at: impl Fn(u64) -> PeakEstimate,
 ) -> Option<u64> {
-    let fits = |bytes: u64| !above_the_stop(budget_at(bytes).peak_bytes(), limit);
+    let fits = |bytes: u64| !above_the_warning(budget_at(bytes).peak_bytes(), limit);
     if !fits(0) {
         return None;
     }
@@ -368,7 +390,7 @@ fn largest_budget_that_fits(
 /// at least one.
 fn threads_that_fit(estimate: PeakEstimate, limit: u64) -> Option<u64> {
     let fits = |threads: u64| {
-        !above_the_stop(
+        !above_the_warning(
             PeakEstimate {
                 walking_threads: threads,
                 ..estimate
@@ -401,7 +423,8 @@ fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-/// **The line a run logs for an estimate that fits**, or whose limit could not be read.
+/// **The line a run logs for an estimate within [`WARN_SHARE`]**, or whose limit could not be
+/// read. An estimate above it is logged with [`PeakNearLimit::warning`] instead.
 #[must_use]
 pub fn fits_in_words(
     estimate: &PeakEstimate,
@@ -417,12 +440,11 @@ pub fn fits_in_words(
             limit.source,
             estimate.parts_in_words()
         ),
-        (PeakCheck::Ignored(too_close), _) => format!(
-            "about {peak} at its peak, above {:.0}% of the {} this run may use ({}); going on, \
-             as --refine-ignore-memory-limit asks; {}",
-            STOP_SHARE * 100.0,
-            gb(too_close.limit.bytes),
-            too_close.limit.source,
+        (PeakCheck::NearLimit(near), _) => format!(
+            "about {peak} at its peak, above {:.0}% of the {} this run may use ({}); {}",
+            WARN_SHARE * 100.0,
+            gb(near.limit.bytes),
+            near.limit.source,
             estimate.parts_in_words()
         ),
         _ => format!(

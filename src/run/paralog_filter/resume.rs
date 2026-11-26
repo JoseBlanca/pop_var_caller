@@ -425,9 +425,9 @@ impl RefinementParts {
                 self.core_floor_bases
                     .is_some_and(|core_floor| core_floor != self.margin_floor_bases)
             }),
-            // The memory check is not kept: a resumed run reads its own limit, and is given
-            // --refine-ignore-memory-limit again if it is to go on past it.
-            memory_guard: crate::neighbour_evidence::peak::MemoryGuard::default(),
+            // The memory check is not kept: a resumed run reads its own limit, and names its own
+            // scratch directory.
+            memory_watch: crate::neighbour_evidence::peak::MemoryWatch::default(),
         })
     }
 }

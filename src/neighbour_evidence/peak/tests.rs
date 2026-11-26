@@ -14,14 +14,11 @@ fn default_sizes(budget: u64) -> WindowSizes {
 /// tomato25's chromosome 1, about 90 Mb: longer than any window.
 const LONG_CONTIG: u64 = 90_000_000;
 
-fn limit(bytes: u64) -> MemoryGuard {
-    MemoryGuard {
-        limit: Some(MemoryLimit {
-            bytes,
-            source: LimitSource::ControlGroupV2,
-        }),
-        ignore_limit: false,
-    }
+fn limit(bytes: u64) -> Option<MemoryLimit> {
+    Some(MemoryLimit {
+        bytes,
+        source: LimitSource::ControlGroupV2,
+    })
 }
 
 /// **tomato25 at 70 GB, 48 threads**: the budget sets the window. 189,230 walked records (70 GB
@@ -88,45 +85,36 @@ fn unthinned_margins_are_walked_in_full() {
     assert_eq!(estimate.walked_records, 600_000);
 }
 
-/// **Where it fits, the run goes on**; above 90% of the limit it stops, unless told to go on.
+/// **Within 85% of the limit the estimate fits; above it the run is warned**, and told the largest
+/// budget that would fit.
 #[test]
-fn the_run_stops_above_ninety_percent_unless_told_to_go_on() {
+fn above_eighty_five_percent_the_run_is_warned() {
     let budget_at =
         |bytes: u64| PeakEstimate::before_any_window(&default_sizes(bytes), 2_176, 48, LONG_CONTIG);
-    let estimate = budget_at(70_000_000_000);
     let found = check(
-        estimate,
+        budget_at(70_000_000_000),
         limit(118_000_000_000),
         PeakMoment::BeforeCalling,
         budget_at,
     );
-    let Ok(PeakCheck::Fits { share }) = found else {
+    let PeakCheck::Fits { share } = found else {
         panic!("{found:?}");
     };
     assert!((0.78..0.79).contains(&share), "{share}");
 
-    // 100 GB under the same limit: 131.8 GB expected.
-    let estimate = budget_at(100_000_000_000);
-    let refused = check(
-        estimate,
+    // 80 GB under the same limit: 105.4 GB expected, 89%, above the warning at 100.3 GB.
+    let PeakCheck::NearLimit(near) = check(
+        budget_at(80_000_000_000),
         limit(118_000_000_000),
         PeakMoment::BeforeCalling,
         budget_at,
-    )
-    .expect_err("131.8 GB is over 90% of 118 GB");
-    // 80.57 GB is the largest budget within 106.2 GB, rounded down.
-    assert_eq!(refused.budget_that_fits, Some(80_000_000_000));
-    assert_eq!(refused.threads_that_fit, None);
-    let ignored = check(
-        estimate,
-        MemoryGuard {
-            ignore_limit: true,
-            ..limit(118_000_000_000)
-        },
-        PeakMoment::BeforeCalling,
-        budget_at,
-    );
-    assert_eq!(ignored, Ok(PeakCheck::Ignored(refused)));
+    ) else {
+        panic!("105.4 GB is over 85% of 118 GB");
+    };
+    // 76.1 GB is the largest budget within 100.3 GB, rounded down; at 80 GB, (100.3 / 1.16 − 80) GB
+    // over 1.05 kB × 216,262 walked records is 28.5 threads.
+    assert_eq!(near.budget_that_fits, Some(76_000_000_000));
+    assert_eq!(near.threads_that_fit, Some(28));
 }
 
 /// **No limit read, nothing checked**, whatever the estimate.
@@ -135,22 +123,22 @@ fn without_a_limit_nothing_is_checked() {
     let budget_at = |bytes: u64| PeakEstimate::for_window(bytes, 1_000_000, 100, 64, bytes);
     let found = check(
         budget_at(u64::MAX / 4),
-        MemoryGuard::default(),
+        None,
         PeakMoment::BeforeCalling,
         budget_at,
     );
-    assert_eq!(found, Ok(PeakCheck::NoLimit));
+    assert_eq!(found, PeakCheck::NoLimit);
 }
 
 /// **Where the threads' arrays are most of it, fewer threads are suggested**, and the budget that
-/// would fit at this many.
+/// would fit at this many; the window's warning names the command that resumes the run.
 #[test]
 fn fewer_threads_are_suggested_where_they_would_fit() {
     // A window of 10 GB counted and 300,000 walked records, 100 samples, 96 threads: 30.2 GB of
     // arrays, 46.7 GB in all, against a 40-GB limit.
     let window =
         |budget: u64| PeakEstimate::for_window(budget / 2, budget * 3 / 200_000, 100, 96, budget);
-    let refused = check(
+    let PeakCheck::NearLimit(near) = check(
         window(20_000_000_000),
         limit(40_000_000_000),
         PeakMoment::Window {
@@ -158,45 +146,58 @@ fn fewer_threads_are_suggested_where_they_would_fit() {
             position: 1,
         },
         window,
-    )
-    .expect_err("46.7 GB is over 36 GB");
-    // (36 / 1.16 − 10) GB over 1.05 kB × 300,000 is 66.8 threads.
-    assert_eq!(refused.threads_that_fit, Some(66));
-    let message = refused.to_string();
+    ) else {
+        panic!("46.7 GB is over 34 GB");
+    };
+    // (34 / 1.16 − 10) GB over 1.05 kB × 300,000 is 61.3 threads.
+    assert_eq!(near.threads_that_fit, Some(61));
+    let message = near.warning(Some(Path::new("/scratch/pvc_tmp_ab12")));
     for expected in [
-        "about 46.7 GB in its window from contig 0 position 1",
+        "refinement memory, window from contig 0 position 1: about 46.7 GB expected",
         "117% of the 40.0 GB",
-        "lower --refine-window-bytes to",
-        "run on 66 threads or fewer",
-        "--refine-ignore-memory-limit",
-        "pvc resume-calling",
+        "Within 85% would be --refine-window-bytes",
+        "or 61 threads or fewer (--threads)",
+        "`pvc resume-calling --scratch-dir /scratch/pvc_tmp_ab12 --refine-window-bytes ",
+        "Later windows warn again only where their estimate is higher still.",
     ] {
         assert!(message.contains(expected), "{expected}: {message}");
     }
+    assert!(!message.contains("upper bound"), "{message}");
 }
 
-/// **The message before calling**, as a person reads it, at tomato25's 100 GB on a 118-GB unit.
+/// **The warning before calling**, as a person reads it, at tomato25's 100 GB on a 118-GB unit:
+/// it says the estimate is an upper bound, what would fit, and how a killed run is finished.
 #[test]
-fn the_message_before_calling_names_the_numbers_and_what_to_change() {
+fn the_warning_before_calling_names_the_numbers_and_what_to_change() {
     let budget_at =
         |bytes: u64| PeakEstimate::before_any_window(&default_sizes(bytes), 2_176, 48, LONG_CONTIG);
-    let refused = check(
+    let PeakCheck::NearLimit(near) = check(
         budget_at(100_000_000_000),
         limit(118_000_000_000),
         PeakMoment::BeforeCalling,
         budget_at,
-    )
-    .expect_err("over");
-    let message = refused.to_string();
+    ) else {
+        panic!("over");
+    };
     assert_eq!(
-        message,
-        "genotype refinement is expected to need about 131.8 GB, 112% of the 118.0 GB this run \
-         may use (the memory.max of the control group pvc runs in), and pvc stops above 90% so \
-         that the system does not kill the run part of the way through. The estimate is 100.0 GB \
-         for a window as --refine-window-bytes counts it (100.0 GB allowed), 13.6 GB for 48 \
-         threads' working arrays (270,328 walked records at 1.05 kB each a thread), and 16% on \
-         top for the memory allocator. To go on, lower --refine-window-bytes to 80000000000 \
-         (80.0 GB) or less, or give --refine-ignore-memory-limit to run anyway, if this run's \
-         peak is known to be lower."
+        near.warning(Some(Path::new("/scratch/pvc_tmp_ab12"))),
+        "refinement memory, before calling: about 131.8 GB expected at its peak, 112% of the \
+         118.0 GB this run may use (the memory.max of the control group pvc runs in), above the \
+         85% at which pvc warns; the run goes on. This is an upper bound: no window is planned \
+         yet, so each is taken to be as large as --refine-window-bytes and the longest contig \
+         allow; each window is estimated again once it is planned. The estimate is 100.0 GB for a \
+         window as --refine-window-bytes counts it (100.0 GB allowed), 13.6 GB for 48 threads' \
+         working arrays (270,328 walked records at 1.05 kB each a thread), and 16% on top for the \
+         memory allocator. Within 85% would be --refine-window-bytes 76000000000 (76.0 GB) or \
+         less. If the system kills the run for memory after calling has ended, its scratch \
+         directory keeps the calls, and `pvc resume-calling --scratch-dir /scratch/pvc_tmp_ab12 \
+         --refine-window-bytes 76000000000` finishes it."
+    );
+    // With the hidden-duplication filter off there is nothing to resume from.
+    assert!(
+        near.warning(None)
+            .ends_with("so a run the system kills for memory has to be started again."),
+        "{}",
+        near.warning(None)
     );
 }

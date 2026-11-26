@@ -426,9 +426,6 @@ fn main() {
             Ok(()) => {}
             Err(StageStop::OverBudget(over)) => panic!("over budget: {over:?}"),
             Err(StageStop::Write(never)) => match never {},
-            Err(StageStop::OverMemory(too_close)) => {
-                unreachable!("the probe's decision carries no memory limit: {too_close}")
-            }
             Err(StageStop::Stopped) => unreachable!("the probe stops at the first stop"),
         }
         if lines_in_window > 0 {
@@ -479,9 +476,6 @@ fn main() {
         Ok(()) => {}
         Err(StageStop::OverBudget(over)) => panic!("over budget: {over:?}"),
         Err(StageStop::Write(never)) => match never {},
-        Err(StageStop::OverMemory(too_close)) => {
-            unreachable!("the probe's decision carries no memory limit: {too_close}")
-        }
         Err(StageStop::Stopped) => unreachable!("the probe stops at the first stop"),
     }
     most_counted = most_counted.max(report(

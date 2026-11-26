@@ -94,12 +94,6 @@ pub enum CallingRunError {
         limit: usize,
     },
 
-    /// **Refinement is expected to need more memory than the run may use**, judged before calling
-    /// starts (`neighbour_evidence_pass.md` §6, memory), and `--refine-ignore-memory-limit` was not
-    /// given. Refused here rather than after hours of calling.
-    #[error("{0}")]
-    RefinementOverMemory(crate::neighbour_evidence::peak::PeakTooClose),
-
     /// A bound that is not a bound.
     #[error(
         "--max-locus-span {asked}: a locus covers at least one reference base, so a \
@@ -923,26 +917,23 @@ pub fn neighbour_evidence_decision(
 /// **Whether refinement's expected peak fits the memory this run may use**, judged before calling
 /// starts (`neighbour_evidence_pass.md` §6, memory): from the window budget, the samples, the
 /// threads and the longest contig, against the smaller of the machine's memory and the control
-/// group's limit ([`crate::memory_limit`]). Logs the estimate where it fits, or where the limit
-/// cannot be read, and hands the limit to the decision so that every window is checked again once
-/// it is planned. Does nothing where refinement does not run. `ignore_limit` is
-/// `--refine-ignore-memory-limit`.
-///
-/// # Errors
-///
-/// [`CallingRunError::RefinementOverMemory`] if the estimate is above
-/// [`STOP_SHARE`](crate::neighbour_evidence::peak::STOP_SHARE) of the limit and `ignore_limit` is
-/// not set.
+/// group's limit ([`crate::memory_limit`]). **It never stops the run**: above
+/// [`WARN_SHARE`](crate::neighbour_evidence::peak::WARN_SHARE) of the limit it warns, saying the
+/// estimate is an upper bound and what would fit; otherwise it logs the estimate. It hands the
+/// limit and `scratch_dir`, the run's scratch directory where it keeps one, to the decision, so
+/// that every window is estimated again once it is planned and its warning can name the command
+/// that resumes the run. Does nothing where refinement does not run.
+#[must_use]
 pub fn check_refinement_memory(
     metadata: VcfHeaderMetadata,
-    ignore_limit: bool,
-) -> Result<VcfHeaderMetadata, CallingRunError> {
+    scratch_dir: Option<&Path>,
+) -> VcfHeaderMetadata {
     let Some(decision) = metadata
         .neighbour_evidence()
         .filter(|decision| decision.ran)
         .cloned()
     else {
-        return Ok(metadata);
+        return metadata;
     };
     let longest_contig = metadata
         .contigs()
@@ -950,26 +941,26 @@ pub fn check_refinement_memory(
         .map(|contig| contig.length)
         .max()
         .unwrap_or(0);
-    let decision = refinement_memory_checked(
+    let (decision, _) = refinement_memory_checked(
         decision,
         crate::memory_limit::of_this_process(),
-        ignore_limit,
+        scratch_dir,
         rayon::current_num_threads(),
         longest_contig,
-    )
-    .map_err(CallingRunError::RefinementOverMemory)?;
-    Ok(metadata.the_neighbour_evidence_decision(decision))
+    );
+    metadata.the_neighbour_evidence_decision(decision)
 }
 
-/// [`check_refinement_memory`]'s judgement, given the limit and the threads.
+/// [`check_refinement_memory`]'s judgement, given the limit and the threads: the decision carrying
+/// the limit, and the warning it logged, if it warned.
 pub(crate) fn refinement_memory_checked(
     decision: NeighbourEvidenceDecision,
     limit: Option<crate::memory_limit::MemoryLimit>,
-    ignore_limit: bool,
+    scratch_dir: Option<&Path>,
     threads: usize,
     longest_contig: u64,
-) -> Result<NeighbourEvidenceDecision, crate::neighbour_evidence::peak::PeakTooClose> {
-    use crate::neighbour_evidence::peak::{self, MemoryGuard, PeakCheck, PeakEstimate, PeakMoment};
+) -> (NeighbourEvidenceDecision, Option<String>) {
+    use crate::neighbour_evidence::peak::{self, MemoryWatch, PeakCheck, PeakEstimate, PeakMoment};
     let samples = decision.inbreeding_by_sample.len();
     let estimate_at = |budget: u64| {
         PeakEstimate::before_any_window(
@@ -983,22 +974,29 @@ pub(crate) fn refinement_memory_checked(
         )
     };
     let estimate = estimate_at(decision.sizes.budget_bytes);
-    let guard = MemoryGuard {
-        limit,
-        ignore_limit,
-    };
-    let found = peak::check(estimate, guard, PeakMoment::BeforeCalling, estimate_at)?;
-    let words = peak::fits_in_words(&estimate, &found, limit);
-    match found {
-        PeakCheck::Ignored(_) => tracing::warn!("refinement memory, before calling: {words}"),
-        PeakCheck::Fits { .. } | PeakCheck::NoLimit => {
-            tracing::info!("refinement memory, before calling: {words}");
+    let found = peak::check(estimate, limit, PeakMoment::BeforeCalling, estimate_at);
+    let warning = match found {
+        PeakCheck::NearLimit(near) => {
+            let warning = near.warning(scratch_dir);
+            tracing::warn!("{warning}");
+            Some(warning)
         }
-    }
-    Ok(NeighbourEvidenceDecision {
-        memory_guard: guard,
+        PeakCheck::Fits { .. } | PeakCheck::NoLimit => {
+            tracing::info!(
+                "refinement memory, before calling: {}",
+                peak::fits_in_words(&estimate, &found, limit)
+            );
+            None
+        }
+    };
+    let decision = NeighbourEvidenceDecision {
+        memory_watch: MemoryWatch {
+            limit,
+            scratch_dir: scratch_dir.map(Path::to_path_buf),
+        },
         ..decision
-    })
+    };
+    (decision, warning)
 }
 
 /// **The ploidy this run was asked for, judged against what the caller can score.**
@@ -1139,11 +1137,11 @@ pub enum ScratchOnFailure {
     /// Left on disk, with everything in it, and its path logged — for looking at what the run
     /// had made before it stopped.
     Kept,
-    /// **Left on disk because refinement stopped on memory**, whatever `--keep-tmp-on-error`
-    /// said: over the window budget even at the smallest window, or its expected peak too close
-    /// to the run's memory limit. That stop comes after calling has ended, so the directory holds
-    /// everything `pvc resume-calling` needs, and removing it would throw away hours of calling
-    /// to a setting the user can change. Set by [`RunScratch::keep_if_refinement_stopped`].
+    /// **Left on disk because a refinement window did not fit its budget**, whatever
+    /// `--keep-tmp-on-error` said: over `--refine-window-bytes` even at the smallest window. That
+    /// stop comes after calling has ended, so the directory holds everything `pvc resume-calling`
+    /// needs, and removing it would throw away hours of calling to a setting the user can change.
+    /// Set by [`RunScratch::keep_if_refinement_stopped`].
     KeptForResuming,
 }
 
@@ -1196,27 +1194,24 @@ impl RunScratch {
         self.the_run_succeeded = true;
     }
 
-    /// **Keep the directory if `error` is refinement stopping on memory**
+    /// **Keep the directory if `error` is a refinement window over its budget**
     /// ([`ScratchOnFailure::KeptForResuming`]); any other error leaves the choice as it was.
     pub fn keep_if_refinement_stopped(&mut self, error: &(dyn std::error::Error + 'static)) {
-        if refinement_stopped_on_memory(error) {
+        if refinement_stopped_over_budget(error) {
             self.on_failure = ScratchOnFailure::KeptForResuming;
         }
     }
 }
 
-/// **Whether `error`, or any error under it, is refinement stopping on memory**: a window over
-/// the budget at its smallest, or one whose expected peak is too close to the memory limit.
+/// **Whether `error`, or any error under it, is refinement stopping on a window over its budget**
+/// even at its smallest. Refinement never stops on its memory estimate; it only warns.
 #[must_use]
-pub fn refinement_stopped_on_memory(error: &(dyn std::error::Error + 'static)) -> bool {
+pub fn refinement_stopped_over_budget(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut next = Some(error);
     while let Some(this) = next {
         if matches!(
             this.downcast_ref::<crate::vcf::writer::VcfWriteError>(),
-            Some(
-                crate::vcf::writer::VcfWriteError::RefinementOverMemory(_)
-                    | crate::vcf::writer::VcfWriteError::RefinementOverBudget(_)
-            )
+            Some(crate::vcf::writer::VcfWriteError::RefinementOverBudget(_))
         ) {
             return true;
         }
@@ -1235,7 +1230,7 @@ impl Drop for RunScratch {
             // left a spill nothing can finish.
             let resumable = crate::run::paralog_filter::resume::is_resumable(&directory);
             let why = if self.on_failure == ScratchOnFailure::KeptForResuming {
-                "because refinement stopped on memory and calling had finished"
+                "because a refinement window did not fit --refine-window-bytes and calling had finished"
             } else {
                 "as --keep-tmp-on-error asked"
             };

@@ -154,7 +154,6 @@ mod tests {
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
             refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
             refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_ignore_memory_limit: false,
             refine_window_max: None,
             refine_core_floor: None,
             refine_core_max: None,
@@ -280,7 +279,6 @@ mod tests {
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
             refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
             refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_ignore_memory_limit: false,
             refine_window_max: None,
             refine_core_floor: None,
             refine_core_max: None,
@@ -553,7 +551,6 @@ mod tests {
                 refine_window_bytes: Some(crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES),
                 refine_window_floor: None,
                 refine_margin_density: None,
-                refine_ignore_memory_limit: false,
                 refine_core_floor: None,
                 phase_min_path_agreement: None,
             },
@@ -596,11 +593,11 @@ mod tests {
     }
 
     /// **Without the flag, the same failed run still keeps its scratch directory**, because it
-    /// stopped on refinement's memory after calling had ended (2026-11-25): removing it would throw
-    /// the calling away for a setting `pvc resume-calling` can change. Any other failure removes it
-    /// without the flag (`calling_run` tests).
+    /// stopped on a refinement window over its budget after calling had ended (2026-11-25):
+    /// removing it would throw the calling away for a setting `pvc resume-calling` can change.
+    /// Any other failure removes it without the flag (`calling_run` tests).
     #[test]
-    fn a_run_stopped_by_refinement_memory_keeps_its_scratch_without_the_flag() {
+    fn a_run_stopped_by_a_refinement_window_over_budget_keeps_its_scratch_without_the_flag() {
         let (cohort, args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(false);
 
         run_call_from_psps(&args).expect_err("refinement cannot fit a one-byte window");
@@ -1675,7 +1672,6 @@ mod tests {
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
             refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
             refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_ignore_memory_limit: false,
             refine_window_max: None,
             refine_core_floor: None,
             refine_core_max: None,

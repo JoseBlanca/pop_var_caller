@@ -1331,7 +1331,6 @@ mod tests {
             refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
             refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
             refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_ignore_memory_limit: false,
             refine_window_max: None,
             refine_core_floor: None,
             refine_core_max: None,

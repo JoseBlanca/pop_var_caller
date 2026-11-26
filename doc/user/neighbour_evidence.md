@@ -149,8 +149,9 @@ kilobase. Four options, under *Advanced* in `--help`, set how large windows may 
 - Before calling, and again at each window, pvc estimates the pass's peak memory — the window,
   each thread's arrays and about 16% more for the memory allocator — and compares it with the
   machine's memory, or the job's limit where that is lower (a systemd unit's `MemoryMax`, a
-  container's). Above 90% of it the run stops and says what to lower; `--refine-ignore-memory-limit`
-  runs it anyway. On 2,176 tomato samples at 48 threads the estimate is about 1.3 times the budget.
+  container's). Above 85% of it the run warns, says what to lower, and goes on; the warning names
+  the `pvc resume-calling` command that finishes the run if the system kills it for memory after
+  calling. On 2,176 tomato samples at 48 threads the estimate is about 1.3 times the budget.
 
 ## How good the fills are: the fill check
 

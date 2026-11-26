@@ -399,17 +399,19 @@ fn a_round_is_cut_into_up_to_four_regions_a_thread_over_the_same_ground() {
     }
 }
 
-/// **Refinement's memory is judged before calling**: tomato25's 2,176 samples at 70 GB and 48
-/// threads fit a 118-GB unit (92 GB expected, 78%) and the decision carries the limit on to every
-/// window; at 100 GB (131.8 GB expected) the run is refused, unless told to go on; and a run whose
-/// limit cannot be read goes on, unchecked.
+/// **Refinement's memory is judged before calling, and never stops the run**: tomato25's 2,176
+/// samples at 70 GB and 48 threads fit a 118-GB unit (92 GB expected, 78%) and the decision carries
+/// the limit and the scratch directory on to every window; at 100 GB (131.8 GB expected) the run is
+/// warned and goes on with the same decision; and a run whose limit cannot be read goes on,
+/// unchecked.
 #[test]
-fn refinement_memory_is_judged_before_calling() {
+fn refinement_memory_is_judged_before_calling_and_only_warns() {
     use crate::memory_limit::{LimitSource, MemoryLimit};
     let unit = Some(MemoryLimit {
         bytes: 118_000_000_000,
         source: LimitSource::ControlGroupV2,
     });
+    let scratch = Path::new("/scratch/pvc_tmp_ab12");
     let at = |budget: u64| {
         decide(
             NeighbourEvidenceSwitch::On,
@@ -421,21 +423,31 @@ fn refinement_memory_is_judged_before_calling() {
             crate::neighbour_evidence::windows::MarginThinning::parse("5").expect("5"),
         )
     };
-    let fits = refinement_memory_checked(at(70_000_000_000), unit, false, 48, 90_000_000)
-        .expect("92 GB of 118");
-    assert_eq!(fits.memory_guard.limit, unit);
-    assert!(!fits.memory_guard.ignore_limit);
+    let (fits, warning) =
+        refinement_memory_checked(at(70_000_000_000), unit, Some(scratch), 48, 90_000_000);
+    assert_eq!(warning, None);
+    assert_eq!(fits.memory_watch.limit, unit);
+    assert_eq!(fits.memory_watch.scratch_dir.as_deref(), Some(scratch));
 
-    let refused = refinement_memory_checked(at(100_000_000_000), unit, false, 48, 90_000_000)
-        .expect_err("131.8 GB of 118");
-    assert_eq!(refused.budget_that_fits, Some(80_000_000_000));
-    let forced = refinement_memory_checked(at(100_000_000_000), unit, true, 48, 90_000_000)
-        .expect("told to go on");
-    assert!(forced.memory_guard.ignore_limit);
+    let (warned, warning) =
+        refinement_memory_checked(at(100_000_000_000), unit, Some(scratch), 48, 90_000_000);
+    let warning = warning.expect("131.8 GB of 118 is over 85%");
+    assert!(warning.contains("This is an upper bound"), "{warning}");
+    assert!(
+        warning.contains("--refine-window-bytes 76000000000 (76.0 GB) or less"),
+        "{warning}"
+    );
+    assert_eq!(
+        warned.sizes,
+        at(100_000_000_000).sizes,
+        "the budget is left as given"
+    );
+    assert_eq!(warned.memory_watch.limit, unit);
 
-    let unread = refinement_memory_checked(at(100_000_000_000), None, false, 48, 90_000_000)
-        .expect("nothing to check against");
-    assert_eq!(unread.memory_guard.limit, None);
+    let (unread, warning) =
+        refinement_memory_checked(at(100_000_000_000), None, None, 48, 90_000_000);
+    assert_eq!(warning, None);
+    assert_eq!(unread.memory_watch.limit, None);
 }
 
 /// An error that holds another, as the filter's errors hold the writer's.
@@ -443,10 +455,10 @@ fn refinement_memory_is_judged_before_calling() {
 #[error("the run could not finish")]
 struct AnErrorAround(#[source] crate::vcf::writer::VcfWriteError);
 
-/// **Refinement stopping on memory keeps the scratch directory, without `--keep-tmp-on-error`**:
+/// **A refinement window over its budget keeps the scratch directory, without `--keep-tmp-on-error`**:
 /// the stop comes after calling, so the directory is what `pvc resume-calling` finishes from.
 #[test]
-fn a_run_stopped_by_refinement_memory_keeps_its_scratch_directory() {
+fn a_run_stopped_by_a_refinement_window_over_budget_keeps_its_scratch_directory() {
     let (mut scratch, file) = a_scratch_directory_holding_a_file(ScratchOnFailure::Removed);
     let directory = scratch.path().to_path_buf();
     let stop = AnErrorAround(crate::vcf::writer::VcfWriteError::RefinementOverBudget(

@@ -183,8 +183,8 @@ pub struct CallFromPspsArgs {
 
     /// Keep the run's scratch directory, and the hidden-dup filter's spill in it, when the run
     /// stops on an error. Its path is logged. A run that finishes removes it as usual. A run
-    /// that refinement stops on memory, after calling, keeps it with or without this flag, so
-    /// `pvc resume-calling` can finish it.
+    /// stopped by a refinement window over --refine-window-bytes, after calling, keeps it with or
+    /// without this flag, so `pvc resume-calling` can finish it.
     ///
     /// The spill holds every called record, so on a large cohort the kept directory can take
     /// terabytes: remove it once it is no longer needed.
@@ -283,7 +283,9 @@ pub struct CallFromPspsArgs {
     /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
     /// walk's arrays, about 1 kB a record it walks, and the memory allocator holds about a sixth
     /// more: on 2,176 samples at 48 threads the process peaked at about 1.3 times the budget. The
-    /// run checks that peak against its memory before calling (see --refine-ignore-memory-limit).
+    /// run estimates that peak before calling and at each window, and warns, without stopping,
+    /// where it is above 85% of the memory the run may use (the machine's, or the job's limit
+    /// where lower, such as a systemd unit's MemoryMax), naming a budget that would fit.
     #[arg(
         long,
         default_value_t = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
@@ -330,14 +332,6 @@ pub struct CallFromPspsArgs {
         help_heading = "Advanced"
     )]
     pub refine_margin_density: calling_run::MarginDensity,
-
-    /// Run genotype refinement even where its expected peak memory is above 90% of the memory
-    /// this run may use: the machine's, or the job's limit where that is lower (a systemd
-    /// unit's MemoryMax, a container's). Without it the run stops, before calling and again at
-    /// any window that would go over, saying what the estimate is made of and what to lower
-    /// (--refine-window-bytes, --threads). With it, the run logs a warning and goes on.
-    #[arg(long, help_heading = "Advanced")]
-    pub refine_ignore_memory_limit: bool,
 
     /// The longest a refinement window's core and each margin may be, in bases, before the budget
     /// shrinks them (at most 1 Mb, the default margin; the default core is 2 Mb). For measurements
@@ -761,9 +755,6 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 core_max: args.refine_core_max,
             },
         ));
-    // **Before calling starts**, so that a run whose refinement cannot fit stops now, not after
-    // hours of calling.
-    let metadata = calling_run::check_refinement_memory(metadata, args.refine_ignore_memory_limit)?;
     // **Fragments are gathered only where the output will read them**, which the header just
     // settled: refinement, if the decision above runs it, or phase from reads alone at ploidy two.
     // Elsewhere — any other ploidy — gathering them would cost the calling threads, the ordered
@@ -789,6 +780,13 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         )?),
         None => None,
     };
+    // **Refinement's memory, judged before calling starts**, so that a run likely not to fit is
+    // warned of now, not after hours of calling; after the scratch directory is made, so that the
+    // warning can name the command that resumes from it. It never stops the run.
+    let metadata = calling_run::check_refinement_memory(
+        metadata,
+        scratch.as_ref().map(|scratch| scratch.path()),
+    );
     let mut sink = if let Some(scratch) = &scratch {
         // The spill's lines are encoded against the same contigs the header names, taken from
         // the metadata itself rather than re-derived.
