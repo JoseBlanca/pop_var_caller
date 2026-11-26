@@ -53,12 +53,12 @@
 
 use std::collections::BTreeMap;
 
-use super::validate::refuse;
+use super::validate::{refuse, the_misread_entry_of};
 use super::{
     BetweenLocusShare, ContaminationFittedFrom, ContaminationMeasurement, CurveReach,
-    EvidenceCount, LevelSmoothing, MisreadBase, ParametersFile, ParametersFileError, SeedRung,
-    ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SlippageCurve, Warrant,
-    concentration_error_of, concentration_of,
+    EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError, SeedRung, ShareCurve,
+    ShareCurveRung, ShareShape, ShareSmoothing, SlippageCurve, Warrant, concentration_error_of,
+    concentration_of,
 };
 use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
 use crate::calling::likelihood::ssr::RepeatTractOutlierWeight;
@@ -162,20 +162,18 @@ impl WhereTheFilesRowsBelong {
             .iter()
             .map(|(id, lane)| ((&*lane.sample, &*lane.id), id.get() as usize))
             .collect();
-        let read_group = file
-            .fitted_from
-            .read_groups
-            .iter()
-            .map(|row| {
-                *run_position_of
-                    .get(&(row.sample.as_str(), row.declared_id.as_str()))
-                    .expect("refuse_if_not_this_runs_inputs matched every read group by now")
-            })
-            .collect();
-
         // **The file's rows are walked, not the run's**, so a file numbering its read groups in
         // another order still lands each of them where the run wants it. The vector is indexed
-        // by the file's own number, which is what every table in the file joins on.
+        // by the file's own read-group number, which is what every table in the file joins on —
+        // **not by the row's position**: `validate` accepts `fitted_from.read_groups` in any row
+        // order, and indexing by position would give one lane another's calibration,
+        // contamination and batch whenever the rows are not written in number order.
+        let mut read_group = vec![0; file.fitted_from.read_groups.len()];
+        for row in &file.fitted_from.read_groups {
+            read_group[row.read_group as usize] = *run_position_of
+                .get(&(row.sample.as_str(), row.declared_id.as_str()))
+                .expect("refuse_if_not_this_runs_inputs matched every read group by now");
+        }
         let sample = read_groups
             .read_groups_per_sample()
             .iter()
@@ -267,7 +265,7 @@ impl ParametersFile {
                 a_ploidy("ploidy", self.ploidy)?,
                 self.outlier_weight(),
             )
-            .with_misread_after_runs(self.misread_after_runs(read_group_count)?),
+            .with_misread_after_runs(self.misread_after_runs()),
             reads_behind_each_calibration,
             inbreeding_by_sample,
         })
@@ -574,106 +572,46 @@ impl ParametersFile {
     /// (`str_context_error_fit.md` §5) — empty where the file has no `[misread_after_runs]`, and
     /// every read group then scores under the built-in table.
     ///
-    /// **A read group with rows has one for every entry, and only those**: a row naming no entry
-    /// of the table, an entry twice, an excess that is not a probability, or a read group with a
-    /// gap is refused, naming the row.
-    fn misread_after_runs(
-        &self,
-        read_group_count: usize,
-    ) -> Result<BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>>, ParametersFileError> {
-        use crate::calling::likelihood::run_context::{ENTRY_COUNT, MisreadExcess, RunEntry};
+    /// **`validate` has already refused a table that is not one row an entry for each read group
+    /// it names** (`the_misread_table_holds_one_row_an_entry`), so every row below names an entry
+    /// and every read group's slots are all filled.
+    fn misread_after_runs(&self) -> BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>> {
+        use crate::calling::likelihood::run_context::{ENTRY_COUNT, MisreadExcess};
         let Some(misread) = &self.misread_after_runs else {
-            return Ok(BTreeMap::new());
+            return BTreeMap::new();
         };
         let mut by_group: BTreeMap<ReadGroupId, Vec<Option<FittedMisreadEntry>>> = BTreeMap::new();
         for row in &misread.entries {
-            let at = format!(
-                "misread_after_runs.entries[read_group = {}, shortest_run = {}, base = {:?}]",
-                row.read_group, row.shortest_run, row.base
-            );
-            if row.read_group as usize >= read_group_count {
-                return Err(refuse(
-                    at,
-                    format!("names a read group the run's {read_group_count} do not include"),
-                ));
-            }
-            let distance = match row.base {
-                MisreadBase::NextBase => 1,
-                MisreadBase::FurtherOn => 2,
-            };
-            let entry = usize::try_from(row.shortest_run)
-                .ok()
-                .and_then(|shortest| RunEntry::of(shortest, distance))
-                .filter(|entry| {
-                    let (shortest, longest) = entry.lengths();
-                    shortest as u64 == row.shortest_run
-                        && longest.map(|top| top as u64) == row.longest_run
-                })
-                .ok_or_else(|| {
-                    refuse(
-                        at.clone(),
-                        "is not an entry of the misread table: no entry has these run \
-                         lengths and this base"
-                            .to_string(),
-                    )
-                })?;
-            for (name, value) in [
-                ("as_the_run", row.as_the_run.value),
-                ("other_wrong", row.other_wrong.value),
-            ] {
-                if !(0.0..1.0).contains(&value) {
-                    return Err(refuse(
-                        format!("{at}.{name}"),
-                        format!("is {value}, and an excess misread rate is a probability below 1"),
-                    ));
-                }
-            }
-            // **Further on, the whole excess is `other_wrong`**: scoring never reads `as_the_run`
-            // there, so a value in it would look as if it applied and change nothing.
-            if row.base == MisreadBase::FurtherOn && row.as_the_run.value != 0.0 {
-                return Err(refuse(
-                    format!("{at}.as_the_run"),
-                    format!(
-                        "is {}, but a base further on than the next has no favourite wrong base: \
-                         its whole excess is `other_wrong`, and this must be 0",
-                        row.as_the_run.value
-                    ),
-                ));
-            }
-            let slots = by_group
+            let entry = the_misread_entry_of(row)
+                .expect("validate refuses a misread row naming no entry of the table");
+            by_group
                 .entry(ReadGroupId(row.read_group))
-                .or_insert_with(|| vec![None; ENTRY_COUNT]);
-            if slots[entry.index()].is_some() {
-                return Err(refuse(at, "is a second row for one entry".to_string()));
-            }
-            slots[entry.index()] = Some(FittedMisreadEntry {
-                excess: MisreadExcess {
-                    as_the_run: row.as_the_run.value,
-                    other_wrong: row.other_wrong.value,
-                },
-                standard_error: MisreadExcess {
-                    as_the_run: row.as_the_run.standard_error.unwrap_or(0.0),
-                    other_wrong: row.other_wrong.standard_error.unwrap_or(0.0),
-                },
-                through_reads: row.through_reads,
-                arriving_first_reads: row.arriving_first_reads,
-                // The weaker of the two: a row whose two numbers were warranted apart (by hand)
-                // is no better than its weaker one.
-                provenance: Provenance::from(row.as_the_run.warrant)
-                    .weaker_of(row.other_wrong.warrant.into()),
-            });
+                .or_insert_with(|| vec![None; ENTRY_COUNT])[entry.index()] =
+                Some(FittedMisreadEntry {
+                    excess: MisreadExcess {
+                        as_the_run: row.as_the_run.value,
+                        other_wrong: row.other_wrong.value,
+                    },
+                    standard_error: MisreadExcess {
+                        as_the_run: row.as_the_run.standard_error.unwrap_or(0.0),
+                        other_wrong: row.other_wrong.standard_error.unwrap_or(0.0),
+                    },
+                    through_reads: row.through_reads,
+                    arriving_first_reads: row.arriving_first_reads,
+                    // The weaker of the two: a row whose two numbers were warranted apart (by
+                    // hand) is no better than its weaker one.
+                    provenance: Provenance::from(row.as_the_run.warrant)
+                        .weaker_of(row.other_wrong.warrant.into()),
+                });
         }
         by_group
             .into_iter()
             .map(|(group, slots)| {
-                let missing = slots.iter().filter(|slot| slot.is_none()).count();
-                if missing > 0 {
-                    return Err(refuse(
-                        format!("misread_after_runs.entries[read_group = {}]", group.get()),
-                        format!("lacks {missing} of the table's {ENTRY_COUNT} entries"),
-                    ));
-                }
-                Ok((group, slots.into_iter().flatten().collect()))
+                let entries = slots
+                    .into_iter()
+                    .map(|slot| slot.expect("validate refuses a read group missing an entry"))
+                    .collect();
+                (group, entries)
             })
             .collect()
     }
@@ -1380,7 +1318,7 @@ pub(super) mod tests {
             .expect("the fixture carries the table")
             .entries
             .iter_mut()
-            .find(|row| row.base == super::MisreadBase::FurtherOn)
+            .find(|row| row.base == super::super::MisreadBase::FurtherOn)
             .expect("a further-on row");
         row.as_the_run.value = 0.05;
 
