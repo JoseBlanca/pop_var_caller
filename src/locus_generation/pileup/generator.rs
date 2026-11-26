@@ -314,8 +314,8 @@ pub struct PileupGeneratorCounts {
     /// removed it.
     pub reads_evicted_at_ceiling: u64,
     /// **The number that says whether the walk is throwing coverage away.** Positions the
-    /// walk folded fewer reads than the per-position cap allows, while reads covering
-    /// that position had been given up by the hold ceiling.
+    /// walk folded, in some read group, fewer reads than the per-position cap allows, while
+    /// reads of that group covering the position had been given up by the hold ceiling.
     ///
     /// A zero is the claim "no position in this run is short of the cap while reads
     /// covering it exist". It can only ever hold *up to the ceiling*: raise the coverage
