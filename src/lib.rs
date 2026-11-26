@@ -35,7 +35,7 @@
 //!   that follows; [`vcf`] — the one file a run writes.
 //! - [`types`] — the vocabulary the steps share.
 //!
-//! [`error_render`] and [`iter_ext`] are small helpers the rest shares. The command line is
+//! [`error_render`], [`progress_text`] and [`iter_ext`] are small helpers the rest shares. The command line is
 //! [`cli`].
 //!
 //! The tandem-repeat scanner is this crate's own; nothing here depends on `trf-mod`, whose output
@@ -101,6 +101,7 @@ pub mod neighbour_evidence;
 pub mod open_files;
 pub mod paralog;
 pub mod parameter_estimation;
+pub mod progress_text;
 pub mod psp;
 pub mod raw_chrom_reader;
 pub mod read;

@@ -28,7 +28,7 @@ use std::io::{self, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use thiserror::Error;
 use tracing::field::{Field, Visit};
@@ -39,9 +39,12 @@ use tracing_subscriber::registry::Registry;
 
 use super::provenance::{current_command_line, rfc3339_now};
 
-/// The target a progress event carries, so the terminal can draw it in place:
-/// `info!(target: PROGRESS, "calling: …")`.
-pub const PROGRESS: &str = "pvc::progress";
+/// The target a progress event carries, and the formatters the subcommands' messages use. They
+/// live in [`crate::progress_text`], where library code can reach them without importing the
+/// command line, and are re-exported here beside the layer that draws a [`PROGRESS`] event in
+/// place.
+pub use crate::progress_text::{PROGRESS, elapsed_text, with_thousands};
+use crate::progress_text::{kibibytes_in_status, size_in_bytes};
 
 /// The run's log, while one is open.
 static LOG: Mutex<Option<RunLog>> = Mutex::new(None);
@@ -354,27 +357,7 @@ pub fn parameters_in(log_text: &str) -> Option<String> {
 /// life of the process; `None` elsewhere.
 fn peak_resident_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kib: u64 = status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmHWM:"))?
-        .trim()
-        .strip_suffix("kB")?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(kib * 1024)
-}
-
-/// A size in bytes as a person reads it: `3.2 GiB`, `850 MiB`.
-fn size_in_bytes(bytes: u64) -> String {
-    // Precision loss is irrelevant: a size to read, to one decimal.
-    #[allow(clippy::cast_precision_loss)]
-    let as_float = bytes as f64;
-    if bytes >= 1 << 30 {
-        format!("{:.1} GiB", as_float / f64::from(1u32 << 30))
-    } else {
-        format!("{:.0} MiB", as_float / f64::from(1u32 << 20))
-    }
+    Some(kibibytes_in_status(&status, "VmHWM:")? * 1024)
 }
 
 /// The terminal's destination: stderr, short.
@@ -475,35 +458,6 @@ impl Visit for MessageAndFields {
     }
 }
 
-/// `1234567` as `1,234,567`.
-#[must_use]
-pub fn with_thousands(number: u64) -> String {
-    let digits = number.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
-}
-
-/// A duration as a person reads it: `1h12m`, `12m05s` or `42s` — to the second, since a
-/// progress line comes every few minutes at the least.
-#[must_use]
-pub fn elapsed_text(took: Duration) -> String {
-    let seconds = took.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 /// A stretch of genome as a person reads its size: `782 Mb`, `12.4 Mb`, `8.0 kb`, `950 bases`.
 #[must_use]
 pub fn size_of_ground(bases: u64) -> String {
@@ -600,11 +554,5 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(parameters_in(&text).as_deref(), Some(toml));
         assert_eq!(parameters_in("a log with no block\n"), None);
-    }
-
-    #[test]
-    fn sizes_are_read_in_mib_and_gib() {
-        assert_eq!(size_in_bytes(850 << 20), "850 MiB");
-        assert_eq!(size_in_bytes(3 << 30), "3.0 GiB");
     }
 }

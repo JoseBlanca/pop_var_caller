@@ -20,7 +20,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::cli::run_output::{PROGRESS, elapsed_text as elapsed, with_thousands};
+use crate::progress_text::{PROGRESS, elapsed_text as elapsed, with_thousands};
 
 use crate::fasta::ContigList;
 use crate::types::GenomeRegion;
