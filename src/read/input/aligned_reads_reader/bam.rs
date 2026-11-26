@@ -99,6 +99,10 @@ impl BamAlignedReadsReader {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests ask a reader for its header")
+    )]
     pub(crate) fn header(&self) -> &sam::Header {
         &self.header
     }
