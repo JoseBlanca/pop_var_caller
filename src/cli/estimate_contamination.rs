@@ -229,8 +229,9 @@ pub enum EstimateContaminationCliError {
     #[error("the positions to record could not be chosen")]
     Selection(#[source] SelectionError),
 
-    #[error("the reference has more contigs than a run can address")]
-    ContigCount,
+    /// A contig longer than a region coordinate (32 bits, 4,294,967,295 bases) can address.
+    #[error("contig {name} is {length} bases, longer than a region coordinate can address")]
+    ContigTooLong { name: String, length: u64 },
 
     #[error("{} declares {samples} samples; this run is one sample per file", .path.display())]
     NotOneSample { path: PathBuf, samples: usize },
@@ -599,18 +600,7 @@ fn prepare(args: &EstimateContaminationArgs) -> Result<Prepared, EstimateContami
         .map_err(EstimateContaminationCliError::Selection)?;
 
     // ---- what stretch of genome to look at ------------------------------------------------
-    let bounds: Vec<ContigBounds> = contigs
-        .entries
-        .iter()
-        .map(|entry| {
-            u32::try_from(entry.length)
-                .map(|length| ContigBounds {
-                    name: &entry.name,
-                    length,
-                })
-                .map_err(|_| EstimateContaminationCliError::ContigCount)
-        })
-        .collect::<Result<_, _>>()?;
+    let bounds = contig_bounds(&contigs)?;
     let (analysed, regions_described) = match &args.regions {
         Some(bed) => {
             let spans = GenomeRegions::from_bed_path(bed, &bounds)
@@ -947,6 +937,28 @@ fn assemble(
     }
 }
 
+/// Each contig's name and length, as the BED reader takes them. A contig longer than a 32-bit
+/// coordinate can hold is refused by name and length, so the user knows which contig to look at.
+fn contig_bounds(
+    contigs: &ContigList,
+) -> Result<Vec<ContigBounds<'_>>, EstimateContaminationCliError> {
+    contigs
+        .entries
+        .iter()
+        .map(|entry| {
+            u32::try_from(entry.length)
+                .map(|length| ContigBounds {
+                    name: &entry.name,
+                    length,
+                })
+                .map_err(|_| EstimateContaminationCliError::ContigTooLong {
+                    name: entry.name.clone(),
+                    length: entry.length,
+                })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // Drawing the stretch to look at
 // ---------------------------------------------------------------------
@@ -1076,6 +1088,25 @@ mod tests {
         let second = draw_blocks(&contigs, 10_000_000, 100_000, 2);
         assert_eq!(first.len(), second.len(), "the same count either way");
         assert_ne!(first, second, "the seed moved no block");
+    }
+
+    /// **A contig too long for a region coordinate is named in the error**, with its length,
+    /// rather than reported as too many contigs.
+    #[test]
+    fn a_contig_longer_than_four_gb_is_refused_by_name() {
+        let contigs = contigs(&[1_000, 5_000_000_000]);
+        let error = contig_bounds(&contigs).expect_err("a 5 Gb contig must be refused");
+        match &error {
+            EstimateContaminationCliError::ContigTooLong { name, length } => {
+                assert_eq!(name, "chr1");
+                assert_eq!(*length, 5_000_000_000);
+            }
+            other => panic!("expected ContigTooLong, got {other:?}"),
+        }
+        assert_eq!(
+            error.to_string(),
+            "contig chr1 is 5000000000 bases, longer than a region coordinate can address"
+        );
     }
 
     /// A contig shorter than the floor contributes nothing: a scaffold's mismapped reads are
