@@ -445,6 +445,7 @@ mod tests {
     /// The `x > 0` contract is enforced in debug builds: a non-positive argument
     /// trips the debug assertion rather than silently returning a corrupt value.
     #[test]
+    #[cfg(debug_assertions)] // the check is a debug_assert!, compiled out of release builds
     #[should_panic(expected = "lgamma requires x > 0")]
     fn lgamma_panics_on_non_positive_in_debug() {
         lgamma(0.0);

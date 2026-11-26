@@ -332,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)] // the check is a debug_assert!, compiled out of release builds
     #[should_panic(expected = "reference_offset")]
     fn an_offset_past_the_reference_panics() {
         // Precondition reference_offset <= reference.len() violated. Fail-fast (panic) is the
