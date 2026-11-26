@@ -63,10 +63,11 @@
 
 use super::{
     BetweenLocusShare, ContaminationMeasurement, EvidenceCount, InformationalNumber,
-    LevelSmoothing, PairedNumber, ParametersFile, ParametersFileError, RepeatTracts, ShareCurve,
-    ShareSmoothing, SlippageCurve, StartOutcome, Warrant, WarrantedValue, between_locus_share_of,
-    concentration_error_of,
+    LevelSmoothing, MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile,
+    ParametersFileError, RepeatTracts, ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome,
+    Warrant, WarrantedValue, between_locus_share_of, concentration_error_of,
 };
+use crate::calling::likelihood::run_context::RunEntry;
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::parameter_estimation::joint::stratum_fits::{
     STATED_FLAT_CONCENTRATION, STATED_OWN_SHARES_CONCENTRATION,
@@ -117,7 +118,7 @@ impl ParametersFile {
         self.the_prior_seed_is_a_pair_of_concentrations()?;
         self.the_informational_tables_hold_numbers()?;
         self.the_tracts_left_out_hold_numbers()?;
-        self.the_misread_table_is_not_older_than_its_format()?;
+        self.the_misread_table_holds_one_row_an_entry()?;
         self.the_snp_indel_fit_holds_numbers()?;
         self.the_repeat_tract_numbers_are_what_they_claim()?;
         self.every_read_group_has_a_stutter_multiplier()?;
@@ -126,11 +127,23 @@ impl ParametersFile {
     }
 
     /// **`[misread_after_runs]` is not in a file stamped before format 8**, which had no such
-    /// table. Its rows are checked where they are read (`to_run_parameters`), which names the row.
-    fn the_misread_table_is_not_older_than_its_format(&self) -> Result<(), ParametersFileError> {
-        if self.misread_after_runs.is_some()
-            && self.format_version < FORMAT_THAT_ADDED_THE_MISREAD_TABLE
-        {
+    /// table, and **a read group with rows has one for every entry of the table, and only those**
+    /// (`str_context_error_fit.md` §5): a row naming a read group the file does not list or no
+    /// entry of the table, an entry twice, an excess that is not a probability, a further-on row
+    /// with an excess "as the run", or a read group with a gap is refused, naming the row.
+    ///
+    /// **These checks used to live in the projection alone**, so `estimate-parameters`, which
+    /// checks the file it writes with `validate`, never ran them. Each excess also goes through
+    /// the warrant rules every other warranted number does, with one difference: **a standard
+    /// error of 0 is accepted here.** The fit writes one for every further-on `as_the_run`, where
+    /// no read is counted and both rates are 0, so their binomial error is exactly 0; refusing it
+    /// would refuse the fit's own output.
+    fn the_misread_table_holds_one_row_an_entry(&self) -> Result<(), ParametersFileError> {
+        use crate::calling::likelihood::run_context::ENTRY_COUNT;
+        let Some(misread) = &self.misread_after_runs else {
+            return Ok(());
+        };
+        if self.format_version < FORMAT_THAT_ADDED_THE_MISREAD_TABLE {
             return Err(refuse(
                 "misread_after_runs",
                 format!(
@@ -140,6 +153,78 @@ impl ParametersFile {
                     self.format_version
                 ),
             ));
+        }
+        let read_group_count = self.fitted_from.read_groups.len();
+        let mut rows_of_each_group: BTreeMap<u32, [bool; ENTRY_COUNT]> = BTreeMap::new();
+        for row in &misread.entries {
+            let at = misread_row_path(row);
+            if row.read_group as usize >= read_group_count {
+                return Err(refuse(
+                    at,
+                    format!("names a read group the run's {read_group_count} do not include"),
+                ));
+            }
+            let entry = the_misread_entry_of(row).ok_or_else(|| {
+                refuse(
+                    at.clone(),
+                    "is not an entry of the misread table: no entry has these run lengths and \
+                     this base"
+                        .to_string(),
+                )
+            })?;
+            for (name, value) in [
+                ("as_the_run", &row.as_the_run),
+                ("other_wrong", &row.other_wrong),
+            ] {
+                let here = format!("{at}.{name}");
+                if !(0.0..1.0).contains(&value.value) {
+                    return Err(refuse(
+                        here,
+                        format!(
+                            "is {}, and an excess misread rate is a probability below 1",
+                            value.value
+                        ),
+                    ));
+                }
+                a_warranted_value(
+                    &here,
+                    &WarrantedValue {
+                        standard_error: None,
+                        ..*value
+                    },
+                    EvidenceCount::Reads(0),
+                )?;
+                if let Some(error) = value.standard_error {
+                    a_misread_standard_error(&here, value.warrant, error)?;
+                }
+            }
+            // **Further on, the whole excess is `other_wrong`**: scoring never reads `as_the_run`
+            // there, so a value in it would look as if it applied and change nothing.
+            if row.base == MisreadBase::FurtherOn && row.as_the_run.value != 0.0 {
+                return Err(refuse(
+                    format!("{at}.as_the_run"),
+                    format!(
+                        "is {}, but a base further on than the next has no favourite wrong base: \
+                         its whole excess is `other_wrong`, and this must be 0",
+                        row.as_the_run.value
+                    ),
+                ));
+            }
+            let seen = rows_of_each_group
+                .entry(row.read_group)
+                .or_insert([false; ENTRY_COUNT]);
+            if std::mem::replace(&mut seen[entry.index()], true) {
+                return Err(refuse(at, "is a second row for one entry".to_string()));
+            }
+        }
+        for (group, seen) in rows_of_each_group {
+            let missing = seen.iter().filter(|seen| !**seen).count();
+            if missing > 0 {
+                return Err(refuse(
+                    format!("misread_after_runs.entries[read_group = {group}]"),
+                    format!("lacks {missing} of the table's {ENTRY_COUNT} entries"),
+                ));
+            }
         }
         Ok(())
     }
@@ -1669,6 +1754,57 @@ fn a_standard_error(at: &str, error: f64) -> Result<(), ParametersFileError> {
     Ok(())
 }
 
+/// **A misread excess's standard error**: what [`a_warranted_value`] holds every other error to,
+/// except that 0 is accepted — the fit writes 0 wherever both rates it compares are 0
+/// ([`ParametersFile::the_misread_table_holds_one_row_an_entry`] says where).
+fn a_misread_standard_error(
+    at: &str,
+    warrant: Warrant,
+    error: f64,
+) -> Result<(), ParametersFileError> {
+    let at = format!("{at}.standard_error");
+    if warrant == Warrant::Defaulted {
+        return Err(refuse(
+            at,
+            "is written beside a `defaulted` warrant, and nothing determined a stated constant; \
+             delete it, or — if you changed the number — delete it and set the warrant to \
+             `supplied`",
+        ));
+    }
+    finite(&at, error)?;
+    if error < 0.0 {
+        return Err(refuse(
+            at,
+            format!("is {error}, and a standard error is not below zero"),
+        ));
+    }
+    Ok(())
+}
+
+/// A misread row's path in the file's own spelling, for a refusal that names it.
+fn misread_row_path(row: &MisreadAfterRunRow) -> String {
+    format!(
+        "misread_after_runs.entries[read_group = {}, shortest_run = {}, base = {:?}]",
+        row.read_group, row.shortest_run, row.base
+    )
+}
+
+/// **The entry of the misread table a row names**, or `None` where no entry has its run lengths
+/// and its base.
+pub(super) fn the_misread_entry_of(row: &MisreadAfterRunRow) -> Option<RunEntry> {
+    let distance = match row.base {
+        MisreadBase::NextBase => 1,
+        MisreadBase::FurtherOn => 2,
+    };
+    usize::try_from(row.shortest_run)
+        .ok()
+        .and_then(|shortest| RunEntry::of(shortest, distance))
+        .filter(|entry| {
+            let (shortest, longest) = entry.lengths();
+            shortest as u64 == row.shortest_run && longest.map(|top| top as u64) == row.longest_run
+        })
+}
+
 /// **A number this design gives no standard error carries none** (`fit_precision.md` §5.2): the
 /// fallback concentration is a median over strata and the outlier weight a stated constant. A run
 /// reading one would drop it on the way back out, so the file would not survive its own round trip.
@@ -2147,6 +2283,7 @@ mod tests {
     fn the_smallest_file_that_says_anything_is_accepted() {
         let mut small = a_file_using_every_shape();
         small.contamination = None;
+        small.misread_after_runs = None;
         small.fitted_from.samples.truncate(1);
         small.fitted_from.read_groups.truncate(1);
         small.base_quality_calibration.by_read_group.truncate(1);
@@ -3882,6 +4019,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The fixture's misread row for read group 1 at table entry `index`.
+    fn misread_row(
+        file: &mut ParametersFile,
+        index: usize,
+    ) -> &mut super::super::MisreadAfterRunRow {
+        &mut file
+            .misread_after_runs
+            .as_mut()
+            .expect("the fixture carries the misread table")
+            .entries[index]
+    }
+
+    /// **A misread row's standard error is checked by `validate`**, as every other table's is.
+    ///
+    /// `estimate-parameters` checks the file it writes with `validate` alone, so a check that
+    /// lives only in the projection is one its self-check never runs. A NaN error here used to
+    /// pass both: the projection checked the excess and never looked at its error.
+    #[test]
+    fn a_misread_excess_whose_standard_error_is_not_a_number_is_refused() {
+        let (field, _) = refused(|file| {
+            misread_row(file, 0).other_wrong.standard_error = Some(f64::NAN);
+        });
+        assert!(
+            field.starts_with("misread_after_runs.entries[read_group = 1, ")
+                && field.ends_with(".other_wrong.standard_error"),
+            "{field}"
+        );
+    }
+
+    /// **A misread row naming no entry of the table is refused by `validate`**, with the path the
+    /// projection used to name, rather than only when a run reads the file.
+    #[test]
+    fn a_misread_row_naming_no_entry_of_the_table_is_refused() {
+        let (field, problem) = refused(|file| {
+            misread_row(file, 0).shortest_run = 999;
+        });
+        assert!(field.starts_with("misread_after_runs.entries["), "{field}");
+        assert!(problem.contains("not an entry"), "{problem}");
+    }
+
+    /// **And a read group missing an entry is refused by `validate`**, naming the read group.
+    #[test]
+    fn a_read_group_missing_a_misread_entry_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.misread_after_runs
+                .as_mut()
+                .expect("the fixture carries the misread table")
+                .entries
+                .pop();
+        });
+        assert_eq!(field, "misread_after_runs.entries[read_group = 1]");
+        assert!(problem.contains("lacks 1 of"), "{problem}");
+    }
+
+    /// **A standard error of zero beside an excess of zero is accepted in this table.**
+    ///
+    /// It is what the fit writes for every further-on entry's `as_the_run`: no read counts there,
+    /// so both rates are 0 and their binomial error is exactly 0. Holding the table to the
+    /// "above zero" rule of other tables would make `estimate-parameters` refuse its own output.
+    #[test]
+    fn a_misread_standard_error_of_zero_is_accepted() {
+        accepted(|file| {
+            let further_on = file
+                .misread_after_runs
+                .as_ref()
+                .expect("the fixture carries the misread table")
+                .entries
+                .iter()
+                .position(|row| row.base == super::super::MisreadBase::FurtherOn)
+                .expect("a further-on row");
+            let row = misread_row(file, further_on);
+            row.as_the_run = WarrantedValue {
+                value: 0.0,
+                warrant: Warrant::FittedHere,
+                observations: Some(EvidenceCount::Reads(612_222)),
+                standard_error: Some(0.0),
+            };
+        });
     }
 
     /// **A warrant of `supplied` is not itself grounds for refusal.**
