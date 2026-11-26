@@ -162,20 +162,18 @@ impl WhereTheFilesRowsBelong {
             .iter()
             .map(|(id, lane)| ((&*lane.sample, &*lane.id), id.get() as usize))
             .collect();
-        let read_group = file
-            .fitted_from
-            .read_groups
-            .iter()
-            .map(|row| {
-                *run_position_of
-                    .get(&(row.sample.as_str(), row.declared_id.as_str()))
-                    .expect("refuse_if_not_this_runs_inputs matched every read group by now")
-            })
-            .collect();
-
         // **The file's rows are walked, not the run's**, so a file numbering its read groups in
         // another order still lands each of them where the run wants it. The vector is indexed
-        // by the file's own number, which is what every table in the file joins on.
+        // by the file's own read-group number, which is what every table in the file joins on —
+        // **not by the row's position**: `validate` accepts `fitted_from.read_groups` in any row
+        // order, and indexing by position would give one lane another's calibration,
+        // contamination and batch whenever the rows are not written in number order.
+        let mut read_group = vec![0; file.fitted_from.read_groups.len()];
+        for row in &file.fitted_from.read_groups {
+            read_group[row.read_group as usize] = *run_position_of
+                .get(&(row.sample.as_str(), row.declared_id.as_str()))
+                .expect("refuse_if_not_this_runs_inputs matched every read group by now");
+        }
         let sample = read_groups
             .read_groups_per_sample()
             .iter()

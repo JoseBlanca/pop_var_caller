@@ -354,8 +354,8 @@ impl ParametersFile {
     ///
     /// **Read groups by their number.** Row *order* in `fitted_from.read_groups` carries no
     /// meaning anywhere in this module — `validate` sorts the ids before checking they are dense,
-    /// the projection reads the table only for its length, and every other section joins on the
-    /// `read_group` key — so a file whose rows are written in another order is the same file.
+    /// the projection places each row by its `read_group` number, and every other section joins
+    /// on that key — so a file whose rows are written in another order is the same file.
     /// **Comparing these two tables positionally refused one**: two lanes of one plant swapped
     /// leaves the file's first-seen sample order unchanged, so it validates, projects, and is the
     /// file this run would have written.
@@ -1641,11 +1641,15 @@ mod tests {
     /// **⚑ A file whose rows are written in another order is the same file, and is accepted.**
     ///
     /// Row order in `fitted_from.read_groups` carries no meaning anywhere in this module:
-    /// `validate` sorts the ids before checking they are dense, the projection reads the table
-    /// only for its length, and every other section joins on the `read_group` key. **The first
+    /// `validate` sorts the ids before checking they are dense, the projection looks each row up
+    /// by its `read_group` number, and every other section joins on that key. **The first
     /// draft of this check joined the two tables positionally and refused such a file** — two
     /// lanes of one plant swapped, which leaves the file's own first-seen sample order unchanged,
     /// so it validates and projects and is the file this run would have written.
+    ///
+    /// **"The same file" is checked on what a run reads from it**, not only on its being
+    /// accepted: an accepted file that put lane 0's calibration, contamination and batch on lane
+    /// 1 would pass the first two assertions and still mis-score both lanes.
     #[test]
     fn a_file_whose_rows_are_written_in_another_order_is_the_same_file() {
         let (reference, read_groups) = the_run_the_fixture_was_fitted_by();
@@ -1656,6 +1660,18 @@ mod tests {
             .expect("row order is not the file's meaning");
         file.refuse_if_not_this_runs_inputs(&reference, &read_groups)
             .expect("and it is still this run's file");
+
+        let what_the_run_reads = |file: &ParametersFile| {
+            let read = file
+                .to_run_parameters_for(&reference, &read_groups, None)
+                .expect("the file projects onto the run that wrote it");
+            format!("{:?}", read.from_file)
+        };
+        assert_eq!(
+            what_the_run_reads(&file),
+            what_the_run_reads(&a_file_using_every_shape()),
+            "every lane keeps its own values when the file lists its lanes in another order"
+        );
     }
 
     /// **The three are checked in spec §6's own order**, which is what decides which refusal a
