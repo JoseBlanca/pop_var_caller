@@ -854,6 +854,11 @@ mod read_region {
 // ---------------------------------------------------------------------
 mod slide_reach;
 
+/// How far before a repeat's start, and after its end, the slide measurement reads the
+/// reference: the furthest a slide is followed, plus one indel unit and the base beside it.
+const SLIDE_FETCH_MARGIN_BP: u64 =
+    (slide_reach::MAX_SLIDE + slide_reach::MAX_INDEL_UNIT + 1) as u64;
+
 mod classify {
     use super::read_region::{
         Footprint, MIN_REGION_Q1, extract_region, flank_truncated, passes_quality_gate,
@@ -4212,11 +4217,20 @@ where
         // Let both readers drop what this walk has gone past. A reference reader is a
         // sliding window over the FASTA that only ever grows unless it is told to shrink, and
         // nobody was telling it: a forward walk of a chromosome ended up holding one byte for
-        // every base it had passed. The margin is one flank, which is the furthest back either
-        // reader looks from a repeat's own start; being generous costs a re-read and never an
-        // answer, because releasing is a hint.
+        // every base it had passed. The cursor's margin is one flank, which is the furthest back
+        // it looks from a repeat's own start. Releasing is a hint: releasing too much costs a
+        // re-read and never an answer.
+        //
+        // **The generator's own reader keeps more: [`SLIDE_FETCH_MARGIN_BP`], 107 bases.**
+        // `slide_reach` reads that far back from the repeat's start right after this call, so
+        // releasing from one flank (15 bases by default) made every STR locus re-read about 92
+        // bases it had just let go of — one extra file read a locus a sample.
         let keep_from = region.start.get().saturating_sub(self.config.flank_bp.0);
-        self.reference.evict_before(keep_from);
+        let reference_keep_from = region
+            .start
+            .get()
+            .saturating_sub(self.config.flank_bp.0.max(SLIDE_FETCH_MARGIN_BP));
+        self.reference.evict_before(reference_keep_from);
         if let Some((_, cursor)) = &self.cursor {
             cursor.evict_reference_before(keep_from);
         }
@@ -4403,7 +4417,7 @@ where
         contig: ContigId,
         region: GenomeRegion,
     ) -> Result<slide_reach::SlideReach, LocusGenerationError> {
-        let margin = (slide_reach::MAX_SLIDE + slide_reach::MAX_INDEL_UNIT + 1) as u64;
+        let margin = SLIDE_FETCH_MARGIN_BP;
         let start = locus.repeat.start().saturating_sub(margin).max(1);
         let contig_len = self
             .reference
@@ -5337,9 +5351,11 @@ mod tests {
     #[test]
     fn every_repeat_releases_the_reference_behind_it() {
         use crate::read::input::test_fixtures::read_named_with_length;
-        // Kept clear of the 100-base fixture contig's end: the last read runs 50..79.
+        // On the 200-base fixture contig, `chr2`: the generator's reader keeps
+        // `SLIDE_FETCH_MARGIN_BP` (107) bases behind each repeat, so the repeats must start past
+        // 107 for its mark to move. Kept clear of the contig's end: the last read runs 150..179.
         let records: Vec<_> = (0..4)
-            .map(|index| read_named_with_length(&format!("r{index}"), 0, 5 + index * 15, 30))
+            .map(|index| read_named_with_length(&format!("r{index}"), 1, 105 + index * 15, 30))
             .collect();
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
 
@@ -5371,10 +5387,21 @@ mod tests {
         .expect("flank within the bundle threshold");
 
         for index in 0..4u64 {
-            let start = 20 + index * 10;
-            generator.begin_segment(span(start, start + 9));
+            let start = 120 + index * 10;
+            generator.begin_segment(GenomeRegion {
+                contig: ContigId(1),
+                ..span(start, start + 9)
+            });
+            let on_chr2 = SsrSegment::new(
+                "chr2".into(),
+                start,
+                start + 9,
+                Motif::new(b"AC").unwrap(),
+                1.0,
+            )
+            .unwrap();
             generator
-                .next_locus(&tract(start, start + 9), &reads)
+                .next_locus(&on_chr2, &reads)
                 .expect("no fetch error");
         }
 
@@ -5390,23 +5417,26 @@ mod tests {
             "the mark must move forward with the walk, or it releases the same nothing every \
              time: {marks:?}",
         );
-        // The first repeat starts at 20 and the margin is one flank, 10.
+        // The first repeat starts at 120; this reader keeps the slide margin, 107 bases,
+        // which is further back than the flank (10).
         assert_eq!(
-            marks[0], 10,
-            "the mark is the repeat's start less one flank, which is the furthest back either \
+            marks[0],
+            120 - SLIDE_FETCH_MARGIN_BP,
+            "the mark is the repeat's start less the slide margin, the furthest back this \
              reader looks from a repeat's own start: {marks:?}",
         );
 
-        // The cursor's reader has none to release at the first repeat, which opens it.
+        // The cursor's reader has none to release at the first repeat, which opens it, and it
+        // keeps one flank: the furthest back it looks.
         let by_cursor = released_by_cursor
             .lock()
             .expect("no panic holds this")
             .clone();
         assert_eq!(
             by_cursor,
-            marks[1..].to_vec(),
-            "the cursor's reader is released too, from the repeat after the one that opens it: \
-             {by_cursor:?}",
+            vec![120, 130, 140],
+            "the cursor's reader is released too, from the repeat after the one that opens it, \
+             at that repeat's start less one flank: {by_cursor:?}",
         );
     }
 

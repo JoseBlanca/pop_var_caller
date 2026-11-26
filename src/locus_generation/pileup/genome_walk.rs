@@ -32,7 +32,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use crate::types::ChainId;
+use crate::types::{ChainId, ReadGroupId};
 
 use crate::locus_generation::SampleLocusObservations;
 use crate::types::GenomeRegion;
@@ -618,8 +618,9 @@ pub struct RunSummary {
     pub reads_evicted_at_ceiling: u64,
     /// **ng's, added by the depth-cap change — and the owner's test of success.**
     ///
-    /// Positions the walk folded **fewer reads than the per-position cap allows, while
-    /// reads covering that position had been given up by the hold ceiling**. Every one
+    /// Positions where some read group folded **fewer reads than the per-position cap allows,
+    /// while reads of that group covering the position had been given up by the hold
+    /// ceiling**. The cap is per read group, so this is judged per read group too. Every one
     /// of these is a position whose depth is lower than the BAM's for no reason the data
     /// justifies: not "too deep to fold", simply "the walk was not holding it".
     ///
@@ -629,8 +630,8 @@ pub struct RunSummary {
     pub positions_short_of_cap: u64,
     /// The reads missing from those positions, summed — how *much* was lost, where
     /// [`positions_short_of_cap`](Self::positions_short_of_cap) says how often. Each
-    /// position contributes the smaller of the gap to the cap and the number of
-    /// ceiling-lost reads actually covering it, so it can never overstate.
+    /// read group contributes the smaller of its gap to the cap and the number of its
+    /// ceiling-lost reads actually covering the position, so it can never overstate.
     pub short_of_cap_deficit: u64,
     /// **ng's** — the deepest column the walk ever assembled, counted **before** the
     /// per-position cap and **after** the mate-overlap collapse. The quantity the caps
@@ -763,16 +764,19 @@ struct WalkerState {
     /// the same reason as `contributors_buf`: this runs once per covered reference base,
     /// and a truncated column is rare, so the buffer is usually empty and never grows.
     truncated_read_ids_buf: Vec<u32>,
-    /// **ng's, added by the depth-cap change** — the alignment ends of the reads the hold
-    /// ceiling gave up, smallest first, so the walk can say at any position **how many
-    /// reads covering it the ceiling took away**. That is the whole of
-    /// `positions_short_of_cap`, and there is no other way to know it: a read the ceiling
-    /// drops is never decomposed, so nothing downstream can be asked which positions it
-    /// would have reached.
+    /// **ng's, added by the depth-cap change** — the alignment ends and read groups of the
+    /// reads the hold ceiling gave up, smallest end first, so the walk can say at any
+    /// position **how many reads covering it the ceiling took away**, in each read group.
+    /// That is the whole of `positions_short_of_cap`, and there is no other way to know it:
+    /// a read the ceiling drops is never decomposed, so nothing downstream can be asked
+    /// which positions it would have reached.
     ///
     /// Costs nothing when the ceiling never binds, which is the case this ships for: the
     /// heap is empty, and the per-position work is one `is_empty` on an empty `Vec`.
-    ceiling_losses_by_end: BinaryHeap<Reverse<u32>>,
+    ceiling_losses_by_end: BinaryHeap<Reverse<(u32, ReadGroupId)>>,
+    /// Scratch for counting, at a position the ceiling took reads from, the reads kept and
+    /// the reads lost in each read group: `(read group, lost)`, one entry a read.
+    short_of_cap_groups_buf: Vec<(ReadGroupId, bool)>,
     /// **ng's, added by the depth-cap change** — scratch for the per-position sample:
     /// `(read group, sampling key, index into the contributor list)` for every contributor,
     /// and then the indices the sample keeps. Hoisted for the reason every buffer here is: a deep
@@ -839,21 +843,16 @@ impl WalkerState {
             last_admitted_chrom_id: None,
             last_admitted_locus: None,
             active_reads: ActiveReads::new(),
-            // **The allocator is handed a cap it can never reach, on purpose.**
+            // **A placeholder allocator with no active-read cap of its own.**
             //
-            // `max_active_reads` is still the ceiling — `admit_read` enforces it, by
-            // refusing the read rather than by failing the walk. Passing the same number
-            // here as well would leave the allocator's two responses to a deep region live
-            // underneath a walk that no longer wants either: a hard
-            // `ActiveReadsExhausted` that can no longer be reached, and a one-shot warning
-            // at three-quarters of the cap telling the user *"the run will fail"*, which
-            // by then is untrue. Neither can be edited — `chain_id_allocator.rs` is locked
-            // byte-identical to production's — so they are put out of reach instead.
-            //
-            // What is lost is a backstop on a bug in the shed itself. It was worth little:
-            // its response to an over-full active set was to abort the run, which is the
-            // behaviour being removed here, and the same over-full set is visible after
-            // the fact in `active_reads_high_water`.
+            // `max_active_reads` is the ceiling, and `admit_read` enforces it by giving up
+            // a held read or refusing the arriving one, never by failing the walk. A run
+            // never walks with this allocator: the generator replaces it through
+            // `adopting_chain_ids` with one built on `max_active_reads`, whose one-shot
+            // warning at three-quarters of the ceiling is the run's only message that the
+            // ceiling is near. Its `ActiveReadsExhausted` cannot fire there either, because
+            // `admit_read` makes room first. Only a walker that is never handed an
+            // allocator, such as one the tests build through `run`, walks with this one.
             chain_ids: ChainIdAllocator::with_caps(u32::MAX, config.mate_lookup_window),
             open_records: OpenPileupRecordTable::with_cap(config.max_record_span),
             summary: RunSummary::default(),
@@ -863,6 +862,7 @@ impl WalkerState {
             ceiling_losses_by_end: BinaryHeap::new(),
             sample_keys_buf: Vec::new(),
             sample_kept_buf: Vec::new(),
+            short_of_cap_groups_buf: Vec::new(),
             mate_overlap_buf: MateOverlapScratch::default(),
             drained_buf: Vec::new(),
             fast_column_buf: FastColumnScratch::default(),
@@ -945,6 +945,7 @@ impl WalkerState {
             truncated_read_ids_buf: _,
             sample_keys_buf: _,
             sample_kept_buf: _,
+            short_of_cap_groups_buf: _,
             mate_overlap_buf: _,
             drained_buf: _,
             fast_column_buf: _,
@@ -1055,10 +1056,11 @@ impl WalkerState {
         // ends up holding an unbiased subsample of the reads over the region instead of
         // its leftmost-starting prefix.
         //
-        // **Nothing is paid for this on the ordinary path.** No key is stored on a read,
-        // no index is kept in key order: the keys are computed by a scan, inside this
-        // branch, which is entered only when the set is already full. At the ceiling this
-        // ships, that is no position on any real fixture measured.
+        // **Almost nothing is paid for this on the ordinary path.** Each held read carries
+        // its key, hashed once at admission; no index is kept in key order, and the worst
+        // key is found by a scan inside this branch, which is entered only when the set is
+        // already full. At the ceiling this ships, that is no position on any real fixture
+        // measured.
         //
         // **Eviction is an early expiry and adds no case to the fold.** A read given back
         // here may already have folded into open records; so may a read whose end the
@@ -1081,23 +1083,24 @@ impl WalkerState {
                 // no tie-break beyond the one already inside `worst_sampling_key`, and
                 // that is reached about once in 2^64 draws.
                 Some((worst_key, worst_read_id)) if worst_key > arriving_key => {
-                    let end_of_evicted = self
+                    let evicted_end_and_group = self
                         .active_reads
                         .get_by_read_id(worst_read_id)
-                        .map(|active| active.read.alignment_end);
+                        .map(|active| (active.read.alignment_end, active.read.read_group));
                     self.active_reads.evict_by_read_id(
                         worst_read_id,
                         &mut self.chain_ids,
                         self.walker_pos,
                     )?;
                     self.summary.reads_evicted_at_ceiling += 1;
-                    if let Some(end) = end_of_evicted {
-                        self.ceiling_losses_by_end.push(Reverse(end));
+                    if let Some(lost) = evicted_end_and_group {
+                        self.ceiling_losses_by_end.push(Reverse(lost));
                     }
                 }
                 _ => {
                     self.summary.reads_shed_at_admission += 1;
-                    self.ceiling_losses_by_end.push(Reverse(read.alignment_end));
+                    self.ceiling_losses_by_end
+                        .push(Reverse((read.alignment_end, read.read_group)));
                     return Ok(());
                 }
             }
@@ -1191,6 +1194,20 @@ impl WalkerState {
                 // already succeeded — so an aborting walk loses exactly what it lost before.
                 // The table is empty whenever anything is held (see `sealed`), so there is
                 // nothing this could be pushed ahead of.
+                //
+                // **The deepest column is counted here too**, since most columns end here.
+                // The lane takes no mate pair and no capped column, so its depth is one
+                // observation a read. A column cannot be deeper than the set it is drawn
+                // from, so the sum is only taken when the set could raise the mark.
+                if self.active_reads.len() as u32 > self.summary.column_depth_high_water {
+                    let depth: u32 = locus
+                        .observations
+                        .iter()
+                        .map(|observation| observation.num_obs)
+                        .sum();
+                    self.summary.column_depth_high_water =
+                        self.summary.column_depth_high_water.max(depth);
+                }
                 self.emit_held_locus_into(out);
                 self.sealed = Some(locus);
                 return Ok(());
@@ -1351,25 +1368,63 @@ impl WalkerState {
         // holding them — so a position below the cap folded fewer reads than the cap
         // allows for a reason the data does not justify.
         //
-        // A position *at or above* the cap is not short, whatever the ceiling did: it
-        // folded the cap's worth, which is all it was ever going to fold. The pruning
-        // still runs there, so the heap cannot grow across a run of capped positions.
+        // **Judged one read group at a time, because the cap is per read group.** A group
+        // that kept the cap's worth is not short, whatever the ceiling did: it folded all
+        // it was ever going to fold. A group below the cap that lost reads covering here is
+        // short, by the cap's shortfall or by the reads lost, whichever is smaller; the
+        // position counts once if any group is short. Comparing the whole column with the
+        // cap, as this did until 2026-11-26, missed a group left short beside a full one.
+        // The pruning runs at every position, so the heap cannot grow across a run of
+        // capped positions.
+        //
+        // `contributors` already went through the cap, so a group's kept count here is
+        // its depth or the cap, whichever is smaller — below the cap exactly when its depth
+        // is.
         //
         // The whole block is behind an `is_empty` on a heap that never received a push
         // unless the ceiling bound, so on a run where it never binds this is one branch
         // per position and nothing else.
         if !self.ceiling_losses_by_end.is_empty() {
-            while let Some(&Reverse(end)) = self.ceiling_losses_by_end.peek() {
+            while let Some(&Reverse((end, _))) = self.ceiling_losses_by_end.peek() {
                 if end < walker_pos {
                     self.ceiling_losses_by_end.pop();
                 } else {
                     break;
                 }
             }
-            let lost_here = self.ceiling_losses_by_end.len();
-            if lost_here > 0 && depth < cap {
-                self.summary.positions_short_of_cap += 1;
-                self.summary.short_of_cap_deficit += (cap - depth).min(lost_here) as u64;
+            if !self.ceiling_losses_by_end.is_empty() {
+                let groups = &mut self.short_of_cap_groups_buf;
+                groups.clear();
+                groups.extend(
+                    self.ceiling_losses_by_end
+                        .iter()
+                        .map(|&Reverse((_, group))| (group, true)),
+                );
+                groups.extend(contributors.iter().map(|contrib| {
+                    (
+                        self.active_reads.at(contrib.active_index).read.read_group,
+                        false,
+                    )
+                }));
+                // `false` sorts first, so each group's kept reads come before its lost ones.
+                groups.sort_unstable();
+                let mut deficit = 0;
+                let mut group_start = 0;
+                while group_start < groups.len() {
+                    let group = groups[group_start].0;
+                    let group_len = groups[group_start..].partition_point(|g| g.0 == group);
+                    let group_entries = &groups[group_start..group_start + group_len];
+                    let kept = group_entries.partition_point(|g| !g.1);
+                    let lost = group_len - kept;
+                    if lost > 0 && kept < cap {
+                        deficit += (cap - kept).min(lost) as u64;
+                    }
+                    group_start += group_len;
+                }
+                if deficit > 0 {
+                    self.summary.positions_short_of_cap += 1;
+                    self.summary.short_of_cap_deficit += deficit;
+                }
             }
         }
 
@@ -2052,10 +2107,10 @@ fn pair_has_indel(a: &ReadContribution, b: &ReadContribution) -> bool {
 ///
 /// # The key comes from the active set, not from the contributor
 ///
-/// A `ReadContribution` does not carry its read's query name, and putting the key on it
-/// would cost eight bytes on every contributor at every position for a decision taken at
-/// 909 positions in 251,792. So the key is looked up here, through the same secondary
-/// index the fold uses, and only on the positions that cap.
+/// Putting the key on a `ReadContribution` would cost eight bytes on every contributor at
+/// every position for a decision taken at 909 positions in 251,792. So the key, which each
+/// held read carries from admission, is looked up here through the same secondary index
+/// the fold uses, and only on the positions that cap.
 ///
 /// A contributor whose read is somehow not in the active set — a state no path reaches,
 /// since the contributor list is built from that very set two dozen lines earlier — is
@@ -2073,15 +2128,11 @@ fn sample_to_cap(
     keys.extend(contributors.iter().enumerate().map(|(index, contrib)| {
         // A read missing from the active set — see below — is put in group `u32::MAX` with
         // key `u64::MAX`, so it is dropped before any read of a real group would be.
-        let (group, key) =
-            active_reads
-                .get_by_read_id(contrib.read_id)
-                .map_or((u32::MAX, u64::MAX), |active| {
-                    (
-                        active.read.read_group.get(),
-                        read_sampling::sampling_key(&active.read),
-                    )
-                });
+        let (group, key) = active_reads
+            .get_by_read_id(contrib.read_id)
+            .map_or((u32::MAX, u64::MAX), |active| {
+                (active.read.read_group.get(), active.sampling_key)
+            });
         (group, key, index as u32)
     }));
     // `(group, key, index)`: the index breaks a key tie deterministically, and it is the
@@ -2396,6 +2447,72 @@ mod tests {
             summary.short_of_cap_deficit >= summary.positions_short_of_cap,
             "each short position is at least one read short: {summary:?}"
         );
+    }
+
+    /// **A position is short of the cap when one read group is**, because the cap is per
+    /// read group.
+    ///
+    /// Two read groups of six reads each over three bases, a hold ceiling of six and a cap
+    /// of four reads a read group. The ceiling keeps six of the twelve, so at least one
+    /// group keeps three or fewer while three or more of its reads cover the position:
+    /// every position is short in that group. The whole column holds six, above the cap,
+    /// which is what a whole-column comparison sees — and it used to count no position.
+    #[test]
+    fn a_position_is_short_of_the_cap_when_one_read_group_is() {
+        let reference = MockFasta::new("ACG");
+        let reads: Vec<_> = (0..12)
+            .map(|index| {
+                let mut read = snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]);
+                read.read_group = ReadGroupId(index % 2);
+                read
+            })
+            .collect();
+        let config = WalkerConfig {
+            max_active_reads: 6,
+            max_reads_per_position: 4,
+            ..WalkerConfig::default()
+        };
+        let mut walker = run(reads, &reference, &config);
+        let loci: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+
+        // The deficit the counter must report, worked out from what was folded: in each
+        // group, the reads short of the cap, but no more than the reads the ceiling took.
+        let mut expected_deficit = 0;
+        for locus in &loci {
+            for group in [ReadGroupId(0), ReadGroupId(1)] {
+                let kept: u32 = locus
+                    .observations
+                    .iter()
+                    .filter(|observation| observation.read_group == group)
+                    .map(|observation| observation.num_obs)
+                    .sum();
+                expected_deficit += u64::from(4u32.saturating_sub(kept).min(6 - kept));
+            }
+        }
+        assert_eq!(
+            summary.positions_short_of_cap, 3,
+            "every position has a read group below the cap: {summary:?}"
+        );
+        assert_eq!(
+            summary.short_of_cap_deficit, expected_deficit,
+            "{summary:?}"
+        );
+    }
+
+    /// **The deepest column counts the columns the ordinary-column lane answers**, which
+    /// are most columns. Three reads matching the reference over three bases: every column
+    /// takes that lane, and the deepest holds three reads.
+    #[test]
+    fn column_depth_high_water_sees_ordinary_columns() {
+        let reference = MockFasta::new("ACG");
+        let reads: Vec<_> = (0..3)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let mut walker = run(reads, &reference, &WalkerConfig::default());
+        let _: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+
+        assert_eq!(walker.summary().column_depth_high_water, 3);
     }
 
     /// **The kept set does not depend on the order the active set holds reads in.**

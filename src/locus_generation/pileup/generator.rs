@@ -276,7 +276,8 @@ pub enum PileupGeneratorConfigError {
 /// to instead. A caller that wants to know what a walk saw reads this struct — the
 /// dump tool prints every field of it — and a caller that wants a *message* is
 /// asking for a policy a library cannot set for it. The one warning in this module
-/// is `chain_id_allocator`'s high-water line, inherited verbatim from production.
+/// is `chain_id_allocator`'s high-water line: once the walk holds three-quarters of
+/// `max_active_reads`, it says that held reads will be given up past the ceiling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PileupGeneratorCounts {
     /// Reads the walk admitted, across every segment.
@@ -313,8 +314,8 @@ pub struct PileupGeneratorCounts {
     /// removed it.
     pub reads_evicted_at_ceiling: u64,
     /// **The number that says whether the walk is throwing coverage away.** Positions the
-    /// walk folded fewer reads than the per-position cap allows, while reads covering
-    /// that position had been given up by the hold ceiling.
+    /// walk folded, in some read group, fewer reads than the per-position cap allows, while
+    /// reads of that group covering the position had been given up by the hold ceiling.
     ///
     /// A zero is the claim "no position in this run is short of the cap while reads
     /// covering it exist". It can only ever hold *up to the ceiling*: raise the coverage

@@ -38,14 +38,14 @@ pub enum WalkerError {
         pos: u32,
     },
 
-    /// **Unreachable from ng's walk, and kept because the type is production's.**
-    /// `WalkerState::new` hands the chain-id allocator a cap of `u32::MAX`; the real
-    /// ceiling, `max_active_reads`, is enforced in `admit_read` by refusing the read.
-    /// Production's walker, which shares this variant's text through its own copy of
-    /// `errors.rs`, still raises it.
+    /// **Unreachable from the walk.** `admit_read` enforces `max_active_reads` first, by
+    /// giving up a held read or refusing the arriving one, so the allocator's count never
+    /// reaches its own cap — whether that cap is `u32::MAX` (a bare `WalkerState::new`) or
+    /// `max_active_reads` (the allocator the generator lends the walk). Kept as the
+    /// allocator's backstop. The text names no setting, because no command offers one.
     #[error(
         "active-read cap exceeded (cap={cap}) at chrom_id={chrom_id} pos={pos}; \
-         consider raising --max-active-reads or pre-filtering this region"
+         the limit is fixed, so leave this region out of --regions"
     )]
     ActiveReadsExhausted { cap: u32, chrom_id: u32, pos: u32 },
 
@@ -61,8 +61,8 @@ pub enum WalkerError {
          chrom_id={chrom_id} pos={pos}: more than {cap} reads are waiting for a mate \
          at once. Two inputs do this. The common one is depth — every read whose \
          partner lies further along waits here, so a region deep enough fills the map \
-         with correctly-paired reads; lower --max-active-reads so the walk holds fewer \
-         reads open. The other is broken pairing (every paired read flagged \
+         with correctly-paired reads; the limit is fixed, so leave this region out of \
+         --regions. The other is broken pairing (every paired read flagged \
          FirstOfPair, no SecondOfPair ever arriving), which shows up as a \
          mate_lookup_evictions count near the read count rather than near zero."
     )]

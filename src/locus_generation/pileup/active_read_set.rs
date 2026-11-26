@@ -41,6 +41,16 @@ pub struct ActiveRead {
     /// admitted. Filled by the active-set admission code on the
     /// second-mate path.
     pub mate_read_id: Option<u32>,
+    /// The read's [`sampling_key`](super::read_sampling::sampling_key), a hash of its name
+    /// and mate role: smaller keys are kept first wherever the walk has to choose reads.
+    ///
+    /// **Stored rather than recomputed, because the two places that need it need it for
+    /// every read they look at.** The per-position cap ranks every read in a column deeper
+    /// than the cap, and the hold ceiling ranks every read held; recomputing hashed each
+    /// read's name again at every such column, and every held read's name on every read
+    /// arriving at a full set — 32,768 hashes a read. Computing it once at admission costs
+    /// one hash and eight bytes a held read.
+    pub sampling_key: u64,
     /// **ng's, added by D2** — whether this read has ever been a
     /// contributor at any position, which is what makes
     /// `reads_silent_over_footprint` countable.
@@ -376,6 +386,7 @@ impl ActiveReads {
         );
 
         let cursor = CigarCursor::new(&read.cigar, read.alignment_start);
+        let sampling_key = super::read_sampling::sampling_key(&read);
 
         let active = ActiveRead {
             read_id,
@@ -383,6 +394,7 @@ impl ActiveReads {
             cursor,
             chain_id,
             mate_read_id: partner_read_id,
+            sampling_key,
             ever_contributed: Cell::new(false),
         };
 
@@ -516,22 +528,17 @@ impl ActiveReads {
     /// `read_id` is carried out with it as the eviction handle, and breaks ties in the
     /// key so two reads that hash alike are still ordered by something deterministic.
     ///
-    /// **It scans, and it hashes as it goes, on purpose.** Keeping a key on every
-    /// `ActiveRead` — or a heap ordered by key — would make every read in the run pay
-    /// for a decision that concerns almost none of them: the ceiling binds at 17 reads
-    /// in 100,000 even at ~130× coverage, and at the ceiling this module now ships it
-    /// binds on no real fixture at all. So the cost is put where the event is. The scan
-    /// is O(held) and runs only when the set is full, which is the same condition that
-    /// used to make the walk refuse the read outright.
+    /// **It scans the stored keys, and keeps no heap ordered by key.** A heap would cost
+    /// every admission and expiry for a decision that concerns almost no read: the
+    /// ceiling binds at 17 reads in 100,000 even at ~130× coverage, and at the ceiling
+    /// this module now ships it binds on no real fixture at all. The scan is O(held), with
+    /// no hashing (each read's key is computed once, at admission), and runs only when the
+    /// set is full, which is the same condition that used to make the walk refuse the
+    /// read outright.
     pub fn worst_sampling_key(&self) -> Option<(u64, u32)> {
         self.reads
             .iter()
-            .map(|active| {
-                (
-                    super::read_sampling::sampling_key(&active.read),
-                    active.read_id,
-                )
-            })
+            .map(|active| (active.sampling_key, active.read_id))
             .max()
     }
 
