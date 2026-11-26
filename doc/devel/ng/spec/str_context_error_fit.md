@@ -243,7 +243,7 @@ provenance says which entries are guesses.
   defaults;
 - the per-locus gathering that already looks up each `(read group, candidate)` substitution rate
   hands the scoring context its read group's table;
-- `run_context.rs` takes the table as an argument where it held constants, and its scoring applies
+- `run_context.rs` (now `src/misread_context.rs`) takes the table as an argument where it held constants, and its scoring applies
   the rule of §2.3;
 - a candidate is scored once per read direction where a run of 8 bases or more, or 7 — one slipped
   base short of charged — sits in the candidate or beside it in its flanks, and the read group's

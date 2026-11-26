@@ -56,7 +56,7 @@ use super::genotype_prior::SpectrumSeed;
 use super::genotype_prior::seed_generic::seed_from_population_moments;
 use super::likelihood::ssr::RepeatTractOutlierWeight;
 use super::{ContaminationView, FrozenParameters, ReadGroupCalibration};
-use crate::calling::likelihood::run_context::{ENTRY_COUNT, MisreadTable};
+use crate::misread_context::{ENTRY_COUNT, MisreadTable};
 use crate::parameter_estimation::Estimate;
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::joint::contamination::{
@@ -424,7 +424,7 @@ impl RunParameters {
     ///
     /// # Panics
     ///
-    /// When a read group's list is not one entry per [`RunEntry`](crate::calling::likelihood::run_context::RunEntry).
+    /// When a read group's list is not one entry per [`RunEntry`](crate::misread_context::RunEntry).
     #[must_use]
     pub fn with_misread_after_runs(
         mut self,
@@ -671,8 +671,8 @@ mod tests {
     /// read group the run holds none for (`str_context_error_fit.md` §6).
     #[test]
     fn each_read_group_scores_under_its_own_misread_table() {
-        use crate::calling::likelihood::run_context::MisreadExcess;
         use crate::calling::parameters_file::DeclaredInbreeding;
+        use crate::misread_context::MisreadExcess;
         use crate::read::input::read_groups::ReadGroups;
         let read_groups = ReadGroups::of_lanes(&[("L1", "S1", "lib1"), ("L2", "S1", "lib2")]);
         let zero = FittedMisreadEntry {

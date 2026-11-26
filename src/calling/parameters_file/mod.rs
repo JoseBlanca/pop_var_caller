@@ -2282,7 +2282,7 @@ mod tests {
             // shapes of a row are in the file. The single-length entries carry their length twice
             // (`shortest_run` and `longest_run`), the one equal pair of fields here.
             misread_after_runs: Some(MisreadAfterRuns {
-                entries: crate::calling::likelihood::run_context::RunEntry::all()
+                entries: crate::misread_context::RunEntry::all()
                     .map(|entry| {
                         let (shortest, longest) = entry.lengths();
                         let index = entry.index() as f64;
@@ -2292,10 +2292,10 @@ mod tests {
                             shortest_run: shortest as u64,
                             longest_run: longest.map(|top| top as u64),
                             base: match entry.distance() {
-                                crate::calling::likelihood::run_context::DistanceAfterRun::NextBase => {
+                                crate::misread_context::DistanceAfterRun::NextBase => {
                                     MisreadBase::NextBase
                                 }
-                                crate::calling::likelihood::run_context::DistanceAfterRun::FurtherOn => {
+                                crate::misread_context::DistanceAfterRun::FurtherOn => {
                                     MisreadBase::FurtherOn
                                 }
                             },
@@ -2303,18 +2303,26 @@ mod tests {
                             // otherwise is refused.
                             as_the_run: WarrantedValue {
                                 value: match entry.distance() {
-                                    crate::calling::likelihood::run_context::DistanceAfterRun::NextBase => {
+                                    crate::misread_context::DistanceAfterRun::NextBase => {
                                         0.001 * (index + 1.5)
                                     }
-                                    crate::calling::likelihood::run_context::DistanceAfterRun::FurtherOn => 0.0,
+                                    crate::misread_context::DistanceAfterRun::FurtherOn => 0.0,
                                 },
-                                warrant: if first { Warrant::FittedHere } else { Warrant::Defaulted },
+                                warrant: if first {
+                                    Warrant::FittedHere
+                                } else {
+                                    Warrant::Defaulted
+                                },
                                 observations: first.then_some(EvidenceCount::Reads(4_321)),
                                 standard_error: first.then_some(0.000_75),
                             },
                             other_wrong: WarrantedValue {
                                 value: 0.0001 * (index + 2.25),
-                                warrant: if first { Warrant::FittedHere } else { Warrant::Defaulted },
+                                warrant: if first {
+                                    Warrant::FittedHere
+                                } else {
+                                    Warrant::Defaulted
+                                },
                                 observations: first.then_some(EvidenceCount::Reads(4_321)),
                                 standard_error: first.then_some(0.000_125),
                             },

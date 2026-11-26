@@ -94,6 +94,7 @@ use crate::calling::genotype_prior::SpectrumSeed;
 use crate::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::calling::quality::{ArtifactTestCounts, CountPriorMemo, SiteQualityBuffers};
 use crate::locus_generation::{LocusKind, SsrBundleDetail, SsrDetail};
+use crate::misread_context::MisreadTable;
 use crate::parameter_estimation::Estimate;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
@@ -106,7 +107,6 @@ use crate::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
     GenotypeRows, InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
 };
-use likelihood::run_context::MisreadTable;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
@@ -1131,7 +1131,7 @@ impl<'a> FrozenParameters<'a> {
     pub fn misread_table(&self, read_group: ReadGroupId) -> &'a MisreadTable {
         self.misread_tables
             .get(&read_group)
-            .unwrap_or(&*likelihood::run_context::DEFAULT_MISREAD_TABLE)
+            .unwrap_or(&*crate::misread_context::DEFAULT_MISREAD_TABLE)
     }
 
     /// **The share of a repeat tract's reads charged to none of its candidate alleles**, with

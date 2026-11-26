@@ -576,7 +576,7 @@ impl ParametersFile {
     /// it names** (`the_misread_table_holds_one_row_an_entry`), so every row below names an entry
     /// and every read group's slots are all filled.
     fn misread_after_runs(&self) -> BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>> {
-        use crate::calling::likelihood::run_context::{ENTRY_COUNT, MisreadExcess};
+        use crate::misread_context::{ENTRY_COUNT, MisreadExcess};
         let Some(misread) = &self.misread_after_runs else {
             return BTreeMap::new();
         };

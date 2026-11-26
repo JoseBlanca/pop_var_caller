@@ -66,7 +66,6 @@
 //! frozen.
 
 use super::ContaminationView;
-use super::run_context::{ReadDirection, a_run_may_reach_a_charged_length};
 use super::ssr_emission::{
     BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over,
 };
@@ -74,6 +73,7 @@ use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::calling::GenotypeTableView;
 use crate::float;
 use crate::locus_generation::{HeldFlank, ReadWitness, SequenceObservation};
+use crate::misread_context::{ReadDirection, a_run_may_reach_a_charged_length};
 use crate::parameter_estimation::Provenance;
 use crate::types::{LogProb, ReadGroupId};
 
@@ -1119,7 +1119,7 @@ mod tests {
         repeat_counts: Vec<u32>,
         /// The misread table every read group scores under: the built-in one unless a test sets
         /// another.
-        misread_table: crate::calling::likelihood::run_context::MisreadTable,
+        misread_table: crate::misread_context::MisreadTable,
     }
 
     impl Fixture {
@@ -1180,7 +1180,7 @@ mod tests {
                     .map(|count| a_tract(motif, *count as usize))
                     .collect(),
                 repeat_counts: repeat_counts.to_vec(),
-                misread_table: crate::calling::likelihood::run_context::MisreadTable::defaults(),
+                misread_table: crate::misread_context::MisreadTable::defaults(),
             }
         }
 
@@ -1336,7 +1336,7 @@ mod tests {
         misreads.num_fwd = 3;
         let observations = [reference_reads, misreads];
         let defaulted = score_row(&fixture, &observations, 2);
-        fixture.misread_table = crate::calling::likelihood::run_context::MisreadTable::zero();
+        fixture.misread_table = crate::misread_context::MisreadTable::zero();
         let zero = score_row(&fixture, &observations, 2);
         assert!(
             defaulted[0].0 > defaulted[1].0,
@@ -1814,7 +1814,7 @@ mod tests {
     /// whole flank before the allele's spelling would find a run of eight and charge the `A`.
     #[test]
     fn a_deleted_flank_base_does_not_lengthen_the_run_before_the_tract() {
-        use crate::calling::likelihood::run_context::MisreadTable;
+        use crate::misread_context::MisreadTable;
         const LEFT_FLANK: &[u8] = b"CGCGAAAAAAAA";
         const RIGHT_FLANK: &[u8] = b"CCGTCAG";
         let deletion = crate::locus_generation::FlankDeletion { left: 2, right: 0 };

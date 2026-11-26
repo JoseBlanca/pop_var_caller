@@ -11,7 +11,9 @@
 //!
 //! **Which entry of the table a base belongs to** is one rule ([`contexts_along`]), used by the
 //! parameter pre-pass on the reference to count and by calling on the candidate to charge, so the
-//! two agree on what an entry means (`str_context_error_fit.md` §2.3).
+//! two agree on what an entry means (`str_context_error_fit.md` §2.3). That is why this module sits
+//! at the crate root rather than inside either: [`crate::parameter_estimation`] and
+//! [`crate::calling`] both import it, and inside `calling` it made the pre-pass import the caller.
 //!
 //! **Calling reads the context off the candidate**, with the locus's flanks around it: the question
 //! is how likely this read is to have misread the candidate, and the candidate is what the read was

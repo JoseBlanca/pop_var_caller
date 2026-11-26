@@ -54,7 +54,7 @@
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
-use crate::calling::likelihood::run_context::ENTRY_COUNT;
+use crate::misread_context::ENTRY_COUNT;
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::depth_bins::CENSUS_DEPTH_BIN_COUNT;
 use crate::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
@@ -2150,7 +2150,7 @@ mod tests {
     /// group** (`str_context_error_fit.md` §3.6), including a negative summed log error.
     #[test]
     fn the_misread_counts_survive_the_round_trip() {
-        use crate::calling::likelihood::run_context::RunEntry;
+        use crate::misread_context::RunEntry;
         let mut entries = [MisreadCounts::default(); ENTRY_COUNT];
         let entry = RunEntry::of(20, 1).expect("an entry");
         entries[entry.index()] = MisreadCounts {

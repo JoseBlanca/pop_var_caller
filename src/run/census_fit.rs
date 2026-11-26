@@ -29,7 +29,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::calling::likelihood::run_context::MisreadTable;
 use crate::calling::parameters_file::{
     CensusIdentity, DepthRuleSettings, FittedDensity, FittedDuplicatedPositions,
     InformationalNumber, PairedNumber, ParametersFile, ReadsBehindEachCalibration,
@@ -38,6 +37,7 @@ use crate::calling::parameters_file::{
     StutterTailRuleSettings, TractsLeftOutRow,
 };
 use crate::calling::run_parameters::RunParameters;
+use crate::misread_context::MisreadTable;
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RecordingTerms,

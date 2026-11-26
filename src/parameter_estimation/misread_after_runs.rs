@@ -9,16 +9,16 @@
 //! ([`fit_misread_table`]) takes the difference of the two rates, and needs no truth set.
 //!
 //! The table itself, and which entry a base belongs to, are the scoring side's
-//! ([`crate::calling::likelihood::run_context`]): one rule decides an entry for counting and for
+//! ([`crate::misread_context`]): one rule decides an entry for counting and for
 //! charging.
 
 use std::collections::BTreeMap;
 
-use crate::calling::likelihood::run_context::{
+use crate::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use crate::misread_context::{
     ContextAfterRun, DistanceAfterRun, ENTRY_COUNT, MisreadExcess, MisreadTable, RunEntry,
     contexts_along,
 };
-use crate::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
 use crate::parameter_estimation::Provenance;
 use crate::ref_seq::{RefSeq, RefSeqError};
 use crate::types::{ContigId, ReadGroupId};

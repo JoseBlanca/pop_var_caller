@@ -22,6 +22,8 @@
 //!   hidden-duplication filter's statistics built on them.
 //! - [`parameter_estimation`] — the error rates, heterozygosity and inbreeding the caller runs on,
 //!   measured from the cohort's own loci before anything is called.
+//! - [`misread_context`] — which entry of the misread-after-a-run table a base belongs to: one rule
+//!   the parameter pre-pass counts by and calling charges by.
 //! - [`cohort_observation`] — what the cohort merge hands the calling steps: one assembled
 //!   cohort locus, each sample's evidence over it, and the rule that decides it is built.
 //! - [`calling`], [`genetics`] — candidate alleles, read likelihoods, genotype priors, the loop
@@ -94,6 +96,7 @@ pub mod genetics;
 pub mod iter_ext;
 pub mod locus_generation;
 pub mod memory_limit;
+pub mod misread_context;
 pub mod neighbour_evidence;
 pub mod open_files;
 pub mod paralog;

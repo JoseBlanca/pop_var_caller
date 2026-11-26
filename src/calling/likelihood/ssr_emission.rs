@@ -36,11 +36,11 @@ use std::num::{NonZeroU8, NonZeroU32};
 use crate::alignment::StutterModel;
 use crate::alignment::emission::{BaseScores, Emission, FlatEmission};
 use crate::alignment::stutter::{MAX_PART_REPEAT_SLIP, MAX_WHOLE_REPEAT_SLIP};
-use crate::calling::likelihood::run_context::{
-    DEFAULT_MISREAD_TABLE, MisreadTable, ReadDirection, letters_after_runs,
-};
 use crate::float;
 use crate::locus_generation::HeldFlank;
+use crate::misread_context::{
+    DEFAULT_MISREAD_TABLE, MisreadTable, ReadDirection, letters_after_runs,
+};
 use crate::parameter_estimation::Provenance;
 use crate::region_typing::reference_runs::ReferenceRun;
 use crate::region_typing::run_parse::RunParse;
@@ -201,7 +201,7 @@ pub struct SsrScoringContext<'a> {
     /// anything.
     pub weakest_provenance: Provenance,
     /// **The direction the reads being scored were sequenced in**, where the misread rate after a
-    /// long run applies ([`run_context`](super::run_context), `str_context_error.md`); `None`
+    /// long run applies ([`misread_context`](crate::misread_context), `str_context_error.md`); `None`
     /// scores every base at the fitted rate, as before. Set by the row for complete reads only.
     pub read_direction: Option<ReadDirection>,
     /// The locus's reference flanks, which a run reaching the candidate's first or last base may
@@ -1385,7 +1385,7 @@ struct MatchedPrefixLetters {
     /// `letters[i]`: `exp(sums[i])`.
     letters: Vec<f64>,
     /// **Where a complete read is compared under the misread rate after a long run**: its
-    /// direction and the locus's flanks ([`run_context`](super::run_context)). `None` after every
+    /// direction and the locus's flanks ([`misread_context`](crate::misread_context)). `None` after every
     /// [`Self::prepare`], so only a caller that sets it gets it.
     run_context: Option<(ReadDirection, Vec<u8>, Vec<u8>, MisreadTable)>,
 }
