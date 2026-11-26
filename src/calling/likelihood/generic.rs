@@ -328,15 +328,14 @@ impl<'a> WrongReadChargeTable<'a> {
 
     /// One allele's column of cells — its entry for every genotype, in genotype order.
     ///
-    /// **The shape the row's inner loop wants**, because for a fixed observation the allele is
-    /// fixed and what varies is the genotype. Walking a column checks the allele once and then
-    /// strides; calling `at` per genotype would put a bounds check, a
-    /// `checked_mul` and a formatting closure inside a loop whose whole stated shape is a
-    /// multiply and an add.
+    /// **Test-only**: the row reads a genotype's cells through [`Self::charges_for`]. Walking a
+    /// column checks the allele once and then strides; calling `at` per genotype would put a
+    /// bounds check, a `checked_mul` and a formatting closure in each step.
     ///
     /// # Panics
     ///
     /// **In release as well as debug**, on an allele this locus is not called over.
+    #[cfg(test)]
     pub fn charges_of(&self, allele: AlleleId) -> impl Iterator<Item = WrongReadCharge> + use<'a> {
         let allele = usize::from(allele.get());
         assert!(
@@ -658,6 +657,14 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 /// One sample's whole `Lg` row at an ordinary site — one log-probability per candidate
 /// genotype: spec §3.6's contamination mixture, which is spec §3.3 wherever nothing is
 /// contaminated.
+///
+/// **Test-only, and it scores without the locus's flanks.** The calling loop builds the row in
+/// two calls, [`fill_generic_emissions`] with the reference beside the locus and then
+/// [`assemble_genotype_log_likelihood_row`]; this wrapper makes the same two calls with
+/// [`ReferenceBesideLocus::NONE`]. A partial read longer than an allele can be compatible
+/// with a carrier's sequence when the flank is known and incompatible here, so a test that
+/// scores a partial read through this wrapper checks a stricter comparison than the caller
+/// runs.
 ///
 /// ```text
 /// log Lg(g)  =   Σ  n_o · log[ (1 − c_{r(o)}) · own(o | g)  +  c_{r(o)} · q(o) ]
