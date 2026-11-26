@@ -459,21 +459,34 @@ pub fn open_census_within(
     // many that is is not known until they are decoded, so the front is read in one go and the
     // rest is never touched. **Capped at the census's own length**, which matters only for a
     // census smaller than the buffer — above it the two are the same read.
+    //
+    // **A sample with several hundred read groups has a front longer than that read** (about
+    // 5.4 kB a read group at 141 strata, so past about 190 groups). When decoding runs off the
+    // end of what was read and the census has more, the read is doubled and the decode starts
+    // again. Only such a census pays for it; every other one is still one read.
     let mut file = std::fs::File::open(path)?;
     if census.offset() > 0 {
         file.seek(std::io::SeekFrom::Start(census.offset()))?;
     }
-    let head_bytes = HEAD_READ_BYTES.min(usize::try_from(census.len()).unwrap_or(HEAD_READ_BYTES));
-    let mut head = vec![0_u8; head_bytes];
-    let filled = read_as_much_as_there_is(&mut file, &mut head)?;
-    head.truncate(filled);
+    let census_bytes = usize::try_from(census.len()).unwrap_or(usize::MAX);
+    let mut head = Vec::new();
+    let mut want = HEAD_READ_BYTES.min(census_bytes);
+    let ((sample, declared, minted, misread, terms), directory) = loop {
+        let already = head.len();
+        head.resize(want, 0);
+        let filled = read_as_much_as_there_is(&mut file, &mut head[already..])?;
+        let reached_the_end = filled < want - already;
+        head.truncate(already + filled);
 
-    let mut cursor = Cursor::new(&head);
-    if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
-        return Err(CensusError::Malformed);
-    }
-    let (sample, declared, minted, misread, terms) = decode_header(&mut cursor)?;
-    let directory = decode_directory(&mut cursor)?;
+        let mut cursor = Cursor::new(&head);
+        match decode_front(&mut cursor) {
+            Ok(front) => break front,
+            Err(_) if cursor.ran_out && !reached_the_end && want < census_bytes => {
+                want = want.saturating_mul(2).min(census_bytes);
+            }
+            Err(error) => return Err(error),
+        }
+    };
 
     // **Every section ends inside the census, checked once here rather than at each read.** A
     // section read is a seek and a `resize` to a length the file supplied, so a directory naming
@@ -501,13 +514,26 @@ pub fn open_census_within(
     .with_misread_after_runs(misread))
 }
 
+/// The magic, the version word, the header and the directory: everything at a census's front.
+fn decode_front(
+    cursor: &mut Cursor<'_>,
+) -> Result<(Header, Vec<(SectionKey, ByteExtent)>), CensusError> {
+    if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
+        return Err(CensusError::Malformed);
+    }
+    let header = decode_header(cursor)?;
+    let directory = decode_directory(cursor)?;
+    Ok((header, directory))
+}
+
 /// How much of a census file's front is read to find its header and its directory.
 ///
-/// **One read rather than a walk of growing reads.** A census of tomato's 141 strata over a
-/// handful of read groups has a directory of a few thousand bytes and a header of about 1.1 kB a
-/// read group, most of it the counts of misreads after runs (19 entries of 56 bytes);
-/// a megabyte covers a directory of about 40,000 sections, and reading it costs one seekless read
-/// of a file that is megabytes long anyway. A file shorter than this is read whole.
+/// **The first read, and for nearly every census the only one.** Each read group costs about
+/// 1.1 kB of header, most of it the counts of misreads after runs (19 entries of 56 bytes), plus
+/// 21 bytes of directory for its ordinary positions and 30 for each stratum — about 5.4 kB a read
+/// group at tomato's 141 strata. A megabyte therefore holds the front of a census of up to about
+/// 190 read groups in one seekless read. A census with more is read again with a buffer twice as
+/// large until its front fits ([`open_census_within`]). A file shorter than this is read whole.
 const HEAD_READ_BYTES: usize = 1 << 20;
 
 /// Fill as much of `into` as the stream has, and say how much that was — a short file is not an
@@ -887,16 +913,26 @@ fn decode_ssr(cursor: &mut Cursor<'_>) -> Result<SsrEvidence, CensusError> {
 struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// Set when a read asked for bytes past the end of `bytes`. The opener reads only the front
+    /// of a census, so for it this means "read further and decode again", not "malformed".
+    ran_out: bool,
 }
 
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0 }
+        Self {
+            bytes,
+            at: 0,
+            ran_out: false,
+        }
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], CensusError> {
         let end = self.at.checked_add(len).ok_or(CensusError::Malformed)?;
-        let slice = self.bytes.get(self.at..end).ok_or(CensusError::Malformed)?;
+        let Some(slice) = self.bytes.get(self.at..end) else {
+            self.ran_out = true;
+            return Err(CensusError::Malformed);
+        };
         self.at = end;
         Ok(slice)
     }
@@ -1663,6 +1699,87 @@ mod tests {
 
         open_census_within(&path, ByteExtent::new(0, encoded.len() as u64))
             .expect("at its real length it opens");
+    }
+
+    /// **A sample with several hundred read groups opens.** Its header and directory together
+    /// are longer than the first read the opener makes, so it has to read further rather than
+    /// call the census malformed.
+    ///
+    /// The shape is a real one: 400 lane-level read groups, each with its name, its misread
+    /// table and tomato's 141 strata. The header is about 1.1 kB a read group and the directory
+    /// about 4.3 kB, so the two come to about 2 MB — twice the first read.
+    #[test]
+    fn a_census_with_hundreds_of_read_groups_opens() {
+        const READ_GROUPS: u32 = 400;
+        const STRATA: u64 = 141;
+        let groups: Vec<ReadGroupId> = (0..READ_GROUPS).map(ReadGroupId).collect();
+        let strata: Vec<Stratum> = (0..STRATA)
+            .map(|index| Stratum {
+                period: u8::try_from(1 + index % 6).expect("a period"),
+                reference_repeats: 2 + index / 6,
+            })
+            .collect();
+        let mut sections = BTreeMap::new();
+        for &group in &groups {
+            sections.insert(
+                SectionKey::Generic(group),
+                Section::Generic(GenericEvidence::never_walked(1)),
+            );
+            for &stratum in &strata {
+                sections.insert(
+                    SectionKey::Ssr(group, stratum),
+                    Section::Ssr(SsrEvidence::never_walked(1)),
+                );
+            }
+        }
+        let misread = groups
+            .iter()
+            .map(|&group| {
+                (
+                    group,
+                    MisreadCountsByEntry::from_entries([MisreadCounts::default(); ENTRY_COUNT]),
+                )
+            })
+            .collect();
+        let census = SampleCensusEvidence::resident(
+            "many-lanes".to_string(),
+            terms(),
+            NamedReadGroup::drawn_for("many-lanes", groups.iter().copied()),
+            BTreeMap::new(),
+            sections,
+        )
+        .with_misread_after_runs(misread);
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("many-lanes.census");
+        let mut encoded = Vec::new();
+        write_census(&census, &mut encoded).expect("a vector accepts every write");
+        std::fs::write(&path, &encoded).expect("the scratch dir is ours");
+        let first_section = decode_directory_of(&encoded)
+            .expect("this build's own bytes")
+            .iter()
+            .map(|(_, extent)| extent.offset())
+            .min()
+            .expect("sections");
+        assert!(
+            first_section > HEAD_READ_BYTES as u64,
+            "the fixture's header and directory ({first_section} bytes) must be longer than the \
+             first read ({HEAD_READ_BYTES} bytes), or this test checks nothing",
+        );
+
+        let mut backed = open_census(&path).expect("a census this build wrote opens");
+        assert_eq!(backed.sample, census.sample);
+        assert_eq!(backed.read_groups(), groups);
+        assert_eq!(backed.strata(), census.strata());
+        let last = *groups.last().expect("groups");
+        let from_file = backed
+            .with_strata(last, &strata, |read| read.len())
+            .expect("this build's own file");
+        assert_eq!(
+            from_file,
+            strata.len(),
+            "the last read group's sections read"
+        );
     }
 
     /// **A census assembled into a cohort keeps where it is in its file.**
