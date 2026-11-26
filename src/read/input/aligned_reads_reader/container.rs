@@ -509,41 +509,75 @@ pub(crate) fn container_at(
     offset: u64,
     reference: &dyn SliceReference,
 ) -> io::Result<Option<Arc<DecodedContainer>>> {
-    let mut cache = shared.lock();
-    let claim = loop {
-        match cache.claim(offset) {
-            Some(claim) => break claim,
-            None => {
-                cache = shared
-                    .settled
-                    .wait(cache)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+    shared.held_or_decoded(offset, || {
+        decode_container_at(reader, header, resolution, offset, reference)
+    })
+}
+
+impl SharedContainers {
+    /// The container at `offset` if it is held, the one another thread is decoding if there is
+    /// one, and otherwise what `decode` makes of it — which is then held for the next asker.
+    fn held_or_decoded(
+        &self,
+        offset: u64,
+        decode: impl FnOnce() -> io::Result<Option<DecodedContainer>>,
+    ) -> io::Result<Option<Arc<DecodedContainer>>> {
+        let mut cache = self.lock();
+        let claim = loop {
+            match cache.claim(offset) {
+                Some(claim) => break claim,
+                None => {
+                    cache = self
+                        .settled
+                        .wait(cache)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            }
+        };
+        drop(cache);
+
+        match claim {
+            Claim::Ready(container) => Ok(Some(container)),
+            Claim::YoursToDecode => {
+                // **The lock is not held across the decode**, which is what the claim is for: a
+                // decode is milliseconds, and holding the lock through one would put the readers
+                // in a queue behind the prefetcher instead of letting them run past it.
+                //
+                // The claim is released when `release` drops, however the decode ends — with a
+                // container, with an error, or by a panic — so no waiter is left promised a
+                // container nobody is going to decode.
+                let mut release = ReleaseClaim {
+                    shared: self,
+                    offset,
+                    decoded: None,
+                };
+                let decoded = decode()?.map(Arc::new);
+                release.decoded.clone_from(&decoded);
+                Ok(decoded)
             }
         }
-    };
-    drop(cache);
+    }
+}
 
-    match claim {
-        Claim::Ready(container) => Ok(Some(container)),
-        Claim::YoursToDecode => {
-            // **The lock is not held across the decode**, which is what the claim is for: a
-            // decode is milliseconds, and holding the lock through one would put the readers in
-            // a queue behind the prefetcher instead of letting them run past it.
-            let decoded = match decode_container_at(reader, header, resolution, offset, reference) {
-                Ok(Some(container)) => Some(Arc::new(container)),
-                Ok(None) => None,
-                Err(error) => {
-                    // Released before the error leaves, so no waiter is left promised a
-                    // container nobody is going to decode.
-                    shared.lock().finished(offset, None);
-                    shared.settled.notify_all();
-                    return Err(error);
-                }
-            };
-            shared.lock().finished(offset, decoded.as_ref());
-            shared.settled.notify_all();
-            Ok(decoded)
-        }
+/// Releases a claim when dropped, handing waiters the container if the decode made one.
+///
+/// **A guard rather than a call after the decode**, because a panic inside the decode — on the
+/// prefetch thread, say — passes no line after it. The claim would then say *someone is
+/// decoding this* for ever, and the reader that reached the container would wait on it for ever:
+/// a hang where the run should have stopped with a message.
+struct ReleaseClaim<'a> {
+    shared: &'a SharedContainers,
+    offset: u64,
+    /// What the decode made, if it finished and made something.
+    decoded: Option<Arc<DecodedContainer>>,
+}
+
+impl Drop for ReleaseClaim<'_> {
+    fn drop(&mut self) {
+        self.shared
+            .lock()
+            .finished(self.offset, self.decoded.as_ref());
+        self.shared.settled.notify_all();
     }
 }
 
@@ -1434,6 +1468,52 @@ mod tests {
             matches!(cache.claim(4_096), Some(Claim::YoursToDecode)),
             "the next caller may decode it, rather than waiting on a claim nobody holds",
         );
+    }
+
+    /// **A decode that panics releases its claim too.** The prefetch thread decodes containers
+    /// beside the walk, and a panic there unwinds out of the decode without passing the line
+    /// that releases an error's claim. The claim then said *someone is decoding this* for ever,
+    /// and the reader that reached the container waited on it for ever: a hang, where the run
+    /// should have stopped with a message. Released, the waiter decodes the container itself.
+    #[test]
+    fn a_decode_that_panics_releases_its_claim_rather_than_stranding_a_waiter() {
+        let shared = Arc::new(SharedContainers::new());
+        let decoding = Arc::new(std::sync::Barrier::new(2));
+
+        let decoder = {
+            let (shared, decoding) = (Arc::clone(&shared), Arc::clone(&decoding));
+            std::thread::spawn(move || {
+                shared.held_or_decoded(4_096, || {
+                    decoding.wait();
+                    // Long enough for the waiter to be blocked on the claim.
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    panic!("a fault inside the decoder");
+                })
+            })
+        };
+
+        decoding.wait();
+        let (answer, answered) = std::sync::mpsc::channel();
+        {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let served = shared.held_or_decoded(4_096, || {
+                    let mut container = empty_container();
+                    container.other_sample_records = 7;
+                    Ok(Some(container))
+                });
+                let _ =
+                    answer.send(served.map(|container| {
+                        container.map(|container| container.other_sample_records())
+                    }));
+            });
+        }
+
+        assert!(decoder.join().is_err(), "the decoder panicked");
+        let served = answered
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the waiter is still waiting on a claim the panicking decoder never released");
+        assert_eq!(served.expect("the waiter's own decode succeeds"), Some(7));
     }
 
     /// **`is_spoken_for` is what stops the prefetcher re-deriving what the cache already has**,

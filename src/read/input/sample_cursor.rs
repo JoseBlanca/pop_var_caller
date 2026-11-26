@@ -59,9 +59,14 @@ impl<R: RawRefSeq> SampleCursor<R> {
 
     /// Point every file cursor at `region`.
     ///
-    /// **All or nothing.** If any file refuses, the whole move fails — a sample answered from
-    /// some of its files is worse than one that answers with an error, because the reads it
-    /// returns are real and the ones it drops are invisible.
+    /// **Nothing is served after a refusal.** If any file refuses, the whole move fails — a
+    /// sample answered from some of its files is worse than one that answers with an error,
+    /// because the reads it returns are real and the ones it drops are invisible.
+    ///
+    /// The move is not undone: with several files, those before the one that refused have
+    /// already moved. So a sample of several files serves nothing more until a later move
+    /// succeeds. A sample of one file is left as it was, because its cursor refuses before
+    /// moving anything. Every caller treats the error as fatal.
     pub fn move_to_region(
         &mut self,
         region: crate::types::GenomeRegion,
@@ -192,7 +197,15 @@ impl<R: RawRefSeq> MergedCursors<R> {
 
     fn move_to_region(&mut self, region: crate::types::GenomeRegion) -> Result<(), CursorError> {
         for cursor in &mut self.cursors {
-            cursor.move_to_region(region)?;
+            if let Err(error) = cursor.move_to_region(region) {
+                // The files before this one may already have moved; what is primed belongs to
+                // the region before. Serving either would answer from part of the sample.
+                self.heads.iter_mut().for_each(|head| *head = None);
+                self.keys.iter_mut().for_each(|key| *key = None);
+                self.pending_error = None;
+                self.done = true;
+                return Err(error);
+            }
         }
         // The heads belong to the region that primed them.
         self.heads.iter_mut().for_each(|head| *head = None);
@@ -471,6 +484,34 @@ mod tests {
         assert!(
             sample.next_read().is_none(),
             "a sample whose move failed answered anyway, from the files that had moved",
+        );
+    }
+
+    /// The same, with reads still waiting from the region before. The test above empties that
+    /// region first, so the sample had nothing left to serve and passed whatever the move did;
+    /// here the heads are still primed when the move fails, and serving them would hand out
+    /// reads of the old region as though they answered the new one.
+    #[test]
+    fn a_failed_move_serves_nothing_even_with_reads_left_from_the_region_before() {
+        let mut sample = SampleCursor::new(vec![
+            cursor_over("/a.bam", vec![read_at("a0", 1), read_at("a1", 31)]),
+            cursor_over("/b.bam", vec![read_at("b0", 1), read_at("b1", 31)]),
+        ]);
+        sample
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+        assert!(sample.next_read().is_some(), "one read taken, three left");
+
+        let foreign = GenomeRegion {
+            contig: ContigId(1),
+            start: Position(1),
+            end: Position(50),
+        };
+        assert!(sample.move_to_region(foreign).is_err());
+
+        assert!(
+            sample.next_read().is_none(),
+            "a sample whose move failed served a read left from the region before",
         );
     }
 

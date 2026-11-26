@@ -65,7 +65,14 @@ pub(crate) fn prepare_passthrough(
     read_group: ReadGroupId,
 ) -> PreparedRead {
     let bq_baq = read.qual.clone();
-    let alignment_start = read.pos as u32;
+    // BAM and CRAM 3 store a position as a 32-bit signed integer, so a decoded one always fits;
+    // checked rather than cast so a decoder that one day widens it cannot wrap it silently.
+    let alignment_start = u32::try_from(read.pos).unwrap_or_else(|_| {
+        panic!(
+            "read position {} does not fit the 32-bit positions the walk uses",
+            read.pos
+        )
+    });
     let alignment_end = alignment_end_of(alignment_start, &read.cigar);
     let qname = qname_to_arc(&read.qname);
     let mate_role = mate_role_of(read.flag);
@@ -402,6 +409,31 @@ mod tests {
             adaptor_boundary: None,
             read_group: PLACEHOLDER_READ_GROUP,
         }
+    }
+
+    /// **A position past the 32-bit range stops the run rather than wrapping.** No decoder in
+    /// use can produce one today — BAM and CRAM 3 store a position as a 32-bit signed integer —
+    /// but the cast that was here would have placed such a read about 4.3 billion bases too
+    /// early on its contig, with nothing failing.
+    #[test]
+    #[should_panic(expected = "does not fit")]
+    fn a_position_past_the_32_bit_range_is_refused_not_wrapped() {
+        let read = MappedRead {
+            qname: b"r".to_vec(),
+            flag: 0,
+            ref_id: 0,
+            pos: u64::from(u32::MAX) + 11,
+            mapq: 60,
+            cigar: vec![CigarOp::Match(1)],
+            seq: b"A".to_vec(),
+            qual: vec![30],
+            mate_ref_id: None,
+            mate_pos: None,
+            adaptor_boundary: None,
+            source_file_index: 0,
+        };
+        let prepared = prepare_passthrough(read, 0, PLACEHOLDER_READ_GROUP);
+        panic!("prepared at {} without complaint", prepared.alignment_start);
     }
 
     #[test]

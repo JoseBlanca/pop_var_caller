@@ -37,7 +37,9 @@ use crate::bam::errors::AlignmentIndexError;
 // ---------------------------------------------------------------------
 
 /// Read-side preference order when both `.csi` and `.bai` exist
-/// next to a BAM input. `.csi` wins because it has no 512 Mbp
+/// next to a BAM input and neither is newer than the other (the
+/// newer one wins otherwise — see [`existing_index_for`]). `.csi` wins
+/// the tie because it has no 512 Mbp
 /// per-contig length cap (some plant references exceed this);
 /// `.bai` is accepted on read as a fallback for compatibility
 /// with existing data sets. See
@@ -113,7 +115,8 @@ impl AlignmentIndex {
 
 /// Load an alignment index from disk. The expected location is the
 /// canonical sibling path (`<input>.crai` for CRAM, `<input>.csi`
-/// preferred or `<input>.bai` fallback for BAM); missing or
+/// preferred or `<input>.bai` fallback for BAM), or the same with the
+/// input's extension replaced (`sample.bai`); missing or
 /// malformed indexes surface as the typed
 /// [`AlignmentIndexError`] variants `MissingAlignmentIndex`,
 /// `LoadFailed`, or `UnsupportedExtension`.
@@ -300,20 +303,40 @@ impl AlignmentFileKind {
 }
 
 /// Resolve the alignment index that already exists for `input`,
-/// if any. For BAM, walks [`BAM_INDEX_READ_PREFERENCE`] in order
-/// and returns the first format whose file is on disk
-/// (`.csi`-preferred, `.bai`-fallback).
+/// if any: the most recently modified of the candidates on disk, and
+/// among candidates written in the same moment the first in order —
+/// for BAM, [`BAM_INDEX_READ_PREFERENCE`] (`.csi` before `.bai`).
+///
+/// Each format is looked for under two names, as htslib looks: the extension appended
+/// (`sample.bam.bai`, which samtools writes) and then the extension replaced (`sample.bai`,
+/// which Picard and GATK write).
 fn existing_index_for(input: &Path, kind: AlignmentFileKind) -> Option<PathBuf> {
-    match kind {
-        AlignmentFileKind::Cram => {
-            let p = crai_path_for(input);
-            p.exists().then_some(p)
+    let extensions: &[&str] = match kind {
+        AlignmentFileKind::Cram => &["crai"],
+        AlignmentFileKind::Bam => BAM_INDEX_READ_PREFERENCE,
+    };
+    // **The newest wins; the order above breaks a tie.** An index older than another beside
+    // the same file was most likely built before the data was rewritten — pvc built a `.csi`,
+    // the BAM was regenerated, `samtools index` wrote a `.bai` — and reading through stale
+    // offsets can drop the reads at a contig's tail without a message.
+    let mut newest: Option<(PathBuf, Option<std::time::SystemTime>)> = None;
+    for candidate in extensions
+        .iter()
+        .flat_map(|ext| [append_extension(input, ext), input.with_extension(ext)])
+    {
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        let modified = metadata.modified().ok();
+        let newer = match &newest {
+            None => true,
+            Some((_, best)) => modified > *best,
+        };
+        if newer {
+            newest = Some((candidate, modified));
         }
-        AlignmentFileKind::Bam => BAM_INDEX_READ_PREFERENCE
-            .iter()
-            .map(|ext| bam_index_path_for(input, ext))
-            .find(|p| p.exists()),
     }
+    newest.map(|(path, _)| path)
 }
 
 /// The index path we would *build* for `input` if asked. For BAM
@@ -352,10 +375,32 @@ fn build_index(input: &Path, kind: AlignmentFileKind) -> std::io::Result<()> {
     match kind {
         AlignmentFileKind::Cram => {
             let index = noodles_cram::fs::index(input)?;
-            noodles_cram::crai::fs::write(crai_path_for(input), &index)
+            write_then_rename(&crai_path_for(input), |partial| {
+                noodles_cram::crai::fs::write(partial, &index)
+            })
         }
         AlignmentFileKind::Bam => build_csi_for_bam(input),
     }
+}
+
+/// Write a file through `write` under a temporary name beside `path`, then rename it to `path`.
+///
+/// **An index cut short must never sit at the name the next run reads.** Written in place, a
+/// build interrupted part-way — a full disk, a killed run — left a truncated index there, which
+/// every later run loaded and failed on until someone deleted it by hand. A rename within one
+/// directory replaces the name in one step, so `path` holds the whole new index or nothing new.
+/// A failed write removes its temporary file; a killed run can leave one, under a name no run
+/// reads.
+fn write_then_rename(
+    path: &Path,
+    write: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let partial = append_extension(path, "partial");
+    let written = write(&partial).and_then(|()| std::fs::rename(&partial, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 /// Build a `.csi` next to `bam_path` by scanning the BAM once and
@@ -381,7 +426,10 @@ fn build_csi_for_bam(bam_path: &Path) -> std::io::Result<()> {
     populate_binning_index(&mut reader, &mut indexer, reference_sequence_count)?;
 
     let index = indexer.build(reference_sequence_count);
-    noodles_csi::fs::write(bam_index_path_for(bam_path, BAM_INDEX_BUILD_FORMAT), &index)
+    write_then_rename(
+        &bam_index_path_for(bam_path, BAM_INDEX_BUILD_FORMAT),
+        |partial| noodles_csi::fs::write(partial, &index),
+    )
 }
 
 /// Walk `reader` once and add a chunk per record to `indexer`.
@@ -607,6 +655,29 @@ mod tests {
         );
     }
 
+    /// **A build that fails while writing leaves no file at the index's name**, so the next run
+    /// finds the index missing (and builds it again) rather than loading half of one. Checked on
+    /// the write itself, because a real build cannot be made to fail half-way on demand.
+    #[test]
+    fn an_index_write_that_fails_part_way_leaves_nothing_at_the_index_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let index = dir.path().join("sample.bam.csi");
+        let files_in_dir = || fs::read_dir(dir.path()).expect("list").count();
+
+        let error = write_then_rename(&index, |partial| {
+            fs::write(partial, b"the first half of an ind")?;
+            Err(std::io::Error::other("no space left on device"))
+        })
+        .expect_err("the write failed");
+        assert_eq!(error.to_string(), "no space left on device");
+        assert!(!index.exists(), "a partial index sits at the index path");
+        assert_eq!(files_in_dir(), 0, "the partial file was left behind");
+
+        write_then_rename(&index, |partial| fs::write(partial, b"a whole index")).expect("written");
+        assert_eq!(fs::read(&index).expect("read"), b"a whole index");
+        assert_eq!(files_in_dir(), 1, "only the index itself remains");
+    }
+
     #[test]
     fn target_index_path_for_bam_picks_csi_not_bai() {
         // Build-side: always emits .csi (the format with no
@@ -638,6 +709,18 @@ mod tests {
         preflight_alignment_indexes(&[bam], false).expect("preflight ok with .bai");
     }
 
+    /// Set `path`'s modification time to `seconds` after an arbitrary fixed moment.
+    fn modified_at(path: &Path, seconds: u64) {
+        let moment =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + seconds);
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("open to set the time")
+            .set_modified(moment)
+            .expect("set the modification time");
+    }
+
     #[test]
     fn preflight_prefers_csi_over_bai_when_both_present() {
         let dir = TempDir::new().expect("tempdir");
@@ -647,10 +730,66 @@ mod tests {
         touch(&bam);
         touch(&csi);
         touch(&bai);
+        // Written in the same moment: the preference order decides.
+        modified_at(&csi, 60);
+        modified_at(&bai, 60);
 
         // Both exist; existing_index_for must return the .csi one.
         let picked = existing_index_for(&bam, AlignmentFileKind::Bam).expect("some index");
         assert_eq!(picked, csi, ".csi must win over .bai when both exist");
+    }
+
+    /// **The newer of two indexes is read**, whichever its format. The case this guards: pvc
+    /// once built `sample.bam.csi`, the BAM was then regenerated and `samtools index` wrote
+    /// `sample.bam.bai` — and the stale `.csi`, preferred by format alone, was read, its offsets
+    /// pointing into a file that had changed under them.
+    #[test]
+    fn the_newer_of_two_indexes_is_read() {
+        let dir = TempDir::new().expect("tempdir");
+        let bam = dir.path().join("sample.bam");
+        let csi = dir.path().join("sample.bam.csi");
+        let bai = dir.path().join("sample.bam.bai");
+        touch(&bam);
+        touch(&csi);
+        touch(&bai);
+
+        modified_at(&csi, 0);
+        modified_at(&bai, 60);
+        assert_eq!(
+            existing_index_for(&bam, AlignmentFileKind::Bam),
+            Some(bai.clone()),
+            "an older .csi was read over a newer .bai",
+        );
+
+        modified_at(&csi, 120);
+        assert_eq!(existing_index_for(&bam, AlignmentFileKind::Bam), Some(csi),);
+    }
+
+    /// **An index named by replacing the data file's extension is found**, as htslib finds it:
+    /// Picard and GATK write `sample.bai` beside `sample.bam`. Not finding it, a run refused the
+    /// file as unindexed, or with `--build-map-file-index` spent a pass over it building a second
+    /// index next to the first.
+    #[test]
+    fn an_index_named_by_replacing_the_extension_is_found() {
+        for (data, index) in [
+            ("sample.bam", "sample.bai"),
+            ("sample.bam", "sample.csi"),
+            ("sample.cram", "sample.crai"),
+        ] {
+            let dir = TempDir::new().expect("tempdir");
+            let data = dir.path().join(data);
+            let index = dir.path().join(index);
+            touch(&data);
+            touch(&index);
+            let kind = AlignmentFileKind::from_path(&data).expect("a known extension");
+            assert_eq!(
+                existing_index_for(&data, kind),
+                Some(index.clone()),
+                "{} beside {} was not found",
+                index.display(),
+                data.display(),
+            );
+        }
     }
 
     #[test]
