@@ -2368,39 +2368,31 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
 /// **Summarise the cohort, then condition each sample on it** — arm A of the step-9 seam, and
 /// the whole of `doc/devel/ng/spec/calling_em_loop.md` §2's pseudocode in one function.
 ///
-/// Three loops, one inside the next, and **ng ships with the outer two switched off**:
+/// Two loops, one inside the other, and **ng ships with the outer one switched off**:
 ///
-/// 1. the **discovery round** of spec §2's pseudocode (§4.1) — structurally a loop here, and
-///    permanently a single pass: milestone E1 found the eligible set reads no posterior, so
-///    discovery's built setting runs as a **pre-pass inside candidate selection** before this
-///    arm is ever called (`DiscoveryMode::BeforeTheLoop`;
-///    `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5), and the loop it
-///    reaches is this one, over a table already widened;
-/// 2. the **slippage round**, which re-fits this locus's slippage numbers from its own
+/// 1. the **slippage round**, which re-fits this locus's slippage numbers from its own
 ///    reads and rebuilds the table under them (§5.1) — built, and `max_rounds = 0` by
-///    default, which is the frozen setting: the round's body never runs;
-/// 3. the **frequency loop**, the innermost, and the only one that repeats at the shipped
+///    default, which is the frozen setting: the round's body runs once and does not repeat;
+/// 2. the **frequency loop**, the inner one, and the only one that repeats at the shipped
 ///    configuration ([`run_frequency_loop`]).
 ///
-/// **Discovery's loop is written with a body that runs once**: its body ends in an
-/// unconditional `break`, and that — not the configuration — is what makes it run once. E1's
-/// pre-pass finding made that permanent rather than provisional — a round here would look at
-/// the same evidence selection already looked at and admit nothing, which an E1 test asserts.
-/// Validation is the second lock: the two round-wrapped discovery modes are refused before
-/// they can reach a [`RunnableCallingLoopConfig`], so no run arrives here expecting rounds it
-/// will not get. **The slippage round is the one with a live body**: it reads
-/// `config.slippage_refit`, and at zero rounds — the shipped default — its body is one
-/// comparison and a `break`, with no table rebuilt and no read attributed.
+/// **Spec §2's pseudocode has a third, outermost loop — the discovery round (§4.1) — and it
+/// is not here.** Milestone E1 found that discovery's eligible set reads no posterior, so
+/// discovery runs as a **pre-pass inside candidate selection** before this arm is called
+/// (`DiscoveryMode::BeforeTheLoop`;
+/// `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5), and the loops here
+/// run over a table already widened.
 ///
-/// **The bodies are not empty — they hold the whole of the work.** Computing the locus's
-/// emissions, assembling the likelihood table from them and running the frequency loop are
-/// inside the inner one; what a round adds is a reason to go round again, not the work.
+/// **The slippage round reads `config.slippage_refit`**, and at zero rounds — the shipped
+/// default — its body builds one table, runs the frequency loop, and breaks, with no table
+/// rebuilt and no read attributed. Computing the locus's emissions, assembling the likelihood
+/// table from them and running the frequency loop are all inside that body; what a round adds
+/// is a reason to go round again, not the work.
 ///
-/// **On the SNP/indel path both rounds are ignored structurally rather than half-honoured**
-/// (spec §5.1's closing paragraph): there are no slippage numbers to re-fit, and discovery's
-/// retrace is defined on stutter attribution. A run that switched the re-fit on therefore
-/// re-fits its tracts and leaves its ordinary sites untouched, with no per-locus setting
-/// anywhere.
+/// **On the SNP/indel path the slippage round is ignored structurally rather than
+/// half-honoured** (spec §5.1's closing paragraph): there are no slippage numbers to re-fit. A
+/// run that switched the re-fit on therefore re-fits its tracts and leaves its ordinary sites
+/// untouched, with no per-locus setting anywhere.
 ///
 /// **At the defaults the locus's emissions are therefore computed exactly once**, before the
 /// frequency loop, whatever the pass count — which is what makes the expensive half of the
@@ -2452,15 +2444,6 @@ where
         "summarise the cohort, then condition each sample on it (arm A)"
     }
 
-    #[expect(
-        clippy::never_loop,
-        reason = "the discovery round of spec §2's pseudocode is structurally present and \
-                  permanently a single pass: discovery's built setting is a pre-pass in \
-                  candidate selection (E1's finding — the eligible set reads no posterior), \
-                  so no mode fills this body, and its unconditional `break` is what makes it \
-                  run once. The slippage round inside it genuinely loops now — its body is \
-                  built — so this expectation is the outer loop's alone"
-    )]
     fn call_locus(
         &self,
         evidence: &LocusEvidence<'_>,
@@ -2647,122 +2630,116 @@ where
         let mut refitted_cells: Vec<Option<Slippage>> = Vec::new();
         let mut rounds_adopted: u32 = 0;
 
-        // ── the discovery round (spec §4.1), `Off` by default ──
+        // ── the slippage round (spec §5.1), `max_rounds` 0 by default ──
         let outcome = loop {
-            // ── the slippage round (spec §5.1), `max_rounds` 0 by default ──
-            let outcome = loop {
-                // **The expensive half, once per round**: the emissions read no allele
-                // frequency, so nothing the frequency loop does can move them — only a
-                // slippage round that adopted new numbers can, by coming back around here.
-                fill_what_no_pass_recomputes_for_round(
-                    &self.emission,
-                    evidence,
-                    parameters,
-                    &candidates,
-                    &genotypes,
-                    scratch,
-                    SlippageRoundBuild {
-                        adopted_slippage: (rounds_adopted > 0).then_some(adopted_cells.as_slice()),
-                        emissions: cached_emissions.as_mut(),
-                    },
-                );
-                // **And the cheap half, once here and then once per pass where something is
-                // contaminated.** This first one is what the prior-free initialisation pass
-                // reads, and there is no estimate of the frequencies for it to score against —
-                // no pass has run — so it scores the reads alone, which is that pass's whole
-                // job (§3).
-                let reassembly =
-                    table_moves_with_the_loop.then(|| TableReassembly::of(evidence, parameters));
-                assemble_genotype_likelihood_table(
-                    evidence,
-                    parameters,
-                    &genotypes,
-                    if contaminated {
-                        ContaminantFrequencies::TheReadsAlone
-                    } else {
-                        ContaminantFrequencies::NoneFitted
-                    },
-                    scratch,
-                );
-                let outcome = run_frequency_loop(
-                    scratch,
-                    &genotypes,
-                    &self.prior,
-                    config,
-                    reassembly.as_ref(),
-                );
-                // **One more assembly against the frequencies the loop settled on**, so that
-                // the final pass scores every sample against the same estimate the convergence
-                // test just accepted rather than against the one the last pass started from.
-                // Where nothing is contaminated the table reads no frequency and there is
-                // nothing to assemble again.
-                //
-                // **What it costs is worth naming**: the genotypes and the site quality then
-                // come from a table one assembly *newer* than the one the convergence test
-                // looked at. At a locus that settled, the two differ by less than the
-                // convergence threshold by construction; at one that hit the pass cap, the
-                // difference is whatever the last pass moved — and such a locus is emitted
-                // flagged, which is what that flag is for (§6).
-                if let Some(reassembly) = reassembly.as_ref() {
-                    reassembly.assemble(
-                        &genotypes,
-                        ContaminantFrequencies::TheLoopsOwnEstimate,
-                        scratch,
-                    );
-                }
-                // ── the round's own body: attribute, re-fit, and either stop or go round ──
-                //
-                // The frozen arm and every ordinary site break here having built one table,
-                // which is the whole of the frozen behaviour.
-                if !refit_may_run {
-                    break outcome;
-                }
-                // The cap counts **adopted** rounds — each one a table rebuild and a rerun of
-                // the frequency loop — mirroring production's `for _ in 0..refit_max_rounds`
-                // (`src/ssr/cohort/em.rs:572`): at the cap, the numbers the last round
-                // adopted stand and no further attribution runs.
-                if rounds_adopted >= refit_config.max_rounds {
-                    break outcome;
-                }
-                let tract = tract_evidence_of(evidence);
-                let pooled = attribute_reads_under_the_posteriors(
-                    scratch,
-                    &genotypes,
-                    &self.prior,
-                    &tract,
-                    &candidates,
-                    cached_emissions
-                        .as_ref()
-                        .expect("a round that may run cached its build's emissions"),
-                );
-                refit_cells(
-                    scratch.tract_fits().frozen_slippage_cells(),
-                    &pooled,
-                    refit_config,
-                    &mut refitted_cells,
-                );
-                // **Test before adopt, and a converging round's numbers are discarded** —
-                // production's shape exactly (`em.rs:576-580`): the round that moves less
-                // than the threshold keeps the numbers the table was already built under,
-                // so the emitted calls were scored under the numbers the test accepted.
-                let standing: &[Option<Slippage>] = if rounds_adopted == 0 {
-                    scratch.tract_fits().frozen_slippage_cells()
+            // **The expensive half, once per round**: the emissions read no allele
+            // frequency, so nothing the frequency loop does can move them — only a
+            // slippage round that adopted new numbers can, by coming back around here.
+            fill_what_no_pass_recomputes_for_round(
+                &self.emission,
+                evidence,
+                parameters,
+                &candidates,
+                &genotypes,
+                scratch,
+                SlippageRoundBuild {
+                    adopted_slippage: (rounds_adopted > 0).then_some(adopted_cells.as_slice()),
+                    emissions: cached_emissions.as_mut(),
+                },
+            );
+            // **And the cheap half, once here and then once per pass where something is
+            // contaminated.** This first one is what the prior-free initialisation pass
+            // reads, and there is no estimate of the frequencies for it to score against —
+            // no pass has run — so it scores the reads alone, which is that pass's whole
+            // job (§3).
+            let reassembly =
+                table_moves_with_the_loop.then(|| TableReassembly::of(evidence, parameters));
+            assemble_genotype_likelihood_table(
+                evidence,
+                parameters,
+                &genotypes,
+                if contaminated {
+                    ContaminantFrequencies::TheReadsAlone
                 } else {
-                    &adopted_cells
-                };
-                if largest_movement(standing, &refitted_cells)
-                    < refit_config.round_convergence_threshold
-                {
-                    break outcome;
-                }
-                std::mem::swap(&mut adopted_cells, &mut refitted_cells);
-                rounds_adopted += 1;
-                // And round again: rebuild the table under the adopted numbers and rerun
-                // the frequency loop to convergence — the nested shape spec §5.1 decides.
+                    ContaminantFrequencies::NoneFitted
+                },
+                scratch,
+            );
+            let outcome = run_frequency_loop(
+                scratch,
+                &genotypes,
+                &self.prior,
+                config,
+                reassembly.as_ref(),
+            );
+            // **One more assembly against the frequencies the loop settled on**, so that
+            // the final pass scores every sample against the same estimate the convergence
+            // test just accepted rather than against the one the last pass started from.
+            // Where nothing is contaminated the table reads no frequency and there is
+            // nothing to assemble again.
+            //
+            // **What it costs is worth naming**: the genotypes and the site quality then
+            // come from a table one assembly *newer* than the one the convergence test
+            // looked at. At a locus that settled, the two differ by less than the
+            // convergence threshold by construction; at one that hit the pass cap, the
+            // difference is whatever the last pass moved — and such a locus is emitted
+            // flagged, which is what that flag is for (§6).
+            if let Some(reassembly) = reassembly.as_ref() {
+                reassembly.assemble(
+                    &genotypes,
+                    ContaminantFrequencies::TheLoopsOwnEstimate,
+                    scratch,
+                );
+            }
+            // ── the round's own body: attribute, re-fit, and either stop or go round ──
+            //
+            // The frozen arm and every ordinary site break here having built one table,
+            // which is the whole of the frozen behaviour.
+            if !refit_may_run {
+                break outcome;
+            }
+            // The cap counts **adopted** rounds — each one a table rebuild and a rerun of
+            // the frequency loop — mirroring production's `for _ in 0..refit_max_rounds`
+            // (`src/ssr/cohort/em.rs:572`): at the cap, the numbers the last round
+            // adopted stand and no further attribution runs.
+            if rounds_adopted >= refit_config.max_rounds {
+                break outcome;
+            }
+            let tract = tract_evidence_of(evidence);
+            let pooled = attribute_reads_under_the_posteriors(
+                scratch,
+                &genotypes,
+                &self.prior,
+                &tract,
+                &candidates,
+                cached_emissions
+                    .as_ref()
+                    .expect("a round that may run cached its build's emissions"),
+            );
+            refit_cells(
+                scratch.tract_fits().frozen_slippage_cells(),
+                &pooled,
+                refit_config,
+                &mut refitted_cells,
+            );
+            // **Test before adopt, and a converging round's numbers are discarded** —
+            // production's shape exactly (`em.rs:576-580`): the round that moves less
+            // than the threshold keeps the numbers the table was already built under,
+            // so the emitted calls were scored under the numbers the test accepted.
+            let standing: &[Option<Slippage>] = if rounds_adopted == 0 {
+                scratch.tract_fits().frozen_slippage_cells()
+            } else {
+                &adopted_cells
             };
-            // Discovery off: the candidate set is what selection settled on, and the prune
-            // and the re-run that would follow a round have nothing to do.
-            break outcome;
+            if largest_movement(standing, &refitted_cells)
+                < refit_config.round_convergence_threshold
+            {
+                break outcome;
+            }
+            std::mem::swap(&mut adopted_cells, &mut refitted_cells);
+            rounds_adopted += 1;
+            // And round again: rebuild the table under the adopted numbers and rerun
+            // the frequency loop to convergence — the nested shape spec §5.1 decides.
         };
         // The probe for the round's stopping rule — nothing on the scoring path reads it.
         scratch.record_slippage_refit_rounds(rounds_adopted);
