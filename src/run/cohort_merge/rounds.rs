@@ -29,9 +29,8 @@
 //!
 //! **Ordering.** `regions_in_round.par_iter()` is indexed, so `collect` gives the round's
 //! outcomes in region order whatever order the workers finished in; rounds are taken in genome
-//! order; so the calls reach `take` in genome order. The organiser's reorder buffer is not
-//! needed here for that reason — what is kept from it is the frontier rule (spec §6.1), which
-//! is replicated below.
+//! order; so the calls reach `take` in genome order, with no reorder buffer. The regions are
+//! handed over through the frontier rule (spec §6.1).
 //!
 //! **What stays on the calling thread**, and each for a reason that is about order rather than
 //! about cost: the sink, because it writes; the eviction and the cover, because a builder reads
@@ -63,14 +62,10 @@ use crate::types::{GenomePosition, GenomeRegion};
 /// once per locus. `call_locus` is what a worker does with a locus. `take` is the sink, on the
 /// calling thread, in genome order.
 ///
-/// **Returns how many loci the frontier rule dropped**, which is
-/// `Organiser::displaced_locus_count`'s
-/// number and is kept for that type's reason: spec §6.1's argument says a builder cannot
-/// produce a locus on ground an earlier locus already owns — given that eviction happens at the
-/// round's first region's first base, which is what this driver does — and the count is how a
-/// run would say the argument had failed. **It is a count and not an assertion on purpose**:
-/// the organiser answers the same question by counting, and a run that has walked a genome
-/// should report a surprise rather than abort on it.
+/// **Returns how many loci the frontier rule dropped.** Spec §6.1's argument says a builder
+/// cannot produce a locus on ground an earlier locus already owns — given that eviction happens
+/// at the round's first region's first base, which is what this driver does — and the count is
+/// how a run would say the argument had failed ([`Frontier`] gives the argument).
 ///
 /// # Errors
 ///

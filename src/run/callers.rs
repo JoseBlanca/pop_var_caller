@@ -7773,7 +7773,7 @@ where
     let displaced = merged?;
     progress.finished(records_written);
     // **Spec §6.1's frontier rule says this cannot happen and the count is how a run would say
-    // it had**, which is `Organiser::displaced_locus_count`'s own stance. It is checked rather
+    // it had** (`cohort_merge::frontier::Frontier`). It is checked rather
     // than reported because no field of the run report carries it yet, and a silent drop is the
     // one outcome that would leave the VCF short with nothing saying so.
     assert_eq!(

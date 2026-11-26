@@ -6,7 +6,7 @@
 //! default (spec §6.1); building regions divide an analysed region.
 //!
 //! `merge_cohort_serially` is **the oracle**: the simplest thing that produces the right
-//! answer — one builder, no cache, no organiser, no threads, holding every sample's
+//! answer — one builder, no cache, no frontier, no threads, holding every sample's
 //! observations and walking the analysed regions in order. Everything the later milestones add
 //! is about speed and memory, so anything that changes this output is a defect rather than a
 //! trade (`doc/devel/ng/spec/cohort_merge.md` §15; the plan's C2).
@@ -17,7 +17,7 @@
 //! own ground instead of the whole stretch, which is what makes short building regions
 //! affordable. The builders run at the same time as each other in `parallel`,
 //! over this same cache; the loci that differ once builders see different windows are what the
-//! organiser's overlap resolution settles (spec §6.1).
+//! frontier's overlap resolution settles (spec §6.1).
 
 use super::build::{LocusReads, build_region_handing_over_windowed};
 #[cfg(test)]
@@ -146,8 +146,7 @@ pub fn merge_cohort_serially(
 /// trips the cache's coordinate-order check and panics ([`ObservationCache::cover`]), because the
 /// cache has no error of its own to mint — `E` is the source's type and this driver only passes
 /// it through. That is right while observations come from this crate's generator, where going
-/// backwards is a bug; it stops being right when they are decoded from a psp file, and
-/// `organise.rs` records that it owes the change to `RunError`.
+/// backwards is a bug; it stops being right when they are decoded from a psp file.
 pub fn merge_cohort_through_cache<S, E>(
     analysed: &[GenomeRegion],
     cache: &mut ObservationCache<S>,
@@ -348,7 +347,7 @@ mod tests {
         FIXTURE_BOUND, SourceFailed, member, refuse_any_difference, region, region_on, render,
         source_of, three_samples_over_six_hundred_bases, width,
     };
-    use super::super::organise::{Organiser, RegionIndex};
+    use super::super::frontier::{CalledRegion, Frontier};
     use super::*;
     use crate::cohort_observation::{MinAltObs, MinAltReadShare};
     use crate::locus_generation::SampleLocusObservations;
@@ -1067,17 +1066,18 @@ mod tests {
     }
 
     /// **A real merge never displaces a locus** — the same claim as
-    /// [`refuse_overlapping_ground`], made where it counts: through the builders and into a
-    /// real [`Organiser`], rather than on the merged output afterwards.
+    /// [`refuse_overlapping_ground`], made where it counts: through the builders and into the
+    /// [`Frontier`] the streaming driver hands every region over through, rather than on the
+    /// merged output afterwards.
     ///
-    /// This is `merge_cohort_through_cache`'s own loop with the organiser wired in — evict at
-    /// the building region's first base, cover it, build it, submit it — which is as close to
+    /// This is `merge_cohort_through_cache`'s own loop with the frontier wired in — evict at
+    /// the building region's first base, cover it, build it, hand it over — which is as close to
     /// the parallel arrangement as one thread gets. Without it nothing in the suite ever hands
-    /// the organiser an outcome a builder produced, and the counter that is meant to be the
+    /// the frontier an outcome a builder produced, and the counter that is meant to be the
     /// alarm would first be read on real data.
     ///
     /// **It re-runs the driver's loop rather than calling the driver**, because
-    /// `merge_cohort_through_cache` returns one merged outcome and the organiser needs them
+    /// `merge_cohort_through_cache` returns one merged outcome and the frontier needs them
     /// region by region. So a defect in the *driver's* own loop is caught by the byte-identity
     /// comparison above and not here; what this catches is a builder producing overlapping loci
     /// from a window drawn as the design says to draw it.
@@ -1101,8 +1101,8 @@ mod tests {
         let mut cache = ObservationCache::over_fixture(
             per_sample.iter().map(|sample| source_of(sample)).collect(),
         );
-        let mut organiser = Organiser::new();
-        let mut next_index = 0u64;
+        let mut frontier = Frontier::default();
+        let mut refused = Vec::new();
 
         for analysed_region in analysed {
             for building_region in building_regions_of(*analysed_region, building_region_width) {
@@ -1123,14 +1123,26 @@ mod tests {
                     )
                     .expect("an infallible build")
                 });
-                organiser.submit(RegionIndex(next_index), outcome);
-                next_index += 1;
-                assert!(organiser.drain_ready().count() < usize::MAX);
+                let RegionOutcome {
+                    cohort_observations,
+                    failed_locus_spans,
+                } = outcome;
+                frontier.hand_over(
+                    CalledRegion {
+                        calls: cohort_observations
+                            .into_iter()
+                            .map(|built| (built.region, ()))
+                            .collect(),
+                        failed: failed_locus_spans,
+                    },
+                    &mut |()| {},
+                    &mut refused,
+                );
             }
         }
 
         assert_eq!(
-            organiser.displaced_locus_count(),
+            frontier.displaced,
             0,
             "at building regions of {} bases a builder produced a locus on ground an earlier \
              locus already owned",
@@ -1138,8 +1150,8 @@ mod tests {
         );
     }
 
-    /// **No two loci a merge produces may overlap** — the claim the organiser's displacement
-    /// rule is the safety net for (`super::organise::Organiser`, and spec §6.1).
+    /// **No two loci a merge produces may overlap** — the claim the frontier's displacement
+    /// rule is the safety net for ([`Frontier`], and spec §6.1).
     ///
     /// Asserted inside [`the_outcome_both_drivers_agree_on`] rather than in a test of its own,
     /// so that it holds over every fixture routed through that helper rather than over one case
@@ -1147,7 +1159,7 @@ mod tests {
     /// hundred random layouts and the 305–330 deletion that a building region's boundary falls
     /// inside at four of its five widths. **A test that calls a driver directly is not checked**,
     /// and `a_locus_reaching_across_a_building_region_boundary_is_built_once_and_whole` is one
-    /// such. The organiser's own tests say what the rule *does*; this says it is not needed on
+    /// such. The frontier's own tests say what the rule *does*; this says it is not needed on
     /// the fixtures it sees.
     ///
     /// It is checked on the **cached** driver's output, because that is the one that divides
@@ -1356,7 +1368,7 @@ mod tests {
             "and both samples' evidence is in it, though they sit either side of base 320",
         );
 
-        // **The shape the plan's E2 names**, taken all the way into a real organiser: a wide
+        // **The shape the plan's E2 names**, taken all the way into a real frontier: a wide
         // deletion beginning before a building region and reaching into it is exactly where a
         // later builder would work from a partial picture. Nothing is displaced, because the
         // builder that owns base 305 follows the locus to 330 and every later builder skips

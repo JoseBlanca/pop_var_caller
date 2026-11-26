@@ -18,6 +18,34 @@ pub(super) struct CalledRegion<T> {
 /// **Spec §6.1's frontier rule**, for the drivers that build regions in parallel: each region's
 /// calls and refused spans, handed over in region order, are interleaved by first base, and a
 /// span that begins on ground an earlier one owns is dropped and counted.
+///
+/// **A refused span owns ground exactly as an emitted locus does** (spec §3.2): it wins against
+/// what starts inside it, and a refused span that starts on owned ground is dropped and not
+/// reported as refused. **"Earlier" means handed over first**, which under the drivers'
+/// contract is the same as starting first.
+///
+/// **The rule is a safety net: nothing a healthy run produces reaches the drop.** Under
+/// [`build_region`](super::build::build_region)'s input contract two loci owned by different
+/// regions cannot overlap. A locus's *members* are the per-sample observations it was closed
+/// over; a builder's *window* is the observations it is handed for its own region. The
+/// argument:
+///
+/// - a builder is handed every observation overlapping its own ground, including those that
+///   opened earlier. **This is a discipline of whoever draws the cache forward**: the cache
+///   drops what ends before the position it is handed, and the drivers hand it the first base
+///   of the earliest building region still live, so everything reaching into that region
+///   survives. Evict at the region's *last* base instead and the argument fails at once —
+///   `super::serial::tests::refuse_displaced_loci` is the regression test;
+/// - so if a locus L owned by an earlier region reaches into this one, every member of L that
+///   reaches this region's first base is in this builder's window, and so, by the chain of
+///   overlaps, is the part of L that begins before this region;
+/// - so this builder closes that ground as one locus starting before its own first base and
+///   skips it as an earlier region's. Every locus it does own begins after L's reach.
+///
+/// The rule is kept because it is spec §6.1's, because the contract it rests on belongs to the
+/// drivers rather than to this type, and because it costs one comparison per locus.
+/// [`displaced`](Self::displaced) is how a run would say the argument had failed; a run over
+/// stored files asserts it is zero (`call_cohort_from_sources_in_rounds` in `run/callers.rs`).
 #[derive(Default)]
 pub(super) struct Frontier {
     /// The last base claimed so far.
