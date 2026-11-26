@@ -205,7 +205,7 @@ impl WriterProvenance {
     /// left standing. A caller replacing an earlier recording whose key set may have
     /// shrunk — the read filters' conditional floor, say — clears its own keys first
     /// (the producer of the entries names them, e.g.
-    /// `READ_FILTER_PROVENANCE_KEYS`).
+    /// `run::read_filter_provenance::READ_FILTER_PROVENANCE_KEYS`).
     pub fn record_parameters(
         &mut self,
         entries: impl IntoIterator<Item = (String, ParameterValue)>,
@@ -1713,10 +1713,12 @@ mod tests {
             manifest: a_manifest(),
         };
         // Through the real A4 path, so the recorded filters in every test's header are
-        // what `provenance_parameters` writes, not a hand-kept copy of it.
-        header
-            .writer
-            .record_parameters(crate::read::ReadFilterConfig::default().provenance_parameters());
+        // what `read_filter_parameters` writes, not a hand-kept copy of it.
+        header.writer.record_parameters(
+            crate::run::read_filter_provenance::read_filter_parameters(
+                &crate::read::ReadFilterConfig::default(),
+            ),
+        );
         header
     }
 

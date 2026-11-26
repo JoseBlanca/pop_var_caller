@@ -40,12 +40,12 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
+use super::read_filter_provenance::READ_FILTER_PROVENANCE_PREFIX;
 use super::records::DEFAULT_MIN_SITE_QUALITY;
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
 use crate::calling::run_parameters::RunParameters;
 use crate::psp::{ContigIdentity, Header, ParameterValue, PspReader};
-use crate::read::filtering::READ_FILTER_PROVENANCE_PREFIX;
 use crate::read::input::read_groups::{
     NameOrigin, NameWithOrigin, ReadGroup, ReadGroups, SampleReadGroups,
 };
