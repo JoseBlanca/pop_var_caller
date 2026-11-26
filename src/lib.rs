@@ -35,8 +35,19 @@
 //!   that follows; [`vcf`] — the one file a run writes.
 //! - [`types`] — the vocabulary the steps share.
 //!
-//! [`error_render`], [`progress_text`] and [`iter_ext`] are small helpers the rest shares. The command line is
-//! [`cli`].
+//! Small helpers the rest shares:
+//!
+//! - [`float`] — `ln`, `exp` and the other transcendental functions computed in Rust, so a result
+//!   has the same bits on every platform;
+//! - [`splitmix`] — the hash that thins reads by the same key in the psp read cap and the
+//!   read-phase cap;
+//! - [`memory_limit`] — the most memory the process may hold, which bounds the refinement's
+//!   memory budget;
+//! - [`open_files`] — the most files the process may open, checked against what a run will hold
+//!   before it reads any data;
+//! - [`error_render`], [`progress_text`] — how an error and a progress line are written.
+//!
+//! The command line is [`cli`].
 //!
 //! The tandem-repeat scanner is this crate's own; nothing here depends on `trf-mod`, whose output
 //! survives only as a committed test catalog (the test-only `golden_catalog`).
@@ -93,7 +104,6 @@ pub mod error_render;
 pub mod fasta;
 pub mod float;
 pub mod genetics;
-pub mod iter_ext;
 pub mod locus_generation;
 pub mod memory_limit;
 pub mod misread_context;
