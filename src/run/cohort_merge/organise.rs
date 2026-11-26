@@ -24,7 +24,10 @@ use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
 use super::build::RegionOutcome;
 #[cfg(test)]
+use super::frontier::{first_base_of, last_base_of};
+#[cfg(test)]
 use crate::cohort_observation::CohortObservation;
+#[cfg(test)]
 use crate::types::{GenomePosition, GenomeRegion};
 
 #[cfg(test)]
@@ -481,29 +484,6 @@ impl Organiser {
         // the next reader looking for the case.
         self.owned_through = Some(last_base_of(locus_span));
         true
-    }
-}
-
-/// A locus span's first base, genome-wide — what decides which of two loci is the earlier
-/// owner.
-///
-/// **The ends are ordered rather than trusted**, as [`ObservationCache::with_observations`] and
-/// [`ObservationCache::cover`] order theirs and for the same reason: `GenomeRegion` has public
-/// fields and no constructor putting them in order, and an inverted span would otherwise walk
-/// the frontier backwards — past its own first base, releasing the locus behind it.
-pub(super) fn first_base_of(locus_span: GenomeRegion) -> GenomePosition {
-    GenomePosition {
-        contig: locus_span.contig,
-        position: locus_span.start.min(locus_span.end),
-    }
-}
-
-/// A locus span's last base, genome-wide — where the frontier stands once the span is claimed.
-/// Ordered for [`first_base_of`]'s reason, and never before it.
-pub(super) fn last_base_of(locus_span: GenomeRegion) -> GenomePosition {
-    GenomePosition {
-        contig: locus_span.contig,
-        position: locus_span.end.max(locus_span.start),
     }
 }
 

@@ -58,10 +58,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use super::build::{LocusReads, build_region_handing_over_windowed};
+use super::frontier::{CalledRegion, Frontier};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, RoundView, building_regions_of,
 };
-use super::rounds::{CalledRegion, Frontier};
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     refuse_malformed_analysed_regions,

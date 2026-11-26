@@ -5,7 +5,7 @@
 //! stored files moved to [`super::stream`] on 2026-11-13, and calling from alignments merges one
 //! region at a time. The stream's tests compare what it hands over, and the error it ends with,
 //! against this driver's, which is simpler to check by reading: a round is read, then built,
-//! then handed over, with nothing overlapping. The [`Frontier`] both use lives here.
+//! then handed over, with nothing overlapping. Both hand their regions over through [`Frontier`].
 //!
 //! This is `merge_cohort_in_parallel`'s round
 //! structure with one difference, and the difference is what the arrangement is for: the
@@ -42,30 +42,18 @@
 use rayon::prelude::*;
 
 use super::build::{LocusReads, build_region_handing_over_windowed};
+use super::frontier::{CalledRegion, Frontier};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
-use crate::cohort_observation::CohortObservation;
-// **The organiser's own frontier helpers, not a second pair.** The rule below is
-// `Organiser::resolve_and_release`'s, and two spellings of "where does this span begin" is
-// exactly the drift this module keeps its shared fixtures in one place to avoid.
-use super::organise::{first_base_of, last_base_of};
 use super::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     refuse_malformed_analysed_regions,
 };
+use crate::cohort_observation::CohortObservation;
 use crate::cohort_observation::MinAltReads;
 use crate::locus_generation::SampleLocusObservations;
 use crate::types::{GenomePosition, GenomeRegion};
-
-/// What one region's worker produced: what the closure made of each locus, in genome order,
-/// and the spans the width bound refused.
-pub struct CalledRegion<T> {
-    /// Each locus's span beside what the closure made of it.
-    pub calls: Vec<(GenomeRegion, T)>,
-    /// The spans this region's builder refused, in genome order.
-    pub failed: Vec<GenomeRegion>,
-}
 
 /// Merge and call the cohort over `analysed`, `regions_in_flight` regions at a time.
 ///
@@ -265,63 +253,6 @@ impl<MK, CL> Round<'_, MK, CL> {
         } else {
             build_the_round()
         }
-    }
-}
-
-/// **Spec §6.1's frontier rule**, the organiser's `resolve_and_release`, for the drivers that
-/// build regions in parallel: each region's calls and refused spans, handed over in region order,
-/// are interleaved by first base, and a span that begins on ground an earlier one owns is dropped
-/// and counted.
-#[derive(Default)]
-pub(super) struct Frontier {
-    /// The last base claimed so far.
-    owned_through: Option<GenomePosition>,
-    /// How many spans were dropped, which is `Organiser::displaced_locus_count`'s number.
-    pub(super) displaced: u64,
-}
-
-impl Frontier {
-    /// Hand one region's outcome over: each call that claims its ground to `take`, each refused
-    /// span that does to `refused`.
-    pub(super) fn hand_over<T>(
-        &mut self,
-        region: CalledRegion<T>,
-        take: &mut impl FnMut(T),
-        refused: &mut Vec<GenomeRegion>,
-    ) {
-        let CalledRegion { calls, failed } = region;
-        let mut calls = calls.into_iter().peekable();
-        for span in failed {
-            let span_first = first_base_of(span);
-            while let Some((locus, made)) =
-                calls.next_if(|(locus, _)| first_base_of(*locus) <= span_first)
-            {
-                if self.claim(locus) {
-                    take(made);
-                }
-            }
-            if self.claim(span) {
-                refused.push(span);
-            }
-        }
-        for (locus, made) in calls {
-            if self.claim(locus) {
-                take(made);
-            }
-        }
-    }
-
-    /// Claim `span`'s ground, or refuse it to whatever got there first.
-    fn claim(&mut self, span: GenomeRegion) -> bool {
-        if self
-            .owned_through
-            .is_some_and(|owned| first_base_of(span) <= owned)
-        {
-            self.displaced = self.displaced.saturating_add(1);
-            return false;
-        }
-        self.owned_through = Some(last_base_of(span));
-        true
     }
 }
 

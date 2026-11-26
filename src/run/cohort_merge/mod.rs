@@ -37,6 +37,7 @@
 
 pub mod build;
 pub mod close;
+mod frontier;
 pub mod observation_cache;
 pub mod organise;
 pub mod recorded_windows;
