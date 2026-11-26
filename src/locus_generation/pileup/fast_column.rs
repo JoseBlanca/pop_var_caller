@@ -416,23 +416,7 @@ pub(super) fn try_ordinary_column(
             .observation_of_read
             .resize(read_id_span as usize, OBSERVATION_OF_NO_CONTRIBUTOR);
     }
-    // **Measurement scaffolding, hoisted out of the loop** — this lane emits observations
-    // without ever building an open record, so a census hooked only into `finalise` would
-    // miss every read that came through here. See
-    // [`minted_error_census`](super::minted_error_census); off unless armed.
-    let census_armed = super::minted_error_census::enabled();
     for read in &scratch.reads {
-        // The read's own `ln ε`, before the loop below pools it into an observation's
-        // `q_sum` and the read is gone. Every witness in this lane is complete, and the
-        // lane refuses any column an open record overlaps — so these are the same reads the
-        // pre-pass's calibration accumulator sums over.
-        if census_armed {
-            super::minted_error_census::record_read(
-                u64::from(walker_pos),
-                read.read_group,
-                read.ln_q,
-            );
-        }
         let at = match scratch
             .observations
             .iter()
@@ -547,7 +531,6 @@ pub(super) fn try_ordinary_column(
         })
         .collect();
 
-    super::column_census::FAST_COLUMNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(FastColumn::Emitted(SampleLocusObservations {
         chain_id_base: 0,
         region: GenomeRegion {

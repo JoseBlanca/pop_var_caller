@@ -204,75 +204,41 @@ impl SampleLocusObservations {
         }
     }
 
-    #[cfg(test)]
-    /// How many reads here showed something other than the reference — the number the
-    /// cohort merge's keep rule sums across a locus
-    /// (`doc/devel/ng/spec/cohort_merge.md` §4.3).
+    /// How many reads here showed something other than the reference, and how many were
+    /// compared against the reference at all — the numerator and the denominator of the
+    /// cohort merge's keep rule, which asks whether a sample's non-reference reads reach a
+    /// floor and a *share* of its compared reads (`doc/devel/ng/spec/cohort_merge.md` §4.3).
+    /// One pass over this record's sequences gives both.
     ///
-    /// **Counted over the [`Complete`](ReadWitness::Complete) observations only, and
-    /// that is forced by what a partial's bases are.** A partial's `bases` cover only the
-    /// stretch its read witnessed, so comparing them against this locus's whole
-    /// `reference_bases` would report a partial that saw less than the whole locus as
-    /// non-reference — including a read that agreed with the reference over every base it
-    /// actually saw. The census writer makes the same comparison over the same subset
-    /// (`parameter_estimation/joint/census.rs`, `add_generic`), which is what
-    /// [`SequenceObservation::matches_reference`] exists to keep in one place.
-    ///
-    /// The cost is that a variant witnessed only by partial reads does not reach the
-    /// keep threshold. Scoring a partial needs a censored likelihood that does not exist
+    /// **Both count the [`Complete`](ReadWitness::Complete) observations only, and that is
+    /// forced by what a partial's bases are.** A partial's `bases` cover only the stretch its
+    /// read witnessed, so comparing them against this locus's whole `reference_bases` would
+    /// report a partial that saw less than the whole locus as non-reference — including a read
+    /// that agreed with the reference over every base it actually saw. The census writer
+    /// makes the same comparison over the same subset (`parameter_estimation/joint/census.rs`,
+    /// `add_generic`), which is what [`SequenceObservation::matches_reference`] exists to keep
+    /// in one place. The cost is that a variant witnessed only by partial reads does not reach
+    /// the keep threshold. Scoring a partial needs a censored likelihood that does not exist
     /// yet (`spec/locus_generation.md` §3), so this is where the line sits today.
     ///
-    /// **The sum saturates, and it costs nothing here**: the only consumer compares the
-    /// total against `min_alt_obs`, default 2, so a total pinned at `u32::MAX` gives the
-    /// same verdict as the true one. The generic pre-pass panics on the same sum instead
+    /// **The denominator counts the same subset, because a share whose two halves count
+    /// different reads is not a share.** The partials are excluded because the numerator
+    /// cannot score them, and [`reads_without_observation`](Self::reads_without_observation)
+    /// is excluded because those reads showed nothing to compare. So at a locus where most
+    /// reads are partial, the denominator is far below the number of reads that covered the
+    /// ground, and the share is taken of what was actually scored. A rule taking the share of
+    /// *depth* would raise the bar using reads that could never have cleared it.
+    ///
+    /// **Both sums saturate, and it costs nothing here**: the consumer compares them against
+    /// `min_alt_obs` (default 2) and against each other, so a total pinned at `u32::MAX` gives
+    /// the same verdict as the true one, and reaching the cap needs four billion reads at one
+    /// locus. The generic pre-pass panics on the same sum instead
     /// (`parameter_estimation/generic/depth_and_alt_reads.rs`) because its number is a
     /// histogram key, where a wrapped count would be scored as a shallow site.
     ///
-    /// The pre-pass counts this same quantity per site under the name `alt_reads`.
-    /// *Non-reference read* is the spec's word (`spec/cohort_merge.md` §1.3); *alt*
-    /// survives in `min_alt_obs`, which is production's parameter name.
-    pub fn non_reference_reads(&self) -> u32 {
-        self.complete_observations()
-            .filter(|obs| !obs.matches_reference(&self.reference_bases))
-            .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
-    }
-
-    #[cfg(test)]
-    /// How many reads here were compared against the reference at all — the denominator
-    /// [`non_reference_reads`](Self::non_reference_reads) is the numerator of.
-    ///
-    /// **The same subset, and that is the whole reason it exists as its own method.** The
-    /// cohort merge's keep rule asks whether a sample's non-reference reads reach a
-    /// *share* of its reads (`spec/cohort_merge.md` §4.3), and a share whose two halves
-    /// count different reads is not a share. So this counts the
-    /// [`Complete`](ReadWitness::Complete) observations and nothing else: the partials are
-    /// excluded because their bases cover less than the locus and the numerator cannot
-    /// score them, and [`reads_without_observation`](Self::reads_without_observation) is
-    /// excluded because those reads showed nothing to compare.
-    ///
-    /// The consequence is worth stating plainly, because it is a difference from read
-    /// depth: at a locus where most reads are partial, this is far below the number of
-    /// reads that covered the ground, and the share is taken of what was actually scored.
-    /// A rule taking the share of *depth* would raise the bar using reads that could
-    /// never have cleared it.
-    ///
-    /// Saturating for the same reason as the numerator: the only consumer compares the
-    /// two, and reaching the cap needs four billion reads at one locus.
-    pub fn reads_compared_with_reference(&self) -> u32 {
-        self.complete_observations()
-            .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
-    }
-
-    /// `non_reference_reads` and
-    /// `reads_compared_with_reference` in **one pass**
-    /// over this record's sequences — the numerator and the denominator of the cohort merge's
-    /// keep rule, which asks for both at every record it walks
-    /// (`spec/cohort_merge.md` §4.3).
-    ///
-    /// The two methods above stay, because a caller that wants one of the numbers should not
-    /// have to discard the other; this exists because the merge wants both, and taken
-    /// separately they walk the same `observations` vector, apply the same
-    /// [`Complete`](ReadWitness::Complete) filter and read the same `num_obs` twice.
+    /// The pre-pass counts the numerator per site under the name `alt_reads`.
+    /// *Non-reference read* is the spec's word (`spec/cohort_merge.md` §1.3); *alt* survives
+    /// in `min_alt_obs`, which is production's parameter name.
     pub fn non_reference_and_compared_reads(&self) -> (u32, u32) {
         let mut non_reference = 0u32;
         let mut compared = 0u32;
@@ -2503,14 +2469,14 @@ mod tests {
                 obs(b"AGGT", ReadWitness::Complete, 2),
             ],
         );
-        assert_eq!(l.non_reference_reads(), 5);
+        assert_eq!(l.non_reference_and_compared_reads().0, 5);
 
         let quiet = locus_over_reference(
             region(10, 13),
             b"ACGT",
             vec![obs(b"ACGT", ReadWitness::Complete, 40)],
         );
-        assert_eq!(quiet.non_reference_reads(), 0);
+        assert_eq!(quiet.non_reference_and_compared_reads().0, 0);
     }
 
     /// **The denominator counts the same reads the numerator was chosen from**, which is
@@ -2541,14 +2507,14 @@ mod tests {
             ],
         );
 
-        assert_eq!(l.non_reference_reads(), 5);
-        assert_eq!(l.reads_compared_with_reference(), 45);
+        assert_eq!(l.non_reference_and_compared_reads().0, 5);
+        assert_eq!(l.non_reference_and_compared_reads().1, 45);
 
         // Reads that covered the locus and showed nothing are not compared either: they
         // are a scalar beside the observations, not an observation.
         let mut with_silent_reads = l;
         with_silent_reads.reads_without_observation = 100;
-        assert_eq!(with_silent_reads.reads_compared_with_reference(), 45);
+        assert_eq!(with_silent_reads.non_reference_and_compared_reads().1, 45);
     }
 
     /// **A partial is not counted, and the fixture says why.** This partial's read agreed
@@ -2573,7 +2539,7 @@ mod tests {
                 ),
             ],
         );
-        assert_eq!(l.non_reference_reads(), 2);
+        assert_eq!(l.non_reference_and_compared_reads().0, 2);
     }
 
     /// A locus nobody covered has no non-reference reads, and that is an answer rather
@@ -2582,7 +2548,7 @@ mod tests {
     #[test]
     fn a_locus_with_no_observations_has_no_non_reference_reads() {
         let uncovered = locus_over_reference(region(10, 13), b"ACGT", vec![]);
-        assert_eq!(uncovered.non_reference_reads(), 0);
+        assert_eq!(uncovered.non_reference_and_compared_reads().0, 0);
     }
 
     /// **The cost of the complete-only rule, pinned.** This partial's read *disagreed*
@@ -2607,7 +2573,7 @@ mod tests {
                 7,
             )],
         );
-        assert_eq!(l.non_reference_reads(), 0);
+        assert_eq!(l.non_reference_and_compared_reads().0, 0);
     }
 
     /// **Saturating, not wrapping** — spec §11's trap, at the boundary that separates the
@@ -2625,6 +2591,6 @@ mod tests {
                 obs(b"AGGT", ReadWitness::Complete, u32::MAX),
             ],
         );
-        assert_eq!(l.non_reference_reads(), u32::MAX);
+        assert_eq!(l.non_reference_and_compared_reads().0, u32::MAX);
     }
 }

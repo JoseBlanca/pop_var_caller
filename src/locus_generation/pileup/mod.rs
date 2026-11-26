@@ -102,14 +102,6 @@ mod errors;
 mod fast_column;
 mod generator;
 mod genome_walk;
-// **Measurement scaffolding, not part of the walk** — per-read-group sums of the minted
-// per-read error in both the shapes an average can be taken in, so the gap between the
-// geometric mean the scale uses and the arithmetic one the spec first asked for can be
-// measured on real reads. Off unless `PVC_MINTED_ERROR_CENSUS=1`; read by
-// `ng_minted_error_means`. The module's own header is the documentation; a doc comment
-// here as well would be resolved in *this* module's scope, where the names it links are
-// not in scope, and `cargo doc` counts each of those as an error.
-pub mod minted_error_census;
 mod open_record;
 /// **ng's, not a copy** — the deterministic per-read number both depth caps select on,
 /// so which reads survive a cap is a fact about the reads and not about the container
@@ -452,56 +444,6 @@ pub use generator::{
 /// already summed, and minting is the walk's own business.
 #[cfg(test)]
 pub(crate) use open_record::minted_ln_read_error;
-
-/// **Measurement scaffolding, not part of the walk.** Process-global tallies of how many
-/// columns the walk saw and how many of them were the *ordinary* column — one covered base,
-/// every contributor showing a plain reference-anchored match, nothing to reconcile. Read by
-/// `ng_generic_walk_probe`; incremented from
-/// [`genome_walk`](crate::locus_generation::pileup) only when `PVC_COLUMN_CENSUS=1`.
-pub mod column_census {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    macro_rules! counters {
-        ($($name:ident),* $(,)?) => {
-            $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
-        };
-    }
-
-    /// **Always counted, unlike everything below** — how many columns the ordinary-column
-    /// path answered. A fast lane that never fires and one that works look identical in a
-    /// timing, so this one is not behind the env gate. One relaxed increment per ordinary
-    /// column, against the ~90 reads that column would otherwise fold.
-    pub static FAST_COLUMNS: AtomicU64 = AtomicU64::new(0);
-
-    counters! {
-        COLUMNS,
-        COLUMNS_ORDINARY,
-        CONTRIBUTORS,
-        CONTRIBUTORS_ORDINARY,
-        REJECT_RECORD_ALREADY_OPEN,
-        REJECT_INDEL_EVENT,
-        REJECT_READ_HAS_DELETION,
-        REJECT_MATE_OVERLAP,
-        REJECT_DEPTH_CAP,
-        REJECT_MULTI_READ_GROUP,
-        REJECT_READ_HAS_INDEL,
-        COLUMNS_SIMPLE,
-        CONTRIBUTORS_SIMPLE,
-        COLUMNS_SIMPLE_WITH_MATE,
-        CONTRIBUTORS_SIMPLE_WITH_MATE,
-    }
-
-    /// Whether the census is armed for this process. Read once; the walk pays a relaxed
-    /// atomic load per column when it is off.
-    pub fn enabled() -> bool {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var_os("PVC_COLUMN_CENSUS").is_some_and(|v| v == "1"))
-    }
-
-    pub(super) fn add(counter: &AtomicU64, n: u64) {
-        counter.fetch_add(n, Ordering::Relaxed);
-    }
-}
 
 // **Not `pub`: no consumer outside this module, and it is production's name.** Kept in
 // scope rather than deleted because `generator.rs` reaches it as

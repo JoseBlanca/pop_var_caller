@@ -924,11 +924,6 @@ impl OpenPileupRecord {
         // distinct allele × witness extent × read group); beyond that it spills and behaves
         // as the `Vec` did.
         let mut observation_alleles: SmallVec<[usize; 4]> = SmallVec::new();
-        // **Measurement scaffolding, and the check is hoisted out of the loop on purpose.**
-        // An unarmed walk pays one cached load per record against the ~90 reads that record
-        // folds; inside the loop it would pay one per read, ~113 M times over a whole-genome
-        // contig. See [`minted_error_census`](super::minted_error_census) for what it is for.
-        let census_armed = super::minted_error_census::enabled();
         // **In place, ascending by `read_id`** — see the note above on why that order is
         // the determinism guarantee and why it no longer costs a sort.
         for (_read_id, state) in self.folded_reads.iter() {
@@ -967,18 +962,6 @@ impl OpenPileupRecord {
                 }
             }
             let read_group = state.read_group;
-            // **The one place a read's own minted error still exists as one read's.** Below,
-            // `add_contribution` pools it into an observation's `q_sum` and the read is gone;
-            // `Σ ε` cannot be recovered from `Σ ln ε` afterwards, which is why the census sums
-            // both here. Complete witnesses only, because those are the reads the pre-pass's
-            // calibration accumulator sums over.
-            if census_armed && matches!(read_witness, ReadWitness::Complete) {
-                super::minted_error_census::record_read(
-                    u64::from(self.pos),
-                    read_group,
-                    state.contribution.q_sum,
-                );
-            }
             let existing = observations.iter().zip(&observation_alleles).position(
                 |(observation, &observation_allele)| {
                     observation_allele == state.allele_index
@@ -3617,8 +3600,8 @@ fn min_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> u8 {
 /// on a read that still counts. Such a read adds nothing to a sum of logarithms and a whole unit
 /// to a sum of probabilities: **9 read-positions in 1,000 on HG002 carry `ε = 1` and they are 73%
 /// of Σ ε**. So an arithmetic mean of what this returns is largely a count of overlapping mates.
-/// Measured by `examples/ng_minted_error_means.rs`, which sums both shapes where a read still
-/// exists.
+/// Measured by `examples/ng_minted_error_means.rs`, which summed both shapes where a read still
+/// existed; that example and the census it read are deleted, and git history keeps both.
 ///
 /// **What pins this function today** is
 /// `the_two_column_paths_mint_one_reads_error_the_same_way` — that the generator's own two
