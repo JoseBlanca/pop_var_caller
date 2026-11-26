@@ -174,14 +174,6 @@ struct OpOffset {
 pub(super) struct CigarCursor {
     offsets: Vec<OpOffset>,
     mode: CursorMode,
-    /// Whether this read's CIGAR contains an `I` or a `D` op at all.
-    ///
-    /// The **cheap** side of "can this read do anything but match the reference here?".
-    /// [`has_deletion`](Self::has_deletion) rules out an event reaching in from an earlier
-    /// anchor; this one additionally rules out an indel *anchored* at the position being
-    /// asked about, without looking at the position. A read for which it is `false` answers
-    /// [`events_at`](Self::events_at) with at most one `Match`, at every position.
-    has_indel: bool,
     /// Whether this read's CIGAR contains a `D` op at all.
     ///
     /// The one thing that makes [`events_overlapping`](Self::events_overlapping) over a
@@ -232,17 +224,8 @@ impl CigarCursor {
         Self {
             offsets,
             mode,
-            has_indel: cigar
-                .iter()
-                .any(|op| matches!(op, CigarOp::Deletion(_) | CigarOp::Insertion(_))),
             has_deletion: cigar.iter().any(|op| matches!(op, CigarOp::Deletion(_))),
         }
-    }
-
-    /// Whether this read can produce anything but a `Match` — see
-    /// [`has_indel`](Self::has_indel).
-    pub(super) fn matches_only(&self) -> bool {
-        !self.has_indel
     }
 
     /// Whether every event this read can produce sits entirely at its own anchor
@@ -550,12 +533,13 @@ impl CigarCursor {
         }
     }
 
-    /// The base and BAQ-capped quality this read shows at `walker_pos`, for a read that can
-    /// only ever match ([`matches_only`](Self::matches_only)).
+    /// The base and BAQ-capped quality this read shows at `walker_pos`, or
+    /// [`NotOneLetter`](BaseShown::NotOneLetter) when an insertion or a deletion is anchored
+    /// there.
     ///
-    /// **The same answer [`events_at`](Self::events_at) gives, in scalars.** For a CIGAR
-    /// with no `I` and no `D` op, `events_at` can push at most one `ReadEvent::Match` — the
-    /// other two arms are unreachable — so the whole of its result is this pair, or nothing.
+    /// **The same answer [`events_at`](Self::events_at) gives, in scalars**, wherever
+    /// `events_at` would push at most one `ReadEvent::Match`: then the whole of its result
+    /// is this pair, or nothing.
     /// The `N`-base and adaptor rules are applied here in the same order and with the same
     /// tests, because they decide whether there is an event at all.
     ///
