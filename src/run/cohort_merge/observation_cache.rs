@@ -350,6 +350,11 @@ pub trait ObservationSource {
     /// cheaply — a reader over a stored sample, which has the summary in the record's head and
     /// need not decode the body behind it — overrides this and keeps its evidence, at the cost
     /// of implementing [`build`](Self::build).
+    ///
+    /// **A source gives one shape for its whole life, and every source of one cohort gives the
+    /// same one**: built records (including [`StandIn::Record`]) or kept bodies (including
+    /// [`StandIn::Body`]), never both. The cache stores the two in separate lists indexed in
+    /// step with the summaries, and refuses a source or a cohort that mixes them.
     fn next_drawn(
         &mut self,
         spare: Option<SampleLocusObservations>,
@@ -558,6 +563,10 @@ struct SampleWindow<S> {
     held_bodies: Vec<core::ops::Range<usize>>,
     /// Whether this source has ever kept a body — latched, so an emptied window still says so.
     keeps_evidence: bool,
+    /// Whether this source has ever built a record — latched like `keeps_evidence`, and the
+    /// other half of the check that a source never does both
+    /// ([`ObservationSource::next_drawn`]).
+    builds_evidence: bool,
     /// The last base of the last observation drawn from `source` — the ordering check's memory.
     last_drawn_reach: Option<GenomePosition>,
     /// This sample's window-coverage measurement, at whatever stage the pass has reached it.
@@ -733,6 +742,7 @@ impl<S: ObservationSource> SampleWindow<S> {
             source,
             spent: _,
             keeps_evidence: _,
+            builds_evidence: _,
             last_drawn_reach: _,
         } = self;
         // **Where the arena's left edge lands, read before the drain moves it.** The first
@@ -971,6 +981,7 @@ impl<S> ObservationCache<S> {
                     held_summaries: Vec::new(),
                     held_bodies: Vec::new(),
                     keeps_evidence: false,
+                    builds_evidence: false,
                     last_drawn_reach: None,
                     window_coverage: WindowCoverageInProgress::new(),
                 })
@@ -1074,6 +1085,7 @@ impl<S> ObservationCache<S> {
                     held_summaries: _,
                     held_bodies: _,
                     keeps_evidence: _,
+                    builds_evidence: _,
                     last_drawn_reach: _,
                 } = window;
                 let WindowCoverageInProgress {
@@ -1602,7 +1614,22 @@ where
         E: From<ReferenceUnreadable>,
     {
         self.read_the_ground_and_measure_coverage_over_it(region, chain_reach, measure)?;
-        self.keeps_evidence |= self.samples.iter().any(|sample| sample.keeps_evidence);
+        // **Whether a window hands out records or summaries is decided for the whole cohort**
+        // (`keeps_evidence`), so one sample that builds beside one that keeps would have a
+        // builder index the first one's empty list of kept bodies. Each sample's own draw
+        // refuses mixing within it; this refuses it across them.
+        let (mut kept, mut built) = (false, false);
+        for sample in &self.samples {
+            kept |= sample.keeps_evidence;
+            built |= sample.builds_evidence;
+        }
+        assert!(
+            !(kept && built),
+            "this cohort's sources have both built and kept evidence; every source of one \
+             cohort must give the same shape. This is a defect in ng rather than anything \
+             about the data.",
+        );
+        self.keeps_evidence |= kept;
         self.covered_to = Some(
             self.covered_to
                 .map_or(chain_reach, |reached| reached.max(chain_reach)),
@@ -1872,6 +1899,7 @@ where
                 };
                 match observation {
                     Drawn::Built(record) => {
+                        self.builds_evidence = true;
                         self.held_summaries.push(LocusSummary::of(&record));
                         self.held_observations.push(record);
                     }
@@ -1884,7 +1912,10 @@ where
                         self.held_summaries
                             .push(LocusSummary::over_depth_ceiling(region));
                         match stand_in {
-                            StandIn::Record(record) => self.held_observations.push(record),
+                            StandIn::Record(record) => {
+                                self.builds_evidence = true;
+                                self.held_observations.push(record);
+                            }
                             StandIn::Body(body) => {
                                 self.keeps_evidence = true;
                                 self.held_bodies.push(body);
@@ -1892,6 +1923,21 @@ where
                         }
                     }
                 }
+                // **The records and the bodies are indexed in step with the summaries**, so a
+                // source that built some and kept others would have its evidence read from the
+                // wrong record, or from past the end of one list. No source mixes today — a
+                // walker builds, a psp reader keeps — and this says so loudly if one ever does.
+                // Two flags compared, once per observation drawn.
+                assert!(
+                    !(self.builds_evidence && self.keeps_evidence),
+                    "this sample's source has both built and kept evidence, at {}; a source \
+                     must give one shape for its whole life. This is a defect in ng rather \
+                     than anything about the data.",
+                    self.held_summaries
+                        .last()
+                        .expect("a summary was just pushed")
+                        .region(),
+                );
             }
             let observation = self.held_summaries[considered];
             if observation.start_position() > *chain_reach {
@@ -1936,6 +1982,7 @@ where
             spent: _,
             spare: _,
             keeps_evidence: _,
+            builds_evidence: _,
             last_drawn_reach: _,
         } = self;
         let first_new = window_coverage.first_not_yet_observed(held_summaries);
@@ -3411,6 +3458,91 @@ mod tests {
             Some(40),
             "nothing survives, so every body drawn may go — named by the last one's end",
         );
+    }
+
+    /// One sample's reader that builds or keeps each record as `keeps` says, record by record
+    /// — the shape no real source has, and the one the shape checks exist to refuse.
+    struct ShapedSource {
+        regions: Vec<GenomeRegion>,
+        /// Whether record *i* is kept (its body the ten bytes at `10i`) rather than built.
+        keeps: Vec<bool>,
+        drawn: usize,
+    }
+
+    impl ObservationSource for ShapedSource {
+        type Error = SourceFailed;
+
+        fn next_observation(
+            &mut self,
+            _spare: Option<SampleLocusObservations>,
+        ) -> Option<Result<SampleLocusObservations, SourceFailed>> {
+            unreachable!("the cache draws this source through `next_drawn`")
+        }
+
+        fn next_drawn(
+            &mut self,
+            _spare: Option<SampleLocusObservations>,
+        ) -> Option<Result<Drawn, SourceFailed>> {
+            let region = *self.regions.get(self.drawn)?;
+            let keep = self.keeps[self.drawn];
+            let body = self.drawn * 10..self.drawn * 10 + 10;
+            self.drawn += 1;
+            let record = observation_over(region);
+            Some(Ok(if keep {
+                Drawn::Kept {
+                    summary: LocusSummary::of(&record),
+                    body,
+                }
+            } else {
+                Drawn::Built(record)
+            }))
+        }
+
+        fn build(
+            &self,
+            body: core::ops::Range<usize>,
+        ) -> Result<SampleLocusObservations, SourceFailed> {
+            Ok(observation_over(self.regions[body.start / 10]))
+        }
+    }
+
+    /// **A source that builds one record and keeps the next is refused.** The cache holds a
+    /// sample's built records and kept bodies in two lists indexed in step with its summaries,
+    /// so a sample mixing the two would read the wrong record's evidence, or index past the end
+    /// of one list.
+    #[test]
+    #[should_panic(expected = "both built and kept")]
+    fn a_source_that_switches_from_building_to_keeping_is_refused() {
+        let source = ShapedSource {
+            regions: vec![region(42, 42), region(45, 45)],
+            keeps: vec![false, true],
+            drawn: 0,
+        };
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+
+        let _ = cache.cover(region(40, 50));
+    }
+
+    /// **A cohort with one building sample and one keeping sample is refused**, though each
+    /// sample is consistent on its own: whether a window hands out records or summaries is
+    /// decided for the whole cohort, so a builder would index the building sample's empty list
+    /// of kept bodies.
+    #[test]
+    #[should_panic(expected = "both built and kept")]
+    fn a_cohort_mixing_a_building_and_a_keeping_source_is_refused() {
+        let building = ShapedSource {
+            regions: vec![region(42, 42)],
+            keeps: vec![false],
+            drawn: 0,
+        };
+        let keeping = ShapedSource {
+            regions: vec![region(45, 45)],
+            keeps: vec![true],
+            drawn: 0,
+        };
+        let mut cache = ObservationCache::over_fixture(vec![building, keeping]);
+
+        let _ = cache.cover(region(40, 50));
     }
 
     /// **Every sample's window is evicted, not merely the first.** Both samples here have a
