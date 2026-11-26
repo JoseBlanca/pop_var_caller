@@ -446,7 +446,9 @@ fn hex(digest: &[u8; 16]) -> String {
 }
 
 fn unhex(text: &str) -> Option<[u8; 16]> {
-    if text.len() != 32 {
+    // `len` counts bytes, and slicing in byte pairs is only safe when every character is one
+    // byte: a corrupt footer holding a multi-byte character must read as unreadable, not panic.
+    if text.len() != 32 || !text.is_ascii() {
         return None;
     }
     let mut out = [0u8; 16];
@@ -996,6 +998,26 @@ mod tests {
         assert!(
             ParquetRecordBatchReaderBuilder::try_new(File::open(&leftover).expect("open")).is_err(),
             "a footerless parquet file cannot be opened, so it cannot read as a short catalog"
+        );
+    }
+
+    /// **A digest field holding a multi-byte character is unreadable, not a crash.** The length
+    /// check counts bytes, so 30 ASCII digits and one two-byte `é` pass it; reading the digits in
+    /// pairs then cuts the `é` in half. The footer is text from a file, so a corrupt footer must
+    /// come back as `None` (and from there as `Unreadable`), never as a panic.
+    #[test]
+    fn a_digest_with_a_multi_byte_character_is_unreadable() {
+        let text = format!("{}é{}", "0".repeat(15), "0".repeat(15));
+        assert_eq!(
+            text.len(),
+            32,
+            "32 bytes, so the length check alone lets it through"
+        );
+        assert_eq!(unhex(&text), None);
+        assert_eq!(
+            unhex(&"0f".repeat(16)),
+            Some([0x0f; 16]),
+            "a valid digest still reads"
         );
     }
 }
