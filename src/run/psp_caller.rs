@@ -1668,6 +1668,23 @@ mod tests {
         segmentation: Segmentation,
         parameters: RunParameters,
     ) -> Result<PspVariantCaller, RunError> {
+        open_the_caller_merging(
+            cohort,
+            reference,
+            segmentation,
+            parameters,
+            MergeParameters::DEFAULT,
+        )
+    }
+
+    /// The same, under the given merge parameters rather than the shipped ones.
+    fn open_the_caller_merging(
+        cohort: OpenPspCohort,
+        reference: &OpenReference,
+        segmentation: Segmentation,
+        parameters: RunParameters,
+        merge_parameters: MergeParameters,
+    ) -> Result<PspVariantCaller, RunError> {
         PspVariantCaller::open(
             cohort,
             StoredCohortInputs {
@@ -1678,7 +1695,7 @@ mod tests {
             parameters,
             RunnableCallingLoopConfig::default(),
             CandidateSelectionConfig::default(),
-            MergeParameters::DEFAULT,
+            merge_parameters,
         )
     }
 
@@ -2660,6 +2677,121 @@ mod tests {
             records(&gathered),
             "the records themselves are the same either way"
         );
+    }
+
+    /// **The round driver writes what the streaming driver writes.** Psp mode picks its driver
+    /// by how many building regions are in flight: one takes the streaming driver, more take
+    /// the round driver, which builds and genotypes a round's regions on the pool and folds the
+    /// records back in genome order. The output must not depend on which was taken.
+    ///
+    /// Nothing else holds the two together on every machine. The mode-equivalence test compares
+    /// direct mode with psp mode, and psp mode takes the round driver only when the test pool
+    /// has more than one thread; on a one-core machine both sides take the streaming driver.
+    /// Here the choice is made by the merge parameters alone, so both drivers run wherever the
+    /// test does.
+    ///
+    /// The regions are ten bases wide, so the variants below fall in many regions over both
+    /// fixture contigs, some of them next to a region boundary, and a round of four holds
+    /// several regions with variants and some without. The site-quality floor is zero so that
+    /// every locus built is written, and with fragments gathered so the read links compared
+    /// span regions and rounds.
+    #[test]
+    fn the_round_driver_writes_what_the_streaming_driver_writes() {
+        use crate::run::cohort_merge::{
+            CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen,
+        };
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let variant_on = |contig: u32, start: u64| {
+            let mut record = a_record(contig, start, 1);
+            record.observations[0].bases = Box::from(&b"T"[..]);
+            record.reference_bases = Box::from(&b"A"[..]);
+            record.observations[0].chain_ids = vec![0, 1, 2];
+            record
+        };
+        // Inside the run's typed ground (contig 0 from 10 to 40, contig 1 from 10 to 150), with
+        // 20 and 21 on either side of a region boundary. Both samples show every variant: one
+        // seen in a single sample's three reads is not written under these fixtures, and the
+        // comparison needs records to compare.
+        let both: Vec<_> = [
+            (0, 12),
+            (0, 13),
+            (0, 20),
+            (0, 21),
+            (0, 31),
+            (0, 38),
+            (1, 15),
+            (1, 40),
+            (1, 60),
+            (1, 120),
+        ]
+        .into_iter()
+        .map(|(contig, start)| variant_on(contig, start))
+        .collect();
+        let paths = vec![
+            a_psp_holding(&dir, "alpha", &segmentation, &both),
+            a_psp_holding(&dir, "beta", &segmentation, &both),
+        ];
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let written_with = |regions_in_flight: usize| {
+            let cohort = OpenPspCohort::open(&paths).expect("the two files agree");
+            let parameters = parameters_for(cohort.read_groups());
+            let merge_parameters = MergeParameters {
+                cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen(
+                    std::num::NonZeroU32::new(10).expect("non-zero"),
+                ),
+                cohort_locus_builder_regions_in_flight: CohortLocusBuilderRegionsInFlight(
+                    std::num::NonZeroUsize::new(regions_in_flight).expect("non-zero"),
+                ),
+                ..MergeParameters::DEFAULT
+            };
+            let caller = open_the_caller_merging(
+                cohort,
+                &reference,
+                Arc::try_unwrap(a_segmentation(ground(false))).expect("one handle"),
+                parameters,
+                merge_parameters,
+            )
+            .expect("the cohort matches the run")
+            .with_min_site_quality(crate::types::Phred::ZERO)
+            .with_fragments_gathered(true);
+            let mut handed = Vec::new();
+            let (tallies, _stored) = caller
+                .call_cohort_handing_each_record_over(
+                    &the_shipped_genotyper(),
+                    &mut |record: &VcfRecord, window_coverage: &[WindowCoverage], fragments| {
+                        // `WindowCoverage` has no `PartialEq` (its floats are compared bitwise
+                        // only where a run is compared with a run), so its printed form is
+                        // what is compared.
+                        handed.push((record.clone(), format!("{window_coverage:?}"), fragments));
+                        Ok::<(), std::io::Error>(())
+                    },
+                )
+                .expect("a cohort of two stored samples calls");
+            (handed, format!("{tallies:?}"))
+        };
+
+        let (streamed, streamed_tallies) = written_with(1);
+        let (in_rounds, in_rounds_tallies) = written_with(4);
+
+        assert!(
+            streamed.len() == 10,
+            "every one of the ten variant positions is written, so the comparison compares \
+             something: {} records",
+            streamed.len(),
+        );
+        assert!(
+            streamed
+                .iter()
+                .all(|(_, _, fragments)| !fragments.is_empty()),
+            "the same three reads at every variant link each record to the others",
+        );
+        assert_eq!(
+            in_rounds, streamed,
+            "the round driver hands over what the streaming driver does, in the same order",
+        );
+        assert_eq!(in_rounds_tallies, streamed_tallies, "and counts the same");
     }
 
     /// **A `.fai` holds no bases**, and a record with an empty allele is padded from the
