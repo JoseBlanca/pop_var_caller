@@ -85,7 +85,7 @@ pub const MAX_PENDING_MATES: usize = 1_000_000;
 
 /// Fraction of the active-read cap at which the allocator emits a
 /// one-shot soft warning. Lets the user spot a pathological-coverage
-/// region before the run trips the cap.
+/// region before the walk starts giving held reads up.
 fn high_water_warn_threshold(cap: u32) -> u32 {
     cap.saturating_mul(3) / 4
 }
@@ -453,17 +453,20 @@ impl ChainIdAllocator {
     /// thing that does happen — reads dropping out of the evidence,
     /// which is silent unless something says so.
     ///
-    /// The number to act on is `positions_short_of_cap`, so the
-    /// warning names it rather than restating the ceiling.
+    /// **It names no setting to raise, because there is none** (2026-11-26).
+    /// The ceiling is `PileupGeneratorConfig::max_active_reads`, which no
+    /// command offers; the earlier wording told the user to raise it. What
+    /// a user can do is leave the region out of `--regions`, so the warning
+    /// says that.
     fn maybe_warn_high_water(&mut self, chrom_id: u32, pos: u32) {
         let threshold = high_water_warn_threshold(self.max_active_reads);
         if !self.high_water_warned && self.counters.active_reads_high_water >= threshold {
             self.high_water_warned = true;
             tracing::warn!(
                 "pileup walker is holding {}/{} reads at chrom_id={} pos={}; \
-                 past {} it starts dropping reads it is holding, and the positions that \
-                 lose coverage are counted in positions_short_of_cap (raise \
-                 max_active_reads if that number is not zero)",
+                 past {} it gives up held reads, chosen by read name, so positions in \
+                 this region may be scored on fewer reads than the input holds. The \
+                 limit is fixed; to avoid it, leave this region out of --regions",
                 self.counters.active_reads_high_water,
                 self.max_active_reads,
                 chrom_id,

@@ -276,7 +276,8 @@ pub enum PileupGeneratorConfigError {
 /// to instead. A caller that wants to know what a walk saw reads this struct — the
 /// dump tool prints every field of it — and a caller that wants a *message* is
 /// asking for a policy a library cannot set for it. The one warning in this module
-/// is `chain_id_allocator`'s high-water line, inherited verbatim from production.
+/// is `chain_id_allocator`'s high-water line: once the walk holds three-quarters of
+/// `max_active_reads`, it says that held reads will be given up past the ceiling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PileupGeneratorCounts {
     /// Reads the walk admitted, across every segment.

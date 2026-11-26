@@ -839,21 +839,16 @@ impl WalkerState {
             last_admitted_chrom_id: None,
             last_admitted_locus: None,
             active_reads: ActiveReads::new(),
-            // **The allocator is handed a cap it can never reach, on purpose.**
+            // **A placeholder allocator with no active-read cap of its own.**
             //
-            // `max_active_reads` is still the ceiling — `admit_read` enforces it, by
-            // refusing the read rather than by failing the walk. Passing the same number
-            // here as well would leave the allocator's two responses to a deep region live
-            // underneath a walk that no longer wants either: a hard
-            // `ActiveReadsExhausted` that can no longer be reached, and a one-shot warning
-            // at three-quarters of the cap telling the user *"the run will fail"*, which
-            // by then is untrue. Neither can be edited — `chain_id_allocator.rs` is locked
-            // byte-identical to production's — so they are put out of reach instead.
-            //
-            // What is lost is a backstop on a bug in the shed itself. It was worth little:
-            // its response to an over-full active set was to abort the run, which is the
-            // behaviour being removed here, and the same over-full set is visible after
-            // the fact in `active_reads_high_water`.
+            // `max_active_reads` is the ceiling, and `admit_read` enforces it by giving up
+            // a held read or refusing the arriving one, never by failing the walk. A run
+            // never walks with this allocator: the generator replaces it through
+            // `adopting_chain_ids` with one built on `max_active_reads`, whose one-shot
+            // warning at three-quarters of the ceiling is the run's only message that the
+            // ceiling is near. Its `ActiveReadsExhausted` cannot fire there either, because
+            // `admit_read` makes room first. Only a walker that is never handed an
+            // allocator, such as one the tests build through `run`, walks with this one.
             chain_ids: ChainIdAllocator::with_caps(u32::MAX, config.mate_lookup_window),
             open_records: OpenPileupRecordTable::with_cap(config.max_record_span),
             summary: RunSummary::default(),
