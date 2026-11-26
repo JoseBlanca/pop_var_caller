@@ -1056,10 +1056,11 @@ impl WalkerState {
         // ends up holding an unbiased subsample of the reads over the region instead of
         // its leftmost-starting prefix.
         //
-        // **Nothing is paid for this on the ordinary path.** No key is stored on a read,
-        // no index is kept in key order: the keys are computed by a scan, inside this
-        // branch, which is entered only when the set is already full. At the ceiling this
-        // ships, that is no position on any real fixture measured.
+        // **Almost nothing is paid for this on the ordinary path.** Each held read carries
+        // its key, hashed once at admission; no index is kept in key order, and the worst
+        // key is found by a scan inside this branch, which is entered only when the set is
+        // already full. At the ceiling this ships, that is no position on any real fixture
+        // measured.
         //
         // **Eviction is an early expiry and adds no case to the fold.** A read given back
         // here may already have folded into open records; so may a read whose end the
@@ -2106,10 +2107,10 @@ fn pair_has_indel(a: &ReadContribution, b: &ReadContribution) -> bool {
 ///
 /// # The key comes from the active set, not from the contributor
 ///
-/// A `ReadContribution` does not carry its read's query name, and putting the key on it
-/// would cost eight bytes on every contributor at every position for a decision taken at
-/// 909 positions in 251,792. So the key is looked up here, through the same secondary
-/// index the fold uses, and only on the positions that cap.
+/// Putting the key on a `ReadContribution` would cost eight bytes on every contributor at
+/// every position for a decision taken at 909 positions in 251,792. So the key, which each
+/// held read carries from admission, is looked up here through the same secondary index
+/// the fold uses, and only on the positions that cap.
 ///
 /// A contributor whose read is somehow not in the active set — a state no path reaches,
 /// since the contributor list is built from that very set two dozen lines earlier — is
@@ -2127,15 +2128,11 @@ fn sample_to_cap(
     keys.extend(contributors.iter().enumerate().map(|(index, contrib)| {
         // A read missing from the active set — see below — is put in group `u32::MAX` with
         // key `u64::MAX`, so it is dropped before any read of a real group would be.
-        let (group, key) =
-            active_reads
-                .get_by_read_id(contrib.read_id)
-                .map_or((u32::MAX, u64::MAX), |active| {
-                    (
-                        active.read.read_group.get(),
-                        read_sampling::sampling_key(&active.read),
-                    )
-                });
+        let (group, key) = active_reads
+            .get_by_read_id(contrib.read_id)
+            .map_or((u32::MAX, u64::MAX), |active| {
+                (active.read.read_group.get(), active.sampling_key)
+            });
         (group, key, index as u32)
     }));
     // `(group, key, index)`: the index breaks a key tie deterministically, and it is the
