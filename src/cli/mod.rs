@@ -11,12 +11,14 @@ pub mod call_from_alignments;
 pub mod call_from_psps;
 pub mod calling_run;
 pub mod command_line;
+#[cfg(test)]
 mod cross_platform_digests;
 pub mod estimate_contamination;
 pub mod estimate_parameters;
 pub mod generate_psps;
 pub mod inspect_psp;
-pub mod mode_equivalence;
+#[cfg(test)]
+mod mode_equivalence;
 pub mod parsers;
 pub(crate) mod provenance;
 pub mod psp_inputs;
