@@ -751,15 +751,34 @@ fn decode_directory(cursor: &mut Cursor<'_>) -> Result<Vec<(SectionKey, ByteExte
     }
     // **No two sections may share a byte**, since a call reading one seeks to its own offset and
     // takes its own length; overlapping extents would hand a caller another section's bytes.
-    for (index, (_, mine)) in entries.iter().enumerate() {
-        if entries[index + 1..]
-            .iter()
-            .any(|(_, theirs)| mine.overlaps(*theirs))
-        {
+    refuse_overlapping_extents(entries.iter().map(|(_, extent)| *extent))?;
+    Ok(entries)
+}
+
+/// [`CensusError::Malformed`] when two of `extents` share a byte, or when one ends past
+/// `u64::MAX`.
+///
+/// **One pass over the extents sorted by offset and then length**, not a comparison of every
+/// pair: a sample with hundreds of read groups has tens of thousands of sections. In that order
+/// an extent shares a byte with an earlier one exactly when some earlier one ends past its start,
+/// which is the rule [`ByteExtent::overlaps`] states — an empty extent included, so an empty
+/// section at another's first byte is allowed and one strictly inside another is not.
+fn refuse_overlapping_extents(
+    extents: impl Iterator<Item = ByteExtent>,
+) -> Result<(), CensusError> {
+    let mut by_offset: Vec<(u64, u64)> = extents
+        .map(|extent| (extent.offset(), extent.len()))
+        .collect();
+    by_offset.sort_unstable();
+    let mut furthest_end = 0_u64;
+    for (offset, len) in by_offset {
+        if furthest_end > offset {
             return Err(CensusError::Malformed);
         }
+        let end = offset.checked_add(len).ok_or(CensusError::Malformed)?;
+        furthest_end = furthest_end.max(end);
     }
-    Ok(entries)
+    Ok(())
 }
 
 fn decode_key(cursor: &mut Cursor<'_>) -> Result<SectionKey, CensusError> {
@@ -1419,6 +1438,38 @@ mod tests {
             last.1.offset() + last.1.len(),
             bytes.len() as u64,
             "and the last one ends at the end of the file"
+        );
+    }
+
+    /// **The one-pass overlap check refuses exactly the directories a comparison of every pair
+    /// refuses.** Every list of three extents with offsets 0–3 and lengths 0–2, in every order,
+    /// is checked both ways — which covers empty extents at, inside and between other extents,
+    /// duplicates, and extents that abut.
+    #[test]
+    fn the_overlap_check_agrees_with_comparing_every_pair() {
+        let small: Vec<ByteExtent> = (0..4)
+            .flat_map(|offset| (0..3).map(move |len| ByteExtent::new(offset, len)))
+            .collect();
+        let mut refused = 0;
+        for &a in &small {
+            for &b in &small {
+                for &c in &small {
+                    let three = [a, b, c];
+                    let pairwise = (0..3).any(|i| (i + 1..3).any(|j| three[i].overlaps(three[j])));
+                    let one_pass = refuse_overlapping_extents(three.into_iter()).is_err();
+                    assert_eq!(one_pass, pairwise, "{three:?}");
+                    refused += usize::from(pairwise);
+                }
+            }
+        }
+        assert!(
+            refused > 0 && refused < small.len().pow(3),
+            "both answers occur"
+        );
+
+        assert!(
+            refuse_overlapping_extents([ByteExtent::new(u64::MAX, 1)].into_iter()).is_err(),
+            "an extent whose end does not fit in a u64 is malformed",
         );
     }
 
