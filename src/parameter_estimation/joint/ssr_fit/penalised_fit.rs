@@ -992,8 +992,10 @@ fn fitted_period_from(
             if class.is_some() {
                 let concentration = float::exp(-spreads[point])
                     .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1);
-                moved = moved
-                    .max((float::ln(concentration) - float::ln(period.concentration[point])).abs());
+                moved = larger_change(
+                    moved,
+                    (float::ln(concentration) - float::ln(period.concentration[point])).abs(),
+                );
                 period.concentration[point] = concentration;
             }
         }
@@ -1717,8 +1719,21 @@ impl Period {
     /// **Every number a round moves, on the scale the fit draws it on**: per class, its slip rate,
     /// shorter share and fall-off as logits, its spread and allele-length shares as logarithms; then
     /// every multiplier as a logarithm.
+    ///
+    /// **Every number is finite.** A logit at ±[`LARGEST_UNBOUNDED`] makes [`logistic`] exactly 0
+    /// or 1, and a share can underflow to 0; their logits and logarithms are infinite, and a jump
+    /// from an infinite number makes every number NaN. So an infinite logit is read as
+    /// ±[`LARGEST_UNBOUNDED`], and the logarithm of a share of 0 as −745, below that of the
+    /// smallest positive number (about −744.4). A finite value is left exactly as it is.
     fn state(&self) -> Vec<f64> {
-        let logit = |p: f64| float::ln(p / (1.0 - p));
+        let held = |value: f64, edge: f64| {
+            if value.is_infinite() {
+                edge.copysign(value)
+            } else {
+                value
+            }
+        };
+        let logit = |p: f64| held(float::ln(p / (1.0 - p)), LARGEST_UNBOUNDED);
         let mut state = Vec::new();
         for point in 0..self.points() {
             if self.class_at_point[point].is_none() {
@@ -1727,7 +1742,11 @@ impl Period {
             let s = self.slippage[point];
             state.extend([logit(s.level), logit(s.shorter_share), logit(s.fall_off)]);
             state.push(float::ln(self.concentration[point]));
-            state.extend(self.shares[point].iter().map(|share| float::ln(*share)));
+            state.extend(
+                self.shares[point]
+                    .iter()
+                    .map(|share| held(float::ln(*share), 745.0)),
+            );
         }
         state.extend(self.multipliers.iter().flatten().map(|m| float::ln(*m)));
         state
@@ -1748,10 +1767,17 @@ impl Period {
             };
             self.concentration[point] =
                 float::exp(next()).clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1);
-            let mut shares: Vec<f64> = (0..self.shares[point].len())
-                .map(|_| float::exp(next()))
-                .collect();
-            let total: f64 = shares.iter().sum();
+            let logs: Vec<f64> = (0..self.shares[point].len()).map(|_| next()).collect();
+            let mut shares: Vec<f64> = logs.iter().map(|log| float::exp(*log)).collect();
+            let mut total: f64 = shares.iter().sum();
+            // A jump can carry a logarithm past where `exp` overflows, or every one below where
+            // it underflows: then the largest is taken out first. Only then, so that the shares
+            // of every ordinary round keep their last bits.
+            if !(total.is_finite() && total > 0.0) {
+                let largest = logs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                shares = logs.iter().map(|log| float::exp(log - largest)).collect();
+                total = shares.iter().sum();
+            }
             for share in &mut shares {
                 *share /= total;
             }
@@ -1759,7 +1785,8 @@ impl Period {
         }
         if let Some(multipliers) = self.multipliers.as_mut() {
             for multiplier in multipliers {
-                *multiplier = float::exp(next());
+                // Held positive and finite, as a jump can carry its logarithm past either end.
+                *multiplier = float::exp(next()).clamp(f64::MIN_POSITIVE, f64::MAX);
             }
         }
     }
@@ -1804,7 +1831,7 @@ impl Period {
                     .iter()
                     .zip(&reached)
                     .map(|(a, b)| (a - b).abs())
-                    .fold(0.0, f64::max);
+                    .fold(0.0, larger_change);
                 self.set_state(&jumped);
                 self.squarem = SquaremCycle::Jumped {
                     fallback: reached,
@@ -1813,8 +1840,9 @@ impl Period {
                 jump
             }
             SquaremCycle::Jumped { fallback, to_beat } => {
-                // This round started from the jumped numbers.
-                if log_likelihood < to_beat {
+                // This round started from the jumped numbers. A NaN log-likelihood is turned
+                // back too: `<` alone would keep it.
+                if log_likelihood.is_nan() || log_likelihood < to_beat {
                     self.set_state(&fallback);
                     self.class_change
                         .iter_mut()
@@ -1847,7 +1875,7 @@ impl Period {
             .iter()
             .zip(&old)
             .map(|(new, old)| (float::ln(*new) - float::ln(*old)).abs())
-            .fold(0.0, f64::max);
+            .fold(0.0, larger_change);
         self.multipliers = Some(fitted);
         moved
     }
@@ -2199,9 +2227,9 @@ impl Period {
                         (float::ln(new_concentration) - float::ln(self.concentration[point])).abs()
                             * 0.01,
                     ])
-                    .fold(0.0, f64::max);
+                    .fold(0.0, larger_change);
                 self.class_change[point] = class_change;
-                change = change.max(class_change);
+                change = larger_change(change, class_change);
                 self.slippage[point] = new_slippage;
                 self.shares[point] = new_shares;
                 self.concentration[point] = new_concentration;
@@ -2209,7 +2237,7 @@ impl Period {
             if let (Some(pull), Some(_)) = (fit.read_group_multiplier_pull, &self.multipliers) {
                 let moved = self.update_multipliers(&counts, pull);
                 self.multiplier_change = moved;
-                change = change.max(moved);
+                change = larger_change(change, moved);
             }
             // Not while the curves' stiffness is first searched for, when a round's step reflects
             // the search as much as the reads.
@@ -2221,7 +2249,7 @@ impl Period {
                     since_lowest += 1;
                 }
                 let jump = self.squarem_step(state_before, self.composite_log_likelihood);
-                change = change.max(jump);
+                change = larger_change(change, jump);
                 if since_lowest >= 30 && matches!(self.squarem, SquaremCycle::Idle) {
                     jumping = false;
                 }
@@ -2934,6 +2962,16 @@ enum SquaremCycle {
     /// Jumped: the numbers two ordinary rounds reached, to return to, and the log-likelihood at
     /// the first round's numbers, to beat.
     Jumped { fallback: Vec<f64>, to_beat: f64 },
+}
+
+/// **The larger of two changes, a NaN counted as unbounded.** `f64::max` drops a NaN, so a
+/// round whose numbers turned NaN would report no change and end the fit as settled.
+fn larger_change(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::INFINITY
+    } else {
+        a.max(b)
+    }
 }
 
 fn logistic(value: f64) -> f64 {
@@ -4098,6 +4136,44 @@ impl BandCholesky {
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
+
+    /// **A state at the edge of working precision reads back finite**, so a jump from it cannot
+    /// turn every number into NaN. A logit of 40 makes `logistic` exactly 1.0, whose logit is
+    /// +∞; a share's logarithm of 1,000 overflows `exp`, and the shares would be ∞/∞.
+    #[test]
+    fn a_state_at_the_edge_reads_back_finite() {
+        let class = a_drawn_class(2, 8, 40, 12, 8, 31);
+        let mut period =
+            Period::new(&[&class], &a_narrow_production_fit()).expect("a class with reads");
+        let mut state = period.state();
+        // The class's numbers: slip rate, shorter share, fall-off, spread, then its shares.
+        state[1] = LARGEST_UNBOUNDED;
+        state[4] = 1_000.0;
+        period.set_state(&state);
+        let back = period.state();
+        assert!(back.iter().all(|value| value.is_finite()), "{back:?}");
+        let total: f64 = period.shares[0].iter().sum();
+        assert!((total - 1.0).abs() < 1e-12, "{:?}", period.shares[0]);
+    }
+
+    /// **A jump whose log-likelihood is NaN is turned back**, as one that lost ground is, and a
+    /// change that is NaN is counted as unbounded, never as no change at all.
+    #[test]
+    fn a_nan_neither_passes_the_jump_test_nor_settles_the_fit() {
+        let class = a_drawn_class(2, 8, 40, 12, 8, 31);
+        let mut period =
+            Period::new(&[&class], &a_narrow_production_fit()).expect("a class with reads");
+        let fallback = period.state();
+        period.squarem = SquaremCycle::Jumped {
+            fallback,
+            to_beat: -10.0,
+        };
+        assert_eq!(period.squarem_step(Vec::new(), f64::NAN), f64::INFINITY);
+
+        assert_eq!(larger_change(0.5, f64::NAN), f64::INFINITY);
+        assert_eq!(larger_change(f64::NAN, 0.5), f64::INFINITY);
+        assert_eq!(larger_change(0.5, 0.25), 0.5);
+    }
 
     /// **The banded Cholesky solves what a dense solve does**, on a random positive-definite
     /// matrix of bandwidth four.

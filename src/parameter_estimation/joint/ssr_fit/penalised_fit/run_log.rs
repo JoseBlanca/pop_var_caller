@@ -55,7 +55,8 @@ pub(super) enum Line {
     Detail(String),
     /// **Something a person must see whatever the log level**: a class the rules that leave
     /// tracts out emptied, or cut by more than 1 tract in 10 (spec `parameter_prepass_ssr.md`
-    /// §4.6.1). Printed as a warning.
+    /// §4.6.1), or a motif length whose fit ran out of rounds before it settled. Printed as a
+    /// warning.
     Warning(String),
 }
 
@@ -279,6 +280,9 @@ pub(super) fn lines_of_a_motif_length(
         curves,
         config,
     ))];
+    if !settled(fit, config) {
+        lines.push(Line::Warning(unsettled_line(period, fit, config)));
+    }
     // With one or two repeat counts with reads the curve through them is a line whatever the
     // strength, so the strength held is the top of the range searched and means nothing (spec
     // §2.3). Every fitted class has reads, so it is a repeat count with reads.
@@ -340,6 +344,27 @@ pub(super) fn classes_whose_directions_rest_on_the_prior(
         .count()
 }
 
+/// **Whether a motif length's fit stopped because no number moved**, not because it ran out of
+/// rounds.
+///
+/// A reading of F after the rounds ran out is followed by no round, so the last change counted
+/// may predate F's last move: only a fit that stopped short of its limit is called settled.
+fn settled(fit: &PenalisedPeriodFit, config: &PenalisedFitConfig) -> bool {
+    fit.rounds < config.max_rounds && fit.last_change < config.tolerance
+}
+
+/// **The warning for a motif length whose fit did not settle**: its numbers are where the last
+/// round left them, and the parameters file does not tell them apart from a settled fit's.
+fn unsettled_line(period: u8, fit: &PenalisedPeriodFit, config: &PenalisedFitConfig) -> String {
+    format!(
+        "motif length {period}: the fit used all {} without settling (the largest change in the \
+         last one was {:.1e}, against {:e} to settle), so its numbers may still be moving",
+        count_of(config.max_rounds, "round", "rounds"),
+        fit.last_change,
+        config.tolerance
+    )
+}
+
 /// The motif length's rounds, how it stopped, how F was read, in how many classes fewer reads
 /// slipped than the stutter prior weighs, and the time in each step.
 fn how_the_fit_ran(
@@ -351,10 +376,8 @@ fn how_the_fit_ran(
     curves: &SmoothCurves,
     config: &PenalisedFitConfig,
 ) -> String {
-    // A reading of F after the rounds ran out is followed by no round, so the last change counted
-    // may predate F's last move: only a fit that stopped short of its limit is called settled.
     // F's change is counted at a hundredth of its logarithm's move, hence "about".
-    let ending = if fit.rounds < config.max_rounds && fit.last_change < config.tolerance {
+    let ending = if settled(fit, config) {
         format!(
             "settled (no number moved by more than about {:e} in the last round)",
             config.tolerance
@@ -767,12 +790,21 @@ mod tests {
         strata: &[StratumEvidence],
         homozygote_excess: &[f64],
     ) -> (Vec<StratumOutcome>, Vec<Line>, Vec<(u8, usize)>) {
+        fit_log_and_rounds_with(strata, homozygote_excess, &a_narrow_production_fit())
+    }
+
+    /// [`fit_log_and_rounds`] under `config`.
+    fn fit_log_and_rounds_with(
+        strata: &[StratumEvidence],
+        homozygote_excess: &[f64],
+        config: &PenalisedFitConfig,
+    ) -> (Vec<StratumOutcome>, Vec<Line>, Vec<(u8, usize)>) {
         let mut lines = Vec::new();
         let rounds = std::cell::RefCell::new(Vec::new());
         let outcomes = fit_repeat_tracts_logging(
             &mut strata.to_vec(),
             homozygote_excess,
-            &a_narrow_production_fit(),
+            config,
             &TractExclusion::none(),
             &mut |line| lines.push(line),
             &|period, round, _| rounds.borrow_mut().push((period, round)),
@@ -792,6 +824,40 @@ mod tests {
             "one line starting {prefix:?} in {lines:#?}"
         );
         matching[0]
+    }
+
+    /// **A motif length whose fit runs out of rounds is warned about**, whatever the log level,
+    /// and one that settles is not: the parameters file does not tell the two apart.
+    #[test]
+    fn a_fit_that_runs_out_of_rounds_warns() {
+        let strata = vec![a_drawn_class(2, 8, 40, 12, 8, 31)];
+        let excess = [0.3; 12];
+        let warnings = |config: &PenalisedFitConfig| -> Vec<String> {
+            let (_, lines, _) = fit_log_and_rounds_with(&strata, &excess, config);
+            lines
+                .iter()
+                .filter(|line| matches!(line, Line::Warning(_)))
+                .map(|line| line.text().to_owned())
+                .collect()
+        };
+
+        let one_round = PenalisedFitConfig {
+            max_rounds: 1,
+            ..a_narrow_production_fit()
+        };
+        let warned = warnings(&one_round);
+        assert_eq!(warned.len(), 1, "{warned:#?}");
+        assert!(
+            warned[0].starts_with("motif length 2: the fit used all 1 round without settling"),
+            "{}",
+            warned[0]
+        );
+
+        assert_eq!(
+            warnings(&a_narrow_production_fit()),
+            Vec::<String>::new(),
+            "a settled fit warns of nothing"
+        );
     }
 
     /// **The log of a small drawn cohort holds every item of spec §2.9**, and logging changes no

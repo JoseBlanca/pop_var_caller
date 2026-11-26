@@ -1055,11 +1055,23 @@ struct EvidenceCursor<'a> {
 }
 
 impl<'a> EvidenceCursor<'a> {
+    /// **How many positions the census holds**: every ordinary-position section of every sample
+    /// is one entry a position, so the length of any of them. Read from the first sample that
+    /// lends a section, not from the first sample: a sample whose census holds repeat tracts only
+    /// lends none, and taken first it would make the census look empty.
     fn position_count(samples: &[SampleGenericSections<'_>]) -> usize {
-        samples
-            .first()
-            .and_then(|sections| sections.first())
-            .map_or(0, |(_, records)| records.depth().len())
+        let mut lengths = samples
+            .iter()
+            .flatten()
+            .map(|(_, records)| records.depth().len());
+        let Some(positions) = lengths.next() else {
+            return 0;
+        };
+        assert!(
+            lengths.all(|length| length == positions),
+            "every ordinary-position section of a census is one entry a position"
+        );
+        positions
     }
 
     /// Each sample's mean read depth over the positions it was walked at, its libraries' depths
@@ -2577,6 +2589,8 @@ pub fn fit_jointly(
             )
         })
         .collect();
+    // A census with no position leaves every count at zero: zero rates, not NaN.
+    let positions = statistics.positions.max(1.0);
     let rates = names
         .iter()
         .enumerate()
@@ -2585,9 +2599,9 @@ pub fn fit_jointly(
                 name.clone(),
                 Estimate {
                     value: SampleGenotypeRates {
-                        heterozygous: statistics.heterozygous[s] / statistics.positions,
-                        homozygous_alt: statistics.homozygous_alt[s] / statistics.positions,
-                        duplicated_carrier: statistics.carrier[s] / statistics.positions,
+                        heterozygous: statistics.heterozygous[s] / positions,
+                        homozygous_alt: statistics.homozygous_alt[s] / positions,
+                        duplicated_carrier: statistics.carrier[s] / positions,
                         positions_with_reads: statistics.with_reads[s],
                         positions_with_two_reads: statistics.with_two_reads[s],
                     },
@@ -7941,6 +7955,89 @@ mod whole_fit_tests {
                 "sample s{s}"
             );
         }
+    }
+
+    /// **A first sample with no ordinary-position section does not empty the census**: the
+    /// number of positions is read from a sample that has a section. Read from the first sample
+    /// alone, it came out zero, every pass visited no position, and every rate came back
+    /// `Defaulted`, silently.
+    #[test]
+    fn a_first_sample_with_no_ordinary_positions_leaves_the_rest_fitted() {
+        let mut cohort = draw_cohort(
+            2,
+            1_000,
+            6.0,
+            (0.003, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0E20_0000_0004,
+        );
+        let terms = as_cohort(&cohort.samples)
+            .terms()
+            .expect("a drawn cohort records terms")
+            .clone();
+        cohort.samples.insert(
+            0,
+            crate::parameter_estimation::joint::census::SampleCensusEvidence::resident(
+                "tracts_only".to_string(),
+                terms,
+                crate::parameter_estimation::joint::census::NamedReadGroup::drawn_for(
+                    "tracts_only",
+                    [ReadGroupId(2)],
+                ),
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    crate::parameter_estimation::joint::census::SectionKey::Ssr(
+                        ReadGroupId(2),
+                        crate::parameter_estimation::joint::census::Stratum {
+                            period: 2,
+                            reference_repeats: 6,
+                        },
+                    ),
+                    crate::parameter_estimation::joint::census::Section::Ssr(
+                        crate::parameter_estimation::joint::census::SsrEvidence::never_walked(0),
+                    ),
+                )]),
+            ),
+        );
+        let fit = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                quadrature_nodes: 8,
+                max_passes: 40,
+                duplicated_positions: false,
+                estimate_contamination: false,
+                starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+                ..JointFitConfig::default()
+            },
+        )
+        .expect("two drawn samples identify the cohort's numbers");
+        // Which number the silent sample's read group is given is the census's choice, so the
+        // groups are counted rather than named.
+        let fitted: Vec<&Estimate<SiteClassNoise>> = fit
+            .noise
+            .values()
+            .filter(|noise| noise.provenance == Provenance::FittedHere)
+            .collect();
+        assert_eq!(fitted.len(), 2, "{:?}", fit.noise);
+        assert!(
+            fitted.iter().all(|noise| noise.observations > 0),
+            "{fitted:?}"
+        );
+        for sample in ["s0", "s1"] {
+            let excess = &fit.hom_excess[sample];
+            assert_eq!(excess.provenance, Provenance::FittedHere, "sample {sample}");
+            assert!(excess.observations > 0, "sample {sample}");
+        }
+        assert_eq!(
+            fit.hom_excess["tracts_only"].provenance,
+            Provenance::Defaulted
+        );
     }
 
     /// **One sample with reads beside a sample with none is a one-sample cohort**: the excess is held,

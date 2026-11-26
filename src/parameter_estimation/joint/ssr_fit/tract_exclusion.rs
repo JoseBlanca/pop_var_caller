@@ -285,7 +285,10 @@ fn binomial_upper_tail(trials: u64, chance: f64, at_least: u64) -> f64 {
         let k = k as f64;
         let term = float::exp(ln_choose(k) + k * ln_p + (n - k) * ln_q);
         total += term;
-        if term < 1e-17 * total {
+        // A term of zero past the mean ends the sum too: the terms after it are smaller, so zero
+        // as well. Without it, a first term that underflows leaves `total` at zero, `0 < 0` never
+        // holds, and the loop runs to `trials`. Below the mean later terms can still be non-zero.
+        if term < 1e-17 * total || (term == 0.0 && k > n * chance) {
             break;
         }
     }
@@ -374,6 +377,20 @@ mod tests {
                 "mean {mean}"
             );
         }
+    }
+
+    /// **A tail whose first term underflows stops at once**: past the mean every later term is
+    /// smaller, so all are zero. Summed to the last read count, 200,000,000 reads take three
+    /// `lgamma` calls each, seconds in all.
+    #[test]
+    fn a_tail_whose_first_term_underflows_returns_zero_at_once() {
+        let started = std::time::Instant::now();
+        assert_eq!(binomial_upper_tail(200_000_000, 0.005, 100_000_000), 0.0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
