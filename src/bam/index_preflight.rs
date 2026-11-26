@@ -113,7 +113,8 @@ impl AlignmentIndex {
 
 /// Load an alignment index from disk. The expected location is the
 /// canonical sibling path (`<input>.crai` for CRAM, `<input>.csi`
-/// preferred or `<input>.bai` fallback for BAM); missing or
+/// preferred or `<input>.bai` fallback for BAM), or the same with the
+/// input's extension replaced (`sample.bai`); missing or
 /// malformed indexes surface as the typed
 /// [`AlignmentIndexError`] variants `MissingAlignmentIndex`,
 /// `LoadFailed`, or `UnsupportedExtension`.
@@ -303,17 +304,19 @@ impl AlignmentFileKind {
 /// if any. For BAM, walks [`BAM_INDEX_READ_PREFERENCE`] in order
 /// and returns the first format whose file is on disk
 /// (`.csi`-preferred, `.bai`-fallback).
+///
+/// Each format is looked for under two names, as htslib looks: the extension appended
+/// (`sample.bam.bai`, which samtools writes) and then the extension replaced (`sample.bai`,
+/// which Picard and GATK write).
 fn existing_index_for(input: &Path, kind: AlignmentFileKind) -> Option<PathBuf> {
-    match kind {
-        AlignmentFileKind::Cram => {
-            let p = crai_path_for(input);
-            p.exists().then_some(p)
-        }
-        AlignmentFileKind::Bam => BAM_INDEX_READ_PREFERENCE
-            .iter()
-            .map(|ext| bam_index_path_for(input, ext))
-            .find(|p| p.exists()),
-    }
+    let extensions: &[&str] = match kind {
+        AlignmentFileKind::Cram => &["crai"],
+        AlignmentFileKind::Bam => BAM_INDEX_READ_PREFERENCE,
+    };
+    extensions
+        .iter()
+        .flat_map(|ext| [append_extension(input, ext), input.with_extension(ext)])
+        .find(|p| p.exists())
 }
 
 /// The index path we would *build* for `input` if asked. For BAM
@@ -651,6 +654,33 @@ mod tests {
         // Both exist; existing_index_for must return the .csi one.
         let picked = existing_index_for(&bam, AlignmentFileKind::Bam).expect("some index");
         assert_eq!(picked, csi, ".csi must win over .bai when both exist");
+    }
+
+    /// **An index named by replacing the data file's extension is found**, as htslib finds it:
+    /// Picard and GATK write `sample.bai` beside `sample.bam`. Not finding it, a run refused the
+    /// file as unindexed, or with `--build-map-file-index` spent a pass over it building a second
+    /// index next to the first.
+    #[test]
+    fn an_index_named_by_replacing_the_extension_is_found() {
+        for (data, index) in [
+            ("sample.bam", "sample.bai"),
+            ("sample.bam", "sample.csi"),
+            ("sample.cram", "sample.crai"),
+        ] {
+            let dir = TempDir::new().expect("tempdir");
+            let data = dir.path().join(data);
+            let index = dir.path().join(index);
+            touch(&data);
+            touch(&index);
+            let kind = AlignmentFileKind::from_path(&data).expect("a known extension");
+            assert_eq!(
+                existing_index_for(&data, kind),
+                Some(index.clone()),
+                "{} beside {} was not found",
+                index.display(),
+                data.display(),
+            );
+        }
     }
 
     #[test]
