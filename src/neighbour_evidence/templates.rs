@@ -119,10 +119,8 @@ impl<T> ChosenTemplate<T> {
     }
 }
 
-/// **The templates sample `sample` copies from in the window `records`**, best first:
-/// `min(max_templates, samples − 1)` other samples, each with the stretches it won. `None` when the
-/// sample has no informative record in the window — then there is nothing to choose by, and the
-/// sample is not re-called there (§3.3).
+/// [`choose_templates_where`] over every record of the window.
+#[cfg(test)]
 #[must_use]
 pub fn choose_templates(
     records: &[SiteRecord],
@@ -132,8 +130,13 @@ pub fn choose_templates(
     choose_templates_where(records, sample, max_templates, |_| true)
 }
 
-/// [`choose_templates`] over the records `walked` admits: those a window with thinned margins
-/// walks (pass spec §6, thinned margins), the only ones whose numbers it holds.
+/// **The templates sample `sample` copies from in the window `records`**, best first:
+/// `min(max_templates, samples − 1)` other samples, each with the stretches it won. `None` when the
+/// sample has no informative record in the window — then there is nothing to choose by, and the
+/// sample is not re-called there (§3.3).
+///
+/// Only the records `walked` admits are judged: those a window with thinned margins walks (pass
+/// spec §6, thinned margins), the only ones whose numbers it holds.
 #[must_use]
 pub(crate) fn choose_templates_where(
     records: &[SiteRecord],
@@ -222,8 +225,8 @@ pub(crate) type HaplotypeReader<'a> = dyn Fn(usize, usize, usize, &mut Vec<f64>)
 /// first, as `(sample, copy)` with the stretches each won: at most `max_templates`, at most one of
 /// each other sample.
 ///
-/// Judged as [`choose_templates`] judges samples, stretch by stretch, with the disagreement read
-/// off the sample's genotype from the previous round rather than its shares: at each record the
+/// Judged as [`choose_templates_where`] judges samples, stretch by stretch, with the
+/// disagreement read off the sample's genotype from the previous round rather than its shares: at each record the
 /// observed disagreement is the chance the haplotype carries an allele that genotype lacks,
 /// `Σ_a h(a) · P(genotype without a)`, and the expected one the same for an allele drawn from the
 /// cohort's frequencies, `Σ_a p(a) · P(genotype without a)` — `h` the haplotype, the genotype
@@ -232,8 +235,8 @@ pub(crate) type HaplotypeReader<'a> = dyn Fn(usize, usize, usize, &mut Vec<f64>)
 /// places (so a homozygous sample's two equal copies do not take both); each sample offers the one
 /// that won more stretches
 /// (on a tie, the better whole-window score; then copy 0), and the offers rank as samples do in
-/// [`choose_templates`], then by copy. `haplotype(other, copy, record, out)` writes the previous
-/// round's haplotype into `out`, which it clears first.
+/// [`choose_templates_where`], then by copy. `haplotype(other, copy, record, out)` writes the
+/// previous round's haplotype into `out`, which it clears first.
 ///
 /// One of each sample because without it the slots fill with copies of the commonest haplotype:
 /// 871 wrong genotypes against 689 on the prototype's first cohort (spec §2.3).

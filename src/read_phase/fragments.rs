@@ -300,6 +300,7 @@ impl PackedRecordFragments {
     }
 
     /// Whether its read alleles are held in four bytes each or fewer.
+    #[cfg(test)]
     #[must_use]
     pub fn is_compact(&self) -> bool {
         matches!(
@@ -309,6 +310,7 @@ impl PackedRecordFragments {
     }
 
     /// Whether its read alleles are held in three bytes each.
+    #[cfg(test)]
     #[must_use]
     pub fn is_tight(&self) -> bool {
         matches!(self.entries, PackedEntries::Tight(_))
