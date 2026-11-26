@@ -14,10 +14,9 @@
 //! **What has landed:** this file's five parameters; [`close`]'s walk and its two
 //! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
 //! span, unified into one allele table, with each covering sample's support against it;
-//! [`organise`]'s observation cache — the window one builder is handed — the division of the
-//! analysed ground into the regions single builders own, the organiser's **ordered release**,
-//! which takes the builders' outcomes by region index and lets their loci out along an
-//! unbroken run of indexes, and its resolution of the overlaps between neighbouring builders;
+//! [`observation_cache`] — the window one builder is handed — and the division of the
+//! analysed ground into the regions single builders own; the frontier rule that resolves the
+//! overlaps between neighbouring builders (`frontier.rs`);
 //! [`serial`]'s **two** single-threaded drivers — the oracle every later milestone must
 //! reproduce and the same merge read through the cache, byte for byte — plus, since the run
 //! driver's E1, a third whose only departure is that each cover sweeps the samples
@@ -37,10 +36,12 @@
 
 pub mod build;
 pub mod close;
+mod frontier;
 pub mod observation_cache;
-pub mod organise;
 pub mod recorded_windows;
-pub mod rounds;
+/// The round driver, kept as the streaming driver's test reference: no run uses it.
+#[cfg(test)]
+mod rounds;
 pub mod serial;
 pub mod stream;
 
@@ -55,7 +56,7 @@ pub mod stream;
 ///
 /// **One home, because the copies had started to multiply.** `region` and `region_on` are
 /// written out in all four of this module's files, and D2's review found `SourceFailed`
-/// becoming the fifth such copy. [`organise`] and [`serial`] read them from here; [`build`] and
+/// becoming the fifth such copy. `frontier` and [`serial`] read them from here; [`build`] and
 /// [`close`] still carry their own and are the next two to fold in.
 #[cfg(test)]
 pub(super) mod fixtures {
@@ -666,7 +667,7 @@ impl CohortLocusBuilderRegionsInFlight {
 /// **Two rules, and the second was found by D2's review.** A region must not overlap or precede
 /// the one before it, or the loci in the ground they share are built — and carried — twice. And
 /// a region's own ends must be the right way round: the division orders them
-/// ([`building_regions_of`](organise::building_regions_of)) and
+/// ([`building_regions_of`](observation_cache::building_regions_of)) and
 /// [`build_region`](build::build_region) does not, so on `50-1` the cached driver builds the
 /// whole of 1–50 and the oracle builds nothing. That is the byte-identity this module claims,
 /// broken by an input nothing was checking.

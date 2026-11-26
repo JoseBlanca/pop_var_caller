@@ -221,18 +221,6 @@ pub struct AlignedFilesVariantCaller {
     /// One per sample, in the run's sample order — the order
     /// [`ReadGroups::read_groups_per_sample`] gave.
     samples: Vec<SampleReads>,
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
-    /// Every read group of every sample, numbered run-wide.
-    ///
-    /// **Kept, not borrowed and dropped.** The fitted parameters are keyed by read-group
-    /// identifier and hold no table of their own, so writing the parameters file beside the
-    /// output and reporting what the run used both need this table back. Re-deriving it there
-    /// would mint a second numbering, which is the accident the run's one sample order exists
-    /// to prevent.
-    read_groups: ReadGroups,
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
-    /// Which reads are admitted.
-    read_filters: ReadFilterConfig,
     /// The reference the walk fetches its bases from, with its index parsed once for the run.
     ///
     /// **Opened at construction, not at the first locus**, so a reference that holds no bases is
@@ -359,8 +347,6 @@ impl AlignedFilesVariantCaller {
         Ok(Self {
             assembly_check,
             samples,
-            read_groups: alignments.read_groups.clone(),
-            read_filters: alignments.read_filters,
             walk_reference,
             segmentation: Arc::new(segmentation),
             parameters,
@@ -450,62 +436,6 @@ impl AlignedFilesVariantCaller {
     #[must_use]
     pub fn sample_reads(&self, sample_index: usize) -> Option<&SampleReads> {
         self.samples.get(sample_index)
-    }
-
-    #[cfg(test)]
-    /// Every read group of every sample, numbered run-wide.
-    #[must_use]
-    pub fn read_groups(&self) -> &ReadGroups {
-        &self.read_groups
-    }
-
-    #[cfg(test)]
-    /// The ground this run analyses, and the record of what it was computed from.
-    #[must_use]
-    pub fn segmentation(&self) -> &Segmentation {
-        &self.segmentation
-    }
-
-    #[cfg(test)]
-    /// The numbers the pre-pass fitted, which every call is scored against.
-    #[must_use]
-    pub fn parameters(&self) -> &RunParameters {
-        &self.parameters
-    }
-
-    #[cfg(test)]
-    /// How the calling loop is configured for this run.
-    #[must_use]
-    pub fn calling_loop_config(&self) -> &RunnableCallingLoopConfig {
-        &self.calling_loop_config
-    }
-
-    #[cfg(test)]
-    /// Which alleles a locus of this run is called over.
-    #[must_use]
-    pub fn candidate_selection(&self) -> &CandidateSelectionConfig {
-        &self.candidate_selection
-    }
-
-    #[cfg(test)]
-    /// What the merge of this run admits and bounds.
-    #[must_use]
-    pub fn merge_parameters(&self) -> MergeParameters {
-        self.merge_parameters
-    }
-
-    #[cfg(test)]
-    /// Which reads this run admits.
-    #[must_use]
-    pub fn read_filters(&self) -> ReadFilterConfig {
-        self.read_filters
-    }
-
-    #[cfg(test)]
-    /// The settings every locus generator of this run is built with.
-    #[must_use]
-    pub fn locus_generator_settings(&self) -> PileupGeneratorConfig {
-        self.locus_generator_settings
     }
 
     #[cfg(test)]
@@ -2771,18 +2701,16 @@ mod tests {
 
         let caller = open_over(std::slice::from_ref(&a), &reference).expect("opens");
 
-        assert_eq!(caller.read_filters(), unusual_read_filters());
         assert_eq!(
-            caller.locus_generator_settings(),
+            caller.locus_generator_settings,
             unusual_locus_generator_settings()
         );
-        assert_eq!(*caller.candidate_selection(), unusual_candidate_selection());
-        assert_eq!(caller.merge_parameters(), unusual_merge_parameters());
-        assert_eq!(*caller.calling_loop_config(), unusual_calling_loop_config());
+        assert_eq!(caller.candidate_selection, unusual_candidate_selection());
+        assert_eq!(caller.merge_parameters, unusual_merge_parameters());
+        assert_eq!(caller.calling_loop_config, unusual_calling_loop_config());
 
         // And each of those really is unlike what ships, or the assertions above would hold
         // for a caller that ignored its arguments entirely.
-        assert_ne!(unusual_read_filters(), ReadFilterConfig::default());
         assert_ne!(
             unusual_locus_generator_settings(),
             PileupGeneratorConfig::default()
@@ -2855,23 +2783,20 @@ mod tests {
         }
     }
 
-    /// The ground and the read-group table come back too.
+    /// The ground comes back too.
     #[test]
-    fn the_ground_and_the_read_group_table_come_back() {
+    fn the_ground_comes_back() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let (_a_dir, a) = bam_for("NA12878", "a.bam");
 
-        let paths = [a];
-        let expected_table = build_read_groups(&paths).expect("read groups");
-        let caller = open_over(&paths, &reference).expect("opens");
+        let caller = open_over(&[a], &reference).expect("opens");
 
-        assert_eq!(caller.segmentation().segments().len(), 1);
+        assert_eq!(caller.segmentation.segments().len(), 1);
         assert_eq!(
-            caller.segmentation().inputs().catalog(),
+            caller.segmentation.inputs().catalog(),
             Some(&catalog_header())
         );
-        assert_eq!(caller.segmentation().analysed_regions().len(), 1);
-        assert_eq!(*caller.read_groups(), expected_table);
+        assert_eq!(caller.segmentation.analysed_regions().len(), 1);
     }
 
     /// **The shipped defaults are each type's own**, not numbers restated here. Restating one
@@ -4906,6 +4831,7 @@ mod calling_joined_to_the_merge {
     };
     use crate::calling::parameters_file::DeclaredInbreeding;
     use crate::cohort_observation::{MinAltObs, MinAltReadShare};
+    use crate::read::input::read_groups::build_read_groups;
     use crate::read::input::test_fixtures::fixture_reference_from_its_index;
     use crate::types::{ContigId, Ploidy, Position};
     use std::num::NonZeroU32;
@@ -5025,16 +4951,16 @@ mod calling_joined_to_the_merge {
         // defaults, which is what makes the two sides comparable at all.
         let merging_first = open_over(&paths, &reference);
         let run_sample_count = merging_first.sample_count();
-        let selection = *merging_first.candidate_selection();
-        let loop_config = *merging_first.calling_loop_config();
+        let selection = merging_first.candidate_selection;
+        let loop_config = merging_first.calling_loop_config;
         let parameters = RunParameters::of_defaults(
-            merging_first.read_groups(),
+            &build_read_groups(&paths).expect("the fixtures declare read groups"),
             Ploidy::try_new(2).expect("a diploid"),
             &DeclaredInbreeding::nothing_said(),
         );
         assert_eq!(
             merging_first
-                .parameters()
+                .parameters
                 .inbreeding_coefficient_by_sample()
                 .len(),
             parameters.inbreeding_coefficient_by_sample().len(),
@@ -7773,7 +7699,7 @@ where
     let displaced = merged?;
     progress.finished(records_written);
     // **Spec §6.1's frontier rule says this cannot happen and the count is how a run would say
-    // it had**, which is `Organiser::displaced_locus_count`'s own stance. It is checked rather
+    // it had** (`cohort_merge::frontier::Frontier`). It is checked rather
     // than reported because no field of the run report carries it yet, and a silent drop is the
     // one outcome that would leave the VCF short with nothing saying so.
     assert_eq!(

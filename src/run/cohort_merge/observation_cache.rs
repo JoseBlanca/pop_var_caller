@@ -27,19 +27,9 @@
 //!
 //! **Builders read it and never write it** (spec §6.4, goal 1):
 //! [`cover`](ObservationCache::cover) and [`evict_before`](ObservationCache::evict_before)
-//! take `&mut self` and belong to the organiser, while
+//! take `&mut self` and belong to the driver, while
 //! [`with_observations`](ObservationCache::with_observations) takes `&self` and is a builder's
 //! only way in.
-//!
-//! **The organiser is [`super::organise`], not here** — the two shared a file until the owner
-//! split them at Checkpoint E. The argument for keeping them together had been that the
-//! organiser would become the cache's only writer, at which point
-//! [`cover`](ObservationCache::cover) and [`evict_before`](ObservationCache::evict_before)
-//! could turn private to that file. E1's review found the premise false: the cached serial
-//! driver calls both from a sibling module and nothing in the plan removes it. So the
-//! reachable narrowing is `pub(super)` — taken here — which a file of its own gets equally,
-//! and against it stood one file of two thousand-odd lines covering two types that share no
-//! field and no function.
 
 mod round_view;
 pub use round_view::RoundView;
@@ -1132,7 +1122,11 @@ impl<S> ObservationCache<S> {
     /// members would be built from another record's body. This is what such a driver adds to
     /// the index.
     ///
+    /// **Only the round driver, a test reference, reads it**; the streaming driver reads the
+    /// same prefix off its sealed round ([`RoundView`]).
+    ///
     /// PROTOTYPE (2026-09-09 concurrency review).
+    #[cfg(test)]
     pub(super) fn window_starts_into(&self, span: GenomeRegion, into: &mut Vec<usize>) {
         let left_edge = GenomePosition {
             contig: span.contig,
