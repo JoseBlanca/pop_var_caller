@@ -37,7 +37,9 @@ use crate::bam::errors::AlignmentIndexError;
 // ---------------------------------------------------------------------
 
 /// Read-side preference order when both `.csi` and `.bai` exist
-/// next to a BAM input. `.csi` wins because it has no 512 Mbp
+/// next to a BAM input and neither is newer than the other (the
+/// newer one wins otherwise — see [`existing_index_for`]). `.csi` wins
+/// the tie because it has no 512 Mbp
 /// per-contig length cap (some plant references exceed this);
 /// `.bai` is accepted on read as a fallback for compatibility
 /// with existing data sets. See
@@ -301,9 +303,9 @@ impl AlignmentFileKind {
 }
 
 /// Resolve the alignment index that already exists for `input`,
-/// if any. For BAM, walks [`BAM_INDEX_READ_PREFERENCE`] in order
-/// and returns the first format whose file is on disk
-/// (`.csi`-preferred, `.bai`-fallback).
+/// if any: the most recently modified of the candidates on disk, and
+/// among candidates written in the same moment the first in order —
+/// for BAM, [`BAM_INDEX_READ_PREFERENCE`] (`.csi` before `.bai`).
 ///
 /// Each format is looked for under two names, as htslib looks: the extension appended
 /// (`sample.bam.bai`, which samtools writes) and then the extension replaced (`sample.bai`,
@@ -313,10 +315,28 @@ fn existing_index_for(input: &Path, kind: AlignmentFileKind) -> Option<PathBuf> 
         AlignmentFileKind::Cram => &["crai"],
         AlignmentFileKind::Bam => BAM_INDEX_READ_PREFERENCE,
     };
-    extensions
+    // **The newest wins; the order above breaks a tie.** An index older than another beside
+    // the same file was most likely built before the data was rewritten — pvc built a `.csi`,
+    // the BAM was regenerated, `samtools index` wrote a `.bai` — and reading through stale
+    // offsets can drop the reads at a contig's tail without a message.
+    let mut newest: Option<(PathBuf, Option<std::time::SystemTime>)> = None;
+    for candidate in extensions
         .iter()
         .flat_map(|ext| [append_extension(input, ext), input.with_extension(ext)])
-        .find(|p| p.exists())
+    {
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        let modified = metadata.modified().ok();
+        let newer = match &newest {
+            None => true,
+            Some((_, best)) => modified > *best,
+        };
+        if newer {
+            newest = Some((candidate, modified));
+        }
+    }
+    newest.map(|(path, _)| path)
 }
 
 /// The index path we would *build* for `input` if asked. For BAM
@@ -641,6 +661,18 @@ mod tests {
         preflight_alignment_indexes(&[bam], false).expect("preflight ok with .bai");
     }
 
+    /// Set `path`'s modification time to `seconds` after an arbitrary fixed moment.
+    fn modified_at(path: &Path, seconds: u64) {
+        let moment =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + seconds);
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("open to set the time")
+            .set_modified(moment)
+            .expect("set the modification time");
+    }
+
     #[test]
     fn preflight_prefers_csi_over_bai_when_both_present() {
         let dir = TempDir::new().expect("tempdir");
@@ -650,10 +682,39 @@ mod tests {
         touch(&bam);
         touch(&csi);
         touch(&bai);
+        // Written in the same moment: the preference order decides.
+        modified_at(&csi, 60);
+        modified_at(&bai, 60);
 
         // Both exist; existing_index_for must return the .csi one.
         let picked = existing_index_for(&bam, AlignmentFileKind::Bam).expect("some index");
         assert_eq!(picked, csi, ".csi must win over .bai when both exist");
+    }
+
+    /// **The newer of two indexes is read**, whichever its format. The case this guards: pvc
+    /// once built `sample.bam.csi`, the BAM was then regenerated and `samtools index` wrote
+    /// `sample.bam.bai` — and the stale `.csi`, preferred by format alone, was read, its offsets
+    /// pointing into a file that had changed under them.
+    #[test]
+    fn the_newer_of_two_indexes_is_read() {
+        let dir = TempDir::new().expect("tempdir");
+        let bam = dir.path().join("sample.bam");
+        let csi = dir.path().join("sample.bam.csi");
+        let bai = dir.path().join("sample.bam.bai");
+        touch(&bam);
+        touch(&csi);
+        touch(&bai);
+
+        modified_at(&csi, 0);
+        modified_at(&bai, 60);
+        assert_eq!(
+            existing_index_for(&bam, AlignmentFileKind::Bam),
+            Some(bai.clone()),
+            "an older .csi was read over a newer .bai",
+        );
+
+        modified_at(&csi, 120);
+        assert_eq!(existing_index_for(&bam, AlignmentFileKind::Bam), Some(csi),);
     }
 
     /// **An index named by replacing the data file's extension is found**, as htslib finds it:
