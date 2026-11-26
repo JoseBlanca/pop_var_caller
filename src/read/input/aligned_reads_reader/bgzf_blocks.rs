@@ -35,10 +35,12 @@
 //! error kinds and messages, so a corrupt or truncated file fails as it did: a bad header is
 //! `invalid BGZF header`, a bad checksum `block data checksum mismatch`, a `BSIZE` too small to
 //! be a frame `invalid frame size`, a file ending inside a frame `UnexpectedEof`, and a file
-//! ending *between* frames is the end of the stream. Two cases differ, both only for the better,
-//! and neither can arise from a well-formed file and its index: a frame claiming more than
+//! ending *between* frames is the end of the stream. Three cases differ, all only for the better,
+//! and none can arise from a well-formed file and its index: a frame claiming more than
 //! 64 KiB of data is refused as `InvalidData`, and a seek to an offset past the end of its block
-//! as `InvalidInput`, where noodles would panic indexing past its buffer in both.
+//! as `InvalidInput`, where noodles would panic indexing past its buffer in both; and a file
+//! ending inside a frame's header is `UnexpectedEof`, where noodles calls it the end of the
+//! stream and so reads a truncated file as a shorter whole one.
 
 use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
@@ -247,7 +249,7 @@ impl BlockCacheState {
         self.file.seek(SeekFrom::Start(compressed_offset))?;
         let mut frame_start = compressed_offset;
         loop {
-            if !read_frame_into(&mut self.file, &mut self.frame)? {
+            if !read_frame_into(&mut self.file, &mut self.frame, frame_start)? {
                 return Ok(InflatedBlock::empty_at(frame_start));
             }
             let next_frame_start = frame_start + self.frame.len() as u64;
@@ -264,14 +266,27 @@ impl BlockCacheState {
     }
 }
 
-/// Read one whole BGZF frame into `frame`. `false` when the stream ends before a frame header
-/// does — noodles' end of stream, and the same rule: a header cut short is the end, a frame cut
-/// short is an error.
-fn read_frame_into(file: &mut File, frame: &mut Vec<u8>) -> io::Result<bool> {
+/// Read one whole BGZF frame, which starts at `frame_start`, into `frame`. `false` when the file
+/// ends exactly at `frame_start` — the end of the stream.
+///
+/// **A header cut short is an error, where noodles takes it for the end of the stream.** Some of
+/// a header is the start of a frame whose remaining bytes are missing, as much as a frame cut
+/// short after its header is.
+fn read_frame_into(file: &mut File, frame: &mut Vec<u8>, frame_start: u64) -> io::Result<bool> {
     frame.resize(FRAME_HEADER_SIZE, 0);
     match file.read_exact(frame) {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            // A failed `read_exact` leaves the descriptor past what it did read, so this asks
+            // whether it read nothing at all — asked only here, so a whole header costs no call.
+            if file.stream_position()? == frame_start {
+                return Ok(false);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the file ends inside a BGZF block header; it is probably truncated",
+            ));
+        }
         Err(error) => return Err(error),
     }
     // `BSIZE` is the header's last two bytes: the frame's total size, minus one.
@@ -782,6 +797,25 @@ mod tests {
             &mut SharedBgzfReader::new(shared(&path)),
             &mut noodles_reader(&path),
         );
+    }
+
+    /// **A file cut inside a frame's 18-byte header is an error**, where noodles takes it for
+    /// the end of the stream. Only a file that ends exactly between two frames has ended; a
+    /// part of a header is the start of a frame whose remaining bytes are missing, and treating
+    /// it as the end made every record after the cut vanish without a message.
+    #[test]
+    fn a_file_cut_inside_a_frame_header_is_an_error() {
+        let clean = bgzf_bytes(3, 1_000);
+        let third_block = frame_offsets(&clean)[2] as usize;
+        for header_bytes_kept in [1, 10, FRAME_HEADER_SIZE - 1] {
+            let mut cut = clean.clone();
+            cut.truncate(third_block + header_bytes_kept);
+            let (_dir, path) = file_of(&cut);
+            let error = SharedBgzfReader::new(shared(&path))
+                .read_to_end(&mut Vec::new())
+                .expect_err("a frame header cut short must not read as the end of the stream");
+            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof, "{error}");
+        }
     }
 
     /// An error leaves nothing behind: the corrupt block is not cached, so asking again fails

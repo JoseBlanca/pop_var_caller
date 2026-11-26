@@ -235,9 +235,19 @@ impl BamAlignedReadsReader {
                 .read_record_buf(&self.header, &mut buf.record)
                 .inspect_err(|_| self.done = true)?;
             if bytes_read == 0 {
-                // End of file inside a chunk — try the next one.
-                self.current_chunk_end = None;
-                continue;
+                // **The file ended before the chunk did, so the file is shorter than the index
+                // says.** The index lists records up to `chunk_end`; in a whole file the reader
+                // reaches that position before running out of bytes, because the last record
+                // ends before the end-of-file marker. Running out first means the bytes are
+                // missing — a copy cut exactly between two blocks reads this way, every block
+                // before the cut whole. Taking it for the end of the chunk would drop every
+                // record after the cut without a message.
+                self.done = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the file ends before records its index lists; it is probably truncated \
+                     (an interrupted copy or write?)",
+                ));
             }
             return Ok(true);
         }
@@ -369,6 +379,76 @@ mod tests {
         assert!(
             reader.read_next(&mut buf).expect("reads again"),
             "a repositioned reader must start again",
+        );
+    }
+
+    /// **A BAM cut exactly between two compressed blocks fails; it does not read as a shorter
+    /// file.** An interrupted copy can leave a file whose last byte ends a block. samtools ends
+    /// a block between two records whenever the next record would not fit, so such a cut also
+    /// falls between records: every block before it is whole and every record in them is whole,
+    /// and nothing about the bytes looks wrong. Only the index, built from the complete file,
+    /// still lists records past the cut. A reader that took running out of bytes for the end of
+    /// the chunk returned the records before the cut and then reported the contig finished, and
+    /// every read after the cut was missing from the sample with no message.
+    #[test]
+    fn a_bam_cut_at_a_block_boundary_fails_rather_than_reading_short() {
+        use crate::bam::index_preflight::preflight_alignment_indexes;
+        use noodles_sam::alignment::io::Write as _;
+        use std::io::Write as _;
+
+        // Written as samtools writes, each block ending at a record: here, every 500 records.
+        let header = bam_header(&[("chr1", CONTIG_LENGTH, None)]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.bam");
+        let mut writer = bam::io::Writer::new(std::fs::File::create(&path).expect("create"));
+        writer.write_header(&header).expect("write header");
+        writer
+            .get_mut()
+            .flush()
+            .expect("the header in a block of its own");
+        let mut block_starts = Vec::new();
+        for i in 0..2_000 {
+            if i % 500 == 0 {
+                block_starts.push(writer.get_ref().virtual_position().compressed());
+            }
+            let record = read_named_with_length(&format!("r{i}"), 0, 1 + i * 90, 30);
+            writer
+                .write_alignment_record(&header, &record)
+                .expect("write record");
+            if i % 500 == 499 {
+                writer
+                    .get_mut()
+                    .flush()
+                    .expect("end the block at this record");
+            }
+        }
+        writer.try_finish().expect("finish");
+        preflight_alignment_indexes(std::slice::from_ref(&path), true).expect("build index");
+
+        // Cut where the third block of records starts, leaving 1,000 whole records before it.
+        // The index stays as it was: built from the complete file, as it would be on disk.
+        let bytes = std::fs::read(&path).expect("read the fixture");
+        std::fs::write(&path, &bytes[..block_starts[2] as usize]).expect("write the cut file");
+
+        let mut reader = reader_over(&path, &header);
+        reader.begin_region(region(1, 100)).expect("positions");
+        let mut buf = NoodlesRawAlignedRead::default();
+        let mut records = 0u64;
+        let outcome = loop {
+            match reader.read_next(&mut buf) {
+                Ok(true) => records += 1,
+                Ok(false) => break Ok(()),
+                Err(error) => break Err(error),
+            }
+        };
+
+        let error = outcome.expect_err(&format!(
+            "the cut file read as complete: {records} of 2,000 records and no error"
+        ));
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof, "{error}");
+        assert_eq!(
+            records, 1_000,
+            "the records before the cut are still served"
         );
     }
 
