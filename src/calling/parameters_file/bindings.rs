@@ -1464,6 +1464,49 @@ mod tests {
             reads_behind, the_files_own_order,
             "and the two orders really do differ, or this test asserts nothing"
         );
+
+        // **And the four repeat-tract tables keyed by read group: slippage group, stutter
+        // multiplier, substitution rate, misread table.** The file numbers HWI.3, HWI.4, HWI.5 as
+        // 0, 1, 2 and the run as 1, 2, 0. The file puts HWI.3 and HWI.4 in slippage group 0 and
+        // HWI.5 in group 1; gives HWI.3 a stutter multiplier of 1.25 at motif length 1 and HWI.5
+        // a defaulted one; fits its one substitution rate on HWI.3; and has a misread table for
+        // HWI.4 alone. Each must arrive under the run's number for that lane.
+        use crate::types::ReadGroupId;
+        let parameters = &read.from_file.parameters;
+        let fits = parameters.ssr_slippage_fits();
+        assert_eq!(
+            [0, 1, 2].map(|lane| fits.slippage_group_of(ReadGroupId(lane))),
+            [Some(1), Some(0), Some(0)],
+            "each lane keeps its own slippage group"
+        );
+        assert_eq!(
+            fits.stutter_multiplier_of(ReadGroupId(1), 1)
+                .map(|multiplier| multiplier.value),
+            Some(1.25),
+            "HWI.3's stutter multiplier follows it to the run's lane 1"
+        );
+        assert_eq!(
+            fits.stutter_multiplier_of(ReadGroupId(0), 1)
+                .map(|multiplier| multiplier.provenance),
+            Some(Provenance::Defaulted),
+            "and HWI.5, the run's lane 0, keeps its own defaulted one"
+        );
+        let substitution_rate_lanes: Vec<ReadGroupId> = parameters
+            .ssr_substitution_rate()
+            .map(|(key, _)| key.read_group)
+            .collect();
+        assert_eq!(
+            substitution_rate_lanes,
+            vec![ReadGroupId(1)],
+            "HWI.3's substitution rate is filed under the run's lane 1"
+        );
+        let misread_lanes: Vec<ReadGroupId> =
+            parameters.misread_after_runs().keys().copied().collect();
+        assert_eq!(
+            misread_lanes,
+            vec![ReadGroupId(2)],
+            "HWI.4's misread table is filed under the run's lane 2"
+        );
     }
 
     /// A run that has a plant the file never saw, with the file's own list a subset of it.

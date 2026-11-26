@@ -183,6 +183,20 @@ impl WhereTheFilesRowsBelong {
 
         Self { read_group, sample }
     }
+
+    /// **The run's id for the read group the file numbers `in_the_file`** — what every table
+    /// keyed by read group must be stored under, since calling looks each one up by the run's
+    /// number. The calibration, contamination and batch tables index [`Self::read_group`]
+    /// directly; the repeat-tract tables, which are maps keyed by id, use this.
+    ///
+    /// **`validate` has already refused a row naming a read group the file does not list**, so
+    /// the index is in range.
+    fn read_group_id(&self, in_the_file: u32) -> ReadGroupId {
+        ReadGroupId(
+            u32::try_from(self.read_group[in_the_file as usize])
+                .expect("a run's read-group axis fits in a u32"),
+        )
+    }
 }
 
 impl ParametersFile {
@@ -260,12 +274,12 @@ impl ParametersFile {
                     .map(|estimate| estimate.value)
                     .collect(),
                 prior_seed,
-                self.slippage_fits()?,
-                self.substitution_rates()?,
+                self.slippage_fits(order)?,
+                self.substitution_rates(order)?,
                 a_ploidy("ploidy", self.ploidy)?,
                 self.outlier_weight(),
             )
-            .with_misread_after_runs(self.misread_after_runs()),
+            .with_misread_after_runs(self.misread_after_runs(order)),
             reads_behind_each_calibration,
             inbreeding_by_sample,
         })
@@ -369,12 +383,15 @@ impl ParametersFile {
 
     /// The whole `[repeat_tracts]` section except the substitution rates, which are keyed
     /// differently.
-    fn slippage_fits(&self) -> Result<StratumFits, ParametersFileError> {
+    fn slippage_fits(
+        &self,
+        order: &WhereTheFilesRowsBelong,
+    ) -> Result<StratumFits, ParametersFileError> {
         let tracts = &self.repeat_tracts;
         let slippage_group_of: BTreeMap<ReadGroupId, u32> = tracts
             .slippage_group_by_read_group
             .iter()
-            .map(|row| (ReadGroupId(row.read_group), row.slippage_group))
+            .map(|row| (order.read_group_id(row.read_group), row.slippage_group))
             .collect();
 
         // **One width for every stratum, taken over the whole section.** The fit builds the three
@@ -515,7 +532,7 @@ impl ParametersFile {
                 .iter()
                 .map(|row| {
                     (
-                        (ReadGroupId(row.read_group), row.period),
+                        (order.read_group_id(row.read_group), row.period),
                         StutterMultiplier {
                             value: row.stutter_multiplier.value,
                             standard_error: row.stutter_multiplier.standard_error,
@@ -531,6 +548,7 @@ impl ParametersFile {
     /// The per-`(read group × stratum × ploidy)` substitution rates, keyed as the fit keys them.
     fn substitution_rates(
         &self,
+        order: &WhereTheFilesRowsBelong,
     ) -> Result<BTreeMap<StratumKey, Estimate<ErrorRate>>, ParametersFileError> {
         let mut rates = BTreeMap::new();
         for row in &self.repeat_tracts.substitution_rate_by_stratum {
@@ -539,7 +557,7 @@ impl ParametersFile {
                 row.read_group, row.period, row.reference_repeats, row.ploidy
             );
             let key = StratumKey {
-                read_group: ReadGroupId(row.read_group),
+                read_group: order.read_group_id(row.read_group),
                 stratum: SsrStratum::new(
                     a_period(&at, row.period)?,
                     a_repeat_count(&at, row.reference_repeats)?,
@@ -575,7 +593,10 @@ impl ParametersFile {
     /// **`validate` has already refused a table that is not one row an entry for each read group
     /// it names** (`the_misread_table_holds_one_row_an_entry`), so every row below names an entry
     /// and every read group's slots are all filled.
-    fn misread_after_runs(&self) -> BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>> {
+    fn misread_after_runs(
+        &self,
+        order: &WhereTheFilesRowsBelong,
+    ) -> BTreeMap<ReadGroupId, Vec<FittedMisreadEntry>> {
         use crate::misread_context::{ENTRY_COUNT, MisreadExcess};
         let Some(misread) = &self.misread_after_runs else {
             return BTreeMap::new();
@@ -585,7 +606,7 @@ impl ParametersFile {
             let entry = the_misread_entry_of(row)
                 .expect("validate refuses a misread row naming no entry of the table");
             by_group
-                .entry(ReadGroupId(row.read_group))
+                .entry(order.read_group_id(row.read_group))
                 .or_insert_with(|| vec![None; ENTRY_COUNT])[entry.index()] =
                 Some(FittedMisreadEntry {
                     excess: MisreadExcess {
