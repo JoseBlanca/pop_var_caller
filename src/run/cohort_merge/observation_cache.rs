@@ -1052,61 +1052,17 @@ impl<S> ObservationCache<S> {
         span: GenomeRegion,
         f: impl FnOnce(&WindowedCohort<'_>) -> R,
     ) -> R {
-        // `min`/`max` for the reason `cover` and `SampleLocusObservations::reach` use them:
-        // `GenomeRegion` has public fields and no constructor ordering them, and these two
-        // methods must read an inverted region the same way, or one draws ground the other
-        // then trims away.
-        let left_edge = GenomePosition {
-            contig: span.contig,
-            position: span.start.min(span.end),
-        };
-        let last_base = GenomePosition {
-            contig: span.contig,
-            position: span.start.max(span.end),
-        };
-
-        // **A release check, for the same reason the coordinate-order one is**: a window over
-        // ground no cover reached is short, and short is a locus closed over the wrong ground
-        // rather than a failure. What it says is that the ground was *drawn* — what is still
-        // held is `evict_before`'s caller's business.
-        assert!(
-            self.covered_to
-                .is_some_and(|covered_to| last_base <= covered_to),
-            "the window was asked for {span} but cover has only reached {:?} — a cover that \
-             failed, or was never made, leaves a window short of what a locus there reaches",
+        window_over_held(
+            span,
             self.covered_to,
-        );
-
-        // One slice reference per sample, one allocation per call. The closer copies them
-        // again into its own array (`LocusCloser::over`); doing it twice costs nothing beside
-        // the walk, and the alternative — a scratch buffer on the cache — would need interior
-        // mutability on a `&self` method that several builders will hold at once.
-        // **Both views start at the same index**, because the two arrays are one sequence held
-        // twice (`SampleWindow::held_summaries`): the summary at index *i* is the summary of
-        // the observation at index *i*, so a member range decided on one addresses the other.
-        let mut observations_per_sample: Vec<&[SampleLocusObservations]> =
-            Vec::with_capacity(self.samples.len());
-        let mut summaries_per_sample: Vec<&[LocusSummary]> = Vec::with_capacity(self.samples.len());
-        // **The whole of what each sample holds, not the part from `left_edge`.** A window is
-        // centred on a position and a builder asks for it by position, so trimming a prefix
-        // would only make the search shorter while giving the caller a slice whose start is not
-        // where it thinks; eviction is what bounds this, as it bounds the other two.
-        let mut finalised_windows_per_sample: Vec<&[(GenomePosition, WindowCoverage)]> =
-            Vec::with_capacity(self.samples.len());
-        for sample in &self.samples {
-            let from = first_reaching_summary(&sample.held_summaries, left_edge);
-            summaries_per_sample.push(&sample.held_summaries[from..]);
-            finalised_windows_per_sample.push(&sample.window_coverage.finalised);
-            if !self.keeps_evidence {
-                observations_per_sample.push(&sample.held_observations[from..]);
-            }
-        }
-        let records = (!self.keeps_evidence).then_some(&observations_per_sample[..]);
-        f(&WindowedCohort {
-            observations: records,
-            summaries: Some(&summaries_per_sample),
-            finalised_windows: Some(&finalised_windows_per_sample),
-        })
+            self.keeps_evidence,
+            self.samples.iter().map(|sample| SampleHeld {
+                summaries: &sample.held_summaries,
+                observations: &sample.held_observations,
+                finalised_windows: &sample.window_coverage.finalised,
+            }),
+            f,
+        )
     }
 
     /// **Where each sample's window begins in its held list** — the prefix
@@ -1128,10 +1084,7 @@ impl<S> ObservationCache<S> {
     /// PROTOTYPE (2026-09-09 concurrency review).
     #[cfg(test)]
     pub(super) fn window_starts_into(&self, span: GenomeRegion, into: &mut Vec<usize>) {
-        let left_edge = GenomePosition {
-            contig: span.contig,
-            position: span.start.min(span.end),
-        };
+        let left_edge = left_edge_of(span);
         into.clear();
         into.extend(
             self.samples
@@ -2026,6 +1979,93 @@ fn summaries_on(held: &[LocusSummary], contig: ContigId) -> &[LocusSummary] {
 /// base of the one before it.
 fn first_reaching_summary(held: &[LocusSummary], position: GenomePosition) -> usize {
     held.partition_point(|summary| summary.reach_position() < position)
+}
+
+/// What one sample holds, as a window reads it — the three lists [`window_over_held`] slices.
+///
+/// The cache keeps them on its `SampleWindow` and a sealed round on its own `SampleView`; this
+/// is the shape both hand over, so the window is cut by one rule.
+struct SampleHeld<'a> {
+    /// The held records' summaries, in coordinate order.
+    summaries: &'a [LocusSummary],
+    /// The held records themselves, index for index with `summaries` — empty where the cohort
+    /// keeps evidence instead.
+    observations: &'a [SampleLocusObservations],
+    /// The windows finalised so far, by centre.
+    finalised_windows: &'a [(GenomePosition, WindowCoverage)],
+}
+
+/// Where a window over `span` begins: its lower end.
+///
+/// `min` for the reason `cover` and `SampleLocusObservations::reach` use it: `GenomeRegion` has
+/// public fields and no constructor ordering them, and the window and the cover must read an
+/// inverted region the same way, or one draws ground the other then trims away.
+fn left_edge_of(span: GenomeRegion) -> GenomePosition {
+    GenomePosition {
+        contig: span.contig,
+        position: span.start.min(span.end),
+    }
+}
+
+/// **The window every sample's held records give over `span`** — the one rule behind
+/// [`ObservationCache::with_observations`] and [`RoundView::with_observations`].
+///
+/// # Panics
+///
+/// If `span` reaches past `covered_to`, the last base the cover drew.
+fn window_over_held<'a, R>(
+    span: GenomeRegion,
+    covered_to: Option<GenomePosition>,
+    keeps_evidence: bool,
+    samples: impl ExactSizeIterator<Item = SampleHeld<'a>>,
+    f: impl FnOnce(&WindowedCohort<'_>) -> R,
+) -> R {
+    let left_edge = left_edge_of(span);
+    let last_base = GenomePosition {
+        contig: span.contig,
+        position: span.start.max(span.end),
+    };
+
+    // **A release check, for the same reason the coordinate-order one is**: a window over
+    // ground no cover reached is short, and short is a locus closed over the wrong ground
+    // rather than a failure. What it says is that the ground was *drawn* — what is still
+    // held is `evict_before`'s caller's business.
+    assert!(
+        covered_to.is_some_and(|covered_to| last_base <= covered_to),
+        "the window was asked for {span} but cover has only reached {covered_to:?} — a cover \
+         that failed, or was never made, leaves a window short of what a locus there reaches",
+    );
+
+    // One slice reference per sample, one allocation per call. The closer copies them
+    // again into its own array (`LocusCloser::over`); doing it twice costs nothing beside
+    // the walk, and the alternative — a scratch buffer on the cache — would need interior
+    // mutability on a `&self` method that several builders will hold at once.
+    // **Both views start at the same index**, because the two arrays are one sequence held
+    // twice (`SampleWindow::held_summaries`): the summary at index *i* is the summary of
+    // the observation at index *i*, so a member range decided on one addresses the other.
+    let mut observations_per_sample: Vec<&[SampleLocusObservations]> =
+        Vec::with_capacity(samples.len());
+    let mut summaries_per_sample: Vec<&[LocusSummary]> = Vec::with_capacity(samples.len());
+    // **The whole of what each sample holds, not the part from `left_edge`.** A window is
+    // centred on a position and a builder asks for it by position, so trimming a prefix
+    // would only make the search shorter while giving the caller a slice whose start is not
+    // where it thinks; eviction is what bounds this, as it bounds the other two.
+    let mut finalised_windows_per_sample: Vec<&[(GenomePosition, WindowCoverage)]> =
+        Vec::with_capacity(samples.len());
+    for sample in samples {
+        let from = first_reaching_summary(sample.summaries, left_edge);
+        summaries_per_sample.push(&sample.summaries[from..]);
+        finalised_windows_per_sample.push(sample.finalised_windows);
+        if !keeps_evidence {
+            observations_per_sample.push(&sample.observations[from..]);
+        }
+    }
+    let records = (!keeps_evidence).then_some(&observations_per_sample[..]);
+    f(&WindowedCohort {
+        observations: records,
+        summaries: Some(&summaries_per_sample),
+        finalised_windows: Some(&finalised_windows_per_sample),
+    })
 }
 
 #[cfg(test)]
