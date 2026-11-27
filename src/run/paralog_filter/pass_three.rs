@@ -25,14 +25,14 @@ use crate::vcf::{
     VcfWriteError, VcfWriter,
 };
 
-use std::io::BufRead;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 
 use rayon::prelude::*;
 
+use super::pass_two::{ReadBatch, read_ahead};
 use super::{
     CompressedSpillEntry, LinePatchError, ParalogVerdicts, SpillEntryDecoder, SpillError,
-    SpillFile, SpillFileError, SpillReaderWithFragments, rewrite_filter_and_info,
+    SpillFile, SpillFileError, rewrite_filter_and_info,
 };
 use crate::read_phase::fragments::RecordFragments;
 use crate::run::explain::{ParalogExplanations, ParalogVerdictAt};
@@ -170,7 +170,7 @@ pub fn write_the_records_the_filter_kept_explaining(
     }
 
     // The one reader of the fragments: they go to the writer beside each line.
-    let entries = spill.read_with_fragments().map_err(PassThreeError::Spill)?;
+    let mut entries = spill.read_with_fragments().map_err(PassThreeError::Spill)?;
     let mut did = WhatTheFilterDid::default();
 
     // **Three threads, each doing what only it can.** The spill has no index, so one thread walks
@@ -186,10 +186,18 @@ pub fn write_the_records_the_filter_kept_explaining(
     // lookup, and the batches come back here in the order they were read, so the pairing is the
     // serial walk's.
     std::thread::scope(|scope| -> Result<(), PassThreeError> {
-        let (read_batches, batches_to_prepare) = mpsc::sync_channel::<ReadBatch>(1);
+        let (read_batches, batches_to_prepare) =
+            mpsc::sync_channel::<ReadBatch<CompressedSpillEntry>>(1);
         let (emptied_batches, batches_to_refill) = mpsc::channel::<Vec<CompressedSpillEntry>>();
         let (prepared_batches, batches_to_write) = mpsc::sync_channel::<PreparedBatch>(1);
-        scope.spawn(move || read_ahead(entries, read_batches, batches_to_refill));
+        scope.spawn(move || {
+            read_ahead(
+                PREPARING_BATCH,
+                |entry| entries.next_compressed_entry(entry),
+                read_batches,
+                batches_to_refill,
+            );
+        });
         scope.spawn(move || {
             prepare_ahead(
                 spill,
@@ -227,17 +235,6 @@ pub fn write_the_records_the_filter_kept_explaining(
 /// prepared batches are in flight, so about 350 MB there.
 const PREPARING_BATCH: usize = 256;
 
-/// **A batch of compressed entries, as the reading thread hands it over.** The first `filled` are
-/// this batch's, the first of them the spill's entry number `first`, counting from 0; the rest are
-/// buffers kept from an earlier, fuller batch. `ended_with` is the reader's failure, when the batch
-/// stopped short because of one.
-struct ReadBatch {
-    entries: Vec<CompressedSpillEntry>,
-    filled: usize,
-    first: usize,
-    ended_with: Option<SpillError>,
-}
-
 /// **A batch the pool has prepared**, one item a record in spill order, then the reader's
 /// failure, if the batch stopped short because of one.
 struct PreparedBatch {
@@ -259,55 +256,6 @@ struct PreparedRecord {
     fragments: RecordFragments,
 }
 
-/// **The reading thread**: fill batches of compressed entries from `reader`, number them, and hand
-/// each on, until the spill ends, the reader fails, or nothing is listening.
-///
-/// It refills the batches handed back rather than allocating new ones, and never waits for one: a
-/// batch not yet returned is replaced by a fresh one.
-fn read_ahead<R: BufRead>(
-    mut reader: SpillReaderWithFragments<R>,
-    read_batches: SyncSender<ReadBatch>,
-    batches_to_refill: Receiver<Vec<CompressedSpillEntry>>,
-) {
-    let mut first = 0;
-    loop {
-        let mut entries = batches_to_refill.try_recv().unwrap_or_default();
-        if entries.len() < PREPARING_BATCH {
-            entries.resize_with(PREPARING_BATCH, CompressedSpillEntry::default);
-        }
-        let mut filled = 0;
-        let mut ended_with = None;
-        let mut at_the_end = false;
-        while filled < PREPARING_BATCH {
-            match reader.next_compressed_entry(&mut entries[filled]) {
-                Some(Ok(())) => filled += 1,
-                Some(Err(error)) => {
-                    ended_with = Some(error);
-                    at_the_end = true;
-                    break;
-                }
-                None => {
-                    at_the_end = true;
-                    break;
-                }
-            }
-        }
-        if filled == 0 && ended_with.is_none() {
-            return;
-        }
-        let handed_over = read_batches.send(ReadBatch {
-            entries,
-            filled,
-            first,
-            ended_with,
-        });
-        first += filled;
-        if handed_over.is_err() || at_the_end {
-            return;
-        }
-    }
-}
-
 /// **The preparing thread**: unpack each read batch on the pool, reach every record's verdict and
 /// patch its line, hand the prepared batch on in the order it came, and return the emptied buffers
 /// to the reading thread.
@@ -315,13 +263,13 @@ fn prepare_ahead(
     spill: &SpillFile,
     verdicts: &ParalogVerdicts,
     tag_instead_of_dropping: bool,
-    batches_to_prepare: Receiver<ReadBatch>,
+    batches_to_prepare: Receiver<ReadBatch<CompressedSpillEntry>>,
     emptied_batches: Sender<Vec<CompressedSpillEntry>>,
     prepared_batches: SyncSender<PreparedBatch>,
 ) {
     for batch in batches_to_prepare {
         let ReadBatch {
-            entries,
+            items: entries,
             filled,
             first,
             ended_with,

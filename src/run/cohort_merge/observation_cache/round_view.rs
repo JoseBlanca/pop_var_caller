@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use super::{
-    BuildsKeptEvidence, LocusSummary, ObservationCache, ObservationSource, WindowedCohort,
-    first_reaching_summary,
+    BuildsKeptEvidence, LocusSummary, ObservationCache, ObservationSource, SampleHeld,
+    WindowedCohort, first_reaching_summary, left_edge_of, window_over_held,
 };
 use crate::locus_generation::SampleLocusObservations;
 use crate::run::explain::DroppedLoci;
@@ -114,39 +114,17 @@ impl<E> RoundView<E> {
         span: GenomeRegion,
         f: impl FnOnce(&WindowedCohort<'_>) -> R,
     ) -> R {
-        let left_edge = GenomePosition {
-            contig: span.contig,
-            position: span.start.min(span.end),
-        };
-        let last_base = GenomePosition {
-            contig: span.contig,
-            position: span.start.max(span.end),
-        };
-        assert!(
-            self.covered_to
-                .is_some_and(|covered_to| last_base <= covered_to),
-            "the window was asked for {span} but the round's cover reached only {:?}",
+        window_over_held(
+            span,
             self.covered_to,
-        );
-        let mut observations: Vec<&[SampleLocusObservations]> =
-            Vec::with_capacity(self.samples.len());
-        let mut summaries: Vec<&[LocusSummary]> = Vec::with_capacity(self.samples.len());
-        let mut windows: Vec<&[(GenomePosition, WindowCoverage)]> =
-            Vec::with_capacity(self.samples.len());
-        for sample in &self.samples {
-            let from = first_reaching_summary(&sample.summaries, left_edge);
-            summaries.push(&sample.summaries[from..]);
-            windows.push(&sample.windows);
-            if !self.keeps_evidence {
-                observations.push(&sample.observations[from..]);
-            }
-        }
-        let records = (!self.keeps_evidence).then_some(&observations[..]);
-        f(&WindowedCohort {
-            observations: records,
-            summaries: Some(&summaries),
-            finalised_windows: Some(&windows),
-        })
+            self.keeps_evidence,
+            self.samples.iter().map(|sample| SampleHeld {
+                summaries: &sample.summaries,
+                observations: &sample.observations,
+                finalised_windows: &sample.windows,
+            }),
+            f,
+        )
     }
 
     /// [`ObservationCache::window_starts_into`], over the sealed round.
@@ -155,10 +133,7 @@ impl<E> RoundView<E> {
         span: GenomeRegion,
         into: &mut Vec<usize>,
     ) {
-        let left_edge = GenomePosition {
-            contig: span.contig,
-            position: span.start.min(span.end),
-        };
+        let left_edge = left_edge_of(span);
         into.clear();
         into.extend(
             self.samples

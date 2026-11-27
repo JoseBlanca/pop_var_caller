@@ -81,6 +81,16 @@ pub enum AlignmentFileError {
         source: io::Error,
     },
 
+    /// A CRAM's file definition declares a major version other than 3.
+    ///
+    /// noodles decodes CRAM 3.0 and 3.1, and nothing else is tested. Without this check a
+    /// file of another major version is read as CRAM 3 regardless: it fails later with a
+    /// decode error that does not mention the version, or, if its layout happens to parse,
+    /// is misread. Checked at the header read, the first time any CRAM is opened, so the
+    /// read-group pre-pass refuses it before any work is done.
+    #[error("unsupported CRAM version {major}.{minor} in '{path}' (only CRAM 3.x is supported)")]
+    UnsupportedCramVersion { path: PathBuf, major: u8, minor: u8 },
+
     /// `@HD SO` is absent or is not `coordinate` (spec §3.1, check 1).
     ///
     /// Cheap and checked first, but **not** a substitute for the streaming

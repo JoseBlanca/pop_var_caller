@@ -32,9 +32,8 @@
 //! lines below — the CIGAR vocabulary now named at the decoder that produces it, and the
 //! shift kernel now a sibling rather than a crate-root module — and one intra-doc link.
 //!
-//! [`left_align_indels`] is what [`left_align_structured`](super::left_align_structured)
-//! wraps, and that module is the whole reason this one is here: algorithm 1a *is* this
-//! function, and a port whose claim is "I am the original" cannot be a rewrite.
+//! Step 2 (read preparation, [`crate::read::left_align`]) calls [`left_align_indels`] directly on
+//! every read that carries an indel.
 
 use super::norm_seqs::{IndexRange, normalize_alleles};
 use crate::bam::alignment_input::CigarOp;

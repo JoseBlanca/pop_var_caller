@@ -1,19 +1,19 @@
 //! ng alignment — lining a read up against a reference stretch.
 //!
 //! This is a **folder, not a file**, because it holds competing implementations that get
-//! compared: the aligner and normalizer traits live here in `mod.rs` and each
+//! compared: the aligner trait lives here in `mod.rs` and each
 //! algorithm sits in its own file beside its siblings — as does the shared [`emission`]
 //! component (`doc/devel/ng/arch/alignment.md` §Module home). File names say
-//! which trait an algorithm implements and whether it is repeat-aware, because both are
-//! load-bearing — an aligner and a normalizer implement *different* traits, and every
-//! repeat-aware algorithm has an affine counterpart it must not be confused with.
+//! whether an algorithm is repeat-aware, because every repeat-aware algorithm has an affine
+//! counterpart it must not be confused with. Indel left-alignment is not an aligner: it
+//! rewrites a CIGAR the mapper already produced, and lives in [`indel_norm`].
 //!
 //! **It is not a pipeline step, and it knows none.** Step 2 (read preparation) and step 7
 //! (read likelihood) both call it; it knows about neither. It takes sequences and returns
 //! alignments or probabilities, which is why it sits outside the step-per-module rule
 //! rather than breaking it (`doc/devel/ng/spec/alignment.md` §1).
 //!
-//! Landed so far: [`Alignment`] and [`RepeatSpan`], the two output shapes; [`RepeatGeometry`]
+//! Landed so far: [`RepeatSpan`], the repeat-aware output shape; [`RepeatGeometry`]
 //! and [`RepeatContext`], which tell a repeat-aware algorithm where the repeat sits and how it
 //! slips; the [`BestPathAligner`] trait they meet at; and the two
 //! shared components, the [`emission`] scoring every aligner uses and the [`stutter`] model;
@@ -26,7 +26,6 @@
 mod delimit_parity;
 pub mod emission;
 pub mod indel_norm;
-pub mod left_align_structured;
 #[cfg(test)]
 mod leftmost_property;
 pub(crate) mod norm_seqs;
@@ -37,73 +36,8 @@ pub mod stutter;
 pub use emission::{BaseScores, Emission, FlatEmission, PerQualityEmission};
 pub use stutter::{StutterModel, StutterRates};
 
-use crate::bam::alignment_input::CigarOp;
 use crate::types::{BaseQual, Bp, DomainError, Motif};
 use std::ops::Range;
-
-/// A read placed against a reference stretch: where the placement starts, and the
-/// operations that spell it out from there.
-///
-/// This is the output shape of the **affine** best-path aligner — the general-purpose
-/// one. The repeat-aware aligners return where a read's repeat sits instead, which is a
-/// different shape and a different type; that is why the aligner trait's output is an
-/// associated type rather than this struct (arch §2.1, §3).
-///
-/// # Reusing production's `CigarOp`
-///
-/// The operations are production's [`CigarOp`], **reused rather than re-minted**. A
-/// parallel operation type would buy nothing and cost a conversion at every boundary
-/// where an alignment meets code that already speaks CIGAR — and unlike ng's [`Motif`],
-/// which had to be ported because production's is `pub(crate)` and would have leaked out
-/// of a `pub` signature, `CigarOp` is already fully public, so reuse here costs
-/// production nothing (arch §5).
-///
-/// Worth naming, because the import path misleads: `CigarOp` lives inside
-/// `pileup::walker`, so this module appears to depend on the pileup walker, which it does
-/// not — it knows no callers at all. `CigarOp` is really crate-wide CIGAR vocabulary
-/// (`bam/`, `ssr/pileup/`, `pop_var_caller/cli/`, the benches and ng all consume it), and
-/// its home inside a pipeline stage is a **pre-existing misplacement**. Lifting it to a
-/// top-level peer is a production edit, and production is frozen (owner, 2026-07-16), so
-/// this is recorded as known debt rather than fixed here; porting this module back is the
-/// natural moment to do it.
-///
-/// [`Motif`]: crate::types::Motif
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Alignment {
-    /// Where the placement starts, measured in bases from the start of **the reference
-    /// stretch the aligner was given** — not a genome position. The aligner is handed a
-    /// slice and knows nothing about where that slice came from, so it cannot return a
-    /// coordinate; turning this into a genome position is the caller's job, and it needs
-    /// the stretch's own start to do it.
-    ///
-    /// `u64`, not `usize`: ng speaks one width for coordinates and lengths, so nothing
-    /// narrows and no off-by-width bug is possible ([`Bp`], and
-    /// [`RepeatInterval`] — the same shape, an offset into the slice its
-    /// producer was handed, `u64` for the same reason).
-    ///
-    /// [`Bp`]: crate::types::Bp
-    /// [`RepeatInterval`]: crate::tandem_repeat::RepeatInterval
-    pub reference_offset: u64,
-    /// The operations from `reference_offset` onward, in read order.
-    ///
-    /// Named `cigar` rather than `ops` to match how every other site in the crate spells
-    /// this concept (`cigar` / `cigar_ops`); the architecture doc's sketch says `ops`, but
-    /// it states that its signatures are illustrative and the contract is what ships.
-    ///
-    /// **An affine aligner inhabits only part of [`CigarOp`].** The enum is production's
-    /// *parser* vocabulary and must represent everything a BAM can contain, including
-    /// `Skip`, `HardClip` and `Padding`, which describe an input record rather than a
-    /// placement this module computed. Exactly which subset the affine aligner emits is
-    /// **not settled here** — its algorithm lands in Milestone E and is currently gated,
-    /// and arch §6 still has the aligner's output shape open. The obligation is recorded
-    /// rather than guessed: the step that writes the producer states the subset, and only
-    /// then may a consumer treat the remaining variants as unreachable.
-    pub cigar: Vec<CigarOp>,
-}
-
-// A note on derives: `Hash` is not derived because [`CigarOp`] does not derive it, and
-// adding it there is a production edit. If an `Alignment` ever needs to be a map key,
-// that is the blocker to clear first.
 
 /// Where a read's repeat lies, in read coordinates, **and what held it there**.
 ///
@@ -384,7 +318,8 @@ impl<'a> ReadBases<'a> {
 /// # What varies between implementations
 ///
 /// The three associated types are what let one trait cover both families. `Output` is
-/// [`Alignment`] for the affine aligner and [`RepeatSpan`] for the repeat-aware ones —
+/// a placement (offset and CIGAR) for the affine aligner, which is not built yet, and
+/// [`RepeatSpan`] for the repeat-aware ones —
 /// they answer different questions, so a single output type would force one of them to
 /// lie. `Context` is `()` for the affine aligner, which needs nothing locus-specific, and
 /// [`RepeatContext`] for the others. `Scratch` is per-algorithm, never one shared buffer.
@@ -449,7 +384,7 @@ pub trait BestPathAligner: Sized {
     /// context. If one ever needs a scratch it must configure, the escape hatch is a
     /// `fn scratch(&self) -> Self::Scratch` on this trait, not a cleverer `Default`.
     type Scratch: Default;
-    /// [`Alignment`] for the affine aligner; [`RepeatSpan`] for the repeat-aware ones.
+    /// A placement for the affine aligner (not built yet); [`RepeatSpan`] for the repeat-aware ones.
     type Output;
     /// `()` for the affine aligner; [`RepeatContext`] for the repeat-aware ones.
     ///
@@ -473,141 +408,9 @@ pub trait BestPathAligner: Sized {
     ) -> Self::Output;
 }
 
-/// Rewrite an existing alignment into its canonical **left-most** spelling, in place.
-///
-/// This is a different task from the aligner above, and a different trait for it: an
-/// aligner *computes* an alignment from two sequences, while this *rewrites* one that already
-/// exists. The same insertion or deletion can be written at several equivalent positions when
-/// it sits in or near a repeat — the gap can slide without changing a single base of the
-/// result — and equivalent alignments spelled differently look like different variants, so
-/// their supporting reads scatter instead of pooling. Left-alignment shifts every gap as far
-/// left as it can go without introducing a mismatch, and merges adjacent gaps of the same
-/// kind. Nothing about the alignment's quality changes; only its spelling (spec §6).
-///
-/// It shares **no machinery** with [`BestPathAligner`]: no dynamic
-/// programming, no matrix, no scratch. It is in this module only because it operates on
-/// alignments, and it is a separate trait because it is a separate task (spec §1, §6).
-///
-/// # Why it takes the whole [`Alignment`], not just its operations
-///
-/// Left-alignment can shift a **leading deletion off the front** of the alignment, which drops
-/// the deletion and moves where the placement starts — its [`Alignment::reference_offset`].
-/// Production's structured pass does exactly that (`left_align_cigar` with end-deletion
-/// stripping; [indel_norm.rs](../../../pileup/walker/indel_norm.rs)). A signature over the
-/// operations alone (`&mut Vec<CigarOp>`) could not express that move, so it would silently
-/// foreclose a normalizer that needs it (arch §3, §5).
-///
-/// # Why the read is required, and why it carries no qualities
-///
-/// How far a gap may shift is bounded by matching on **both** sequences — a base can only move
-/// left across a reference base it equals *and* a read base it equals. So the read is not
-/// optional context; it is half of what defines "leftmost". But it arrives as a bare `&[u8]`,
-/// not a [`ReadBases`]: normalization shifts gaps by comparing **bases**, never quality
-/// scores, so it is quality-blind by construction and there are no qualities to pass (spec §6).
-///
-/// # Contract
-///
-/// **Pure per call**, like [`BestPathAligner`]: the output is a function of the arguments
-/// and the implementation's own constructor state, with no hidden state — so the result never
-/// depends on call order or thread count. There is no `Scratch` associated type, because these
-/// algorithms fill no matrix; a normalizer that wants a reusable buffer owns it as its own
-/// field. **No `Result`:** an alignment that is already leftmost is normalized to itself, an
-/// answer rather than a failure, so `normalize` returns nothing and mutates in place.
-///
-/// The `Sized` supertrait matches [`BestPathAligner`]: implementations
-/// are selected by generic type parameter, never behind `dyn`. Normalization runs per read as
-/// the caller walks a cohort, and the module's rule is static dispatch throughout (spec §7,
-/// arch §4). Stating it makes that a compile error rather than a convention.
-///
-/// [`ReadBases`]: crate::alignment::ReadBases
-pub trait AlignmentNormalizer: Sized {
-    /// Rewrite `alignment` into its left-most spelling, given the `read` it places and the
-    /// `reference` stretch it was placed against.
-    ///
-    /// `reference` is the whole stretch the alignment was computed against;
-    /// [`Alignment::reference_offset`] says where within it the placement starts. `read` is the
-    /// full read sequence, bare bases with no qualities (see above). Both are borrowed and
-    /// neither is mutated — only `alignment` changes, in place.
-    fn normalize(&self, alignment: &mut Alignment, read: &[u8], reference: &[u8]);
-}
-
-/// **The recommended normalizer: algorithm 1a, the GATK/production left-aligner.**
-///
-/// The module ships three `AlignmentNormalizer`s so they can be *compared*, not because a caller
-/// should choose between them by taste (spec §1, §6). The comparison is settled, and this alias
-/// records the answer so a caller reaches for one obvious thing:
-///
-/// - **1a** [`StructuredLeftAligner`](left_align_structured::StructuredLeftAligner) — a port of
-///   production's `left_align_indels` (GATK `leftAlignIndels`). One structured pass: always
-///   leftmost, merges/trims/propagates across blocks, no loop, and — for a read with no indel —
-///   returns after a single cigar scan with no allocation. **This is the default.**
-/// - **1b** `RepeatedLeftAligner` — freebayes' repeated
-///   capped passes. It can ship a *non-leftmost* result (its 20-pass cap), so it is the comparator
-///   that shows freebayes' shape is worse here, not a production candidate.
-/// - **1c** `FixpointLeftAligner` — 1a to a fixpoint; built only to *test* whether 1a is a true
-///   fixpoint. It is, empirically (the differ-at-all screen saw 0 panics and 0 disagreements with 1a
-///   across 63,821 real and adversarial reads), so 1c is retained as a regression guard, not a
-///   default.
-///
-/// **The evidence** (`ng_normalizer_screen` over GIAB HG002 10x, 2026-07-24): across 63,757 real
-/// indel-bearing reads the three produce **identical** output — so the *choice* of normalizer does
-/// not change calling, and normalization placement is not the lever behind the indel deficit
-/// (spec §6). On synthetic reads that place an indel past 1b's cap, only 1b diverges. **Owner
-/// decision, 2026-07-24:** 1a is the default; 1b and 1c are kept as comparators / regression guards.
-///
-/// A named alias rather than a hidden default inside a caller: which normalizer runs stays visible
-/// at the use site, and a caller with a reason to pick another still names it explicitly.
-pub type DefaultAlignmentNormalizer = left_align_structured::StructuredLeftAligner;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A0 lands no algorithm, so this test's job is to be a **compile-time anchor**, and
-    /// it is written to fail if the things it anchors change: that the type keeps both
-    /// fields, derives structural equality over *both* of them, and still builds its
-    /// operations out of production's [`CigarOp`].
-    ///
-    /// The whole-struct comparisons are the part that carries weight — a hand-written
-    /// `PartialEq` that ignored either field would pass field-by-field assertions and
-    /// fail these.
-    ///
-    /// TODO(Milestone E): the two contract properties stated on the fields have no test
-    /// and cannot have one until a producer exists. The step that writes the affine
-    /// aligner owes `align_returns_offset_relative_to_the_reference_stretch` (the
-    /// stretch-versus-genome confusion is a wrong answer, not a panic) and
-    /// `align_returns_operations_in_read_order`.
-    #[test]
-    fn alignment_distinguishes_offset_and_operation_order() {
-        let alignment = Alignment {
-            reference_offset: 7,
-            cigar: vec![CigarOp::Match(10), CigarOp::Insertion(2), CigarOp::Match(5)],
-        };
-
-        assert_eq!(alignment.reference_offset, 7);
-        assert_eq!(
-            alignment.cigar,
-            vec![CigarOp::Match(10), CigarOp::Insertion(2), CigarOp::Match(5)]
-        );
-
-        // Equality must see the offset: same operations, different placement.
-        assert_ne!(
-            alignment,
-            Alignment {
-                reference_offset: 8,
-                cigar: alignment.cigar.clone(),
-            }
-        );
-
-        // Equality must see operation order: same operations, permuted.
-        assert_ne!(
-            alignment,
-            Alignment {
-                reference_offset: 7,
-                cigar: vec![CigarOp::Insertion(2), CigarOp::Match(10), CigarOp::Match(5)],
-            }
-        );
-    }
 
     fn geometry(left_flank_len: u64, right_flank_len: u64) -> RepeatGeometry {
         RepeatGeometry {
@@ -841,119 +644,4 @@ mod tests {
     // `align_assigns_a_junction_gap_to_the_block_on_its_five_prime_side`,
     // `align_returns_unanchored_for_an_empty_reference`, and a debug-build test that the
     // two documented preconditions are asserted.
-
-    // ---- A1: the `AlignmentNormalizer` trait -----------------------------------------
-    //
-    // A1 lands the trait with **no algorithm** — the three real normalizers (1a/1b/1c)
-    // arrive in Milestones B and C. The two impls below are `#[cfg(test)]` compile-time
-    // anchors, not implementations of any plan algorithm: their bodies are trivial and
-    // deterministic, and their only job is to prove the trait can be met — including the
-    // one shape the whole-`Alignment` signature exists for: moving `reference_offset`.
-
-    /// The degenerate normalizer: every alignment is already leftmost, so it does nothing.
-    /// It anchors that an implementation can leave an [`Alignment`] untouched — the
-    /// already-leftmost case is an answer, not a no-op to be special-cased away.
-    struct IdentityNormalizer;
-    impl AlignmentNormalizer for IdentityNormalizer {
-        fn normalize(&self, _alignment: &mut Alignment, _read: &[u8], _reference: &[u8]) {}
-    }
-
-    /// A stand-in that strips a **leading deletion** and advances
-    /// [`Alignment::reference_offset`] by the bases it dropped. This is the load-bearing
-    /// anchor: it is expressible **only** because the trait takes the whole `Alignment` and
-    /// not just its operations. Production's structured pass does exactly this move (a
-    /// deletion that left-aligns to the read start rolls off the front); a signature over
-    /// `&mut Vec<CigarOp>` could not, which is the point arch §5 records. It is not a real
-    /// left-aligner — it only demonstrates the offset can move.
-    struct LeadingDeletionStripper;
-    impl AlignmentNormalizer for LeadingDeletionStripper {
-        fn normalize(&self, alignment: &mut Alignment, _read: &[u8], _reference: &[u8]) {
-            if let Some(CigarOp::Deletion(dropped)) = alignment.cigar.first().copied() {
-                alignment.reference_offset += u64::from(dropped);
-                alignment.cigar.remove(0);
-            }
-        }
-    }
-
-    /// Drive a normalizer **through a generic bound**, which is the only place the trait's
-    /// `Sized` supertrait (static dispatch, never `dyn`) actually bites: a concrete call
-    /// compiles regardless, so a test using concrete types alone would not pin it. A generic
-    /// function whose type parameter has no `?Sized` relaxation can only be instantiated with
-    /// a `Sized` implementor, so this helper existing at all is the guard.
-    fn normalize_via<N: AlignmentNormalizer>(
-        normalizer: &N,
-        alignment: &mut Alignment,
-        read: &[u8],
-        reference: &[u8],
-    ) {
-        normalizer.normalize(alignment, read, reference);
-    }
-
-    /// The trait is implementable and the already-leftmost case is a genuine identity —
-    /// nothing about the alignment changes, driven through the generic (static-dispatch)
-    /// caller so the `Sized` supertrait is exercised, not merely declared.
-    #[test]
-    fn alignment_normalizer_leaves_an_already_leftmost_alignment_untouched() {
-        let mut alignment = Alignment {
-            reference_offset: 4,
-            cigar: vec![CigarOp::Match(3), CigarOp::Insertion(1), CigarOp::Match(2)],
-        };
-        let before = alignment.clone();
-        normalize_via(&IdentityNormalizer, &mut alignment, b"ACGTAC", b"ACGACAC");
-        assert_eq!(alignment, before);
-    }
-
-    /// **The whole-`Alignment` signature earns its shape here.** A normalizer that drops a
-    /// leading deletion must move `reference_offset` by the bases it removed — a change an
-    /// operations-only signature could not express. Both fields move together: the deletion
-    /// leaves the CIGAR *and* the placement start advances by its length.
-    #[test]
-    fn alignment_normalizer_can_move_the_reference_offset() {
-        let mut alignment = Alignment {
-            reference_offset: 10,
-            cigar: vec![CigarOp::Deletion(2), CigarOp::Match(5)],
-        };
-        normalize_via(
-            &LeadingDeletionStripper,
-            &mut alignment,
-            b"ACGTA",
-            b"GGACGTA",
-        );
-        assert_eq!(alignment.reference_offset, 12);
-        assert_eq!(alignment.cigar, vec![CigarOp::Match(5)]);
-    }
-
-    /// The stripper's **guard** is load-bearing: a first op that is not a deletion must be
-    /// left alone. Without this, a widened pattern (strip unconditionally) would remove a
-    /// leading `Match` and wrongly advance `reference_offset`, and the offset-moving test
-    /// above would still pass.
-    #[test]
-    fn leading_deletion_stripper_leaves_a_non_leading_deletion_alignment_untouched() {
-        let mut alignment = Alignment {
-            reference_offset: 7,
-            cigar: vec![CigarOp::Match(4), CigarOp::Deletion(2), CigarOp::Match(3)],
-        };
-        let before = alignment.clone();
-        normalize_via(
-            &LeadingDeletionStripper,
-            &mut alignment,
-            b"ACGTACG",
-            b"ACGTGGACG",
-        );
-        assert_eq!(alignment, before);
-    }
-
-    /// The empty-cigar boundary: `cigar.first()` is `None`, so nothing is dropped and no
-    /// `.remove(0)` runs. Pins the no-op path against a regression that indexed `cigar[0]`
-    /// or hoisted the removal out of the guard, which would panic on the smallest input.
-    #[test]
-    fn leading_deletion_stripper_leaves_an_empty_cigar_untouched() {
-        let mut alignment = Alignment {
-            reference_offset: 3,
-            cigar: vec![],
-        };
-        normalize_via(&LeadingDeletionStripper, &mut alignment, b"", b"ACG");
-        assert_eq!(alignment.reference_offset, 3);
-        assert!(alignment.cigar.is_empty());
-    }
 }

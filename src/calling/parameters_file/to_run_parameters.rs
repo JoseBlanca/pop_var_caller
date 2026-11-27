@@ -355,10 +355,7 @@ impl ParametersFile {
         let mut by_sample = vec![None; self.fitted_from.samples.len()];
         for row in &self.inbreeding.by_sample {
             let at = order.sample[row.sample.as_str()];
-            let field = format!(
-                "inbreeding.by_sample[{:?}].inbreeding_coefficient",
-                row.sample
-            );
+            let field = format!("{}.inbreeding_coefficient", row.path());
             let value = InbreedingF::try_new(row.inbreeding_coefficient.value).map_err(|_| {
                 refuse(
                     &field,
@@ -419,10 +416,7 @@ impl ParametersFile {
                 period: row.period,
                 reference_repeats: row.reference_repeats,
             };
-            let at = format!(
-                "repeat_tracts.slippage_by_stratum_and_group[period = {}, reference_repeats = {}, slippage_group = {}]",
-                row.period, row.reference_repeats, row.slippage_group
-            );
+            let at = row.path();
             let level = a_level_provenance(&at, &row.share_of_reads_that_slip_origin)?;
             let shares = row
                 .shorter_share_and_fall_off_origin
@@ -552,10 +546,7 @@ impl ParametersFile {
     ) -> Result<BTreeMap<StratumKey, Estimate<ErrorRate>>, ParametersFileError> {
         let mut rates = BTreeMap::new();
         for row in &self.repeat_tracts.substitution_rate_by_stratum {
-            let at = format!(
-                "repeat_tracts.substitution_rate_by_stratum[read_group = {}, period = {}, reference_repeats = {}, ploidy = {}]",
-                row.read_group, row.period, row.reference_repeats, row.ploidy
-            );
+            let at = row.path();
             let key = StratumKey {
                 read_group: order.read_group_id(row.read_group),
                 stratum: SsrStratum::new(
@@ -676,20 +667,14 @@ fn a_measured_view(measurement: &ContaminationMeasurement) -> ContaminationView 
 /// `defaulted` value — a stated constant has nothing behind it — and a count of zero says the
 /// same thing in the shape memory has. What the file adds is the ability to say it by leaving
 /// the key out, which is what makes a hand-written file legible.
+///
+/// **The unit is dropped here and nowhere else.** `Estimate<T>`'s count is a bare `u64` whose unit
+/// follows the quantity; the file names the unit because a reader cannot be sent to the source to
+/// find it. The projection out puts the right one back, per quantity, so the trip is lossless —
+/// the file's own `every_evidence_count_names_the_unit_its_quantity_is_fitted_over` is what holds
+/// that.
 fn an_evidence_count(count: Option<EvidenceCount>) -> u64 {
-    match count {
-        // **The unit is dropped here and nowhere else.** `Estimate<T>`'s count is a bare `u64`
-        // whose unit follows the quantity; the file names the unit because a reader cannot be
-        // sent to the source to find it. The projection out puts the right one back, per
-        // quantity, so the trip is lossless — the file's own
-        // `every_evidence_count_names_the_unit_its_quantity_is_fitted_over` is what holds that.
-        Some(
-            EvidenceCount::Reads(count)
-            | EvidenceCount::CoveredPositions(count)
-            | EvidenceCount::BasesCompared(count),
-        ) => count,
-        None => 0,
-    }
+    count.map_or(0, EvidenceCount::count)
 }
 
 fn a_period(at: &str, period: u8) -> Result<SsrPeriod, ParametersFileError> {

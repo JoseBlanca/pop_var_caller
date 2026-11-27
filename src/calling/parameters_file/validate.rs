@@ -23,8 +23,8 @@
 //!
 //! **No line number.** The refusals of C1 come from a parser holding a byte span; these come from
 //! walking a value that no longer remembers where it was written. What is given instead is **the
-//! key's full path in the file's own spelling** — `inbreeding.by_sample["TS-1"]` — which a reader
-//! can search for, and which survives the file being reformatted.
+//! key's full path in the file's own spelling** — `inbreeding.by_sample[sample = "TS-1"]` — which a
+//! reader can search for, and which survives the file being reformatted.
 //!
 //! **A line is available and was not taken.** The `toml` crate re-exports `serde_spanned::Spanned`,
 //! so a field wrapped in `Spanned<T>` carries a byte range out of the parse this module's caller
@@ -61,6 +61,7 @@
 //! either a saturated write or a number nobody could have counted — 9.2 quintillion reads — and
 //! reading it as evidence would put a number the writer knows it lost into a run's report.
 
+use super::to_toml::the_word_for_warrant;
 use super::{
     BetweenLocusShare, ContaminationMeasurement, EvidenceCount, InformationalNumber,
     LevelSmoothing, MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile,
@@ -144,20 +145,17 @@ impl ParametersFile {
             return Ok(());
         };
         if self.format_version < FORMAT_THAT_ADDED_THE_MISREAD_TABLE {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "misread_after_runs",
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_MISREAD_TABLE} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_MISREAD_TABLE,
+                self.format_version,
             ));
         }
         let read_group_count = self.fitted_from.read_groups.len();
         let mut rows_of_each_group: BTreeMap<u32, [bool; ENTRY_COUNT]> = BTreeMap::new();
         for row in &misread.entries {
-            let at = misread_row_path(row);
+            let at = row.path();
             if row.read_group as usize >= read_group_count {
                 return Err(refuse(
                     at,
@@ -240,14 +238,11 @@ impl ParametersFile {
             return Ok(());
         };
         if self.format_version < FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "snp_indel_fit",
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT,
+                self.format_version,
             ));
         }
         let at = "snp_indel_fit";
@@ -328,31 +323,25 @@ impl ParametersFile {
             return Ok(());
         };
         if self.format_version < FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "repeat_tracts_left_out",
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT,
+                self.format_version,
             ));
         }
         let at = "repeat_tracts_left_out";
         if self.format_version < FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT
             && let Some(row) = left_out.by_stratum.iter().find(|row| row.interrupted > 0)
         {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 format!(
                     "{at}.by_stratum[period = {}, reference_repeats = {}].interrupted",
                     row.period, row.reference_repeats
                 ),
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT} count in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "count",
+                FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT,
+                self.format_version,
             ));
         }
         if let Some(depth) = left_out.typical_depth {
@@ -393,14 +382,11 @@ impl ParametersFile {
             if rows.is_empty() {
                 return Ok(());
             }
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 at,
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS,
+                self.format_version,
             ));
         }
         names_each_key_once(
@@ -495,15 +481,11 @@ impl ParametersFile {
                 ("duplicated_positions", self.duplicated_positions.is_some()),
             ];
             if let Some((table, _)) = tables.into_iter().find(|(_, written)| *written) {
-                return Err(refuse(
+                return Err(newer_than_the_files_format(
                     table,
-                    format!(
-                        "is a format-{FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES} table in a file \
-                         whose `format_version` says {}, so it is not clear which format the file \
-                         was written in; set `format_version` to the format the file was written \
-                         in",
-                        self.format_version
-                    ),
+                    "table",
+                    FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES,
+                    self.format_version,
                 ));
             }
         }
@@ -1179,10 +1161,7 @@ impl ParametersFile {
             ));
         }
         for row in &self.inbreeding.by_sample {
-            let at = format!(
-                "inbreeding.by_sample[sample = {:?}].inbreeding_coefficient",
-                row.sample
-            );
+            let at = format!("{}.inbreeding_coefficient", row.path());
             a_warranted_value(
                 &at,
                 &row.inbreeding_coefficient,
@@ -1250,14 +1229,11 @@ impl ParametersFile {
             .is_some()
             && self.format_version < FORMAT_THAT_SPLIT_THE_STATED_SHARE
         {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "repeat_tracts.fallback_between_locus_share_with_own_shares",
-                format!(
-                    "is a format-{FORMAT_THAT_SPLIT_THE_STATED_SHARE} key in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "key",
+                FORMAT_THAT_SPLIT_THE_STATED_SHARE,
+                self.format_version,
             ));
         }
         a_stated_fallback_share(
@@ -1278,11 +1254,7 @@ impl ParametersFile {
         }
 
         for row in &tracts.slippage_by_stratum_and_group {
-            let at = format!(
-                "repeat_tracts.slippage_by_stratum_and_group[period = {}, reference_repeats = {}, \
-                 slippage_group = {}]",
-                row.period, row.reference_repeats, row.slippage_group
-            );
+            let at = row.path();
             a_share(
                 &format!("{at}.share_of_reads_that_slip"),
                 row.share_of_reads_that_slip,
@@ -1397,11 +1369,7 @@ impl ParametersFile {
         }
 
         for row in &tracts.substitution_rate_by_stratum {
-            let at = format!(
-                "repeat_tracts.substitution_rate_by_stratum[read_group = {}, period = {}, \
-                 reference_repeats = {}, ploidy = {}].rate",
-                row.read_group, row.period, row.reference_repeats, row.ploidy
-            );
+            let at = format!("{}.rate", row.path());
             a_warranted_value(&at, &row.rate, EvidenceCount::BasesCompared(0))?;
             finite(at.clone(), row.rate.value)?;
             if !(0.0..=1.0).contains(&row.rate.value) {
@@ -1479,23 +1447,10 @@ impl ParametersFile {
                     "has the warrant `{}`, and nothing fits this number: it is either the \
                      built-in {built_in:?}, which is `defaulted`, or one you wrote here, which \
                      is `supplied`",
-                    the_word_for(other)
+                    the_word_for_warrant(other)
                 ),
             )),
         }
-    }
-}
-
-/// The file's own spelling of a warrant, for a refusal that has to quote one back.
-///
-/// **The `serde` spelling rather than `{:?}`**, which would print the Rust variant name — a
-/// word that appears nowhere in the file the reader is being sent to edit.
-fn the_word_for(warrant: Warrant) -> &'static str {
-    match warrant {
-        Warrant::FittedHere => "fitted_here",
-        Warrant::Borrowed => "borrowed",
-        Warrant::Supplied => "supplied",
-        Warrant::Defaulted => "defaulted",
     }
 }
 
@@ -1689,6 +1644,27 @@ pub(super) fn refuse(field: impl Into<String>, problem: impl Into<String>) -> Pa
     }
 }
 
+/// **The refusal for something a later format added, found in a file stamped older**: a file that
+/// says `format_version` 3 and holds a format-4 table cannot say which format it was written in.
+///
+/// `what` names the kind of thing at `at` — "table", "key" or "count" — and `added_in` is the
+/// format that added it.
+fn newer_than_the_files_format(
+    at: impl Into<String>,
+    what: &str,
+    added_in: u32,
+    format_version: u32,
+) -> ParametersFileError {
+    refuse(
+        at,
+        format!(
+            "is a format-{added_in} {what} in a file whose `format_version` says \
+             {format_version}, so it is not clear which format the file was written in; set \
+             `format_version` to the format the file was written in"
+        ),
+    )
+}
+
 /// A number that is a number — refusing `NaN` and both infinities.
 ///
 /// **Its own check rather than a corollary of the range tests**, because `NaN` fails every
@@ -1779,14 +1755,6 @@ fn a_misread_standard_error(
         ));
     }
     Ok(())
-}
-
-/// A misread row's path in the file's own spelling, for a refusal that names it.
-fn misread_row_path(row: &MisreadAfterRunRow) -> String {
-    format!(
-        "misread_after_runs.entries[read_group = {}, shortest_run = {}, base = {:?}]",
-        row.read_group, row.shortest_run, row.base
-    )
 }
 
 /// **The entry of the misread table a row names**, or `None` where no entry has its run lengths
@@ -2849,8 +2817,12 @@ mod tests {
     fn the_tracts_left_out_in_a_version_six_file_are_refused() {
         let (field, problem) = refused(|file| file.format_version = 6);
         assert_eq!(field, "repeat_tracts_left_out");
-        assert!(problem.contains("format-7 table"), "{problem}");
-        assert!(problem.contains("says 6"), "{problem}");
+        assert_eq!(
+            problem,
+            "is a format-7 table in a file whose `format_version` says 6, so it is not clear \
+             which format the file was written in; set `format_version` to the format the file \
+             was written in"
+        );
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;

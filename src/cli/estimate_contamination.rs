@@ -747,7 +747,7 @@ fn walk_one_sample(
     let generic_generator = PileupGenerator::new(
         Arc::clone(&shared),
         accessor.clone(),
-        LeftAlignPreparer::with_default_normalizer(accessor()),
+        LeftAlignPreparer::new(accessor()),
         PileupGeneratorConfig::default(),
     )
     .map_err(EstimateContaminationCliError::Generators)?;

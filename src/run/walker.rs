@@ -1228,7 +1228,7 @@ mod walking_the_real_generator {
             SampleReads::open_only_sample(&[bam], &reference, ReadFilterConfig::default(), false)
                 .expect("the fixture sample opens");
 
-        let preparer = LeftAlignPreparer::with_default_normalizer(fixture_reference_bases());
+        let preparer = LeftAlignPreparer::new(fixture_reference_bases());
         // An ordinary `Arc`: `InMemoryRefSeq` is `Send + Sync`, as `WindowedRefSeq` also is
         // since 2026-09-01. (An `arc_with_non_send_sync` waiver contrast used to live here;
         // the lint stopped firing anywhere when the file-backed accessor became `Sync`.)
@@ -1664,7 +1664,7 @@ pub(crate) fn generic_path_generators(
     let generator = PileupGenerator::new(
         shared,
         make_reference,
-        LeftAlignPreparer::with_default_normalizer(reference.accessor()),
+        LeftAlignPreparer::new(reference.accessor()),
         config,
     )
     .map_err(|source| RunError::LocusGeneratorSettings { source })?;

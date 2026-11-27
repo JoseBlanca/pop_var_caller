@@ -26,8 +26,18 @@
 //! `cohort_inbreeding` helper, which sits immediately after this span in its file and
 //! fills a slice with one coefficient repeated for every sample, is deliberately **not**
 //! copied: it is the piece ng replaces rather than ports.
+//!
+//! **One item at the end is ng's own, not a copy**:
+//! [`calibrate_from_the_ratio_histogram`], which puts the copied pieces together and adds the
+//! **fallback**. An estimate that did not settle is replaced by the documented rate rather than
+//! used, because an unconverged iterate is not distinguishable from a real estimate by its value
+//! alone and would otherwise calibrate the whole run. It sat in a file of its own while the guard
+//! compared this one's span; with the guard gone the split protected nothing. It is checked
+//! against production's frozen answers all the same:
+//! `the_fallback_and_the_cut_agree_with_productions_to_within_rounding` in `production_parity` is
+//! the oracle.
 
-use super::{EmConfig, ParalogFdrCurve, ParalogPrior};
+use super::{EmConfig, ParalogFdrCurve, ParalogLrHistogram, ParalogPrior};
 use crate::float;
 
 /// Default fallback `π` used when the EM does not converge — a rare-paralog
@@ -111,5 +121,39 @@ impl ParalogCalibration {
         }
         let log_odds = lr + float::ln(pi / (1.0 - pi)); // LR + logit(π)
         Some(1.0 / (1.0 + float::exp(-log_odds))) // σ(·)
+    }
+}
+
+/// **The rate, the curve and the cut, from a histogram of likelihood ratios.**
+///
+/// `target_fdr` is the operator's target false-discovery rate among the records removed. The
+/// caller has already checked it is a probability — pass two takes it as a
+/// [`TargetFdr`](crate::run::paralog_filter::TargetFdr), which cannot hold anything else.
+///
+/// An EM estimate that did not converge is replaced by `config.fallback_prior`; `converged` stays
+/// `false`, so the run report can say which happened.
+///
+/// Pure: the same histogram and configuration give the same calibration.
+pub fn calibrate_from_the_ratio_histogram(
+    histogram: &ParalogLrHistogram,
+    target_fdr: f64,
+    config: &CalibrationConfig,
+) -> ParalogCalibration {
+    let estimated = ParalogPrior::estimate(histogram, &config.em);
+    let prior = if estimated.converged {
+        estimated
+    } else {
+        ParalogPrior {
+            prior_probability: config.fallback_prior,
+            converged: false,
+        }
+    };
+    let curve = ParalogFdrCurve::from_histogram(histogram, &prior);
+    let lr_threshold = curve.lr_threshold_for_fdr(target_fdr);
+    ParalogCalibration {
+        prior,
+        curve,
+        lr_threshold,
+        target_fdr,
     }
 }

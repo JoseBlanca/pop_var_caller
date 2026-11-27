@@ -40,6 +40,7 @@ mod accumulator;
 /// rather than the cache's walk, which is the only thing that differs between them.
 pub mod depth;
 mod depth_grid;
+pub mod histogram_line;
 
 #[cfg(test)]
 mod production_parity;

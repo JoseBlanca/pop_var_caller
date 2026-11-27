@@ -319,6 +319,34 @@ fn site_terms(
     emissions_into(site, terms, templates, mismatch, emissions, scratch);
 }
 
+/// **Each row of shares weighed by the likelihood**, written over `weighted` (`rows × alleles`):
+/// entry `b` of a row is `Σₐ share[a] · by_alleles[a·A + b]`, summed over `a` in order.
+///
+/// [`emissions_into`] and [`definite_emissions_into`] both call this, so the two give an emission
+/// the same bits by construction rather than by keeping two copies of the loop alike.
+fn weigh_shares_into(
+    weighted: &mut Vec<f64>,
+    rows: usize,
+    shares: &[f64],
+    by_alleles: &[f64],
+    alleles: usize,
+) {
+    weighted.clear();
+    weighted.resize(rows * alleles, 0.0);
+    for (out, shares) in weighted
+        .chunks_exact_mut(alleles)
+        .zip(shares.chunks_exact(alleles))
+    {
+        for (b, value) in out.iter_mut().enumerate() {
+            *value = shares
+                .iter()
+                .zip(by_alleles.iter().skip(b).step_by(alleles))
+                .map(|(share, likelihood)| share * likelihood)
+                .sum();
+        }
+    }
+}
+
 /// A template's share blurred by the mismatch rate: `(1 − ε)·q + ε/A`.
 fn blur(share: f64, mismatch: f64, alleles: usize) -> f64 {
     (1.0 - mismatch) * share + mismatch / alleles as f64
@@ -368,20 +396,7 @@ fn emissions_into(
     };
     let (weighted, by_allele) = (&mut scratch.weighted, &mut scratch.by_allele);
     let by_alleles = &terms.by_alleles;
-    weighted.clear();
-    weighted.resize(templates * alleles, 0.0);
-    for (out, shares) in weighted
-        .chunks_exact_mut(alleles)
-        .zip(emitting.chunks_exact(alleles))
-    {
-        for (b, value) in out.iter_mut().enumerate() {
-            *value = shares
-                .iter()
-                .zip(by_alleles.iter().skip(b).step_by(alleles))
-                .map(|(share, likelihood)| share * likelihood)
-                .sum();
-        }
-    }
+    weigh_shares_into(weighted, templates, emitting, by_alleles, alleles);
     // Each first template's row of emissions is built one allele at a time across every second
     // template, so the inner loop runs over templates and vectorises; each emission still adds its
     // alleles' terms in order, so the bits are those of a sum per pair.
@@ -466,20 +481,7 @@ fn definite_emissions_into(
                 .map(|allele| blur(f64::from(u8::from(allele == carried)), mismatch, alleles)),
         );
     }
-    weighted.clear();
-    weighted.resize(alleles * alleles, 0.0);
-    for (out, shares) in weighted
-        .chunks_exact_mut(alleles)
-        .zip(own.chunks_exact(alleles))
-    {
-        for (b, value) in out.iter_mut().enumerate() {
-            *value = shares
-                .iter()
-                .zip(by_alleles.iter().skip(b).step_by(alleles))
-                .map(|(share, likelihood)| share * likelihood)
-                .sum();
-        }
-    }
+    weigh_shares_into(weighted, alleles, own, by_alleles, alleles);
     pair_table.clear();
     pair_table.resize(alleles * alleles, 0.0);
     for (out, first) in pair_table

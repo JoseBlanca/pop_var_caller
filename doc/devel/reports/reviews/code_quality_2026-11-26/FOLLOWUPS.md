@@ -1,5 +1,8 @@
 
-- CRAM major-version check missing on the live reader (found by D1; deleted cram_input had it). Add to read/input/open_bam.rs with a test: refuse non-3.x CRAM. Autonomous (unsupported input only).
+- CRAM major-version check missing on the live reader (found by D1; deleted cram_input had it). Add to read/input/open_bam.rs with a test: refuse non-3.x CRAM. Autonomous (unsupported input only). **FIXED (F8, branch cq-f8):** `read_header` in read/input/open_bam.rs refuses a CRAM whose major version is not 3 with `AlignmentFileError::UnsupportedCramVersion`; test `a_cram_with_major_version_4_is_refused_at_the_header_read`.
 - RepeatLadder computes modal_repeat_count on every locus; only tests read it (found by D2). Candidate speed cleanup, gate timing.
-- Release-only test failure: alignment::left_align_structured::tests::an_offset_past_the_reference_panics expects a debug_assert message (pre-existing; owner U8).
+- Release-only test failure: alignment::left_align_structured::tests::an_offset_past_the_reference_panics expects a debug_assert message (pre-existing; owner U8). **FIXED 62fd4540:** both debug-only panic tests are `#[cfg(debug_assertions)]`.
 - Two rustdoc "redundant explicit link target" warnings: stratum_fits.rs:64, cohort_merge/close.rs:18.
+- `cargo clippy --all-targets` fails on examples/solve_bench.rs: it calls `NeighbourEvidenceStage::push`/`finish`, which D6 (6176ee12) made `#[cfg(test)]` (found by U4). Either give the example another entry point or drop the example; check whether anyone still runs it. **DELETED** (owner 2026-11-27: nothing used it; only the dated 2026-11-24/25 reports name it).
+- Docs still naming AlignmentNormalizer / with_default_normalizer / MappedRead after U8: doc/devel/ng/arch/read_preparation.md, doc/devel/ng/README.md:144 and other spec/arch docs (X6).
+- validate: the snp_indel_fit.by_sample[sample = …] path prints the sample unquoted, the inbreeding path quotes it (found by U6; message text only, small output item). Clippy warnings (~6) in ssr_fit/{penalised_fit,tract_exclusion,bench_fixtures/cohort_draw}.rs and run/census_fit.rs.
