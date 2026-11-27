@@ -1538,11 +1538,10 @@ fn share_of_one_read(
         // −0.5 one reports −0.5.
         //
         // That a sequence's read count agrees with the reads it names is the **producer's**
-        // guarantee, like the reference width and the chain ids. **The psp reader checks it on
-        // one list a record only** — the one it derives rather than stores
-        // (`psp/record.rs`, `check_a_derived_read_list`) — so a damaged psp whose stored list
-        // names reads under a zero count reaches this assertion and aborts the run rather than
-        // being refused as damage.
+        // guarantee, like the reference width and the chain ids. The psp reader checks it on
+        // every list a record holds, derived or stored (`psp/record.rs`,
+        // `check_a_derived_read_list` and `check_the_stored_read_lists`), so a damaged psp
+        // naming reads under a zero count is refused as damage before it gets here.
         assert!(
             sequence.num_obs > 0,
             "the observation {:?} at {} of sample index {} names reads but counts none, so \
@@ -1868,10 +1867,11 @@ fn alleles_of_sample(
             //
             // Release-level, like the walk's own checks beside it, and one comparison per
             // sequence against a derivation that already copies every sequence's bases.
-            // **The psp reader checks this on one list a record only**, the one it derives
-            // (`psp/record.rs`, `check_a_derived_read_list`); a damaged psp whose stored list
-            // is empty under a non-zero count reaches this assertion and aborts the run
-            // rather than being refused as damage.
+            // The psp reader refuses a damaged generic record whose list is empty under a
+            // non-zero count while reads are live (`psp/record.rs`,
+            // `check_the_stored_read_lists`). ⚠ **It accepts one with no read live at all**,
+            // which it cannot tell from a file that names no reads, so this assertion is still
+            // the backstop for that shape.
             assert!(
                 !sequence.chain_ids.is_empty(),
                 "the observation {:?} at {} of sample index {} carries {} reads and no \
