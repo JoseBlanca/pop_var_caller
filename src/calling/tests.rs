@@ -1,6 +1,9 @@
 use super::*;
+use crate::calling::genotype_prior::SpectrumSeed;
 use crate::locus_generation::SsrDetail;
-use crate::types::{AlleleId, ContigId, Motif, Position};
+use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use crate::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::types::{AlleleId, ContigId, Motif, Ploidy, Position};
 
 pub(super) fn generic_reference() -> CandidateAlleles {
     CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic)
@@ -585,134 +588,13 @@ fn an_artifact_summary_naming_an_allele_the_locus_lacks_is_refused() {
 // The three types the calling loop takes and gives back, and the missing genotype.
 // ────────────────────────────────────────────────────────────────────────────────
 
-use crate::parameter_estimation::joint::contamination::ContaminationSource;
 use std::collections::BTreeMap;
 
 pub(super) fn no_strata() -> StratumFits {
     StratumFits::over(&[], BTreeMap::new())
 }
 
-/// A run whose fit produced an allele length variation at one dinucleotide stratum and at one
-/// trinucleotide stratum, with **different shapes and different concentrations** — so that a
-/// lookup answering from the wrong stratum, or from the wrong period, is a different number
-/// rather than the same one.
-fn strata_with_allele_length_variations() -> StratumFits {
-    use crate::parameter_estimation::joint::census::Stratum;
-    use crate::parameter_estimation::joint::share_curve::ShareSource;
-    use crate::parameter_estimation::joint::slippage_curve::LevelSource;
-    use crate::parameter_estimation::joint::ssr_fit::{
-        LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
-    };
-
-    let level = LevelProvenance {
-        source: LevelSource::Cell,
-        curve: None,
-        reach: None,
-        slipped_reads: Some(400.0),
-    };
-    let share = ShareProvenance {
-        source: ShareSource::Stratum,
-        curve: None,
-        reach: None,
-    };
-    let one = |period: u8, repeats: u64, allele_length_variation: Vec<f64>, concentration: f64| {
-        StratumOutcome::Fitted(Box::new(StratumFit {
-            standard_errors: None,
-            stratum: Stratum {
-                period,
-                reference_repeats: repeats,
-            },
-            slippage: vec![Some(Slippage {
-                level: 0.05,
-                shorter_share: 0.83,
-                fall_off: 0.25,
-            })],
-            allele_length_variation,
-            concentration: Some(concentration),
-            samples_fitted_on: None,
-            tracts_of_its_own: 40,
-            reads_crossing: 400,
-            level_provenance: vec![Some(level)],
-            shares_provenance: vec![Some(SharesProvenance {
-                slipped_reads: Some(400.0),
-                shorter_share: share,
-                fall_off: share,
-            })],
-        }))
-    };
-    StratumFits::over(
-        &[
-            one(2, 10, vec![0.6, 0.3, 0.1], 4.0),
-            one(3, 10, vec![0.1, 0.3, 0.6], 25.0),
-        ],
-        BTreeMap::from([(ReadGroupId(0), 0)]),
-    )
-}
-
-/// **The run's frozen parameters answer a tract's prior shape from the tract's own stratum**,
-/// and the accessor is keyed by the tract's reference repeat count where its two neighbours
-/// on this type are keyed by the candidate's.
-///
-/// **Three fixtures' worth of coincidence is removed on purpose.** The two strata carry
-/// different motif periods, different shapes and different concentrations, and the repeat
-/// count asked for is not one either stratum would answer by accident — so a lookup off by
-/// one repeat, or reading the wrong period, is a visibly different answer.
-#[test]
-fn the_run_answers_a_tracts_prior_shape_from_its_own_stratum() {
-    use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
-    use crate::parameter_estimation::repeat_strata::RepeatCount;
-
-    let strata = strata_with_allele_length_variations();
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let batching = SequencingBatches::all_together_over(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let dinucleotide = parameters.ssr_allele_length_variation_at(
-        SsrPeriod::try_new(2).expect("a dinucleotide"),
-        RepeatCount(10),
-    );
-    assert_eq!(
-        dinucleotide.rung(),
-        AlleleLengthVariationRung::StratumsOwnFit
-    );
-    assert_eq!(dinucleotide.fitted_weights(), Some(&[0.6, 0.3, 0.1][..]));
-    assert_eq!(dinucleotide.concentration(), 4.0);
-
-    // Same repeat count, other motif period: a different stratum and a different answer.
-    let trinucleotide = parameters.ssr_allele_length_variation_at(
-        SsrPeriod::try_new(3).expect("a trinucleotide"),
-        RepeatCount(10),
-    );
-    assert_eq!(trinucleotide.fitted_weights(), Some(&[0.1, 0.3, 0.6][..]));
-    assert_eq!(trinucleotide.concentration(), 25.0);
-
-    // A repeat count neither stratum holds falls down the ladder rather than answering.
-    let elsewhere = parameters.ssr_allele_length_variation_at(
-        SsrPeriod::try_new(2).expect("a dinucleotide"),
-        RepeatCount(11),
-    );
-    assert_eq!(elsewhere.rung(), AlleleLengthVariationRung::StatedFlat);
-    // The median is taken on the between-locus share 1 / (1 + c): 4 and 25 have shares 1/5
-    // and 1/26, whose mean is 31/260, a concentration of (1 − 31/260) / (31/260) = 229/31 —
-    // not the mean of the two concentrations, 14.5.
-    let expected = 229.0 / 31.0;
-    assert!(
-        (elsewhere.concentration() - expected).abs() < 1e-12,
-        "the run fitted 4.0 and 25.0, whose median share converts back to 229/31 ≈ 7.39; \
-         got {}",
-        elsewhere.concentration()
-    );
-}
-
-fn diploid_ploidy() -> Ploidy {
+pub(super) fn diploid_ploidy() -> Ploidy {
     Ploidy::try_new(2).expect("a diploid")
 }
 
@@ -724,16 +606,7 @@ pub(super) fn one_read_group() -> Vec<ReadGroupCalibration> {
     vec![ReadGroupCalibration::unscaled()]
 }
 
-fn measured_contamination() -> ContaminationView {
-    ContaminationView {
-        fraction: 0.03,
-        markers_with_reads: 400,
-        reads_on_markers: 1_200,
-        source: ContaminationSource::ThisReadGroupsReads,
-    }
-}
-
-fn neutral_seed() -> SpectrumSeed {
+pub(super) fn neutral_seed() -> SpectrumSeed {
     SpectrumSeed::new(1.0, 1e-3, genotype_prior::SeedRegime::NeutralShape)
 }
 
@@ -809,201 +682,6 @@ fn biallelic_locus() -> (CandidateAlleles, std::sync::Arc<GenotypeTable>) {
     let (alleles, _) = two_allele_locus();
     let table = GenotypeTable::build(diploid_ploidy(), alleles.len());
     (alleles, table)
-}
-
-/// Contamination is fitted per read group, so a run whose calibration covers one group
-/// and whose contamination covers two has one of the two indexed by something else.
-///
-/// **The check has to be at construction, not at the first read.** The row looks a
-/// fraction up by read group id, so a mismatched pair is found at whichever locus first
-/// carries a read from the group past the end — or never, if no read ever comes from
-/// one, in which case every genotype of the run is scored under somebody else's
-/// contamination.
-#[test]
-#[should_panic(expected = "contamination is fitted per read group")]
-fn frozen_parameters_refuse_a_contamination_list_of_another_read_group_count() {
-    let calibration = one_read_group();
-    let contamination = vec![measured_contamination(), measured_contamination()];
-    let inbreeding = outbred_samples(2);
-    let strata = no_strata();
-    // A batching that matches neither list, so that what refuses this is the check the
-    // test is about rather than a fixture that happened to disagree first.
-    let _ = frozen_parameters(
-        &calibration,
-        &contamination,
-        &one_batch(2, 2),
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-}
-
-/// No contamination anywhere has a **named** door, and it is a different claim from a
-/// fitted zero: at one sample there is no panel to be surprised by, so the fraction is
-/// not estimable at all rather than estimated and found clean.
-#[test]
-fn a_run_with_no_contamination_fitted_says_so_by_name() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let parameters = FrozenParameters::uncontaminated(
-        &calibration,
-        &inbreeding,
-        neutral_seed(),
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-        diploid_ploidy(),
-    );
-
-    assert!(parameters.contamination_is_absent());
-    assert!(parameters.contamination_by_read_group().is_empty());
-    assert_eq!(parameters.read_group_count(), 1);
-    assert_eq!(parameters.sample_count(), 1);
-    assert_eq!(parameters.ploidy().get(), 2);
-    assert_eq!(parameters.prior_seed().alpha_ref(), 1.0);
-    assert_eq!(parameters.ssr_slippage_fits().strata(), 0);
-}
-
-/// The shortest thing that compiles is refused, so a caller reaches the decision.
-///
-/// **The two spellings are not equivalent and that is the whole point.** A consumer
-/// handed an empty list writes `contamination.get(group).map(|v| v.fraction)
-/// .unwrap_or(0.0)` and has silently turned *not estimable* into *estimated and found
-/// clean* — which are different claims about the sample. The sibling half of the same
-/// mixture, `ContaminationMixture::new`, refuses the empty spelling for this reason,
-/// and this is the frozen half spelled to match.
-#[test]
-#[should_panic(expected = "is spelled `FrozenParameters::uncontaminated`")]
-fn an_empty_contamination_list_is_refused_in_favour_of_the_named_constructor() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let _ = FrozenParameters::new(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        neutral_seed(),
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-        diploid_ploidy(),
-    );
-}
-
-/// The two axes the type calls "not interchangeable" are told apart by a fixture where
-/// they differ: one library, three samples.
-///
-/// **Every fixture with one of each passes a swapped implementation.** `sample_count()`
-/// is what the evidence check compares against, so `read_group_count()` and
-/// `sample_count()` reading each other's field turns the run-order guard into a
-/// read-group-count guard — invisible on a panel of 63 accessions with one library
-/// each, and wrong on any run where a sample is sequenced twice.
-#[test]
-fn read_group_count_and_sample_count_are_two_different_axes() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(3);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    assert_eq!(parameters.read_group_count(), 1);
-    assert_eq!(parameters.sample_count(), 3);
-    assert_eq!(parameters.calibration_by_read_group().len(), 1);
-    assert_eq!(parameters.inbreeding_coefficient_by_sample().len(), 3);
-}
-
-/// A run whose read-group axis went missing is refused at construction, rather than
-/// producing an out-of-range index at whichever locus first carries a read.
-#[test]
-#[should_panic(expected = "read-group axis went missing")]
-fn frozen_parameters_refuse_a_run_with_no_read_groups() {
-    let inbreeding = outbred_samples(2);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let _ = frozen_parameters(
-        &[],
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-}
-
-/// **A batching minted over a different set of libraries is refused where the run is
-/// assembled**, not at whichever locus first carries a read from the library it misses.
-///
-/// The batching is declared by the user and the parameters are fitted, so the two can
-/// disagree about how many libraries a run has without either being wrong on its own — and
-/// the symptom without this is a mixture scoring some library against the neighbours of
-/// another.
-#[test]
-#[should_panic(expected = "the batching covers 2 read groups")]
-fn a_batching_over_another_runs_read_groups_is_refused() {
-    let calibration = one_read_group();
-    let contamination = vec![measured_contamination()];
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let two_libraries = one_batch(2, 2);
-    let _ = FrozenParameters::new(
-        &calibration,
-        &contamination,
-        &two_libraries,
-        &inbreeding,
-        neutral_seed(),
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-        diploid_ploidy(),
-    );
-}
-
-/// **And the other axis**, which is the one a run of one library per sample cannot tell
-/// apart from the first: the sample-keyed batching is read by the run's own sample index, so
-/// a shorter one drops the last samples out of every batch's copies.
-#[test]
-#[should_panic(expected = "the batching covers 1 samples")]
-fn a_batching_over_another_runs_samples_is_refused() {
-    let calibration = one_read_group();
-    let contamination = vec![measured_contamination()];
-    let inbreeding = outbred_samples(2);
-    let strata = no_strata();
-    let one_library_one_sample = one_batch(1, 1);
-    let _ = FrozenParameters::new(
-        &calibration,
-        &contamination,
-        &one_library_one_sample,
-        &inbreeding,
-        neutral_seed(),
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-        diploid_ploidy(),
-    );
-}
-
-/// A run whose sample order went missing is refused, rather than producing a locus with
-/// no calls in it.
-#[test]
-#[should_panic(expected = "an empty list is a run whose sample order went missing")]
-fn frozen_parameters_refuse_a_run_with_no_samples() {
-    let calibration = one_read_group();
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let _ = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &[],
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
 }
 
 /// Each sample reads and writes its own row of the two flat tables, and the rows do not
