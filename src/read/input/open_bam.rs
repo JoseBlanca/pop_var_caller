@@ -758,7 +758,23 @@ pub(crate) fn read_header(path: &Path) -> Result<sam::Header, AlignmentFileError
 
     match AlignmentFileKind::from_path(path) {
         Some(AlignmentFileKind::Bam) => bam::io::Reader::new(file).read_header(),
-        Some(AlignmentFileKind::Cram) => cram::io::Reader::new(file).read_header(),
+        // **The CRAM version is checked here because this is the first read of every CRAM**:
+        // the read-group pre-pass and `AlignmentFile::open` both come through this function,
+        // and a cursor's later header reads are of a file this has already passed. noodles
+        // itself accepts any version and decodes as CRAM 3, so a CRAM 4 file would otherwise
+        // fail later with an error that never mentions the version, or be misread.
+        Some(AlignmentFileKind::Cram) => {
+            let mut reader = cram::io::Reader::new(file);
+            let version = reader.read_file_definition().map_err(open_error)?.version();
+            if version.major() != 3 {
+                return Err(AlignmentFileError::UnsupportedCramVersion {
+                    path: path.to_path_buf(),
+                    major: version.major(),
+                    minor: version.minor(),
+                });
+            }
+            reader.read_file_header()
+        }
         // `load_alignment_index` rejects this too, but the header read comes
         // first, so the extension has to be understood here.
         None => Err(std::io::Error::new(
@@ -3481,6 +3497,38 @@ mod tests {
         let grouped = group_crai_by_contig(&index, 3);
 
         assert!(grouped[1].is_empty());
+    }
+
+    // --- the CRAM major version ---
+
+    /// **A CRAM whose file definition says major version 4 is refused, naming the file and
+    /// the version.** The bytes are a real CRAM 3.0 file with byte 4 — the major version —
+    /// changed, so everything after the version still parses: without the check the header
+    /// reads cleanly and the file would go on to be decoded as CRAM 3. The unpatched file is
+    /// read first, so the refusal is shown to come from the version byte alone.
+    #[test]
+    fn a_cram_with_major_version_4_is_refused_at_the_header_read() {
+        let testdata =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/read/input/testdata");
+        let mut bytes =
+            std::fs::read(testdata.join("multi_contig_slice.cram")).expect("the fixture CRAM");
+        assert_eq!(&bytes[..6], b"CRAM\x03\x00", "the fixture is CRAM 3.0");
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let good = dir.path().join("version_3.cram");
+        std::fs::write(&good, &bytes).expect("write the CRAM 3.0 copy");
+        read_header(&good).expect("the unpatched CRAM 3.0 copy reads");
+
+        bytes[4] = 4;
+        let bad = dir.path().join("version_4.cram");
+        std::fs::write(&bad, &bytes).expect("write the CRAM 4.0 copy");
+        match read_header(&bad) {
+            Err(AlignmentFileError::UnsupportedCramVersion { path, major, minor }) => {
+                assert_eq!((major, minor), (4, 0));
+                assert_eq!(path, bad);
+            }
+            other => panic!("expected UnsupportedCramVersion, got {other:?}"),
+        }
     }
 
     // --- the hex decoder's edges ---
