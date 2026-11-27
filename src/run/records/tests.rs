@@ -104,15 +104,14 @@ fn a_span_at_the_contigs_first_base_takes_the_base_to_its_right() {
     assert_eq!(answer, Some(PaddingBase::Right(b'G')));
 }
 
-/// **The shape the generic path actually produces needs no padding base**, which is why the
-/// rule above is answered and never exercised on today's run.
+/// **The shape the generic path actually produces needs no padding base**; only a
+/// repeat-tract locus exercises the rule above.
 ///
 /// The generic mint anchors its indels — a deletion's reference span is the anchor plus the
 /// deleted run and an insertion's is the anchor plus its own inserted length
 /// (`ReadEvent::record_span`, `locus_generation/pileup/decompose.rs`) — so a five-base deletion
 /// is `REF ACGTTG` against `ALT A`, and the alternative spells a base rather than nothing. The
-/// empty allele spec §5 was written for is the repeat-tract path's full-tract deletion, which is
-/// unbuilt.
+/// empty allele spec §5 was written for is the repeat-tract path's full-tract deletion.
 #[test]
 fn a_deletion_shaped_the_way_the_generic_mint_shapes_one_needs_no_padding_base() {
     let reference = reference_of(b"ACGTTGCA");
@@ -161,11 +160,11 @@ fn a_span_starting_at_the_second_base_of_a_contig_still_pads_from_the_left() {
 
 /// **A base the reference cannot serve is an error, never an invented `N`.**
 ///
-/// Production's repeat-tract writer puts the letter `N` at a span it cannot read beside
-/// ([`vcf_out.rs:405-435`](../../../../src/ssr/cohort/vcf_out.rs)); spec §5 declines to port
-/// that, because a base the reference does not contain, written at an unshifted position, is a
-/// record that parses and lies. The state is unreachable from real reads — it needs a span
-/// covering a whole contig — and the refusal is what makes that a claim rather than a hope.
+/// The caller this one replaced put the letter `N` at a span it could not read beside; spec §5
+/// declines to do that, because a base the reference does not contain, written at an unshifted
+/// position, is a record that parses and lies. The state is unreachable from real reads — it
+// needs a span covering a whole contig — and the refusal is what makes that a claim rather
+/// than a hope.
 #[test]
 fn a_padding_base_the_reference_cannot_serve_is_refused_rather_than_invented() {
     let reference = reference_of(b"AC");

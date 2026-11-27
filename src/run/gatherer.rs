@@ -597,8 +597,8 @@ impl SampleObservationGatherer {
     ///
     /// **It names no psp, and cannot.** A census kept in a file of its own used to name the psp
     /// it was built from, so that a pair which had come apart could be caught; a census that *is*
-    /// the psp's own trailer cannot come apart from it, and the naming went at
-    /// `psp_census_pair.md`'s Milestone E.
+    /// the psp's own trailer cannot come apart from it, so the census no longer names one
+    /// (`psp_census_pair.md`).
     ///
     /// # Errors
     ///
@@ -1602,8 +1602,7 @@ mod census_tests {
     //!
     //! **These use the binary namespace's on-disk cohort fixture**, which is the only one in the
     //! tree that builds a real catalog file — and a real catalog is what the selection needs.
-    //! The alternative was a fourth copy of the reference-and-catalog builder, which is the debt
-    //! Milestone C recorded and F1 paid off.
+    //! The alternative was a fourth copy of the reference-and-catalog builder.
 
     use super::*;
     use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};

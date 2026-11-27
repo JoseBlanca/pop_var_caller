@@ -27,22 +27,18 @@
 //! accessor for the whole run, minted beside the walkers' — at the moment the record is built,
 //! which is the only moment that knows both the span and whether any allele is empty.
 //!
-//! **⚑ And on today's path it is never fetched, which is worth knowing before reading this as
-//! live code.** Every generic record starts at an anchor base that both of its alleles keep: a
-//! deletion's reference span is the anchor plus the deleted run and an insertion's is the anchor
-//! plus its own inserted length (`ReadEvent::record_span`,
-//! `locus_generation/pileup/decompose.rs`), so a deletion's alternative is the anchor base and
-//! never nothing, an insertion's is longer still, and **no allele a generic locus is called over
-//! is ever empty**. The empty allele spec §5 was written for is the repeat-tract
-//! path's full-tract deletion, and that path is unbuilt. What this is, then, is the answer
-//! ready for when a record needs it — and it cannot be left out: `VcfRecord::new` asserts a
-//! padding base is carried **exactly** when some allele is empty, so a run that did not compute
-//! one would panic at the first record that needed it rather than write a wrong one.
+//! **Only repeat-tract loci ever need it.** Every generic record starts at an anchor base that
+//! both of its alleles keep: a deletion's reference span is the anchor plus the deleted run and
+//! an insertion's is the anchor plus its own inserted length (`ReadEvent::record_span`,
+//! `locus_generation/pileup/decompose.rs`), so **no allele a generic locus is called over is
+//! ever empty**. A repeat-tract locus can carry an empty allele — the whole tract deleted — and
+//! that is where the base is fetched. It cannot be left out: `VcfRecord::new` asserts a padding
+//! base is carried **exactly** when some allele is empty, so a run that did not compute one
+//! would panic at the first record that needed it rather than write a wrong one.
 //!
-//! **Never invented.** Production's repeat-tract writer puts the letter `N` at a span starting
-//! at a contig's first base ([`vcf_out.rs:405-435`](../../../../src/ssr/cohort/vcf_out.rs));
-//! spec §5 declines to port that, so a base that cannot be read is a run that stops and says
-//! which position it could not read.
+//! **Never invented.** The caller this one replaced put the letter `N` at a span starting at a
+//! contig's first base; spec §5 declines to do that, so a base that cannot be read is a run that
+//! stops and says which position it could not read.
 
 use crate::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
 use crate::calling::likelihood::generic::{

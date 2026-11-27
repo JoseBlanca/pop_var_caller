@@ -16,8 +16,8 @@
 //!   source's error and passes it through, so in a run over a thousand samples an error saying
 //!   only *block 41 would not inflate* names neither the individual to look at nor the ground
 //!   already called ([`RunError::SourceFailed`], spec §9). On the path a run takes
-//!   (`PspObservationSource::over`) the name is read from the file's own header, so the name
-//!   in the error and the file it came from cannot come apart.
+//!   ([`PspSummarySource::over`]) the name is read from the file's own header, so the name in
+//!   the error and the file it came from cannot come apart.
 //! - **Refusals where the merge would otherwise assert or go quiet** — see [`PspSourceError`],
 //!   which says of each whether the mistake is the file's or this crate's.
 //! - **The read groups renumbered from the file's terms into the run's.** Every psp numbers its
@@ -32,14 +32,14 @@
 //!   to [`PspReader`]'s walk and not to this adapter. The psp-mode plan defers it with the
 //!   rest of psp-mode performance.
 //!
-//! **Generic over the walk, and that is what makes the head-only refusal reachable.** A psp's
-//! records can be walked two ways: [`RecordIter`], which builds every record, and
-//! `SelectiveRecordIter`, which builds only the bodies a
-//! predicate asks for and hands the rest back as a head alone. **A merge fed the second would
-//! be handed a cohort with observations missing and no error anywhere** — wrong genotypes, not
-//! a failure. So this type takes either and refuses the moment a body is missing, rather than
-//! taking only the first and leaving the trap for whoever wires the cheap-numbers pass spec §10
-//! defers.
+//! **Two sources live here, and a run uses one of them.** [`PspSummarySource`] is psp mode's
+//! source: it hands the merge each record's head as a summary and keeps the body's bytes unbuilt
+//! until the merge decides the locus is worth building (`spec/cohort_merge_psp_path.md` §3).
+//! `PspObservationSource`, compiled for tests only, builds every record it walks. It is generic
+//! over the walk — [`RecordIter`], which builds every record, or `SelectiveRecordIter`, which
+//! hands some back as a head alone — and refuses the moment a body is missing, because a merge
+//! fed a head-only record would be handed a cohort with observations missing and no error
+//! anywhere.
 
 use crate::locus_generation::SampleLocusObservations;
 #[cfg(test)]
@@ -881,7 +881,7 @@ impl<W> PspObservationSource<W> {
 }
 
 /// **The one place a psp source's failure is shaped**, so that a failure before the source
-/// exists — [`PspObservationSource::over`], where the walk itself would not start — and one
+/// exists — [`PspSummarySource::over`], where the walk itself would not start — and one
 /// from a draw cannot render differently.
 fn source_failed(
     sample: &str,
@@ -2130,7 +2130,7 @@ mod tests {
     /// **A source over a psp can cross a thread**, which is what the merge's parallel cover
     /// needs of it: `merge_cohort_handing_each_locus_over_covering_samples_in_parallel` sweeps
     /// the cohort's sources from a worker pool, one thread at a time each, and refuses a source
-    /// that is not `Send`. The walker earned the same proof at direct mode's Milestone E
+    /// that is not `Send`. The walker has the same proof
     /// (`a_run_walker_can_cross_a_thread`); this is psp mode's half, and it is a compile-time
     /// check rather than a runtime one — a `!Send` source would not build this test.
     #[test]

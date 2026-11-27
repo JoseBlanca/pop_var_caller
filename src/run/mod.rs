@@ -3,30 +3,38 @@
 //! A calling run reads every sample's locus observations in coordinate order and emits called
 //! variants in coordinate order; psp mode's walk stage runs the same per-sample machinery and
 //! stores the observations instead. `doc/devel/ng/spec/run_streaming.md` owns that outer shape
-//! (the run objects, the sources, the VCF writing) and
-//! `doc/devel/ng/arch/run_streaming.md` the types; this module is where its parts land as
-//! they are built.
+//! (the run objects, the sources, the VCF writing) and `doc/devel/ng/arch/run_streaming.md` the
+//! types.
 //!
-//! **Landed so far:** [`cohort_merge`], which turns k samples' observations into one stream of
-//! cohort observations; [`segments`]'s [`Segmentation`], the ground every sample of a run
-//! walks; [`walker`]'s [`AlignmentFilesWalker`], one sample's alignment files behind the merge's
-//! source interface; [`callers`]'s [`AlignedFilesVariantCaller`], which drives that merge
-//! over one walker per sample and genotypes each cohort locus where it is built;
-//! [`records`], which turns each called locus into what a VCF record states; [`report`]'s
-//! [`RunReport`], what a finished run says about itself; [`gatherer`]'s
-//! [`SampleObservationGatherer`], psp mode's walk stage — one sample's observations drained
-//! into a psp on disk (spec §5.2); and [`psp_source`]'s `PspObservationSource`, the same
-//! merge interface served from a psp instead of from alignment files — the one place the two
-//! calling modes differ (spec §3.1).
+//! **The main parts:**
 //!
-//! **Three ways out, and only two are a real run's.**
-//! `AlignedFilesVariantCaller::call_cohort` collects every called locus and hands them back at
-//! once, which is what an oracle wants and what no real run can afford;
-//! [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] hands each record over as
-//! it is finished and keeps none, which is the path
-//! [`call-from-alignments`](crate::cli::call_from_alignments) takes; and
-//! [`SampleObservationGatherer::write_psp`] stores one sample's walk as a psp, calling
-//! nothing — psp mode's walk half, whose calling half reads a cohort of those files back.
+//! - [`segments`]'s [`Segmentation`]: the ground every sample of a run walks.
+//! - [`walker`]'s [`AlignmentFilesWalker`]: one sample's alignment files behind the merge's
+//!   source interface.
+//! - [`psp_source`]'s [`PspSummarySource`](psp_source::PspSummarySource): the same interface
+//!   served from a psp instead of from alignment files — the one place the two calling modes
+//!   differ (spec §3.1).
+//! - [`cohort_merge`]: turns k samples' observations into one stream of cohort observations.
+//! - [`callers`]'s [`AlignedFilesVariantCaller`]: direct mode's run, which drives that merge over
+//!   one walker per sample and genotypes each cohort locus where it is built.
+//!   [`psp_caller`]'s [`PspVariantCaller`] is psp mode's, over one psp per sample.
+//! - [`records`]: turns each called locus into what a VCF record states.
+//! - [`report`]'s [`RunReport`]: what a finished run says about itself.
+//! - [`gatherer`]'s [`SampleObservationGatherer`]: psp mode's walk stage — one sample's
+//!   observations drained into a psp on disk (spec §5.2).
+//!
+//! **Three ways out.**
+//!
+//! - [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] hands each record over
+//!   as it is finished and keeps none; it is the path
+//!   [`call-from-alignments`](crate::cli::call_from_alignments) takes.
+//! - [`PspVariantCaller::call_cohort_preparing_each_record`] does the same from a cohort of psps,
+//!   for `call-from-psps`.
+//! - [`SampleObservationGatherer::write_psp`] stores one sample's walk as a psp, calling nothing —
+//!   psp mode's walk half.
+//!
+//! `AlignedFilesVariantCaller::call_cohort`, which collects every called locus and hands them
+//! back at once, is compiled for tests only.
 
 pub mod callers;
 mod calling_progress;

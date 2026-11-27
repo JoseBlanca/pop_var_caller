@@ -1545,8 +1545,8 @@ mod walking_the_real_generator {
 /// `.fai` for itself costs about 189 µs on a GRCh38-shaped reference of 2,580 records; sharing
 /// the index brings that to 52 µs, of which 34 is cloning the contig table; sharing the table
 /// too leaves about 18 µs, which is the `open(2)` that giving each reader its own cursor
-/// actually means (measured, [`WindowedRefSeq::with_shared_index`]). **And the parse is paid at
-/// every contig open, not once per accessor** ([`WindowedRefSeq::new`]) — so on a 63-sample
+/// actually means (measured, [`WindowedRefSeq::with_shared_index`]). **And an accessor without a
+/// shared index pays the parse at every contig open, not once** — so on a 63-sample
 /// cohort over a dozen contigs, sharing is the difference between one parse and several hundred.
 pub(crate) struct WalkReference {
     fasta: std::path::PathBuf,
@@ -1615,18 +1615,13 @@ impl std::fmt::Debug for WalkReference {
     }
 }
 
-/// The generator set a run builds today: **the SNP/indel path, the repeat-tract path and the
-/// STR bundle path, all three filled**.
+/// The generator set a run builds: **the SNP/indel path, the repeat-tract path and the STR
+/// bundle path, all three filled** — unless the run sorted no repeats, when only the SNP/indel
+/// slot is filled (below).
 ///
-/// **The bundle slot was refused as unbuilt until 2026-10-11** (`str_bundle_loci.md` §6.1): a
-/// bundle routed to it emitted no locus and was counted against `unhandled_not_implemented`.
-/// Filling it makes a run *produce* bundle observations, one locus per bundle over its hull;
-/// calling still sets each aside and counts it until step 4 of that design lands.
-///
-/// **The tract slot was refused as unbuilt until 2026-09-02 and the generator was not** — it
-/// was built, tested and reachable only from the development tools. Filling it makes a run
-/// *produce* tract observations; what the calling loop does with one is
-/// `calling_loop_ssr.md`'s, and until that lands the driver sets each aside and counts it.
+/// Each kind of ground gets its own observations: the SNP/indel generator emits one locus per
+/// variable stretch, the tract generator one per repeat tract, and the bundle generator one per
+/// STR bundle over its hull (`str_bundle_loci.md` §6.1). The calling driver calls all three.
 ///
 /// **The aligner is not a knob here**: the delimiter bake-off is recorded and a run gets its
 /// winner, the unit-robust algorithm 4u.
@@ -1634,9 +1629,10 @@ impl std::fmt::Debug for WalkReference {
 /// **The bundle radius is derived here, from the criteria the ground was cut with** — the
 /// segmentation's own record, never a constant a caller could substitute — so the flank the
 /// tract generator fetches is checked against the radius the classification actually used.
-/// Taking the whole [`SegmentationInputs`] rather than the one number is deliberate: both
-/// calling modes and any test build their generators through this function, so the rule that
-/// turns criteria into a radius has exactly one copy.
+/// Taking the whole [`SegmentationInputs`](crate::segmentation_inputs::SegmentationInputs)
+/// rather than the one number is deliberate: both calling modes and any test build their
+/// generators through this function, so the rule that turns criteria into a radius has exactly
+/// one copy.
 ///
 /// One set per sample: a locus generator carries state across segments and cannot be shared
 /// (spec §8).
