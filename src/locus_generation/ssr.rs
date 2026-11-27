@@ -1,19 +1,25 @@
 //! The STR locus generator — one microsatellite tract → one locus.
 //!
-//! The first [`LocusGenerator`]: it consumes an `SsrSegment`,
-//! fetches the reads over the tract, aligns each to read off its repeat, and tallies the
-//! answers into a [`SampleLocusObservations`]. A port of
-//! production `src/ssr/pileup/`, adapted at two seams (the split of coordinates from bases,
-//! and a widened admission gate). See `doc/devel/ng/spec/locus_generation_ssr.md` (design)
-//! and `doc/devel/ng/arch/locus_generation_ssr.md` (types & interfaces).
+//! A [`LocusGenerator`]: it consumes an `SsrSegment`, fetches the reads over the tract, aligns
+//! each to read off its repeat, and tallies the answers into a [`SampleLocusObservations`]. It
+//! was ported from the STR pileup of the caller deleted on 2026-09-13, adapted at two seams (the
+//! split of coordinates from bases, and a widened admission gate). See
+//! `doc/devel/ng/spec/locus_generation_ssr.md` (design) and
+//! `doc/devel/ng/arch/locus_generation_ssr.md` (types & interfaces).
 //!
-//! This module lands across the STR generator plan: the config, counts, cap constant, the
-//! working input ([`SsrLocus`] + its margin fetch), the reservoir cap, the per-locus read
-//! fetch, the read-region CIGAR mapping, the per-read classify pipeline (delimited by a chosen
-//! [`RepeatDelimiter`] — algorithm 4, the unit-slip aligner, by default; algorithm 3, the
-//! flat-gap production-parity port, for the bake-off and the parity oracle), the tally, and — the
-//! public surface — [`SsrGenerator`], the [`LocusGenerator`] that turns one
-//! `SsrSegment` into one locus.
+//! This file holds the config, the counts, the working input ([`SsrLocus`] and its margin
+//! fetch) and the public surface, [`SsrGenerator`]. The four steps it runs per locus live in
+//! submodules:
+//!
+//! - [`read_cap`] — fetch the reads over the tract and its margin, and cap their number;
+//! - [`read_region`] — map each read's CIGAR to the slice of the read over the locus window;
+//! - [`classify`] — delimit the read's repeat with the chosen [`RepeatDelimiter`] (by default
+//!   the unit-slip aligner; the flat-gap aligner for STR bundles and the parity oracle) and
+//!   turn the result into an observation or a reason for none;
+//! - [`tally`] — fold the kept reads' observations into the locus's observed sequences.
+//!
+//! [`slide_reach`] measures how far an indel inside a repeat can slide past its edges, and
+//! [`bundle`] holds the STR bundle generator, which runs the same steps over a bundle's hull.
 
 use super::{
     CursorLedger, GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind,
@@ -55,7 +61,7 @@ struct MeasuredRepeat {
     edge_run_periods: EdgeRunPeriods,
     /// Whether this is an STR segment or an STR bundle's hull — which decides whether a flank
     /// deletion the delimiter's own spelling implies is recorded
-    /// ([`classify::flank_deletion_the_delimiter_implies`]).
+    /// (`classify::flank_deletion_the_delimiter_implies`).
     ground: MeasuredGround,
 }
 
@@ -310,28 +316,12 @@ pub struct SsrGeneratorCounts {
 
 impl SsrGeneratorCounts {}
 
-// ---------------------------------------------------------------------
-// The per-locus read cap — a faithful port of production's reservoir sampler
-// (src/ssr/pileup/fetch_reads.rs), keyed to ng's own seed and cap constant.
-// ---------------------------------------------------------------------
 mod read_cap;
 
 use read_cap::{fetch_capped_reads, seed_for_segment};
 
-// ---------------------------------------------------------------------
-// D2a — the read-region mapping: CIGAR → the read-coordinate slice covering the locus
-// window, plus the region quality gate. Ported from production
-// (`src/ssr/pileup/footprint.rs`, `alignment.rs`), adapted to take window coordinates
-// directly and a plain scratch buffer. Consumed by the classify pipeline (D2b).
-// ---------------------------------------------------------------------
 mod read_region;
 
-// ---------------------------------------------------------------------
-// D2b — classify one read against a locus: delimit (the chosen `RepeatDelimiter` — algorithm 3 or
-// 4), recover a long allele by widening, gate the tract quality, and map the result
-// to an observation or a no-observation reason. The per-read pipeline ported from
-// production's `classify_read`, over the new delimiter. Consumed by the tally + generator.
-// ---------------------------------------------------------------------
 mod slide_reach;
 
 /// How far before a repeat's start, and after its end, the slide measurement reads the
@@ -341,21 +331,11 @@ const SLIDE_FETCH_MARGIN_BP: u64 =
 
 mod classify;
 
-// ---------------------------------------------------------------------
-// D2c — the tally: fold each kept read's `Classified` into the locus's observed sequences,
-// deduping by `(bases, read_witness)`, accumulating the support moments, and counting the
-// no-observation reasons. A port of production's `tally` (`src/ssr/pileup/locus_tally.rs`),
-// extended with partial observations and the strand/BQ/MAPQ moments the shared type carries
-// (spec §3, §6). Consumed by the generator (D3).
-// ---------------------------------------------------------------------
 mod tally;
 
-// ---------------------------------------------------------------------
-// D3 — the generator: one `SsrSegment` → one `SampleLocusObservations`. The four steps
-// (build the locus, fetch+cap the reads, classify each, tally) run inside the first
-// `next_locus`; the second returns `None`. One locus per segment, including zero coverage
-// (spec §2, arch §1, §2).
-// ---------------------------------------------------------------------
+// The generator: one `SsrSegment` → one `SampleLocusObservations`. The four steps (build the
+// locus, fetch and cap the reads, classify each, tally) run inside the first `next_locus`; the
+// second returns `None`. One locus per segment, including zero coverage (spec §2, arch §1, §2).
 
 /// A tract delimiter the generator can drive — any alignment-module aligner that measures a read's
 /// repeat: [algorithm 3](crate::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner) (the
@@ -402,7 +382,7 @@ impl<A> RepeatDelimiter for A where
 ///
 /// These are the same reference logically; a future `Arc`-shared reference would collapse them to
 /// one field with a cheap per-file view. Holding both is the working stopgap the spec flags (spec
-/// §8) — **and D3 took most of its cost away**: the factory is called once per file per
+/// §8) — **and the per-chromosome cursor took most of its cost away**: the factory is called once per file per
 /// *chromosome* now, where it used to run at every locus, so a file-backed `R` whose factory
 /// reloads is no longer the per-locus tax it was.
 pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: RepeatDelimiter> {
@@ -412,17 +392,17 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: Repe
     /// per chromosome (see the type doc).
     ///
     /// **Boxed, which is what keeps it off this type's parameter list**, the same trade the
-    /// generic generator took at D2 (arch §3.6). It is called at chromosome boundaries and
+    /// generic generator took (arch §3.6). It is called at chromosome boundaries and
     /// nowhere else, so the indirection is not on any path that matters.
     ///
-    /// **`+ Send` since 2026-09-01, because [`GeneratorSlot`] now requires it of everything
-    /// boxed into a slot** — a calling run's walkers cross threads under the merge's parallel
+    /// **`+ Send` since 2026-09-01, because [`GeneratorSlot`](super::GeneratorSlot) now
+    /// requires it of everything boxed into a slot** — a calling run's walkers cross threads under the merge's parallel
     /// cover, so a generator that could fill a slot must be able to go with them. The caller
     /// that used to rule the bound out — `ng_ssr_cohort_stutter` handing every file a clone of
     /// one `Arc<WindowedRefSeq>` — stopped being a counter-example in the same step, when
     /// `WindowedRefSeq` became `Sync` and that `Arc` became `Send`.
     make_reference: Box<dyn FnMut() -> R + Send>,
-    /// The sample's cursor and the chromosome it covers — **D3.** One per chromosome, minted by
+    /// The sample's cursor and the chromosome it covers — one per chromosome, minted by
     /// the first locus on each and rebuilt at every boundary, because nothing in a cursor
     /// survives a chromosome change (`spec/alignment_cursor.md` §4).
     ///
@@ -431,7 +411,7 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: Repe
     cursor: Option<(ContigId, SampleCursor<R>)>,
     /// **The sample this generator reads, and what its retired chromosomes' cursors did** —
     /// one sample per generator, refused in [`cursor_for`](Self::cursor_for), and the tallies
-    /// [`cursor_counts`](Self::cursor_counts) and [`read_filter_counts`](Self::read_filter_counts)
+    /// `cursor_counts` (tests only) and [`read_filter_counts`](Self::read_filter_counts)
     /// add the live cursor's to.
     ledger: CursorLedger,
     /// The tract delimiter — the chosen [`RepeatDelimiter`] (algorithm 3 or 4).
@@ -538,8 +518,8 @@ where
     /// argument, which is the same one.
     ///
     /// In short: a generator that mints a cursor per locus and one that keeps a cursor per
-    /// chromosome emit **identical loci**, so nothing in the output can tell them apart, and the
-    /// D2 review proved the feature could be switched off with the whole suite green. What
+    /// chromosome emit **identical loci**, so nothing in the output can tell them apart, and a
+    /// review proved the feature could be switched off with the whole suite green. What
     /// moves is only what the reader avoided (`spec/alignment_cursor.md` §11.5).
     pub fn cursor_counts(&self) -> CursorCounts {
         self.ledger
@@ -567,7 +547,7 @@ where
     }
 
     /// This sample's cursor for `contig`, minting one if the last locus was on another
-    /// chromosome — **D3, and the whole of it.**
+    /// chromosome.
     ///
     /// The cursor is what replaces a read query per locus. It stays open and positioned, so two
     /// STR loci close enough to share reads decode them once
@@ -1026,7 +1006,7 @@ mod tests {
         ));
     }
 
-    // --- D1: the per-locus read fetch + cap ---------------------------------
+    // --- the per-locus read fetch and cap -----------------------------------
 
     fn span(start: u64, end: u64) -> GenomeRegion {
         GenomeRegion {
@@ -1052,8 +1032,7 @@ mod tests {
     }
 
     /// A cursor over the fixture sample's first contig — what
-    /// [`fetch_capped_reads`] is pointed at since D3, in place of the sample plus a
-    /// per-locus query.
+    /// [`fetch_capped_reads`] is pointed at, in place of the sample plus a per-locus query.
     fn a_cursor(reads: &SampleReads) -> SampleCursor<InMemoryRefSeq> {
         reads
             .cursor(ContigId(0), fixture_ref_bases)
@@ -1133,13 +1112,13 @@ mod tests {
         );
     }
 
-    // --- D3: the generator ---------------------------------------------------
+    // --- the generator --------------------------------------------------------
 
     /// A generator over the all-`A` fixture reference (`chr1` = 100 bp, `chr2` = 200 bp), with
     /// `flank_bp = 10` (within a bundle threshold of 10) and no cap. The reference and the
     /// read-query factory are the same all-`A` bases, so fixture reads (also all-`A`) clear the
     /// mismatch filter — the tract content is not real STR sequence, which is fine for the
-    /// structural checks D3 owns (real tract parity is E's).
+    /// structural checks here (real tract parity is the parity oracle's).
     fn ssr_generator() -> SsrGenerator<InMemoryRefSeq, SsrUnitRobustAligner<PerQualityEmission>> {
         SsrGenerator::new(
             fixture_ref_bases(),
@@ -1154,11 +1133,11 @@ mod tests {
         .expect("flank within the bundle threshold")
     }
 
-    /// **The cursor is kept across loci rather than minted for each — D3, and the test that can
+    /// **The cursor is kept across loci rather than minted for each — and the test that can
     /// tell.**
     ///
     /// A generator that opens a query per locus and one that keeps a cursor per chromosome emit
-    /// **identical loci**; that is the correctness requirement, and it is why the D2 review could
+    /// **identical loci**; that is the correctness requirement, and it is why a review could
     /// switch the whole feature off with 1,557 tests green. The only observable is what the
     /// reader avoided (`spec/alignment_cursor.md` §11.5), which is what `cursor_counts` exists
     /// for.
@@ -1382,8 +1361,8 @@ mod tests {
     /// **A locus on a new chromosome mints a cursor, and the old one's tallies survive it.**
     ///
     /// A cursor covers one chromosome and refuses a region on any other (§4), so the generator
-    /// has to notice the boundary. Nothing before D3 could see this: a query per locus carried
-    /// its contig in the query.
+    /// has to notice the boundary. When a query was opened per locus nothing needed to see
+    /// this: each query carried its contig.
     #[test]
     fn a_locus_on_a_new_chromosome_mints_a_cursor_and_keeps_the_old_tallies() {
         use crate::read::input::test_fixtures::read_named_with_length;
@@ -1940,14 +1919,14 @@ mod tests {
         }
     }
 
-    // --- E2: the parity oracle — the port anchor -----------------------------
+    // --- the parity oracle against the deleted caller ---------------------------
 
     /// **The north-star parity oracle** (spec §6, §9.3): every COMPLETE observation ng produces
     /// must match production's `SsrLocusObs.observed` byte for byte, in bases and count, **with the
     /// cap disabled** on a fixture shallower than any cap.
     ///
-    /// **Production's side is frozen since promotion step C23** — see the recorded block in the
-    /// body. The paragraphs below describe the comparison as it was built.
+    /// **Production's side is frozen since that caller was deleted** — see the recorded block in
+    /// the body. The paragraphs below describe the comparison as it was built.
     ///
     /// Both sides ran over the **same** reads and the **same** reference frame. ng runs its real
     /// per-read pipeline (`classify::classify_read`, the `SsrFlatGapAligner` over production's
@@ -1956,7 +1935,7 @@ mod tests {
     /// algorithms* — this is exactly the claim under test: that on the complete class of clean reads
     /// they delimit the identical tract. The generator's fetch/cap are not exercised here because,
     /// with the cap disabled, they only select reads and never change an observation's bases; that
-    /// wiring is covered by D3 and the dump-tool fixture (E1). The production side reproduced
+    /// wiring is covered by the generator tests above. The production side reproduced
     /// production's *clean-read* classify path (extract → delimit → the Region tract), which for
     /// these Q40, fully-spanned reads is exactly what production's `classify_read` does — this was
     /// asserted, while production still ran, via `flank_truncated` and the quality floor.
@@ -2056,7 +2035,7 @@ mod tests {
 
         // --- production: recorded ---------------------------------------------
         // What production's `delimit_read` over `HmmModel`, driven through its clean-read classify
-        // path, and its `tally` gave on these six reads at commit `d9e7b076` (promotion step C23):
+        // path, and its `tally` gave on these six reads at commit `d9e7b076`, before its deletion:
         // the two complete alleles with their counts, and the partially-covering read dropped as
         // border-off-end. This is the value the test asserted ng equal to while it still called
         // production live, and production's code did not change after `d9e7b076`. That test also

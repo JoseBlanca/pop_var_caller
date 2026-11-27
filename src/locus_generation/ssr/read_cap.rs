@@ -1,3 +1,12 @@
+//! The per-locus read fetch and its depth cap.
+//!
+//! [`fetch_capped_reads`] fetches the reads over a locus's tract plus margin and, when a cap is
+//! set, keeps at most that many with a reservoir sampler seeded from the locus itself — so the
+//! kept set is the same at any thread count and in any run. The seed, the random-number
+//! generator and the sampler are copied from the caller this one replaced, and
+//! `ng_seed_and_reservoir_match_frozen_production_byte_for_byte` pins the kept sets that caller
+//! produced.
+
 use crate::locus_generation::LocusGenerationError;
 use crate::read::aligned_read::AlignedRead;
 use crate::read::input::cursor::CursorError;
@@ -6,9 +15,17 @@ use crate::ref_seq::RawRefSeq;
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::types::GenomeRegion;
 
-/// A tiny deterministic PRNG (SplitMix64) — seeded per locus so the depth-cap subsample is
-/// reproducible and thread-count-invariant, with no external RNG whose stream could shift.
-/// Ported verbatim from production; the constants are load-bearing for byte parity.
+/// A tiny deterministic random-number generator — seeded per locus so the depth-cap subsample
+/// is reproducible and thread-count-invariant, with no external generator whose stream could
+/// shift.
+///
+/// **SplitMix64 in shape, but not the standard SplitMix64.** Its increment,
+/// `0x9e3779b97f4a7615`, differs in one hex digit from the standard constant
+/// `0x9e37_79b9_7f4a_7c15` that [`crate::splitmix`] uses. The value is still odd, so the
+/// sequence is sound; it is kept as copied from the caller this one replaced because changing
+/// it changes which reads the cap keeps, and
+/// `ng_seed_and_reservoir_match_frozen_production_byte_for_byte` pins those reads. Do not
+/// replace it with the shared function.
 struct SplitMix64 {
     state: u64,
 }
@@ -119,10 +136,6 @@ impl<T> Reservoir<T> {
     }
 }
 
-// ---------------------------------------------------------------------
-// The per-locus read fetch (D1): fetch over the tract+margin span, depth-cap.
-// ---------------------------------------------------------------------
-
 /// The reads kept for one locus after depth-capping, and how many were fetched — the caller
 /// records `reads_discarded_by_cap = fetched - kept.len()`.
 pub(super) struct CappedReads {
@@ -138,7 +151,7 @@ pub(super) struct CappedReads {
 /// read that runs off mid-tract is exactly what a partial observation is made of (spec §2). The
 /// cap sits between fetch and align; `None` keeps every read.
 ///
-/// **Pointed at a cursor, not handed a query — D3.** The cursor covers `query_span`'s
+/// **Pointed at a cursor, not handed a query.** The cursor covers `query_span`'s
 /// chromosome and stays open across every locus on it, so consecutive loci that share reads
 /// decode them once (`spec/alignment_cursor.md` §1). Making the cursor and moving it to the
 /// right chromosome is the caller's job; this only points it at the span.
@@ -293,12 +306,14 @@ mod tests {
     }
 
     /// **The parity oracle for the port**: ng's seed and reservoir must produce output
-    /// identical to production's `src/ssr/pileup/fetch_reads.rs` as of `d9e7b076`, byte for byte. The
-    /// self-consistency tests above would survive a drifted constant; this one would not —
-    /// it is what makes "byte-faithful port" a checked claim rather than an asserted one.
+    /// identical, byte for byte, to the deleted caller's `src/ssr/pileup/fetch_reads.rs` as of
+    /// commit `d9e7b076`. The self-consistency tests above would survive a drifted constant;
+    /// this one would not — it is what makes "byte-faithful port" a checked claim rather than an
+    /// asserted one.
     ///
-    /// **Production's answers are frozen since promotion step C23**: its `locus_seed` for the four
-    /// loci and the kept set its `Reservoir` held, recorded at commit `d9e7b076`.
+    /// **That caller's answers are frozen here**, since it was deleted on 2026-09-13: its
+    /// `locus_seed` for the four loci and the kept set its `Reservoir` held, recorded at
+    /// commit `d9e7b076`.
     #[test]
     fn ng_seed_and_reservoir_match_frozen_production_byte_for_byte() {
         for (chrom, start, production_seed) in [

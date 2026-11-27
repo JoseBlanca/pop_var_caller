@@ -1,3 +1,9 @@
+//! The read-region mapping: from a read's CIGAR, the slice of the read that covers a locus
+//! window, and the base-quality gate a delimited tract must pass.
+//!
+//! Adapted from the STR pileup of the caller deleted on 2026-09-13, to take window coordinates
+//! directly and a plain scratch buffer. Used by [`classify`](super::classify).
+
 use crate::bam::alignment_input::CigarOp;
 use std::ops::Range;
 
