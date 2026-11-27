@@ -76,7 +76,7 @@ competing implementation and carries no trait ceremony.
 ## 1. What this unit consumes and produces
 
 **Input:** the locus stream, `Iterator<Item = Result<SampleLocusObservations, LocusGenerationError>>`
-([`locus_generation/mod.rs:701`](../../../../src/ng/locus_generation/mod.rs)). This unit **borrows
+([`locus_generation/mod.rs:701`](../../../../src/locus_generation/mod.rs)). This unit **borrows
 each item and passes it on untouched** — it never takes ownership, so it composes into an existing
 consumer loop rather than replacing one.
 
@@ -514,7 +514,7 @@ impl<C: CellCounter> DepthAltHistogram<C> {
 
     /// How many **loci** entered — not how many reference positions they covered. A
     /// generic locus widened to an indel's reference span
-    /// ([`open_record.rs:573`](../../../../src/ng/locus_generation/pileup/open_record.rs))
+    /// ([`open_record.rs:573`](../../../../src/locus_generation/pileup/open_record.rs))
     /// is one entry here and several covered positions.
     pub fn total_loci(&self) -> u64;
 
@@ -632,7 +632,7 @@ pub struct DepthAndAltReads { pub depth: u32, pub alt_reads: u32 }
 /// earlier draft skipped any locus whose reads an upstream cap had subsampled. That was
 /// depth-dependent selection of exactly the kind spec `parameter_prepass.md` §2.1 exists to
 /// remove: ng's generic pileup caps indel-bearing columns at 250 reads against 8,000 for
-/// the rest ([walker/mod.rs:89](../../../../src/pileup/walker/mod.rs)), so at 300× every
+/// the rest (walker/mod.rs:89 (file since removed)), so at 300× every
 /// indel-bearing column would be dropped and at 30× none would — and the coverage-invariance
 /// anchor in §9 would be measuring the skip rule rather than the estimator.
 ///
@@ -647,7 +647,7 @@ pub struct DepthAndAltReads { pub depth: u32, pub alt_reads: u32 }
 /// ```
 ///
 /// and `contributors` is built by walking the active-read set, whose own doc states
-/// "Iteration order is admission order" ([active_read_set.rs:66](../../../../src/ng/locus_generation/pileup/active_read_set.rs)).
+/// "Iteration order is admission order" ([active_read_set.rs:66](../../../../src/locus_generation/pileup/active_read_set.rs)).
 /// Reads are admitted as the walk reaches their alignment start, so **the reads kept are
 /// the earliest-starting ones** — which means the capped column sits further into each
 /// retained read, nearer its 3' end, where Illumina error rates are highest. The cap does
@@ -655,7 +655,7 @@ pub struct DepthAndAltReads { pub depth: u32, pub alt_reads: u32 }
 /// biases `ε` upward there.
 ///
 /// **Where it bites, and where it does not.** The cap is 250 on indel-bearing columns and
-/// 8,000 on the rest ([walker/mod.rs:83,89](../../../../src/pileup/walker/mod.rs)), so it
+/// 8,000 on the rest (walker/mod.rs:83,89 (file since removed)), so it
 /// fires on the indel-bearing columns of any deep sample — essentially all of them at
 /// HG002's 300× — and never at tomato's 3 reads a site.
 ///
@@ -886,7 +886,7 @@ equal cell for cell, which is the assertion §9 pins.
 
 **The invariant `add_locus` depends on: generic loci partition the covered positions.** A locus can
 span several reference bases — `open_record.rs` widens a record to an indel's reference span
-([open_record.rs:573](../../../../src/ng/locus_generation/pileup/open_record.rs),
+([open_record.rs:573](../../../../src/locus_generation/pileup/open_record.rs),
 `footprint_end_exclusive`) — but no two loci may cover the same position. Overlap would enter a
 site into the windowed histogram twice, breaking "a site enters once, whole" (spec §4), and
 `num_obs_along_locus`'s own doc warns that overlapping generic loci double-count if summed.
@@ -895,7 +895,7 @@ site into the windowed histogram twice, breaking "a site enters once, whole" (sp
 one comparison per locus — and tallies any locus that starts before it. Counting rather than
 asserting, because a debug-only guard compiles out of the release build this repo actually runs, a
 trap it has recorded hitting twice
-([locus_generation/mod.rs:87-90](../../../../src/ng/locus_generation/mod.rs), the
+([locus_generation/mod.rs:87-90](../../../../src/locus_generation/mod.rs), the
 `num_obs_along_locus` clamp). Counting rather than repairing, because a de-duplication rule would
 hide an upstream bug behind a plausible number; a counter that must read zero cannot.
 
@@ -1531,24 +1531,24 @@ Every row read before it was written.
 
 | this doc | existing code | action |
 |---|---|---|
-| the input stream | `SampleLocusObservationsIterator` ([locus_generation/mod.rs:701](../../../../src/ng/locus_generation/mod.rs)) | consume by reference; unchanged |
-| the locus | `SampleLocusObservations` ([locus_generation/mod.rs:40](../../../../src/ng/locus_generation/mod.rs)) | reuse as-is |
-| per-allele support | `SequenceObservation` ([locus_generation/mod.rs:157](../../../../src/ng/locus_generation/mod.rs)) | reuse; `read_group` is already part of its identity |
-| the scorable subset | `complete_observations()` ([locus_generation/mod.rs:134](../../../../src/ng/locus_generation/mod.rs)) | call directly — §2.3's guard |
-| marker routing | `LocusKind` ([locus_generation/mod.rs:213](../../../../src/ng/locus_generation/mod.rs)) | match on it in `mod.rs` |
-| `WindowIndex` source | `GenomeRegion` ([types.rs:79](../../../../src/ng/types.rs)) | derive from `region.start` |
-| `ReadGroupId` | [types.rs:199](../../../../src/ng/types.rs) (`pub struct ReadGroupId(pub u32)`) | reuse as-is |
-| read-group identity | `ReadGroup` ([read/input/read_groups.rs:46](../../../../src/ng/read/input/read_groups.rs)) | reuse — resolves a group to sample/library/experiment |
-| `ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` | not present as types; `DomainError::ErrorRate` already is ([types.rs:275](../../../../src/ng/types.rs)) | **new in `types.rs`** — shared vocabulary, consumed by steps 7 and 8. Each copies `MismatchFraction`'s checked-constructor shape ([types.rs:242](../../../../src/ng/types.rs)); `DomainError`'s doc already names `InbreedingF` as expected |
+| the input stream | `SampleLocusObservationsIterator` ([locus_generation/mod.rs:701](../../../../src/locus_generation/mod.rs)) | consume by reference; unchanged |
+| the locus | `SampleLocusObservations` ([locus_generation/mod.rs:40](../../../../src/locus_generation/mod.rs)) | reuse as-is |
+| per-allele support | `SequenceObservation` ([locus_generation/mod.rs:157](../../../../src/locus_generation/mod.rs)) | reuse; `read_group` is already part of its identity |
+| the scorable subset | `complete_observations()` ([locus_generation/mod.rs:134](../../../../src/locus_generation/mod.rs)) | call directly — §2.3's guard |
+| marker routing | `LocusKind` ([locus_generation/mod.rs:213](../../../../src/locus_generation/mod.rs)) | match on it in `mod.rs` |
+| `WindowIndex` source | `GenomeRegion` ([types.rs:79](../../../../src/types.rs)) | derive from `region.start` |
+| `ReadGroupId` | [types.rs:199](../../../../src/types.rs) (`pub struct ReadGroupId(pub u32)`) | reuse as-is |
+| read-group identity | `ReadGroup` ([read/input/read_groups.rs:46](../../../../src/read/input/read_groups.rs)) | reuse — resolves a group to sample/library/experiment |
+| `ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` | not present as types; `DomainError::ErrorRate` already is ([types.rs:275](../../../../src/types.rs)) | **new in `types.rs`** — shared vocabulary, consumed by steps 7 and 8. Each copies `MismatchFraction`'s checked-constructor shape ([types.rs:242](../../../../src/types.rs)); `DomainError`'s doc already names `InbreedingF` as expected |
 | `WindowIndex`, `DepthBin`, `DepthBinEdges`, `DepthAltHistogram`, `CellCounter`, `SiteKey`, `AccumulationCounts`, `CoupledFit`, `RunsModelStarts`, `StartOutcome` | not present | **new, and step-4-local** — no consumer outside this step (§2.1) |
-| the sample's name in `GenericEstimationConfig` | `SampleIdentity` ([read/input/mod.rs:424](../../../../src/ng/read/input/mod.rs)) | **not reused** — it compares open files by pointer, answering "the same sample?" rather than "called what?". A `String` from the alignment header, used only in messages and the summary (§1.1) |
-| the ladder's log scale | `LogProb` ([types.rs:227](../../../../src/ng/types.rs)) | **not reused, and no `Phred` twin added** — a second log-scaled probability type would make a base mix-up a plausible wrong number rather than a compile error, which is what `LogProb`'s own doc says it exists to prevent (§2.1) |
-| `fit_mixture_weights` | `run_em_loop` / `GenotypeEmModel` ([var_calling/posterior_engine.rs:2635 (GenotypeEmModel), 2733 (run_em_loop)](../../../../src/var_calling/posterior_engine.rs)) | **shape to copy, not code to call** — production's EM is tied to its own genotype model, and ng does not depend on production |
+| the sample's name in `GenericEstimationConfig` | `SampleIdentity` ([read/input/mod.rs:424](../../../../src/read/input/mod.rs)) | **not reused** — it compares open files by pointer, answering "the same sample?" rather than "called what?". A `String` from the alignment header, used only in messages and the summary (§1.1) |
+| the ladder's log scale | `LogProb` ([types.rs:227](../../../../src/types.rs)) | **not reused, and no `Phred` twin added** — a second log-scaled probability type would make a base mix-up a plausible wrong number rather than a compile error, which is what `LogProb`'s own doc says it exists to prevent (§2.1) |
+| `fit_mixture_weights` | `run_em_loop` / `GenotypeEmModel` (var_calling/posterior_engine.rs:2635 (GenotypeEmModel), 2733 (run_em_loop) (file since removed)) | **shape to copy, not code to call** — production's EM is tied to its own genotype model, and ng does not depend on production |
 | the profile scan | GATK `DragstrParametersEstimator.java` (vendored under `gatk/`) | algorithm copied, not code |
 | the runs model | `bcftools roh` ([vcfroh.c:476-499](../../../../bcftools/vcfroh.c), emissions; [452-472](../../../../bcftools/vcfroh.c), distance-scaled transitions) | reference form for §5.3; not a dependency |
 | `SampleSummarizer` | [`ng_step_interfaces.md`:343](ng_step_interfaces.md) — `fn summarize(&self, confident: &[ConfidentGenotype]) -> SampleSummary` | **re-specified.** No rough caller exists, so there are no confident genotypes; the input is `GenericAccumulators` (spec parameter_prepass §2.3) |
-| site reduction | `SiteCounts::from_record` ([sample_summary/het.rs:146](../../../../src/sample_summary/het.rs)) | **not reusable** — it takes a `PileupRecord`, production's type, and returns `None` for a pure-reference column, which is the evidence this step exists to keep. Shape only |
-| the three-genotype score | `observe_site` ([sample_summary/het.rs:266](../../../../src/sample_summary/het.rs)) | shape only — it gates on `min_depth` and classifies, which is the bias the spec removes |
+| site reduction | `SiteCounts::from_record` (sample_summary/het.rs:146 (file since removed)) | **not reusable** — it takes a `PileupRecord`, production's type, and returns `None` for a pure-reference column, which is the evidence this step exists to keep. Shape only |
+| the three-genotype score | `observe_site` (sample_summary/het.rs:266 (file since removed)) | shape only — it gates on `min_depth` and classifies, which is the bias the spec removes |
 
 ## 8. Open items
 
@@ -1669,7 +1669,7 @@ fraction of the genome.
   reproduces the exact per-library likelihood. **Any change to §5.1's expression re-runs these
   first.** It also carries the depth-ladder sweep behind §2.2 (`--only=binning`) and the cost of
   assuming a heterozygote is a half (`--only=balance`).
-- [`ng_inbreeding_harness.rs`](../../../../examples/ng_inbreeding_harness.rs) — `F` against a
+- `ng_inbreeding_harness.rs` (file since removed) — `F` against a
   simulated genome's realised autozygous fraction, plus the three things §5.3's contract turns on:
   the noise floor by window count, the false-heterozygote robustness, and what happens when the
   starting points do not span the state separation. Its `--only=binning` section refits one genome

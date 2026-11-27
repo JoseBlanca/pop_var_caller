@@ -188,12 +188,12 @@ pub struct ContaminationConfig {
     /// Whether a sample's reads are scored against every depth its stored code could stand for,
     /// rather than against the middle of that range.
     ///
-    /// Above eight reads a position the record keeps a range and not a number, while the count
-    /// of disagreeing reads is exact — so a heterozygote's read share lands away from a half by
-    /// up to a sixth for a reason that is not the sample, and that is what a contamination
-    /// fraction is made of. On a drawn panel with nobody contaminated and no mismapped
-    /// positions the median sample came back at 0.0013 at three reads a position and 0.025 at
-    /// ten.
+    /// Above 124 reads a position the record keeps a range and not a number, while the count
+    /// of disagreeing reads is exact — so a heterozygote's read share can land away from a half
+    /// for a reason that is not the sample, and that is what a contamination fraction is made
+    /// of. Measured while the ladder was exact only to eight reads, on a drawn panel with nobody
+    /// contaminated and no mismapped positions: the median sample came back at 0.0013 at three
+    /// reads a position and 0.025 at ten.
     pub integrate_over_depth_bin: bool,
     /// **Whether a sample is taken back out of the allele frequency it is judged against.**
     ///
@@ -235,7 +235,7 @@ pub struct ContaminationConfig {
 /// cohort under `benchmarks/` can tell them apart — every sample of tomato1, tomato2 and the
 /// GIAB trio was sequenced from one library, and there the two grains are the same number by
 /// arithmetic — so the comparison has to be made on a panel drawn with libraries that differ
-/// (`examples/ng_joint_contamination_control.rs`, `LIBRARIES`).
+/// (this module's tests, `structured_panel_of_libraries`).
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum ContaminationGrain {
     /// **One fraction for each read group, fitted from that read group's own reads.** The
@@ -309,7 +309,8 @@ pub const MAX_LEVERAGE: f64 = 0.5;
 /// separate.
 struct Marker {
     /// Reads on the cohort's most common non-reference allele, **per read group** — one entry
-    /// for each (sample, read group) the cohort holds, in [`Sections`]'s order.
+    /// for each (sample, read group) the cohort holds, in [`Units`]'s order. (Under
+    /// [`ContaminationGrain::Sample`] a unit is a whole sample, so there is one entry a sample.)
     ///
     /// **Per read group and not per sample, because this is what a fraction is fitted from**,
     /// and a fraction belongs to the library. The three fields below are keyed the same way.
@@ -1354,10 +1355,10 @@ fn ln_marker(
     let priors = genotype_priors(own_frequency, hom_excess);
     // The contaminant is somebody else, so it carries no inbreeding of this sample's.
     let contaminant = genotype_priors(batch_frequency, 0.0);
-    // **The depth is summed over rather than read off.** The record keeps a five-bit code, so
-    // above eight reads what is known is a range; every depth in it that could have produced
-    // the alternative reads seen is given equal weight. Below nine the range is one value and
-    // this is the plain binomial.
+    // **The depth is summed over rather than read off.** The record keeps a one-byte code, so
+    // above 124 reads what is known is a range; every depth in it that could have produced the
+    // alternative reads seen is given equal weight. Up to 124 the range is one value and this is
+    // the plain binomial.
     let widest = (*depths.end() - *depths.start() + 1) as usize;
     let mut terms = [f64::NEG_INFINITY; 9];
     for own in 0..3 {
@@ -1407,8 +1408,8 @@ fn binomial(k: u32, n: u32, p: f64) -> f64 {
 }
 
 /// The `wanted` eigenvectors of largest eigenvalue of a small symmetric matrix, by cyclic
-/// Jacobi rotation ([`linear_algebra::jacobi_rotations`]). One row per sample, so this is fifty by
-/// fifty at most.
+/// Jacobi rotation ([`linear_algebra::jacobi_rotations`]). One row per sample, so at a cohort of
+/// several thousand this is a matrix of several thousand by several thousand.
 fn leading_eigenvectors(matrix: &[f64], n: usize, wanted: usize) -> Vec<Vec<f64>> {
     let (diagonal, v) = linear_algebra::jacobi_rotations(matrix, n, 1e-18, 1e-15);
     let mut order: Vec<usize> = (0..n).collect();

@@ -212,18 +212,18 @@ what fixing them changes elsewhere in ng.
 
 The generic path classifies each site as het, hom-alt or ambiguous, then forms
 `Hobs = n_het / (n_het + n_hom_alt)` from two of those three counters
-([`src/sample_summary/het.rs:266`](../../../../src/sample_summary/het.rs), `observe_site`). The STR
+(`src/sample_summary/het.rs:266` (file since removed), `observe_site`). The STR
 path pools reads from loci that passed a confident-genotype gate
-([`src/ssr/cohort/prepass.rs`](../../../../src/ssr/cohort/prepass.rs)). Both estimate a parameter
+(`src/ssr/cohort/prepass.rs` (file since removed)). Both estimate a parameter
 from **the sites that were easy to call**, and inherit whatever the threshold selected for — which
 sites those are depends on depth, so the bias is depth-dependent.
 
 **And the sites with no alternative allele never arrive at all.** The classifier's input builder
 returns `None` for a pure-reference column
-([`het.rs:147-148`](../../../../src/sample_summary/het.rs)), so a site with depth 30 and no alt
+(`het.rs:147-148` (file since removed)), so a site with depth 30 and no alt
 reads is never seen. **The record itself is still staged and written** — the skip is the het
 accumulator's alone
-([`pileup_to_psp.rs:90-108`](../../../../src/pileup/per_sample/pileup_to_psp.rs)) — so this is a loss
+(`pileup_to_psp.rs:90-108` (file since removed)) — so this is a loss
 in the estimator, not in the data. Those columns are the majority of the genome and the strongest
 evidence there is about `ε`: a clean 30-read column says far more about the error rate than a
 marginal 2-alt one does.
@@ -942,9 +942,9 @@ is unvalidated on the data this spec's numbers come from. §10.3 says how to tes
 manufacturing the contrast a simulator can supply and our cohorts cannot.
 
 ng already carries the evidence at this grain: `ObservedSequence` includes its read group in its
-identity ([`src/ng/locus_generation/mod.rs:178`](../../../../src/ng/locus_generation/mod.rs)), so an
+identity ([`src/locus_generation/mod.rs:178`](../../../../src/locus_generation/mod.rs)), so an
 allele seen from two groups is two rows with their own quality moments, and the read-group table
-([`src/ng/read/input/read_groups.rs:43`](../../../../src/ng/read/input/read_groups.rs), the
+([`src/read/input/read_groups.rs:43`](../../../../src/read/input/read_groups.rs), the
 `ReadGroup` record) resolves that identity to sample, library and experiment — recording whether each grouping name was
 **declared** by the file or **synthesized** because the file gave none.
 

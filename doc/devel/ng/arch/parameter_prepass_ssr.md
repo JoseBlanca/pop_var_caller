@@ -70,9 +70,9 @@ drives it.
 
 **Input:** the same locus stream the generic path reads,
 `Iterator<Item = Result<SampleLocusObservations, LocusGenerationError>>`
-([`locus_generation/mod.rs:706`](../../../../src/ng/locus_generation/mod.rs)). This unit **borrows
+([`locus_generation/mod.rs:706`](../../../../src/locus_generation/mod.rs)). This unit **borrows
 each item and passes it on untouched**, and **ignores every locus whose `kind` is not
-`LocusKind::Ssr`** ([`locus_generation/mod.rs:213`](../../../../src/ng/locus_generation/mod.rs)).
+`LocusKind::Ssr`** ([`locus_generation/mod.rs:213`](../../../../src/locus_generation/mod.rs)).
 
 **Where that stream's loci come from is not this unit's business and is worth one sentence anyway**,
 because it changed on 2026-08-11: the regions it walks are read from a repeat catalog built once per
@@ -749,7 +749,7 @@ zero and is a bug report against region typing if it does not.
 > how precisely each did, and every stratum's numbers are re-emitted as its own answer blended with
 > that curve. A stratum too thin to fit at all takes the curves whole. The types are
 > `share_curve.rs` and `slippage_curve.rs` beside
-> [`ssr_fit.rs`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs); the design is
+> [`ssr_fit.rs`](../../../../src/parameter_estimation/joint/ssr_fit.rs); the design is
 > [`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md) §5.1. **The two steps
 > below stand as the record of the per-sample route**, which still does both.
 
@@ -933,33 +933,33 @@ Every row read before it was written.
 
 | this doc | existing code | action |
 |---|---|---|
-| the input stream | `SampleLocusObservationsIterator` ([locus_generation/mod.rs:706](../../../../src/ng/locus_generation/mod.rs)) | consume by reference; unchanged. Generic over the region source's error since 2026-08-11, which this unit never names |
-| where its regions come from | `RepeatCatalog::str_loci` ([repeat_catalog/reader.rs:220](../../../../src/ng/repeat_catalog/reader.rs)) | **not called here** — a driver opens the catalog and feeds the stream (spec §5.3). This unit sees loci, not tracts |
-| what a run may ask the catalog for | `StrRepeatCriteria::serves` ([repeat_catalog/criteria.rs](../../../../src/ng/repeat_catalog/criteria.rs)), floors `CATALOG_MIN_COPIES = [5, 5, 4, 4, 4, 3]` `:16` | recorded, not applied: a request under the built floors is refused by the reader, naming the axis and both numbers |
-| which tracts become STR loci | `MinCopies::default` = `[8, 6, 6, 6, 5, 4]` ([segment_criteria.rs:444](../../../../src/ng/region_typing/segment_criteria.rs)) | decides which strata exist at all; travels into `SsrEstimationConfig::locus_selection` and out with the parameters (§1) |
-| how many loci a stratum holds genome-wide | `count_loci_per_stratum` ([repeat_catalog/reader.rs:242](../../../../src/ng/repeat_catalog/reader.rs)) | **not an input to any fit** — the floors of §4.1 count the loci this sample observed. Available as a denominator for a diagnostic (spec §5.3) |
+| the input stream | `SampleLocusObservationsIterator` ([locus_generation/mod.rs:706](../../../../src/locus_generation/mod.rs)) | consume by reference; unchanged. Generic over the region source's error since 2026-08-11, which this unit never names |
+| where its regions come from | `RepeatCatalog::str_loci` ([repeat_catalog/reader.rs:220](../../../../src/repeat_catalog/reader.rs)) | **not called here** — a driver opens the catalog and feeds the stream (spec §5.3). This unit sees loci, not tracts |
+| what a run may ask the catalog for | `StrRepeatCriteria::serves` ([repeat_catalog/criteria.rs](../../../../src/repeat_catalog/criteria.rs)), floors `CATALOG_MIN_COPIES = [5, 5, 4, 4, 4, 3]` `:16` | recorded, not applied: a request under the built floors is refused by the reader, naming the axis and both numbers |
+| which tracts become STR loci | `MinCopies::default` = `[8, 6, 6, 6, 5, 4]` ([segment_criteria.rs:444](../../../../src/region_typing/segment_criteria.rs)) | decides which strata exist at all; travels into `SsrEstimationConfig::locus_selection` and out with the parameters (§1) |
+| how many loci a stratum holds genome-wide | `count_loci_per_stratum` ([repeat_catalog/reader.rs:242](../../../../src/repeat_catalog/reader.rs)) | **not an input to any fit** — the floors of §4.1 count the loci this sample observed. Available as a denominator for a diagnostic (spec §5.3) |
 | the live tandem-repeat scan | `TypedRegionIterator`, `partition_windowed`, `BlockWalk` | **deleted 2026-08-11** — nothing to reconcile; `partition_resident` survives only as the catalog's differential oracle |
-| the locus | `SampleLocusObservations` ([locus_generation/mod.rs:40](../../../../src/ng/locus_generation/mod.rs)) | reuse as-is |
-| routing to this path | `LocusKind::Ssr(SsrDetail)` ([locus_generation/mod.rs:213, 229](../../../../src/ng/locus_generation/mod.rs)) | match on it; `SsrDetail::motif` is the period source |
-| the reference tract | `SampleLocusObservations::reference_bases` ([locus_generation/mod.rs:46](../../../../src/ng/locus_generation/mod.rs)) | the origin and the stratum's repeat count both derive from its length |
-| a read's observed tract | `SequenceObservation::bases` ([locus_generation/mod.rs:159](../../../../src/ng/locus_generation/mod.rs)) — "allele content, in **read** coordinates" | the offset is `(bases.len() − reference_bases.len()) / period` |
-| the scorable subset | `complete_observations()` ([locus_generation/mod.rs:134](../../../../src/ng/locus_generation/mod.rs)) | call directly — §2.3's guard, and on this path a partial reads as a lost repeat |
-| per-read-group support | `SequenceObservation::read_group` ([locus_generation/mod.rs:178](../../../../src/ng/locus_generation/mod.rs)) — already part of the identity, and its doc names this path as the near-term consumer | reuse as-is |
-| read support | `SequenceObservation::num_obs` ([locus_generation/mod.rs:181](../../../../src/ng/locus_generation/mod.rs)) — "the whole support on the STR path" | the bucket increment |
-| the upstream cap | `reads_discarded_by_cap` ([locus_generation/mod.rs:56](../../../../src/ng/locus_generation/mod.rs)), set by `DEFAULT_SSR_MAX_READS_PER_LOCUS` ([locus_generation/ssr.rs:125](../../../../src/ng/locus_generation/ssr.rs)) | count it; do not skip the locus |
-| the motif | `Motif` ([types.rs:520](../../../../src/ng/types.rs)), `period()` ([types.rs:551](../../../../src/ng/types.rs)) returning `usize` | reuse; add `SsrPeriod` beside it rather than changing the accessor's type under its callers |
-| the tract's coordinates and purity | `SsrSegment` ([region_typing/segment_criteria.rs:141](../../../../src/ng/region_typing/segment_criteria.rs)), `period()` `:215`, `tract_len()` `:223`, `purity_fraction()` `:209` | **not consumed by this unit** — the locus carries what is needed. `purity_fraction` is what would make §2.3's `ε`-absorbs-impurity caveat measurable |
-| `ReadGroupId` | [types.rs:199](../../../../src/ng/types.rs) | reuse as-is |
-| the read-admission policy | `ReadFilterConfig` ([read/filtering.rs:63](../../../../src/ng/read/filtering.rs)) | carried into `SsrEstimationConfig` and emitted with the parameters, for the reason generic spec §2 gives — an `ε` describes the reads that survived admission |
-| `DomainError` | [types.rs:425](../../../../src/ng/types.rs) — `#[non_exhaustive]`, doc already says later constrained types add their own variants | extend with `SsrPeriod`'s and the three slippage newtypes' variants |
-| the checked-newtype shape | `MismatchFraction` ([types.rs:243](../../../../src/ng/types.rs)) | copy: private field, `try_new`, `.get()` |
+| the locus | `SampleLocusObservations` ([locus_generation/mod.rs:40](../../../../src/locus_generation/mod.rs)) | reuse as-is |
+| routing to this path | `LocusKind::Ssr(SsrDetail)` ([locus_generation/mod.rs:213, 229](../../../../src/locus_generation/mod.rs)) | match on it; `SsrDetail::motif` is the period source |
+| the reference tract | `SampleLocusObservations::reference_bases` ([locus_generation/mod.rs:46](../../../../src/locus_generation/mod.rs)) | the origin and the stratum's repeat count both derive from its length |
+| a read's observed tract | `SequenceObservation::bases` ([locus_generation/mod.rs:159](../../../../src/locus_generation/mod.rs)) — "allele content, in **read** coordinates" | the offset is `(bases.len() − reference_bases.len()) / period` |
+| the scorable subset | `complete_observations()` ([locus_generation/mod.rs:134](../../../../src/locus_generation/mod.rs)) | call directly — §2.3's guard, and on this path a partial reads as a lost repeat |
+| per-read-group support | `SequenceObservation::read_group` ([locus_generation/mod.rs:178](../../../../src/locus_generation/mod.rs)) — already part of the identity, and its doc names this path as the near-term consumer | reuse as-is |
+| read support | `SequenceObservation::num_obs` ([locus_generation/mod.rs:181](../../../../src/locus_generation/mod.rs)) — "the whole support on the STR path" | the bucket increment |
+| the upstream cap | `reads_discarded_by_cap` ([locus_generation/mod.rs:56](../../../../src/locus_generation/mod.rs)), set by `DEFAULT_SSR_MAX_READS_PER_LOCUS` ([locus_generation/ssr.rs:125](../../../../src/locus_generation/ssr.rs)) | count it; do not skip the locus |
+| the motif | `Motif` ([types.rs:520](../../../../src/types.rs)), `period()` ([types.rs:551](../../../../src/types.rs)) returning `usize` | reuse; add `SsrPeriod` beside it rather than changing the accessor's type under its callers |
+| the tract's coordinates and purity | `SsrSegment` ([region_typing/segment_criteria.rs:141](../../../../src/region_typing/segment_criteria.rs)), `period()` `:215`, `tract_len()` `:223`, `purity_fraction()` `:209` | **not consumed by this unit** — the locus carries what is needed. `purity_fraction` is what would make §2.3's `ε`-absorbs-impurity caveat measurable |
+| `ReadGroupId` | [types.rs:199](../../../../src/types.rs) | reuse as-is |
+| the read-admission policy | `ReadFilterConfig` ([read/filtering.rs:63](../../../../src/read/filtering.rs)) | carried into `SsrEstimationConfig` and emitted with the parameters, for the reason generic spec §2 gives — an `ε` describes the reads that survived admission |
+| `DomainError` | [types.rs:425](../../../../src/types.rs) — `#[non_exhaustive]`, doc already says later constrained types add their own variants | extend with `SsrPeriod`'s and the three slippage newtypes' variants |
+| the checked-newtype shape | `MismatchFraction` ([types.rs:243](../../../../src/types.rs)) | copy: private field, `try_new`, `.get()` |
 | `ErrorRate`, `Estimate<T>`, `Provenance`, `Ploidy`, `PloidyMap` | [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1, §2.4, §3 — new there, not yet in code | consume; this unit adds no second copy |
 | `NoiseModel` | [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4.2 | implement — this is its second implementation and the reason it is a trait |
 | `fit_mixture_weights` | [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4.1 | reuse, **after widening its return type past three genotypes** (§3) |
 | `fit_by_profile_scan` | [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4.2 | **not used**; `fitting/` gains `fit_by_multistart` beside it (§3) |
 | the mismatch score | `alignment/emission.rs:43` (the match/mismatch pick) | **not reused today** — it scores, it does not count. `OPEN:` §2.3 |
 | the per-sample summary | [`ng_step_interfaces.md`:343](ng_step_interfaces.md) | re-specified with the generic path's: the input is accumulated statistics, not `&[ConfidentGenotype]` (shared spec §2.3) |
-| production's stutter pre-pass | [`src/ssr/cohort/prepass.rs`](../../../../src/ssr/cohort/prepass.rs) | **not reused** — it pools reads from loci that passed a confident-genotype gate, which is both biases this design removes. Frozen production |
+| production's stutter pre-pass | `src/ssr/cohort/prepass.rs` (file since removed) | **not reused** — it pools reads from loci that passed a confident-genotype gate, which is both biases this design removes. Frozen production |
 
 ## 7. Open items
 
@@ -1037,7 +1037,7 @@ Seven anchors:
   only place that holds both.
 
 No `bench/`: this unit has no competing implementations, and its cost claims are measured rather
-than open — [`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs) drives the STR
+than open — `ng_str_table_memory.rs` (file since removed) drives the STR
 locus generator over real alignments and prices the table on them (research note §6.8). It reads its
 regions from the repeat catalog now rather than scanning as it goes, so **it takes a catalog beside
 the reference and the alignments**. **Re-run it when the entry key changes** — and its recorded

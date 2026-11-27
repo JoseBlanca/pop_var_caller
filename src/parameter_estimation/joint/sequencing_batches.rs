@@ -322,8 +322,8 @@ impl SequencingBatches {
     /// *user's declaration* comes through, and it is where a declaration that does not describe
     /// the run is refused. A parameters file has already been through that door once: it carries
     /// both columns, written from a batching that was resolved when the fit ran. Re-deriving the
-    /// sample column here would need the run's read-group table, which is what step D2 compares
-    /// the file against rather than what this projection may assume.
+    /// sample column here would need the run's read-group table, which is what the parameters
+    /// file's refusals compare the file against rather than what this projection may assume.
     ///
     /// `defaulted` is the file's own `batching_was_declared`, negated: it is the one thing the
     /// two columns cannot say, because a run that declared nothing and a run that declared one

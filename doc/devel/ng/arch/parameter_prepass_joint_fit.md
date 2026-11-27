@@ -64,7 +64,7 @@ pub struct JointFit {
 
 **Contract.** Every entry carries `Estimate<T>`'s provenance and observation count, as the per-sample
 route's do — a parameter that fell back rather than being fitted here says so
-([`parameter_estimation/mod.rs:48,72`](../../../../src/ng/parameter_estimation/mod.rs)).
+([`parameter_estimation/mod.rs:48,72`](../../../../src/parameter_estimation/mod.rs)).
 
 ### 1.2 `SiteClassNoise` — three classes, not two
 
@@ -195,7 +195,7 @@ impl HomozygoteExcess {
 ```
 
 **Decided — a new newtype, and `InbreedingF` is left alone.** `InbreedingF`
-([`src/ng/types.rs:355`](../../../../src/ng/types.rs)) is already the autozygosity coefficient
+([`src/types.rs:355`](../../../../src/types.rs)) is already the autozygosity coefficient
 everywhere it is used, and the per-sample route is built on it; renaming it would touch shipped code
 for a documentation gain. **What the compiler must refuse is the mix**, and two types do that (spec
 §5.1). *Its doc comment carries the mapping to the literature: `F_ROH` for `InbreedingF`, `F_IS` for
@@ -235,7 +235,7 @@ that guessed it from what survives would be wrong silently.
 **⚠ Built 2026-08-26, at the calling loop's E2a, and the built type differs from the sketch below
 in five ways.** The sketch is kept because its *argument* is still the argument; what it got wrong is
 the shape, and the reasons are all the consumer's. The built form is
-[`src/ng/parameter_estimation/joint/sequencing_batches.rs`](../../../../src/ng/parameter_estimation/joint/sequencing_batches.rs):
+[`src/parameter_estimation/joint/sequencing_batches.rs`](../../../../src/parameter_estimation/joint/sequencing_batches.rs):
 
 - **it holds two dense vectors, not a `Vec<BTreeSet<ReadGroupId>>`** — `BatchOfEachReadGroup` and
   `BatchOfEachSample`, one entry per read group and one per sample, because the calling loop indexes
@@ -307,7 +307,7 @@ batch holds everything. *This follows the owner's stated recommendation and is n
 rule that admits the split case would replace it here.*
 
 **Where `PU` fits, and it is a default rather than an answer.** `ReadGroup`
-([`read/input/read_groups.rs`](../../../../src/ng/read/input/read_groups.rs)) reads `ID`, `SM`, `LB`
+([`read/input/read_groups.rs`](../../../../src/read/input/read_groups.rs)) reads `ID`, `SM`, `LB`
 and `PL` and has no platform-unit field. Adding one, and seeding the batching from it where a file
 declares it, is worth doing — GIAB's read names carry `HISEQ1:23:H9UD5ADXX:2:…` even though its `PU`
 says `unknown` — but **the user's `--sequenced-together` always wins**, because a declared `PU` is as
@@ -315,7 +315,7 @@ untrustworthy as the `PL` this module already refuses to group by.
 
 ### 1.7 `StratumFits` — the slippage lookup the caller borrows
 
-**Built 2026-08-24** ([`stratum_fits.rs`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)).
+**Built 2026-08-24** ([`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs)).
 [`calling_em_loop.md`](calling_em_loop.md) §2 records that `FrozenParameters` borrows one
 `(read group, stratum)` slippage lookup across the calling seam, and that this doc pins its type.
 It is this.
@@ -468,7 +468,7 @@ shape is what makes that additive rather than a redesign.
 ### 2.2 The likelihood, as the shared seam already shapes it
 
 **The innermost sum is `NoiseModel::append_genotype_likelihoods`, unchanged**
-([`fitting/mod.rs:64`](../../../../src/ng/parameter_estimation/fitting/mod.rs)). What this route adds
+(`fitting/mod.rs:64` (file since removed)). What this route adds
 is the two sums outside it — over the locus's allele frequency, and over the site class — and those
 are its own code rather than the trait's:
 
@@ -609,15 +609,15 @@ pub enum JointFitError {
 
 | this doc | existing code | how they meet |
 |---|---|---|
-| the sum over genotypes at one sample's locus | `NoiseModel` + `SubstitutionNoiseModel` ([`fitting/mod.rs:64`](../../../../src/ng/parameter_estimation/fitting/mod.rs), [`generic/noise_model.rs:257`](../../../../src/ng/parameter_estimation/generic/noise_model.rs)) | used unchanged as the innermost term; `NoiseParams` is an associated type, which is the seam that lets this route carry a third site class without touching the trait |
-| the two site classes | `SiteNoise` ([`generic/mod.rs:90`](../../../../src/ng/parameter_estimation/generic/mod.rs)) | `SiteClassNoise` **holds** one rather than restating its two fields, so the pair keeps one home |
-| the climb over mixture weights | `climb_mixture_weights` + `MAX_CLIMB_PASSES`, `CLIMB_STILLNESS` ([`fitting/mixture_weights.rs:50,66`](../../../../src/ng/parameter_estimation/fitting/mixture_weights.rs)) | the density's two masses are mixture weights and reuse it. **The Beta's `a` and `b` are not**, and reaching for this function for them is the mistake this row exists to head off |
-| the alternation's shape and its termination | `CoupledFit` ([`generic/mod.rs:474`](../../../../src/ng/parameter_estimation/generic/mod.rs)) | same loop shape and same rule that running out of passes is not convergence, with four blocks instead of two |
-| provenance and evidence count | `Provenance`, `Estimate<T>` ([`parameter_estimation/mod.rs:48,72`](../../../../src/ng/parameter_estimation/mod.rs)) | used as-is on every emitted parameter |
-| the per-sample rates | `SampleRates` ([`generic/mod.rs:342`](../../../../src/ng/parameter_estimation/generic/mod.rs)) | reused so the two routes' `Hobs`/`π_hom_alt` are the same type and directly comparable — the comparison is the point |
-| the autozygosity coefficient | `InbreedingF` ([`src/ng/types.rs:355`](../../../../src/ng/types.rs)) | **not reused and not renamed**; this route emits `HomozygoteExcess` and never writes to a field of that type |
-| `ErrorRate`, `Ploidy`, `GenotypeFrequency`, `ReadGroupId` | [`src/ng/types.rs:311,386,333,199`](../../../../src/ng/types.rs) | used as-is |
-| the ladder scan | `fit_by_profile_scan`, `fit_by_fixed_frequency_scan` ([`fitting/ladder_scan.rs:131,248`](../../../../src/ng/parameter_estimation/fitting/ladder_scan.rs)) | **not used** — a rung here is a pass over the data (§2.3). Recorded so an implementer does not reach for them by analogy |
+| the sum over genotypes at one sample's locus | `NoiseModel` + `SubstitutionNoiseModel` (`fitting/mod.rs:64` (file since removed), `generic/noise_model.rs:257` (file since removed)) | used unchanged as the innermost term; `NoiseParams` is an associated type, which is the seam that lets this route carry a third site class without touching the trait |
+| the two site classes | `SiteNoise` (`generic/mod.rs:90` (file since removed)) | `SiteClassNoise` **holds** one rather than restating its two fields, so the pair keeps one home |
+| the climb over mixture weights | `climb_mixture_weights` + `MAX_CLIMB_PASSES`, `CLIMB_STILLNESS` (`fitting/mixture_weights.rs:50,66` (file since removed)) | the density's two masses are mixture weights and reuse it. **The Beta's `a` and `b` are not**, and reaching for this function for them is the mistake this row exists to head off |
+| the alternation's shape and its termination | `CoupledFit` (`generic/mod.rs:474` (file since removed)) | same loop shape and same rule that running out of passes is not convergence, with four blocks instead of two |
+| provenance and evidence count | `Provenance`, `Estimate<T>` ([`parameter_estimation/mod.rs:48,72`](../../../../src/parameter_estimation/mod.rs)) | used as-is on every emitted parameter |
+| the per-sample rates | `SampleRates` (`generic/mod.rs:342` (file since removed)) | reused so the two routes' `Hobs`/`π_hom_alt` are the same type and directly comparable — the comparison is the point |
+| the autozygosity coefficient | `InbreedingF` ([`src/types.rs:355`](../../../../src/types.rs)) | **not reused and not renamed**; this route emits `HomozygoteExcess` and never writes to a field of that type |
+| `ErrorRate`, `Ploidy`, `GenotypeFrequency`, `ReadGroupId` | [`src/types.rs:311,386,333,199`](../../../../src/types.rs) | used as-is |
+| the ladder scan | `fit_by_profile_scan`, `fit_by_fixed_frequency_scan` (`fitting/ladder_scan.rs:131,248` (file since removed)) | **not used** — a rung here is a pass over the data (§2.3). Recorded so an implementer does not reach for them by analogy |
 
 ---
 
@@ -635,7 +635,7 @@ pub enum JointFitError {
 - **`OPEN:`** whether the short-tract STR strata contribute to contamination — spec §11 question 5.
   Until it is settled, `fit_jointly` reads contamination from the generic records only.
 - **Impl-time:** `Stratum` as a key type. The catalog keys strata by `(u8, u64)`
-  ([`repeat_catalog/strata.rs:21`](../../../../src/ng/repeat_catalog/strata.rs)); pin whether this
+  ([`repeat_catalog/strata.rs:21`](../../../../src/repeat_catalog/strata.rs)); pin whether this
   route takes that tuple or a newtype over it, and do not mint a second stratum notion.
 - **Impl-time:** whether `SiteClassPosteriors` is materialised for every locus or streamed. Two
   million floats per class is small; the contract is only that a consumer can ask about a named locus.

@@ -24,9 +24,8 @@ use super::{
 
 /// Fills a sample's records as the walk hands it loci.
 ///
-/// **It is handed the same locus stream the histogram accumulators are handed**, borrowing
-/// rather than taking, so one walk fills both routes and the comparison between them is over
-/// identical evidence. It knows which loci are kept and ignores the rest.
+/// It borrows each locus rather than taking it, so the walk can hand the same locus on to the
+/// rest of the run. It knows which loci are kept and ignores the rest.
 pub struct CensusWriter {
     /// The kept generic positions, in selection order — the index a record entry carries.
     generic_loci: Vec<GenomePosition>,

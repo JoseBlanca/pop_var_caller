@@ -55,9 +55,10 @@
 //! 124 in the population the rate was fitted from, and deep positions are where reads pile up
 //! from elsewhere and where mapping quality collapses.
 //!
-//! **Measured, not argued** (`examples/ng_minted_error_means.rs`). On HG002's 100 benchmark regions
-//! at 300×, where the fit sees 41 read-positions in 100, the denominator's geometric mean is
-//! 2.9055 × 10⁻⁴ against 2.9862 × 10⁻⁴ with each position thinned first — **2.7%, or 0.12 Phred**.
+//! **Measured, not argued** (by `examples/ng_minted_error_means.rs`, since deleted). On HG002's
+//! 100 benchmark regions at 300×, where the fit sees 41 read-positions in 100, the denominator's
+//! geometric mean is 2.9055 × 10⁻⁴ against 2.9862 × 10⁻⁴ with each position thinned first —
+//! **2.7%, or 0.12 Phred**.
 //! On the tomato cohort — 2.5× to 28.6× over 63 accessions — it is nothing: on the deepest of them
 //! 228,468,065 read-positions of 228,492,796 are under the cap and the mean moves by 1.0000.
 //! **This fold does not thin, and that is decided rather than pending** (owner, 2026-08-24): the
@@ -128,7 +129,7 @@ const PARTS_OF_ONE: f64 = (1_u64 << 20) as f64;
 /// observation contributes its `num_obs` at every locus it appears at — so a sample's total is
 /// its covered length times its depth, not its read count. Measured on HG002's 100 benchmark
 /// regions at 300×: 172,616,054 over 571,984 bases, which is 301.8 a base
-/// (`examples/ng_minted_error_means.rs`). So:
+/// (measured by `examples/ng_minted_error_means.rs`, since deleted). So:
 ///
 /// **The largest one of these can get is one sample's whole genome**, because a read group belongs
 /// to exactly one sample — `build_read_groups` mints one entry per declared read group per file and
@@ -274,10 +275,9 @@ impl MintedReadErrors {
 /// hundreds of millions of them, and a fresh `Vec` per locus would be an allocation on the
 /// hottest path of the walk.
 ///
-/// **The same observations the read-group histogram counts, under the same gate.** A non-generic
-/// locus contributes nothing here because it contributes nothing there, and the reads are the
-/// complete witnesses for the same reason: a partial read's `q_sum` is over the stretch it saw,
-/// and the fitted rate was never fitted from one.
+/// **Generic loci only, and complete witnesses only.** A repeat-tract locus contributes nothing
+/// here, and a partial read is left out because its `q_sum` is over the stretch it saw, and the
+/// fitted rate was never fitted from one.
 pub fn minted_error_by_read_group(
     locus: &SampleLocusObservations,
     out: &mut Vec<(ReadGroupId, MintedReadErrors)>,
@@ -448,8 +448,7 @@ mod tests {
     }
 
     /// **An observation no read is behind is not skipped, and what it costs depends on its
-    /// `q_sum`.** The error-rate histogram this is the denominator for does not skip one either,
-    /// and the two paths visiting exactly the same observations is worth more than a branch.
+    /// `q_sum`.**
     ///
     /// **The walk cannot build one at all**, which is the fact the rounding bound in
     /// [`MintedReadErrors`]'s doc rests on: both column paths create an observation only when a

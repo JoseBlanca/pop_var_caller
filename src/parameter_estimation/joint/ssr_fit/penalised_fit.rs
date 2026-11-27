@@ -23,6 +23,9 @@
 //! and grows only logarithmically beyond it ([`PenalisedFitConfig::kink_tail`]), so a class whose own
 //! reads insist on a step pays a bounded price for it. The knee is the slippage curve's blend's
 //! (`str_slippage_level_curve.md` §7.2).
+//!
+//! **Plan steps cited below** (C8, D1, D6, D7) are those of
+//! `doc/devel/ng/impl_plan/str_penalised_fit.md`.
 
 use std::time::Instant;
 
@@ -98,9 +101,8 @@ pub struct PenalisedFitConfig {
     /// enough mass into the tails to bias the reference length's share by −0.13 (one-base runs) and
     /// −0.20 (two-base runs) on the fitting bench's tomato-like truth.
     pub allele_pseudo_draws: f64,
-    /// **A second floor under the allele draws, sized as the counting fit sizes its own: this many
-    /// loci's worth of a class's allele draws, spread evenly over the lengths** (the counting fit's
-    /// `SHARE_PRIOR_TRACTS` is one). Production's is [`ALLELE_PRIOR_LOCI`], one. The floor of
+    /// **A second floor under the allele draws: this many loci's worth of a class's allele draws,
+    /// spread evenly over the lengths.** Production's is [`ALLELE_PRIOR_LOCI`], one. The floor of
     /// [`allele_pseudo_draws`](Self::allele_pseudo_draws) is one draw a class whatever the cohort,
     /// so from tens of samples up it no longer holds off zero a length that no locus of the class
     /// carries; this one grows with the cohort and does (spec §2.4). Zero, the prototype's default,
@@ -232,7 +234,7 @@ impl PenalisedFitConfig {
 
     #[cfg(test)]
     /// **The research prototype's own settings, not production's** (production's are
-    /// [`production`](Self::production)), kept for the research examples and a few tests: a looser
+    /// [`production`](Self::production)), kept for a few tests: a looser
     /// start, at most 500 rounds, stop below 10⁻⁶, no second floor under the allele lengths, no
     /// prior under the stutter curves, F not read off pairs, and no standard errors.
     #[must_use]
@@ -793,9 +795,9 @@ pub fn fit_period_by_penalised_counting(
     fit_one_period(&classes, homozygote_excess, fit, &|_, _| {})
 }
 
-/// [`fit_period_by_penalised_counting`] over borrowed classes, so that [`fit_repeat_tracts`] can
-/// hand one motif length's classes over from wherever they sit in its input without copying
-/// their reads.
+/// `fit_period_by_penalised_counting` (test-only) over borrowed classes, so that
+/// [`fit_repeat_tracts`] can hand one motif length's classes over from wherever they sit in its
+/// input without copying their reads.
 ///
 /// `round_ended` is told, after every round, how many rounds have run and the largest change any
 /// number made in that round, so that a long fit can say where it is; it changes nothing.

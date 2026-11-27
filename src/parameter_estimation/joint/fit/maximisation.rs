@@ -1,5 +1,8 @@
 //! The maximisation step: every parameter's own maximisation over the counts one pass
 //! accumulated, with the reads untouched.
+//!
+//! **Plan steps cited below** (A7, B1) are those of
+//! `doc/devel/implementation_plans/fit_precision.md`.
 
 use crate::types::Ploidy;
 

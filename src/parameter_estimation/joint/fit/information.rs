@@ -2,7 +2,8 @@
 //! a time — the raw material of every standard error the fit reports.
 //!
 //! Design: `doc/devel/ng/spec/fit_precision.md` §3.2. Build order:
-//! `doc/devel/implementation_plans/fit_precision.md`, Milestone A.
+//! `doc/devel/implementation_plans/fit_precision.md`, Milestone A; the plan steps and the
+//! checkpoint cited below (A3 to A8, B1, B2, checkpoint A) are that plan's.
 //!
 //! # What a score is, and why one position's is enough
 //!

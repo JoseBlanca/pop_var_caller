@@ -54,7 +54,7 @@
 //! - **no position's likelihood depends on it** — its diagonal entry is zero: a sample with no
 //!   reads, or the duplicated class when the run does not fit it;
 //! - **the fit does not move it** — a sample's homozygote excess in a cohort of one sample
-//!   ([`fits_homozygote_excess`](super::fits_homozygote_excess)). Its information is not zero
+//!   ([`fits_homozygote_excess`]). Its information is not zero
 //!   there, but the fit holds it at its start, so no error describes where it ended;
 //! - **the data cannot tell it apart from the parameters before it** — other parameters can mimic
 //!   its effect on every position, so everything its curvature says is already said by theirs.
@@ -171,7 +171,7 @@ const ABSENT_REASONS: [&str; 4] = [
 ];
 
 /// What the run's log calls each cohort-level parameter, by slot
-/// ([`cohort`](super::information::cohort)).
+/// ([`cohort`]).
 pub(super) const COHORT_PARAMETER_NAMES: [&str; COHORT_PARAMETERS] = [
     "mismapped share",
     "invariant share",
@@ -208,7 +208,7 @@ struct InvertedParameter {
 /// Every fitted parameter's standard error, or why it has none.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct StandardErrors {
-    /// The cohort's eight, indexed by [`cohort`](super::information::cohort).
+    /// The cohort's eight, indexed by [`cohort`].
     pub cohort: [StandardError; COHORT_PARAMETERS],
     /// Per sample, in the order the fit iterates samples, in [`sample`]'s layout: its first
     /// library's two rates, its homozygote excess, then each further library's two rates.
@@ -1580,7 +1580,7 @@ fn error_from_variance(variance: f64, bounds: (f64, f64)) -> StandardError {
     }
 }
 
-/// The interval the fit keeps each cohort parameter in, by slot ([`cohort`](super::information::cohort)).
+/// The interval the fit keeps each cohort parameter in, by slot ([`cohort`]).
 const COHORT_BOUNDS: [(f64, f64); COHORT_PARAMETERS] = [
     NOISY_SHARE_BOUNDS,
     P_INVARIANT_BOUNDS,

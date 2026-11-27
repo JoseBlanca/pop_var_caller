@@ -13,10 +13,10 @@
 //! `parameter_prepass_joint_loci.md` (which loci), `parameter_prepass_joint_records.md`
 //! (what is recorded at each). Types: the three `arch/parameter_prepass_joint_*.md`.
 //!
-//! **Under construction.** [`loci`] settles which loci every sample keeps, [`census`] what
-//! each writes down there, [`fit`] is
-//! the estimator over ordinary positions — including the class for positions a sample carries
-//! more copies of than the reference does — [`ssr_fit`] the estimator over repeat tracts, and
+//! [`loci`] settles which loci every sample keeps, [`census`] what each writes down there
+//! ([`census_file`] puts it in a file), [`fit`] is the estimator over ordinary positions —
+//! including the class for positions a sample carries more copies of than the reference does —
+//! [`ssr_fit`] the estimator over repeat tracts, and
 //! [`contamination`] the share of a sample's reads that came from another individual, which no
 //! per-sample route can produce at all. Each module's own docs say what it does and does not do.
 //!

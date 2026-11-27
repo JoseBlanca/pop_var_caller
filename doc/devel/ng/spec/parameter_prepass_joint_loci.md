@@ -208,7 +208,7 @@ Four properties, and the last two are what the even spread lacked:
   counts of §3.5 are a tally beside the heaps rather than a second traversal.
 
 **Rejected: the even spread over each stratum's segments**
-([`examples/ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs), where it is
+(`examples/ng_str_stutter_rate.rs` (file since removed), where it is
 written and in use). It was the right answer to *"the first N is biased"* and it fixed that; what it
 does not fix is that a systematic sample is not a random one, and it buys its evenness with an
 order dependence. **It costs the same pass over the reference**, so nothing is saved by keeping it.

@@ -411,8 +411,7 @@ impl StratumEvidence {
     }
 
     /// Tracts carrying at least one spanning read — the count the penalised fit spreads its
-    /// allele-length prior over, and the one the bench's
-    /// `COUNTING_FIT_FLOOR` is measured in.
+    /// allele-length prior over.
     pub fn tracts_with_reads(&self) -> usize {
         self.tracts.iter().filter(|t| !t.samples.is_empty()).count()
     }
@@ -1156,7 +1155,7 @@ pub fn gather_strata(
 }
 
 // ---------------------------------------------------------------------
-// Drawn strata: one generator, shared by the tests and the bench
+// Drawn strata: one generator, shared by the tests
 // ---------------------------------------------------------------------
 
 /// A stratum drawn at a known truth, for anything that has to fit evidence it already knows
@@ -1591,7 +1590,7 @@ mod tests {
     }
 
     /// **A count with one outcome only takes half a count of the other**, so no substitution rate
-    /// is exactly zero or one (owner, checkpoint E): no mismatch in 459 bases gives 0.5 / 460,
+    /// is exactly zero or one (the owner's decision): no mismatch in 459 bases gives 0.5 / 460,
     /// every base mismatched gives 459.5 / 460, and a count that saw both keeps its ratio.
     #[test]
     fn a_count_with_one_outcome_only_takes_half_a_count_of_the_other() {

@@ -2,17 +2,17 @@
 //!
 //! The joint fit estimates error rates, heterozygosity, inbreeding, contamination and
 //! repeat-tract slippage once over a whole cohort, before a single variant is called. Until
-//! this file existed the only way to time it was `examples/ng_joint_records_walk`, which opens
-//! CRAMs and a reference genome first — so a wall-clock delta could not tell a regression in
-//! the per-tract likelihood loop from one in `noodles_cram::Block::decode`, and the
+//! this file existed the only way to time it was `examples/ng_joint_records_walk` (since deleted),
+//! which opens CRAMs and a reference genome first — so a wall-clock delta could not tell a
+//! regression in the per-tract likelihood loop from one in `noodles_cram::Block::decode`, and the
 //! 2026-08-15 performance review named this the single highest-value missing measurement
 //! (`doc/devel/reports/reviews/perf_ng-census-joint-fit_2026-08-15.md` §3, item 1).
 //!
 //! Every benchmark here calls the **production** function, `fit_jointly`, on evidence drawn in
 //! memory. **Only the ordinary-position half is timed now**: the repeat-tract benchmarks timed
 //! the climb (`fit_stratum`, `fit_strata`), which was deleted on 2026-10-16
-//! (`doc/devel/ng/arch/str_penalised_fit.md` §4.1). The penalised fit that replaced it is timed by
-//! the research bench (`examples/ng_str_fit_bench.rs`, `examples/str_fit_cost_probe.rs`).
+//! (`doc/devel/ng/arch/str_penalised_fit.md` §4.1). Nothing times the penalised fit that replaced
+//! it: its research benches were removed with the code no `pvc` subcommand reaches.
 //!
 //! ```text
 //! cargo bench --features bench-fixtures --bench ng_joint_fit_perf

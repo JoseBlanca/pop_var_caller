@@ -587,12 +587,12 @@ make a property of the sample look like a property of the file.
 
 | this doc | existing code | how they meet |
 |---|---|---|
-| `DepthBin`, the ladder behind `DepthCode` | [`generic/depth_bins.rs:106,141`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs) | reused unchanged; **do not mint a second ladder** |
-| `CensusWriter::add_locus` | `GenericAccumulators::add_locus` ([`generic/accumulators.rs:278`](../../../../src/ng/parameter_estimation/generic/accumulators.rs)) | same signature and same borrow, so one genome walk feeds both routes |
-| `CensusWriter::merge` | `GenericAccumulators::merge` ([`generic/accumulators.rs:392`](../../../../src/ng/parameter_estimation/generic/accumulators.rs)) | same contract: shard, then fold |
-| what the writer is fed | `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | taken as-is: `region`, `observations`, and the no-observation scalar |
-| `ReadGroupId` | [`src/ng/types.rs:199`](../../../../src/ng/types.rs) | used as-is |
-| `StratumCounts` | [`repeat_catalog/strata.rs:15`](../../../../src/ng/repeat_catalog/strata.rs) | stored, not restated |
+| `DepthBin`, the ladder behind `DepthCode` | `generic/depth_bins.rs:106,141` (file since removed) | reused unchanged; **do not mint a second ladder** |
+| `CensusWriter::add_locus` | `GenericAccumulators::add_locus` (`generic/accumulators.rs:278` (file since removed)) | same signature and same borrow, so one genome walk feeds both routes |
+| `CensusWriter::merge` | `GenericAccumulators::merge` (`generic/accumulators.rs:392` (file since removed)) | same contract: shard, then fold |
+| what the writer is fed | `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs)) | taken as-is: `region`, `observations`, and the no-observation scalar |
+| `ReadGroupId` | [`src/types.rs:199`](../../../../src/types.rs) | used as-is |
+| `StratumCounts` | [`repeat_catalog/strata.rs:15`](../../../../src/repeat_catalog/strata.rs) | stored, not restated |
 | `SelectionTerms`, `CensusLociDigest` | [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §1.2–1.3 | held, not redefined |
 
 **Renamed in the code — 2026-08-14** (`refactor(ng): A2`, plan

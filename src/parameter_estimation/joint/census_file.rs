@@ -32,7 +32,7 @@
 //!
 //! ```text
 //!   magic     8 bytes   "NGCENSUS"
-//!   version   u16       1
+//!   version   u16       5 (`VERSION`)
 //!   header              the sample's name, its read groups, their minted read-error totals,
 //!                       their counts of misreads after runs,
 //!                       the twelve terms it was recorded under, and one byte that is always
@@ -45,11 +45,10 @@
 //! seeks once per section. That means the writer has to know each section's length before it
 //! writes the directory, which it does by encoding the sections first and then placing them.
 //!
-//! # What is not here yet
-//!
-//! **Reading one section on its own.** This module writes the file and reads it whole; the
-//! seeking reader that fills one section at a time is the next unit of work, and the whole-file
-//! read here is its parity oracle.
+//! **A run reads a file one section at a time**, through
+//! [`Sections::fill`](super::census::Sections::fill), which reads only the sections a call asks
+//! for. The tests check what it reads against the same census held in memory; reading a file
+//! whole (`decode_census`) is test-only.
 
 use std::io::{Read, Seek, Write};
 use std::path::Path;
@@ -714,12 +713,13 @@ fn decode_header(cursor: &mut Cursor<'_>) -> Result<Header, CensusError> {
 
     // **The byte the pileup identity used to occupy** — see `encode_header`. It must be zero.
     // A census with it set was written before the census moved into the psp, names a psp by a
-    // digest and a record count, and **this build does not read one**: the naming is what E2
-    // deleted, so a reader that stepped over those 24 bytes would be accepting a file it can no
-    // longer say anything true about. Nothing in the shipped commands can produce one — the fit
-    // and the repair both read a psp's trailer, and the walk has written this byte zero since
-    // Milestone A — so this refusal is reachable only from a census file kept from an older
-    // build.
+    // digest and a record count, and **this build does not read one**: that naming was deleted
+    // with the census's sidecar file (`doc/devel/ng/impl_plan/psp_census_pair.md`, step E2), so
+    // a reader that stepped over those 24 bytes would be accepting a file it can no longer say
+    // anything true about. Nothing in the shipped commands can produce one — the fit
+    // and the repair both read a psp's trailer, and the walk has written this byte zero since the
+    // census moved into the psp's trailer — so this refusal is reachable only from a census file
+    // kept from an older build.
     if cursor.u8()? != 0 {
         return Err(CensusError::Malformed);
     }
@@ -1282,8 +1282,9 @@ mod tests {
     /// a codec on its own. This one is a check on the codec's bytes, and it exists because a
     /// caller leaned on it: the parity oracle used to decode the census *file* a rebuild had
     /// written and re-encode it before comparing it with the psp's trailer. **No caller decodes
-    /// and re-encodes a census today** — since plan step D1 the rebuild writes into the trailer
-    /// and the comparison is over those bytes directly. What this keeps guarding is the codec
+    /// and re-encodes a census today**: the rebuild writes into the psp's trailer
+    /// (`doc/devel/ng/impl_plan/psp_census_pair.md`, step D1), and the comparison is over those
+    /// bytes directly. What this keeps guarding is the codec
     /// itself: a decode made lossy or normalising — a dropped empty section, a reordered
     /// directory — would be invisible to every round-trip test that compares decoded *values*.
     #[test]

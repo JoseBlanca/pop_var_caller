@@ -36,9 +36,9 @@ use std::fmt;
 /// log(level)          =  intercept + slope · repeat_count      for rise_shape = 0
 /// ```
 ///
-/// **1 is production's own shape** — `baseline + slope · units`, clamped, in
-/// `src/ssr/cohort/em.rs`'s `candidate_level` — so the family contains what production does
-/// rather than replacing it with something unrelated.
+/// **1 is the shape the caller deleted on 2026-09-13 used** — `baseline + slope · units`,
+/// clamped — so the family contains that shape rather than replacing it with something
+/// unrelated.
 ///
 /// Fitted per motif period and shared by every slippage group at that period, because a
 /// curvature needs the whole span of repeat counts visible at once where a level and a slope do
@@ -52,7 +52,7 @@ impl RiseShape {
     pub const MULTIPLYING: Self = Self(0.0);
 
     #[cfg(test)]
-    /// The adding end: each extra repeat adds a fixed amount, which is production's shape.
+    /// The adding end: each extra repeat adds a fixed amount, the deleted caller's shape.
     pub const ADDING: Self = Self(1.0);
 
     /// `None` outside `[0, 1]` or on a value that is not a number.

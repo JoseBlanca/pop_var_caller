@@ -210,7 +210,7 @@ struct Drawn {
 
 fn draw(samples: usize, positions: usize, arm: Arm, seed: u64) -> Drawn {
     let mut rng = Rng(seed);
-    let edges = DepthBinEdges::new();
+    let edges = DepthBinEdges::for_census();
     let mut codes: Vec<PackedDepthCodes> = (0..samples)
         .map(|_| PackedDepthCodes::never_walked(positions))
         .collect();
