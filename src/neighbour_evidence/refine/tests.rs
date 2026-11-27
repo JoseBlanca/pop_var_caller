@@ -992,6 +992,7 @@ fn a_copy_that_followed_the_reader_is_read_without_it() {
             &hidden,
             record,
             &genotype_pairs,
+            &mut EchoScratch::default(),
             &mut out,
         );
         out

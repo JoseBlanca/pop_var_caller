@@ -26,6 +26,7 @@
 //! records hidden from the rounds, the only ones where the prediction holds none of the sample's own
 //! reads (phasing spec §4.1).
 
+use std::cell::RefCell;
 use std::ops::Range;
 
 use rayon::prelude::*;
@@ -721,6 +722,15 @@ impl WindowLayout {
     }
 }
 
+/// **The two buffers [`HaplotypeStore::template_into`] works in** where a copy echoes its reader:
+/// the other sample's likelihoods laid out `A × A`, and the other copy's haplotype. Held by a
+/// sample's round so the buffers are allocated once a round rather than once a copy read.
+#[derive(Default)]
+struct EchoScratch {
+    by_alleles: Vec<f64>,
+    kept: Vec<f64>,
+}
+
 /// **Every sample's two haplotypes at every site of a window** (phasing spec §5), double-buffered:
 /// a round reads [`HaplotypeStore::current`] and each sample writes its own row of `next`, which
 /// replaces `current` at the round's end. A row holds, site by site, copy 0's probabilities of the
@@ -817,6 +827,7 @@ impl HaplotypeStore {
         hidden: &[Vec<usize>],
         record_index: usize,
         genotype_pairs: &GenotypePairs,
+        scratch: &mut EchoScratch,
         out: &mut Vec<f64>,
     ) {
         let followed = self.followed[other][site].map(|template| {
@@ -835,7 +846,9 @@ impl HaplotypeStore {
             .known(alleles)
             .expect("every allele count of the window is known");
         let other_hidden = is_hidden(hidden, other, record_index);
-        let mut by_alleles = vec![1.0; alleles * alleles];
+        let EchoScratch { by_alleles, kept } = scratch;
+        by_alleles.clear();
+        by_alleles.resize(alleles * alleles, 1.0);
         if !other_hidden {
             for (&(a, b), likelihood) in pairs.iter().zip(record.likelihoods(other)) {
                 by_alleles[a * alleles + b] = likelihood;
@@ -852,7 +865,8 @@ impl HaplotypeStore {
             );
         } else {
             self.haplotype_into(other, 1 - copy, site, out);
-            let kept: Vec<f64> = out.drain(start..).collect();
+            kept.clear();
+            kept.extend(out.drain(start..));
             out.extend(record.background_shares().enumerate().map(|(a, share)| {
                 share
                     * kept
@@ -1394,6 +1408,7 @@ fn solve_round(
         return;
     };
     // A template's haplotype as this sample reads it: without its own reads echoed back.
+    let echo_scratch = RefCell::new(EchoScratch::default());
     let template = |other: usize, copy: usize, record: usize, out: &mut Vec<f64>| {
         store.template_into(
             sample,
@@ -1404,6 +1419,7 @@ fn solve_round(
             hidden,
             record,
             genotype_pairs,
+            &mut echo_scratch.borrow_mut(),
             out,
         );
     };
