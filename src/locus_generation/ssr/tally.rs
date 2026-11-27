@@ -1,3 +1,10 @@
+//! The per-locus tally: fold each kept read's [`Classified`] into the locus's observed
+//! sequences, one per distinct [`ObservationIdentity`], summing the support moments and counting
+//! the reasons reads yielded no observation.
+//!
+//! It follows the deleted caller's `tally`, extended with partial observations and the
+//! strand, base-quality and mapping-quality moments the shared locus type carries (spec §3, §6).
+
 use super::SsrGeneratorCounts;
 use super::classify::{Classified, NoObservationReason};
 use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
@@ -28,8 +35,8 @@ pub(super) struct SsrTally {
     pub(super) reads_without_observation: u32,
 }
 
-/// Accumulated support for one distinct `(bases, read_witness, read_group)` bucket — the moments summed
-/// as reads fold in, materialised into a [`SequenceObservation`] at the end.
+/// Accumulated support for one distinct [`ObservationIdentity`] — the moments summed as reads
+/// fold in, materialised into a [`SequenceObservation`] at the end.
 #[derive(Default)]
 struct Support {
     num_obs: u32,
@@ -42,13 +49,14 @@ struct Support {
 
 /// Fold each kept read's classification into the locus tally.
 ///
-/// Observations dedup by **`(bases, read_witness, read_group)`** — a `Complete` and a
-/// partial of the same bases are different evidence and stay separate observations, two identical
-/// partials from one read group merge, and the **same allele seen from two read groups is two
-/// observations** (spec §3, §6). Each bucket accumulates the strand (`num_fwd` off the reverse-strand
-/// flag), BQ (`q_sum`, off the read's tract error mass), MAPQ and `placed_left` moments;
-/// `chain_ids` stays empty because the STR path does not phase. `observations` is sorted
-/// by `(bases, witness, read_group)`, so — like production's `tally` — the bases, the counts
+/// Observations dedup by **[`ObservationIdentity`]** — bases, witness, read group, flank
+/// deletion and held flank. So a `Complete` and a partial of the same bases are different
+/// evidence and stay separate observations, two identical partials from one read group merge,
+/// and the **same allele seen from two read groups is two observations** (spec §3, §6). Each
+/// bucket accumulates the strand (`num_fwd` off the reverse-strand flag), BQ (`q_sum`, off the
+/// read's tract error mass), MAPQ and `placed_left` moments; `chain_ids` stays empty because
+/// the STR path does not phase. `observations` is sorted by all five fields of that identity,
+/// so — like the deleted caller's `tally` — the bases, the counts
 /// and the integer moments are independent of the order reads were folded. `q_sum` is the one
 /// exception: it sums in `f64`, which is commutative but not associative, so a bucket's
 /// `q_sum` can differ in its low bits under a different fold order. That is immaterial while
@@ -394,8 +402,8 @@ mod tests {
     }
 
     /// A `Complete` and a partial run of the **same** bases are different evidence, so they
-    /// stay as two separate observations (spec §3) — the property the `(bases, read_witness, read_group)` dedup
-    /// key rests on.
+    /// stay as two separate observations (spec §3) — the property the [`ObservationIdentity`]
+    /// dedup key rests on.
     #[test]
     fn a_complete_and_a_partial_of_the_same_bases_stay_separate() {
         let fwd = read(0, 60);
@@ -528,7 +536,7 @@ mod tests {
                 &r,
                 Classified::NoObservation(NoObservationReason::LowQuality),
             ),
-            // C0's reason, and the largest of the four on real data — its tally arm went
+            // The outside-the-tract reason, the largest of the four on real data — its tally arm went
             // untested until the Milestone C review said so.
             (
                 &r,
@@ -653,7 +661,7 @@ mod tests {
     }
 
     /// The integer moments of a **multi-read bucket** are order-independent: the same reads
-    /// (differing strand and MAPQ) folded into one `(bases, witness)` bucket in two orders
+    /// (differing strand and MAPQ) folded into one bucket in two orders
     /// give the same `num_obs` / `num_fwd` / `mapq_sum` / `mapq_sum_sq`. This is the case the
     /// singleton buckets of `tally_is_order_independent` never exercise, and it isolates
     /// `q_sum` as the sole order-sensitive field (its f64 sum is not asserted here).

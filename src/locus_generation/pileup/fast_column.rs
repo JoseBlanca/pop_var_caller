@@ -98,7 +98,7 @@ struct PlainContribution {
     base: u8,
     /// `ln(P_err)` for this read at this position — the BAQ-capped base quality floored by the
     /// read's mapping-quality log-error, minted by
-    /// [`minted_ln_read_error`](super::open_record::minted_ln_read_error), which is the
+    /// [`minted_ln_read_error`], which is the
     /// function the general fold mints with too.
     ///
     /// **This path reaches the same number by a shorter route, not over a narrower window.**

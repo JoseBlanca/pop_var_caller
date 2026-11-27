@@ -1,6 +1,6 @@
 //! Errors raised by the pileup walker. Each variant carries enough
 //! context (qname, chromosome, position) to point at the offending
-//! input from the error alone, per `ia/specs/design_principles.md`
+//! input from the error alone, per `doc/devel/specs/design_principles.md`
 //! principle 6 ("typed errors at module boundaries").
 //!
 //! **No longer a verbatim copy — A0 (plan 3).** Copied from

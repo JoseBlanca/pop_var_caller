@@ -1,6 +1,6 @@
 # ng — the generic locus generator: a non-STR stretch → many loci
 
-*Status: design spec, 2026-07-26. **No code yet.** The second
+*Status: design spec, 2026-07-26; built in `src/locus_generation/pileup/`. The second
 [`LocusGenerator`](locus_generation.md) and the last loci-minting mechanism — it consumes the
 `Generic` region kind and produces one locus per covered reference position. Inherits the locus
 type, the contract, the dispatch and the error model from

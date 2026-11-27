@@ -254,7 +254,7 @@ Everything else is unchanged and motif-free: the spelling of the read over the h
 deletion at the two outer edges in its smallest form (`str_edge_deletion_alleles.md` §4), the
 per-sample tally keyed on spelling, flank deletion and read group.
 
-*Changed during implementation (2026-10-11, step 3).* As built (`locus_generation/ssr_bundle.rs`),
+*Changed during implementation (2026-10-11, step 3).* As built (`locus_generation/ssr/bundle.rs`),
 with these details the section left open:
 
 - **The flanks are the segments'**: 15 bases each side by default (`SsrGeneratorConfig`'s

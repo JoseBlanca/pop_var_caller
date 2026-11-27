@@ -1,3 +1,10 @@
+//! Classify one read against an STR locus: delimit its repeat with the generator's
+//! [`RepeatDelimiter`], recover a long allele by widening the read region, gate the tract's base
+//! quality, and map the result to an observation or to the reason there is none.
+//!
+//! The per-read pipeline follows the deleted caller's `classify_read`, over the new delimiters.
+//! Its result, [`Classified`], is what [`tally`](super::tally) folds.
+
 use super::read_region::{
     Footprint, MIN_REGION_Q1, extract_region, flank_truncated, passes_quality_gate, read_footprint,
     tract_span_from_input, widen_region,
@@ -26,7 +33,7 @@ pub(super) enum NoObservationReason {
     ///
     /// It arises because the fetch queries the tract **plus its margin**, so a read
     /// overlapping only the flank is delimited too; the aligner then reports
-    /// [`RepeatSpan::FromLeft`](crate::alignment::RepeatSpan::FromLeft) or
+    /// [`RepeatSpan::FromLeft`] or
     /// `FromRight` with an empty span, the rejected side having fallen back to the
     /// read's own edge. Measured on tomato chr01 of `SRR7279503`: **6,704 such reads
     /// against 7,085 genuine partials**, at a median window overlap of 16 bases against
@@ -316,9 +323,9 @@ pub(super) fn classify_read<A: RepeatDelimiter>(
         // **An empty one-sided span is a read outside the locus, not a lower bound of
         // zero** — and `partial` is where that is decided, in one place.
         //
-        // This arm used to hold a `if tract.is_empty()` guard of its own, added at C0
+        // This arm used to hold a `if tract.is_empty()` guard of its own, added
         // when `ReadWitness::from_left`/`from_right` were infallible and nothing else
-        // could reject the case. C2 gave them an `Option`, so `partial` has to handle
+        // could reject the case. They now return an `Option`, so `partial` has to handle
         // "no position covered" anyway and answers exactly this — which made the guard
         // **unfalsifiable**: the Milestone C review deleted it outright and the whole
         // suite stayed green, because no input can tell the two paths apart. Two
@@ -844,8 +851,8 @@ fn unaligned_bases_at_the_ends(cigar: &[CigarOp]) -> (u32, u32) {
 /// - **No insertion or deletion anywhere in the read.** One outside the window still shifts
 ///   every reference-to-read offset after it, and `region` is derived from those offsets.
 /// - **No clip at either end.** A soft clip is the one place a long allele's extra units can
-///   hide from the aligned span — production's own gate admits a clipped read unconditionally
-///   for exactly this reason (`src/ssr/pileup/footprint.rs:210-222`) — so a clipped read goes
+///   hide from the aligned span — the deleted caller's gate admitted a clipped read
+///   unconditionally for exactly this reason — so a clipped read goes
 ///   to the aligner however clean the rest of its CIGAR looks.
 /// - **The aligned span brackets the whole window**, or the read is a partial observation and
 ///   belongs on the aligner's path, which is what decides how far into the tract it reached.
@@ -1047,11 +1054,11 @@ fn partial(
     // never entered the repeat comes back as `tract_start == tract_end`. The bound it
     // would supply is *at least zero* — no evidence — and it arrives in bulk, because
     // the fetch queries the tract plus its margin so every read clipping the flank is
-    // delimited. Those bases are the SNP/indel path's to analyse (C0; see
+    // delimited. Those bases are the SNP/indel path's to analyse (see
     // `NoObservationReason::OutsideTract` for the measurement).
     //
-    // A second `tract.is_empty()` guard stood in `classify_read` from C0 until the
-    // Milestone C review showed no input could distinguish the two — C2's `Option` had
+    // A second `tract.is_empty()` guard stood in `classify_read` until the
+    // Milestone C review showed no input could distinguish the two — the `Option` had
     // made this branch answer first. One decision, one place.
     let Some(read_witness) = (match border {
         HeldFlank::Left => ReadWitness::from_left(reach, locus_len),

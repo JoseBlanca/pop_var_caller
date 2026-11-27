@@ -1,6 +1,6 @@
 //! The walker loop. Single-threaded; drives all the building
 //! blocks (active set, chain-id allocator, open-record table) through
-//! the closure rule and yields finalised `PileupRecord`s through
+//! the closure rule and yields finished loci ([`SampleLocusObservations`]) through
 //! a pull-shaped `Iterator`.
 //!
 //! The walker is a state machine: each call to `Iterator::next()`
@@ -10,21 +10,20 @@
 //! in a small `VecDeque` and drains across successive `next()`
 //! calls.
 //!
-//! **No longer a verbatim copy — released from `copy_fidelity.rs` at A0 (plan 3),
-//! and it has diverged since.** Copied from `src/pileup/walker/driver.rs`, then:
+//! **No longer a verbatim copy.** Transcribed from the deleted caller's
+//! `src/pileup/walker/driver.rs`, then changed:
 //!
-//! - **A0:** the reference accessor is bound by ng's [`RefSeq`] rather than
-//!   production's `MultiChromRefFetcher`, and the field and parameters carrying
-//!   it are named `reference` rather than `ref_fetcher` — there is no fetcher
-//!   any more.
-//! - **C2 (plan 3):** `stop_after`, the region walk's right bound.
-//! - **C3 (plan 3):** `adopting_chain_ids` / `into_chain_ids`, because ng lends
-//!   the allocator rather than owning it.
-//! - **D1 (the alignment cursor):** [`LookAhead`] in place of `Peekable`,
+//! - the reference accessor is bound by ng's [`RefSeq`] rather than the old
+//!   `MultiChromRefFetcher`, and the field and parameters carrying it are named
+//!   `reference` rather than `ref_fetcher` — there is no fetcher any more;
+//! - `stop_after`, the region walk's right bound;
+//! - `adopting_chain_ids` / `into_chain_ids`, because ng lends the allocator
+//!   rather than owning it;
+//! - for the alignment cursor: [`LookAhead`] in place of `Peekable`,
 //!   [`RegionReadSource`], [`PileupWalker::move_to_region`] and
-//!   [`WalkerState::begin_region`] — a walker now lives for a chromosome and is
-//!   pointed at each of its regions in turn, where production builds one per
-//!   chromosome and ng used to build one per region.
+//!   [`WalkerState::begin_region`] — a walker lives for a chromosome and is
+//!   pointed at each of its regions in turn, where ng used to build one per
+//!   region.
 //!
 //! The per-position walk itself — admit, process, expire, close, advance — is
 //! still the transcription.
@@ -52,7 +51,7 @@ use crate::ref_seq::RefSeq;
 use crate::types::ContigId;
 
 /// Construct a [`PileupWalker`] over a coordinate-sorted stream of
-/// prepared reads. The walker is an `Iterator<Item = Result<PileupRecord,
+/// prepared reads. The walker is an `Iterator<Item = Result<SampleLocusObservations,
 /// WalkerError>>`; callers drive it by repeatedly calling `next()`
 /// (or by collecting / for-looping). After iteration ends, the
 /// run's cumulative counters are available via

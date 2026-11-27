@@ -1,6 +1,6 @@
 # ng — the STR locus generator: one tract segment → one locus
 
-*Status: design spec, 2026-07-21. **No code yet.** The first
+*Status: design spec, 2026-07-21; built in `src/locus_generation/ssr.rs` and `ssr/`. The first
 [`LocusGenerator`](locus_generation.md) — it consumes `SsrSegment` and produces one locus per tract.
 Inherits the locus type, the contract, the dispatch and the error model from
 [locus_generation.md](locus_generation.md); read that first. Drives the STR read aligner
@@ -110,7 +110,7 @@ period of the reference run reaching each edge (`None` where fixed sequence reac
 whether a read that ends inside is kept as a partial or dropped. A segment converts into one with
 its own motif at both edges and partials kept, so every segment is measured exactly as before:
 the psps' non-bundle records were byte-identical on the stuttering benchmark (4,120,085 dump rows,
-one sample, 30×). The bundle generator (`locus_generation/ssr_bundle.rs`) is this generator with
+one sample, 30×). The bundle generator (`locus_generation/ssr/bundle.rs`) is this generator with
 the flat-gap delimiter, run over the hull through the steps it exposes (`fetch_locus`,
 `measure_reads`); a read that ends inside the hull is kept as a partial observation, as at a
 segment (`str_bundle_loci.md` §6.1; the `ended_inside_a_bundle` no-observation count of step 3 is

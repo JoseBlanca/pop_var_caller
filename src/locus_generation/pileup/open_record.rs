@@ -1,20 +1,19 @@
 //! Open-record formation, merging, and widening — the
-//! walker's central operation. See `ia/specs/pileup_walker.md`
+//! walker's central operation. See `doc/devel/specs/pileup_walker.md`
 //! §"Open-record formation and merging".
 //!
-//! An open record is the in-flight version of a `PileupRecord`:
-//! same shape, but its REF span and allele list grow as the walker
+//! An open record is the in-flight version of a finished locus
+//! ([`SampleLocusObservations`]): its REF span and allele list grow as the walker
 //! folds events into it. When the walker confirms no future event
 //! can touch the record (its footprint is fully behind the walker
-//! per the closure rule), it converts the open record into a
-//! finalised `PileupRecord` and pushes it through the channel.
+//! per the closure rule), it converts the open record into the
+//! finished locus and yields it.
 //!
-//! **No longer a verbatim copy — A0 (plan 3).** Copied from
-//! `src/pileup/walker/open_record.rs`, then changed: the reference is reached
-//! through ng's [`RefSeq`] rather than production's `MultiChromRefFetcher`, and
+//! **No longer a verbatim copy.** Transcribed from the deleted caller's
+//! `src/pileup/walker/open_record.rs`, then changed: among others, the reference is
+//! reached through ng's [`RefSeq`] rather than the old `MultiChromRefFetcher`, and
 //! through [`RefSeq::fetch_into`] rather than `fetch`, so `widen` writes into a
 //! buffer this table owns instead of allocating a `Vec<u8>` per call.
-//! `copy_fidelity.rs` released this file in that commit.
 
 use smallvec::SmallVec;
 
@@ -223,7 +222,7 @@ pub(super) struct AlleleSupportStats {
 }
 
 /// How the reads folded into one finished record witnessed it — the tally
-/// [`OpenPileupRecord::finalise`] produces on its way past every
+/// [`OpenPileupRecord::finalise_recycling`] produces on its way past every
 /// [`FoldedReadState`], resolving [`witness_of`] once against the **final**
 /// footprint.
 ///
@@ -270,7 +269,7 @@ pub(super) struct RecordWitnessCounts {
 
 /// How much of the finished record a read witnessed, in **locus positions**.
 ///
-/// Resolved once, at [`finalise`](OpenPileupRecord::finalise), from the read's
+/// Resolved once, at [`finalise_recycling`](OpenPileupRecord::finalise_recycling), from the read's
 /// `witnessed` extent against the record's **final** footprint — never during the
 /// fold, when that footprint is not yet known. A read that was a complete witness
 /// when it folded becomes `Partial` after a later widen **with nothing about the
@@ -772,12 +771,6 @@ impl OpenPileupRecord {
         Self::with_fold_capacity(chrom_id, pos, ref_seq, RECORD_FOLDED_READS_INITIAL_CAPACITY)
     }
 
-    /// As [`new`](Self::new), with room reserved for `fold_capacity` folded reads.
-    ///
-    /// The walk uses this so a record's fold table starts at the sample's observed
-    /// coverage instead of a fixed guess; see
-    /// [`OpenPileupRecordTable::observe_column_depth`]. `new` remains the form tests build
-    /// records with, since a test that folds three reads has nothing to learn from.
     /// As [`with_fold_capacity`](Self::with_fold_capacity), built on the containers a
     /// previously closed record handed back rather than on fresh ones.
     ///
@@ -820,6 +813,12 @@ impl OpenPileupRecord {
         }
     }
 
+    /// As `new` (tests only), with room reserved for `fold_capacity` folded reads.
+    ///
+    /// The walk uses this, when no closed record's containers are spare, so a record's fold
+    /// table starts at the size the last closed record needed instead of a fixed guess; see
+    /// [`OpenPileupRecordTable::learn_fold_size_from`]. `new` remains the form tests build
+    /// records with, since a test that folds three reads has nothing to learn from.
     fn with_fold_capacity(chrom_id: u32, pos: u32, ref_seq: Vec<u8>, fold_capacity: usize) -> Self {
         Self {
             chrom_id,
@@ -1003,8 +1002,19 @@ impl OpenPileupRecord {
         observations
     }
 
+    /// As [`finalise_recycling`](Self::finalise_recycling), dropping the storage it hands
+    /// back. The form tests use, where one record is built and closed and there is no next
+    /// one to give it to.
+    #[cfg(test)]
+    pub fn finalise(self) -> (SampleLocusObservations, RecordWitnessCounts) {
+        let (locus, witness, _storage) = self.finalise_recycling();
+        (locus, witness)
+    }
+
     /// Convert into the finished locus ng emits: the region, the reference bytes under it,
     /// one [`SequenceObservation`] per accumulated key, and the two per-record counters.
+    /// Also hand back the two containers the record was built on, so the next record can be
+    /// built on them instead of allocating its own.
     ///
     /// **Coverage is resolved here, and here is the only place it can be.** A read's
     /// `witnessed` extent is absolute; what it *means* — complete witness, or one run short
@@ -1018,21 +1028,10 @@ impl OpenPileupRecord {
     /// [`KeyedObservation::chain_ids`] for the ruling that changed and what the cohort
     /// merge needs it for.
     ///
-    /// `placed_start` is **gone**, as A1 said it would be: ng's stats never carried it, the
-    /// `PileupRecord` boundary did, and this step removed that boundary. Nothing consumes
-    /// it, and it is a pure function of the read's start against the anchor, so a later
-    /// consumer re-derives it without changing the fold (spec §6).
-    /// As [`finalise_recycling`](Self::finalise_recycling), dropping the storage it hands
-    /// back. The form tests use, where one record is built and closed and there is no next
-    /// one to give it to.
-    #[cfg(test)]
-    pub fn finalise(self) -> (SampleLocusObservations, RecordWitnessCounts) {
-        let (locus, witness, _storage) = self.finalise_recycling();
-        (locus, witness)
-    }
-
-    /// Close the record, and hand back the two containers it was built on so the next
-    /// record can be built on them instead of allocating its own.
+    /// `placed_start` is **gone**: ng's stats never carried it, only the old `PileupRecord`
+    /// boundary did, and that boundary was removed. Nothing consumes it, and it is a pure
+    /// function of the read's start against the anchor, so a later consumer re-derives it
+    /// without changing the fold (spec §6).
     ///
     /// **Why the walk cares.** At most two records are open at any moment (measured, both
     /// fixtures) while 86 million pass through the table on one tomato chromosome, so the
@@ -3662,8 +3661,8 @@ pub(super) struct ReadContribution {
     pub bq_baq_at_walker_pos: u8,
     pub alignment_start: u32,
     /// SAM-flag-derived mate role. Carries through from
-    /// [`PreparedRead::mate_role`]; only
-    /// [`MateRole::is_first_of_pair`] is read by the tie-break
+    /// [`PreparedRead::mate_role`](super::PreparedRead::mate_role); only
+    /// [`MateRole::is_first_of_pair`](super::MateRole::is_first_of_pair) is read by the tie-break
     /// helpers (a deterministic tertiary key on equal-BQ
     /// mate-overlap positions per the spec — not a faithful proxy
     /// for "earlier alignment_start").

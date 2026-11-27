@@ -1,6 +1,6 @@
 # ng — locus generation: typed regions → a sample's loci (the shared shape)
 
-*Status: design spec, 2026-07-21. **No code yet.** The middle arrow of the caller spine
+*Status: design spec, 2026-07-21; built in `src/locus_generation/`. The middle arrow of the caller spine
 (`ng_proposal.md`): reference → typed regions → **a sample's loci** → calls. This is the shared
 preamble; each segment kind's generator gets its own spec, the first being
 [locus_generation_ssr.md](locus_generation_ssr.md). Stands on the typed-region generator
@@ -498,14 +498,16 @@ question the manager needs answered separately from "what will it never cover?" 
 the STR generator, so `SsrSegment` does real work while `Generic` and `SsrBundle` fall to
 `NotImplemented` and `Satellite` to `OutOfScope`.
 
-**Module layout.** `src/ng/locus_generation/` — a folder, per `module_layout.md` principle 1: a step whose
+**Module layout.** `src/locus_generation/` — a folder, per `module_layout.md` principle 1: a step whose
 implementations compete keeps its trait and every implementation side by side.
 
 ```
-src/ng/locus_generation/
-  mod.rs      – SampleLocusObservations, SequenceObservation, LocusGenerator, the dispatcher, NoLoci
-  ssr.rs      – the STR generator (locus_generation_ssr.md)
-  pileup/     – the generic generator (deferred, §11)
+src/locus_generation/
+  mod.rs      – SampleLocusObservations, SequenceObservation, LocusGenerator, the dispatcher
+  witness.rs  – the witness vocabulary (ReadWitness, LocusLen, …)
+  ssr.rs      – the STR segment generator (locus_generation_ssr.md)
+  ssr/        – its steps, and bundle.rs, the STR bundle generator (str_bundle_loci.md)
+  pileup/     – the generic generator (locus_generation_pileup.md)
 ```
 
 *This reverses an earlier call in this design* that the step was a file, on the grounds that it had no

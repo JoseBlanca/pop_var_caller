@@ -54,7 +54,7 @@
 //! Hashing it would hide the ordering dependence rather than remove it. The query name
 //! is what a BAM says the read *is*.
 //!
-//! [`WalkerConfig::max_reads_per_position`]: super::WalkerConfig::max_reads_per_position
+//! [`WalkerConfig::max_reads_per_position`]: crate::locus_generation::pileup::WalkerConfig::max_reads_per_position
 
 use super::{MateRole, PreparedRead};
 

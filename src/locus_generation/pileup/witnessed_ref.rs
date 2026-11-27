@@ -33,7 +33,7 @@ use crate::locus_generation::witness::canonicalise_runs;
 /// types so the compiler refuses the mix (arch §3). This one is the *fold's*, `pub(super)`
 /// and private to the walk, so it lives with the walk; only the locus-axis vocabulary is
 /// public (arch *Module home*). The canonical form itself is shared — one
-/// [`canonicalise_runs`](crate::locus_generation::witness::canonicalise_runs), so the
+/// [`canonicalise_runs`], so the
 /// two types cannot drift on what "canonical" means.
 ///
 /// # Half-open, where `RefSpan` was inclusive

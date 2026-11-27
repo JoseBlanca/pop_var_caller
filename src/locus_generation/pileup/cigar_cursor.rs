@@ -94,7 +94,7 @@ pub(super) type EventsOverlapping = SmallVec<[ReadEvent; 4]>;
 /// least as long as the read — in which case no readthrough is
 /// possible). See finding `G1` in
 /// `ia/reviews/pileup_gatk_comparison_2026-05-08.md` and
-/// `ia/specs/pileup_walker.md` §"Adaptor-region per-base filter".
+/// `doc/devel/specs/pileup_walker.md` §"Adaptor-region per-base filter".
 #[inline(always)]
 fn base_in_adaptor(ref_pos: u32, read: &PreparedRead) -> bool {
     let Some(boundary) = read.adaptor_boundary else {
@@ -1311,7 +1311,7 @@ mod tests {
     // bucket (which would record "the read showed N" as a fake
     // allele) nor into the REF bucket at ref-N positions (which
     // would record "the read agrees with the unknown reference",
-    // also nonsense). See `ia/specs/pileup_walker.md`
+    // also nonsense). See `doc/devel/specs/pileup_walker.md`
     // §"N-base handling".
 
     #[test]
@@ -1444,7 +1444,7 @@ mod tests {
     // sequenced *through* the molecule into the far adaptor; it
     // belongs to the library construct, not the genome. The cursor
     // emits no Match event at those positions, in the same way
-    // read-N is skipped. See `ia/specs/pileup_walker.md`
+    // read-N is skipped. See `doc/devel/specs/pileup_walker.md`
     // §"Adaptor-region per-base filter".
 
     /// Build a `PreparedRead` exactly like `make_read` but with an
