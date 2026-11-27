@@ -144,14 +144,11 @@ impl ParametersFile {
             return Ok(());
         };
         if self.format_version < FORMAT_THAT_ADDED_THE_MISREAD_TABLE {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "misread_after_runs",
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_MISREAD_TABLE} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_MISREAD_TABLE,
+                self.format_version,
             ));
         }
         let read_group_count = self.fitted_from.read_groups.len();
@@ -240,14 +237,11 @@ impl ParametersFile {
             return Ok(());
         };
         if self.format_version < FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "snp_indel_fit",
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_SNP_INDEL_FIT,
+                self.format_version,
             ));
         }
         let at = "snp_indel_fit";
@@ -328,31 +322,25 @@ impl ParametersFile {
             return Ok(());
         };
         if self.format_version < FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "repeat_tracts_left_out",
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_TRACTS_LEFT_OUT,
+                self.format_version,
             ));
         }
         let at = "repeat_tracts_left_out";
         if self.format_version < FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT
             && let Some(row) = left_out.by_stratum.iter().find(|row| row.interrupted > 0)
         {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 format!(
                     "{at}.by_stratum[period = {}, reference_repeats = {}].interrupted",
                     row.period, row.reference_repeats
                 ),
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT} count in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "count",
+                FORMAT_THAT_ADDED_THE_INTERRUPTED_COUNT,
+                self.format_version,
             ));
         }
         if let Some(depth) = left_out.typical_depth {
@@ -393,14 +381,11 @@ impl ParametersFile {
             if rows.is_empty() {
                 return Ok(());
             }
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 at,
-                format!(
-                    "is a format-{FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS} table in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "table",
+                FORMAT_THAT_ADDED_THE_STUTTER_MULTIPLIERS,
+                self.format_version,
             ));
         }
         names_each_key_once(
@@ -495,15 +480,11 @@ impl ParametersFile {
                 ("duplicated_positions", self.duplicated_positions.is_some()),
             ];
             if let Some((table, _)) = tables.into_iter().find(|(_, written)| *written) {
-                return Err(refuse(
+                return Err(newer_than_the_files_format(
                     table,
-                    format!(
-                        "is a format-{FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES} table in a file \
-                         whose `format_version` says {}, so it is not clear which format the file \
-                         was written in; set `format_version` to the format the file was written \
-                         in",
-                        self.format_version
-                    ),
+                    "table",
+                    FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES,
+                    self.format_version,
                 ));
             }
         }
@@ -1250,14 +1231,11 @@ impl ParametersFile {
             .is_some()
             && self.format_version < FORMAT_THAT_SPLIT_THE_STATED_SHARE
         {
-            return Err(refuse(
+            return Err(newer_than_the_files_format(
                 "repeat_tracts.fallback_between_locus_share_with_own_shares",
-                format!(
-                    "is a format-{FORMAT_THAT_SPLIT_THE_STATED_SHARE} key in a file whose \
-                     `format_version` says {}, so it is not clear which format the file was \
-                     written in; set `format_version` to the format the file was written in",
-                    self.format_version
-                ),
+                "key",
+                FORMAT_THAT_SPLIT_THE_STATED_SHARE,
+                self.format_version,
             ));
         }
         a_stated_fallback_share(
@@ -1687,6 +1665,27 @@ pub(super) fn refuse(field: impl Into<String>, problem: impl Into<String>) -> Pa
         field: field.into(),
         problem: problem.into(),
     }
+}
+
+/// **The refusal for something a later format added, found in a file stamped older**: a file that
+/// says `format_version` 3 and holds a format-4 table cannot say which format it was written in.
+///
+/// `what` names the kind of thing at `at` — "table", "key" or "count" — and `added_in` is the
+/// format that added it.
+fn newer_than_the_files_format(
+    at: impl Into<String>,
+    what: &str,
+    added_in: u32,
+    format_version: u32,
+) -> ParametersFileError {
+    refuse(
+        at,
+        format!(
+            "is a format-{added_in} {what} in a file whose `format_version` says \
+             {format_version}, so it is not clear which format the file was written in; set \
+             `format_version` to the format the file was written in"
+        ),
+    )
 }
 
 /// A number that is a number — refusing `NaN` and both infinities.
@@ -2849,8 +2848,12 @@ mod tests {
     fn the_tracts_left_out_in_a_version_six_file_are_refused() {
         let (field, problem) = refused(|file| file.format_version = 6);
         assert_eq!(field, "repeat_tracts_left_out");
-        assert!(problem.contains("format-7 table"), "{problem}");
-        assert!(problem.contains("says 6"), "{problem}");
+        assert_eq!(
+            problem,
+            "is a format-7 table in a file whose `format_version` says 6, so it is not clear \
+             which format the file was written in; set `format_version` to the format the file \
+             was written in"
+        );
         accepted(|file| {
             file.format_version = 6;
             file.repeat_tracts_left_out = None;
