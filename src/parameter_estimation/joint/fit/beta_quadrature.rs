@@ -4,7 +4,7 @@
 use crate::float;
 use crate::parameter_estimation::joint::linear_algebra;
 
-use super::{genotype_frequencies, genotype_frequencies_slope_in_frequency};
+use super::expectation::{genotype_frequencies, genotype_frequencies_slope_in_frequency};
 
 /// A Gauss–Jacobi rule for `∫₀¹ Beta(f; a, b) · h(f) df`, normalised so the weights sum to one.
 ///

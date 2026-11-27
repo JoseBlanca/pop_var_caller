@@ -4,16 +4,19 @@
 use crate::types::Ploidy;
 
 use super::beta_quadrature::{BetaQuadrature, trigamma};
+use super::expectation::{
+    candidate_read_probability, count_times_ln, genotype_frequencies, reference_read_probability,
+};
 use super::{
     BETA_SHAPE_BOUNDS, CLEAN_ERROR_BOUNDS, DUPLICATED_SHARE_BOUNDS, HOM_EXCESS_BOUNDS,
     JointFitConfig, NOISY_ERROR_BOUNDS, NOISY_SHARE_BOUNDS, P_FIXED_ALT_BOUNDS, P_INVARIANT_BOUNDS,
-    Parameters, ReadTally, Statistics, candidate_read_probability, count_times_ln,
-    genotype_frequencies, reference_read_probability,
+    Parameters, ReadTally, Statistics,
 };
 
 /// Every parameter's own maximisation, over the counts one pass accumulated. Returns the
-/// largest relative move any parameter made — what the per-pass trace ([`PassSummary`]) records;
-/// since plan step B1 it no longer decides when the fit stops.
+/// largest relative move any parameter made — what the per-pass trace
+/// ([`PassSummary`](super::PassSummary)) records; since plan step B1 it no longer decides when the
+/// fit stops.
 pub(super) fn maximisation(
     parameters: &mut Parameters,
     statistics: &Statistics,
@@ -169,10 +172,11 @@ fn maximise_error_rate(
 /// **Whether the fit moves each sample's homozygote excess**: only with two samples or more that
 /// carry reads at an ordinary position. At one sample nothing separates an inbred individual from a
 /// population whose frequencies are what they are, so the excess is held where it starts — and,
-/// holding it, the fit has no standard error for it either ([`standard_errors`]). **A sample with no
-/// such read is not counted**: one sample with reads beside one whose census holds repeat tracts
-/// only is a one-sample cohort, and counting both had the first sample's excess come back fitted,
-/// with an error, where alone it is held.
+/// holding it, the fit has no standard error for it either
+/// ([`standard_errors`](super::standard_errors)). **A sample with no such read is not counted**:
+/// one sample with reads beside one whose census holds repeat tracts only is a one-sample cohort,
+/// and counting both had the first sample's excess come back fitted, with an error, where alone it
+/// is held.
 pub(super) fn fits_homozygote_excess(samples_with_reads: usize) -> bool {
     samples_with_reads >= 2
 }
