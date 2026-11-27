@@ -232,7 +232,7 @@ pub struct TractScoringFits {
     /// the fit was run over.
     ///
     /// **Separated because the other two absences are ordinary and these two are not.**
-    /// [`NoSlippage`](crate::parameter_estimation::joint::stratum_fits::NoSlippage) calls
+    /// [`NoSlippage`] calls
     /// them *"the run is not what it claims"*: a candidate several repeats from its tract's
     /// length lands in no stratum on perfectly good data, but a read group the fit never named
     /// means the parameters and the reads came from different runs. Folding both into one count
@@ -1136,8 +1136,7 @@ pub struct TractPrior<'a> {
 /// The penalised fit gives every number one source, a point on its motif length's penalised
 /// curve (below). A file written by the fit before it (the climb, deleted 2026-10-16) may carry
 /// any of three others: the cell's own fit, its period's curve, or a blend of the two, each with
-/// the share the curve took
-/// ([`LevelSource::curve_weight`](crate::parameter_estimation::joint::slippage_curve::LevelSource::curve_weight)).
+/// the share the curve took ([`LevelSource::Blend`]'s `curve_weight`).
 /// **A number the curve entered at all is [`Provenance::Borrowed`]**: the curve is drawn
 /// through other strata, so a cell reading off it is reading a neighbouring grain's
 /// measurement, which is exactly what that rung means. Only a cell whose level and both shares

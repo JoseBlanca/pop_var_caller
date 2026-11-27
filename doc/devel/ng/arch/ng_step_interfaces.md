@@ -196,9 +196,10 @@ pub enum LocusKind {
 }
 
 /// The candidate allele set at a locus (step 6). REF is always present at `ref_idx`.
-// RENAMED `CandidateAlleles` and homed in `calling/mod.rs` (`../arch/calling_em_loop.md` §2),
-// because the loop appends to it during discovery and prunes it at the end. Its `kind` routes
-// both the row builder and the prior's seed.
+// RENAMED `CandidateAlleles` and homed in `calling/candidate_alleles.rs`, re-exported from
+// `calling/` (`../arch/calling_em_loop.md` §2). Its `kind` routes both the row builder and the
+// prior's seed. (The loop was to append to it during discovery and prune it at the end;
+// neither was built — discovery runs inside candidate selection, and nothing prunes.)
 pub struct AlleleCandidates {
     pub alleles: Vec<Allele>,        // sequence-resolved
     pub ref_idx: AlleleId,
@@ -576,7 +577,7 @@ were not freshly re-read.
 | `RefSeq` + `RawRefSeq` (traits) | `ChromRefFetcher` + `MultiChromRefFetcher` + `RepositoryRefFetcher` + `StreamingChromRefFetcher` + `ManualEvictChromRefFetcher` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) | **consolidate** into `RefSeq` (universal canonical fetch) + the `RawRefSeq` capability + an inherent `evict_before` (no silent no-ops); reuse the fetcher impls behind them. Spec: [`../spec/ref_seq.md`](../spec/ref_seq.md) |
 | `MappedRead` | `MappedRead` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | reuse as-is (the step-2 input) |
 | `LocusRead` (prepared-read output) | — (name retired) | **generic path only:** read preparation produces production's `PreparedRead`, reused as-is (may want hoisting out of `pileup/walker/`). There is **no STR counterpart** — the STR path has no read preparation; its per-read alignment produces a locus *observation* (`ObservedSequence` in `locus_generation_ssr.md`), not a prepared read. The old `SsrTractObs` path-owned type is gone with the retired STR read-prep spec |
-| `AlleleCandidates` | **renamed 2026-08-21 to `CandidateAlleles`** and homed in `calling/mod.rs` ([`calling_em_loop.md`](calling_em_loop.md) §2) — the loop owns it because a discovery round appends to it and the final prune shrinks it. Production's `CandidateSet` ([`candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs)) is the STR-side reuse target | rename; port the rung ladder when the STR path comes through the merge |
+| `AlleleCandidates` | **renamed 2026-08-21 to `CandidateAlleles`** and homed in `calling/candidate_alleles.rs`, re-exported from `calling/` ([`calling_em_loop.md`](calling_em_loop.md) §2) — the loop takes it by value and hands it back inside the locus's result. (A discovery round inside the loop and a final prune were planned; neither was built.) Production's `CandidateSet` ([`candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs)) is the STR-side reuse target | rename; port the rung ladder when the STR path comes through the merge |
 | `SampleSummary` | ≈ the `.psp` `SampleSummary` ([sample_summary/](../../../../src/sample_summary/)) | reuse / align |
 | `ModelParams` | **resolved 2026-08-21** — the successor is `FrozenParameters` ([`calling_em_loop.md`](calling_em_loop.md) §2): a borrow gathering the pre-pass's outputs (`ReadGroupCalibration`, `ContaminationView`, per-sample `InbreedingF`, `SpectrumSeed`, the `(read group, stratum)` slippage lookup) | assemble once per run; never written during calling |
 | `Genotype` | **resolved 2026-08-21** — a pair, not one type: `GenotypeIdx` (a row of the shared `GenotypeTable`, the loop's working currency) and the owned `Genotype` multiset, minted only at output ([`calling_em_loop.md`](calling_em_loop.md) §2). The table ports production's `GenotypeShape` ([`posterior_engine/shape.rs:42`](../../../../src/var_calling/posterior_engine/shape.rs)) | port the shape; mint the multiset at the final pass |

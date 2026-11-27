@@ -154,8 +154,11 @@ dependency, not a feeling.** As four sibling folders at the top of `src/ng/`, th
 calling arch docs each had to state that the prior and the likelihood must never import
 from `inference/`, and the shared types had to cross as flat slices partly to enforce it —
 a constraint the tree imposed rather than the design. Under one `calling/` folder the
-shared vocabulary sits in `calling/mod.rs` and every sub-module imports downward, so the
-rule disappears. **The generalisation worth carrying: when keeping steps apart forces you
+shared vocabulary sits one level above the steps, in files beside `calling/mod.rs`, and the
+rule that mattered — the prior and the likelihood never import from `inference/` — still
+holds, though only review keeps it so. (The shared types are not free of the steps: several
+carry a type a step defines, and `CallingScratch` holds a buffer from every step by design,
+because a worker owns one scratch and lends each step its part.) **The generalisation worth carrying: when keeping steps apart forces you
 to write a no-import rule between them, they are one folder.** (The flat slices stay, for
 their own reasons — the no-allocation contract, and `genetics.rs:127`'s deliberate
 avoidance of a back-reference into its caller.)

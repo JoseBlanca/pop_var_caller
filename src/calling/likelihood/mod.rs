@@ -4434,7 +4434,7 @@ mod tests {
     /// **Every slot is checked as it accumulates and the total is not**, so a row of finite
     /// copies whose sum overflows would reach the division — where `finite / inf` is zero, every
     /// allele is lifted to the floor, and the row comes back finite and plausible and says the
-    /// neighbours carry nothing. C2's review built it with one sample holding `1e308` copies of
+    /// neighbours carry nothing. A review built it with one sample holding `1e308` copies of
     /// each of two alleles.
     #[test]
     #[should_panic(expected = "arithmetic that went wrong upstream")]

@@ -59,7 +59,7 @@ fn call_tract_over(
 }
 
 /// **The tolerance the existing SSR caller states**, `1e-6`
-/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)'s `EmCfg::tol`).
+/// (`d9e7b076:src/ssr/cohort/em.rs`'s `EmCfg::tol`).
 ///
 /// **It is that caller's number and not its rule**, and the difference is measured in
 /// `a_tract_called_under_both_tolerances_gives_one_answer_and_says_what_moved`'s doc: the two
@@ -739,7 +739,7 @@ fn a_tract_says_whether_the_contaminant_term_was_built() {
 /// frequency before comparing it against a tolerance. They divide by different things:
 ///
 /// - the SSR caller adds its prior's pseudocounts to the copies before normalising
-///   ([`em.rs`](../../../../src/ssr/cohort/em.rs)'s `run_pi_em`, whose `expected` **starts at**
+///   (`d9e7b076:src/ssr/cohort/em.rs`'s `run_pi_em`, whose `expected` **starts at**
 ///   `g0`), so its divisor is `chromosomes + pseudocount mass`;
 /// - ng divides by the cohort's chromosomes alone.
 ///

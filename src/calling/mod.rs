@@ -44,28 +44,41 @@
 //! - `tests.rs`, test-only — the fixtures the tests of more than one family use, and
 //!   that `inference`'s tests borrow.
 //!
-//! Of the four sub-modules — the candidate
-//! step, the likelihood, the genotype prior and the inference loop — three are here:
-//! [`allele_candidates`], step 6, which narrows the merge's allele table to the sequences
-//! worth calling over (`doc/devel/ng/impl_plan/candidate_alleles.md`);
-//! [`likelihood`], step 7, how probable this sample's reads are given each genotype
-//! (`doc/devel/ng/impl_plan/calling_read_likelihoods.md`); and
-//! [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
-//! (`doc/devel/ng/impl_plan/calling_prior.md`). **The fourth is [`inference`], step 9, the
-//! loop that consumes all three** — it holds the seam every way of handling a cohort crosses
-//! and the configuration of the three nested loops, two of which ship switched off
-//! (`doc/devel/ng/impl_plan/calling_loop.md`).
+//! The four steps are four sub-modules:
 //!
-//! Beside this file rather than inside any one sub-module: [`genotype_table`], which
-//! says which genotypes a locus's alleles make and holds the three flat tables the
-//! genotype prior and the read likelihood both read them from. It sits here for the
-//! same reason the types above do — two of the four sub-modules consume it, so it
-//! belongs one level above them — and its three types are re-exported here, so that
-//! all of calling's shared vocabulary is named at one depth. Beside it again, and
-//! test-only: `genotype_table_parity`, which checks that table value for value against
-//! production's `GenotypeShape`, frozen in `testdata/` at promotion step C5. It is a file of its
-//! own rather than a block inside [`genotype_table`]'s own tests so that the table's tests stay
-//! free of the comparison.
+//! - [`allele_candidates`], step 6, which narrows the merge's allele table to the sequences
+//!   worth calling over (`doc/devel/ng/impl_plan/candidate_alleles.md`);
+//! - [`likelihood`], step 7, how probable a sample's reads are given each genotype
+//!   (`doc/devel/ng/impl_plan/calling_read_likelihoods.md`);
+//! - [`genotype_prior`], step 8, how likely each genotype is before any read is looked at
+//!   (`doc/devel/ng/impl_plan/calling_prior.md`);
+//! - [`inference`], step 9, **the loop that consumes the other three** — it holds the seam
+//!   every way of handling a cohort crosses and the configuration of the two nested loops,
+//!   the outer of which ships switched off (`doc/devel/ng/impl_plan/calling_loop.md`).
+//!
+//! Beside them, five more:
+//!
+//! - [`evidence_shaping`] — the input edge: one merged cohort locus, shaped into what the
+//!   loop reads;
+//! - [`quality`] — the per-sample genotype quality and the site quality, computed here
+//!   because their inputs stop existing when the locus is released;
+//! - [`run_parameters`] — the owner of everything the parameter pre-pass froze, which
+//!   [`FrozenParameters`] borrows;
+//! - [`parameters_file`] — those parameters as a file on disk;
+//! - [`genotype_table`] — which genotypes a locus's alleles make, and the three flat tables
+//!   the genotype prior and the read likelihood both read them from. It sits at this level
+//!   for the same reason the shared types do — two of the four steps consume it — and its
+//!   three types are re-exported here, so that all of calling's shared vocabulary is named
+//!   at one depth.
+//!
+//! Test-only, three files check this code against numbers recorded from the caller deleted
+//! on 2026-09-13: `genotype_table_parity` (the genotype tables), `loop_parity` (the
+//! frequency loop) and `quality_parity` (the site quality). Each module doc says what it
+//! pins and what to do when a deliberate change breaks it.
+//!
+//! **Citations of that deleted caller** are written `d9e7b076:src/<path>`: the file as it
+//! stood at commit `d9e7b076`, the last that held it, which `git show d9e7b076:src/<path>`
+//! prints.
 //!
 //! The scalars other steps also name — `AlleleId`, `Phred`, `Genotype` — are not here
 //! but in [`crate::types`], with the rest of ng's shared vocabulary.

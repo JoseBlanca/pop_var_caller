@@ -71,22 +71,10 @@ use crate::types::{
     ReadGroupId,
 };
 
-// **What stood here until 2026-08-27: `FittedFrequencySpectrum`.**
-//
-// It owned the vector of `2N + 1` allele-count class weights the genotype prior's search borrowed,
-// projected from the joint fit's density at the panel the run had. **The search is deleted**
-// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5) and both of the seed's numbers are now
-// integrals of the density itself, so nothing evaluates it into classes on the way and there is
-// no vector to own.
-//
-// **⚑ One thing it computed is still owed, and this is where the debt is recorded.** Alongside the
-// weights it carried **how many census positions came out variable across the panel** — one minus
-// the two end classes, times the positions the density was fitted on, which is *not* the share
-// that segregates in the population and differed from it 6.6-fold at one individual on a
-// tomato-like density. Spec §6.2 needs that quantity beside the two moments and re-sources it from
-// the fit's own per-position posteriors, as a **soft count** — the sum over positions of the
-// probability that the position segregates in this panel. **Nothing computes it today**; it is
-// Milestone C's step C2.
+// **⚑ Not built: the count of segregating census positions.** The SNP/indel seed's two moments
+// should travel with a soft count of the positions that segregate in the panel — the sum over
+// positions of the probability that each one does — so that a thin census can be reported
+// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §6.2). Nothing computes it today.
 
 /// **The pre-pass's outputs, owned for the run** — what [`FrozenParameters`] borrows.
 ///
@@ -114,8 +102,8 @@ pub struct RunParameters {
     /// **The one parameter here no fit produces.** Everything else on this type arrives from the
     /// pre-pass; this arrives from the binary, unless a parameters file supplied one
     /// (`doc/devel/ng/spec/parameters_file.md` §3.8, which puts it in the file precisely so that
-    /// a person can change it). [`Self::assemble`] takes the default and
-    /// [`Self::with_repeat_tract_outlier_weight`] is how a supplied one gets in.
+    /// a person can change it). [`Self::assemble`] takes the default, and
+    /// [`Self::of_gathered_values`] is how a value read from a parameters file gets in.
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
     /// **Each read group's misread excess after runs, entry by entry, as fitted or defaulted**
     /// (`str_context_error_fit.md` §4). Empty where nothing set it: every read group then scores
@@ -294,8 +282,8 @@ impl RunParameters {
             ploidy,
             // **The compiled-in constant, because a fit has no other answer.** Nothing in the
             // parameter pre-pass measures this number, so the only value assembly can put here
-            // is the inherited one; a run handed a parameters file replaces it through
-            // [`Self::with_repeat_tract_outlier_weight`].
+            // is the inherited one; a run handed a parameters file gets the file's value through
+            // [`Self::of_gathered_values`] instead.
             repeat_tract_outlier_weight: RepeatTractOutlierWeight::defaulted(),
             misread_after_runs: BTreeMap::new(),
             misread_tables: BTreeMap::new(),
@@ -403,11 +391,9 @@ impl RunParameters {
     /// the *fit's* outputs and no fit produces this number: every one of assembly's callers
     /// would have to pass the same constant.
     ///
-    /// **Nothing calls it outside this module's tests yet.** The caller it exists for is the
-    /// projection back from a parameters file, which reads the value out of
-    /// `[stated_constants]` — the other half of step C2, not yet written. So this change
-    /// carries a value the first half of the pipe cannot yet produce, deliberately: the
-    /// alternative was landing the projection with nowhere for the number to go.
+    /// **Test-only.** A run that reads a parameters file gets the file's value through
+    /// [`Self::of_gathered_values`]; tests use this to score under a chosen weight without
+    /// restating the other eight values.
     ///
     /// **Nothing that skips this call is silently wrong** — it keeps
     /// [`RepeatTractOutlierWeight::defaulted`], which is what the run would have scored with
@@ -1645,5 +1631,5 @@ mod tests {
         );
     }
 
-    // ── E2b: what the run says it used ────────────────────────────────────────────────────
+    // ── what the run says it used ─────────────────────────────────────────────────────────
 }

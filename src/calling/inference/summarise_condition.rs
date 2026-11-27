@@ -90,7 +90,7 @@ use super::{LocusGenotyper, RunnableCallingLoopConfig};
 /// prior is still just the seed. **The loop converges, and it converges to no-variant, having
 /// never let the reads speak.** GATK's allele-frequency calculation starts flat for the same
 /// reason, and so does production's own E-step
-/// (`src/var_calling/posterior_engine.rs`, `EmStepPhase::FirstIteration`).
+/// (`d9e7b076:src/var_calling/posterior_engine.rs`, `EmStepPhase::FirstIteration`).
 ///
 /// **It runs at the start of every outer round, not only the very first.** For the first round
 /// the reason is that the number does not exist yet; for the later ones it is different — a
@@ -194,7 +194,7 @@ impl PassPrior<'_> {
 ///   [`fill_sample_concentration`] or by [`PriorRow::new`]. It is here so the panic names the
 ///   seed rather than the buffer that disagrees with it.
 /// - **the sample's own expected copies must all be finite and non-negative.** Its own
-///   sentinel makes this necessary: [`prepare_for_locus`] fills that row with
+///   sentinel makes this necessary: [`CallingScratch::prepare_for_locus`] fills that row with
 ///   `UNWRITTEN_SCRATCH_VALUE`, which is `NaN`, and the leave-one-out term's `max(0, ·)`
 ///   *returns the other operand* on a `NaN` — so in release a row nobody wrote is absorbed
 ///   as a zero cohort term and the sample is scored against the bare seed, with the cohort's
@@ -212,8 +212,8 @@ impl PassPrior<'_> {
 /// The remaining shapes are checked by [`fill_sample_concentration`] and [`PriorRow::new`],
 /// which is why they are not repeated here.
 // **`pub(crate)` rather than `pub`**: the chain from here up to `SummariseConditionLoop` is
-// this module's, and the arm is the only thing outside it a run needs. Until D1 wrote that arm
-// the whole chain was dead in a non-test build and carried a `cfg_attr(not(test),
+// this module's, and the arm is the only thing outside it a run needs. Until the loop's driver
+// wrote that arm the whole chain was dead in a non-test build and carried a `cfg_attr(not(test),
 // expect(dead_code))` for it — the expectation rather than an `allow`, so that the first real
 // caller would turn the line into a compile error. It did, and the line is gone.
 pub(crate) fn score_one_sample(
@@ -449,20 +449,14 @@ pub(crate) fn score_one_sample(
 ///
 /// # A sample the candidate step set aside
 ///
-/// **Not handled here, and it must be before the loop runs on real evidence.** Spec §5.0 sets
-/// aside a sample whose own reads earned an allele the cap then cut: it is scored against
-/// nothing and *contributes nothing to this sum*, because its posterior would sit over the
-/// wrong set of alleles and would pull the locus's frequencies toward the reference by exactly
-/// the samples carrying the rarest alleles. `LocusEvidence::Generic` carries the flag
-/// (`GenericLocusSample::genotype_must_be_missing`) and keeps such a sample's *index*, so this
-/// table has a row for it.
-///
-/// **What happens today is that such a row is never written and this function refuses the
-/// locus**, loudly, because `prepare_for_locus` left it holding the `NaN` sentinel and a `NaN`
-/// propagates through every addition into the finiteness check below. That is the right
-/// failure while the exclusion is unbuilt — a wrong cohort frequency would be silent — but it
-/// is not the answer. Step D1 assembles the loop and owns the choice between skipping those
-/// rows here and never giving them one.
+/// **Not handled here: it never reaches this table.** Spec §5.0 sets aside a sample whose own
+/// reads earned an allele the cap then cut: it is scored against nothing and *contributes
+/// nothing to this sum*, because its posterior would sit over the wrong set of alleles and
+/// would pull the locus's frequencies toward the reference by exactly the samples carrying the
+/// rarest alleles. The loop's driver ([`SummariseConditionLoop`]'s
+/// [`call_locus`](LocusGenotyper::call_locus)) gives such a sample no scratch row at all, so
+/// every row summed here belongs to a sample the loop scores. A row nobody wrote still holds
+/// the `NaN` sentinel `prepare_for_locus` left, and the finiteness check below refuses it.
 ///
 /// # Panics
 ///
@@ -527,7 +521,7 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
     // bit-identical. It is that a `fill(0.0)` would overwrite the scratch's
     // `UNWRITTEN_SCRATCH_VALUE` sentinel *before* the walk, so a walk that summed no rows at
     // all would hand back a row of zeros that reads like a real summary. That cannot happen
-    // today, because `sample_count` is checked above — but it is exactly the shape step D1
+    // today, because `sample_count` is checked above — but it is exactly the shape a caller
     // would introduce if it implemented spec §5.0 by skipping set-aside rows here, and a
     // locus where every sample was set aside would then report the cohort as carrying
     // nothing. Seeding from a row that must exist makes the empty walk unrepresentable.
@@ -548,15 +542,15 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
     // `alleles`, not `samples × alleles`. Without it the cohort's summary goes on to build
     // every sample's prior on the next pass.
     //
-    // **On the first pass at a locus only, and the difference matters to whoever writes D1.**
+    // **On the first pass at a locus only, and the difference matters to the loop's driver.**
     // The sentinel is written by `prepare_for_locus`, once per locus, and the per-sample rows
     // are deliberately *not* re-armed between passes, because `score_one_sample` reads each
     // sample's previous copies as its leave-one-out term. So from pass 2 a row this pass did
     // not write holds the **previous pass's finite, plausible value** and is summed as though
     // it were current — measured `[1.0, 3.0]` where pass 1 gave `[2.0, 2.0]` and one sample's
-    // E-step did not run. Finite, non-negative, wrong, silent. A loop that can skip a sample
-    // mid-run — which is what spec §5.0's exclusion would be — needs a per-pass written mask,
-    // and that is D1's to build.
+    // E-step did not run. Finite, non-negative, wrong, silent. The driver never skips a sample
+    // mid-run — a set-aside sample has no row from the start — so no per-pass written mask is
+    // needed; a loop that did skip one would need it.
     //
     // **Complete for a non-finite input and not for a negative one**, and the asymmetry is
     // worth knowing rather than glossing: `NaN` and `±∞` survive addition, so a single bad
@@ -591,7 +585,7 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
 /// not settled. Production tests exactly this, and its comment records what testing the
 /// *reported* estimate cost: that number is scaled by a pseudocount and does not feed back,
 /// so a larger pseudocount damped the delta and stopped the loop earlier on an otherwise
-/// identical trajectory ([`posterior_engine.rs:2702`](../../../../src/var_calling/posterior_engine.rs)).
+/// identical trajectory (`d9e7b076:src/var_calling/posterior_engine.rs:2702`).
 ///
 /// # Why the division, which is the easy thing to drop
 ///
@@ -631,8 +625,8 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
 /// successors rather than for it: the prior-free initialisation's M-step writes finite copies
 /// before the first swap, so by the time this is first called the previous row is a real
 /// estimate. What the spelling protects is any later caller that compares before a pass has
-/// advanced — step C3's final pass, and step D1's outer rounds, which restart the
-/// initialisation and could reorder the swap.
+/// advanced — the final pass, and the slippage round, which restarts the initialisation and
+/// could reorder the swap.
 ///
 /// # Why `.abs()`, which two alleles cannot show
 ///
@@ -710,7 +704,7 @@ fn cohort_expected_copies_have_settled(
 }
 
 /// What one run of the frequency loop reports about *how* it stopped — the two fields that
-/// travel into [`LocusInference`](crate::calling::LocusInference) unchanged.
+/// travel into [`LocusInference`] unchanged.
 ///
 /// **Both are emitted, and neither is an error.** A locus that runs out of passes is called
 /// anyway: production retired its non-convergence error precisely so that one hard site could
@@ -748,7 +742,7 @@ pub(crate) struct FrequencyLoopOutcome {
 /// **What it leaves behind is as much the point as what it returns.** On return the scratch
 /// holds the converged cohort expected copies, each sample's own expected copies, and the
 /// posterior row of *the last sample scored* — so a caller that wants every sample's genotype
-/// must score them again. That final pass is step C3's, and it is a pass rather than a
+/// must score them again. That is the final pass's job, and it is a pass rather than a
 /// read-back because the posterior row is one reused buffer.
 ///
 /// # The order within a pass, and why the swap sits between the two halves
@@ -789,7 +783,7 @@ pub(crate) struct FrequencyLoopOutcome {
 /// the row map rather than in this function's preamble.
 ///
 /// **The two directions fail differently, which is why the check covers both, and neither
-/// fails the way this paragraph used to say** (measured with the check downgraded, C3b's
+/// fails the way this paragraph used to say** (measured with the check downgraded, in
 /// review). A map one entry **short** panics at the walk's last read — `index out of bounds:
 /// the len is 2 but the index is 2` — which is loud, but names a slice where the reader needs
 /// the cohort. A map one entry **long** is the silent one: the walk is over the prepared row
@@ -992,7 +986,7 @@ impl PooledArtifactCounts {
     /// allele candidate selection dropped reaches the view as pooled error mass with no
     /// count beside it (`GenericSampleEvidence::unmatched_q_sum`). Production's depth is the
     /// same quantity, a sum over the alleles its record carries
-    /// ([`qual_refine.rs:92`](../../../../src/vcf/qual_refine.rs)).
+    /// (`d9e7b076:src/vcf/qual_refine.rs:92`).
     fn add_called_sample(
         &mut self,
         evidence: &GenericSampleEvidence<'_>,
@@ -1059,7 +1053,7 @@ impl PooledArtifactCounts {
 /// ([`SelectionVerdict::Selected`](crate::calling::allele_candidates::SelectionVerdict))
 /// — and a locus with alternatives that no read reached. Both leave the two tests with
 /// nothing to weigh, and production returns its baseline unchanged in exactly these two
-/// cases ([`qual_refine.rs:79`](../../../../src/vcf/qual_refine.rs)).
+/// cases (`d9e7b076:src/vcf/qual_refine.rs:79`).
 ///
 /// # Panics
 ///
@@ -1214,8 +1208,7 @@ fn pick_primary_alternative(
 /// M-step sums the rows there are, the convergence delta divides by the chromosomes those rows
 /// carry, and the site quality's count axis runs over the same samples — none of them having
 /// to be told to skip anything. This pass walks the run's samples against a **row cursor**,
-/// and the cursor is the whole of the map back (spec §5.0, §9; the choice was D1's, and B2 and
-/// C3b both recorded it as open until then).
+/// and the cursor is the whole of the map back (spec §5.0, §9).
 ///
 /// # One sample, and a thousand
 ///
@@ -1255,7 +1248,7 @@ fn pick_primary_alternative(
     reason = "the seam this feeds (LocusGenotyper::call_locus) already takes four of these — \
               the evidence, the parameters, the candidates and the scratch — and the five \
               that remain are the prior model, the loop's outcome and the two warrants a \
-              locus carries, all of which D1 has in hand when it calls this; a bundle \
+              locus carries, all of which the driver has in hand when it calls this; a bundle \
               invented to satisfy the lint would be a type nothing else names"
 )]
 pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
@@ -1302,7 +1295,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
 
     // **The genotype table's ploidy, and there is no second source of it.** The table was
     // built for a `(ploidy, allele count)` shape and every genotype's copies come out of it;
-    // taking `FrozenParameters`' would add a number nothing compares (C2's ruling). It stays
+    // taking `FrozenParameters`' would add a number nothing compares. It stays
     // a `Ploidy` all the way to the division it is the divisor of, so that no arithmetic
     // below can be handed a zero.
     let ploidy = genotypes.ploidy();
@@ -1945,7 +1938,7 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
 ///
 /// On a candidate table that is not one repeat tract's, and on repeat counts that are not one
 /// per candidate — both by
-/// [`tract_candidates`](super::repeat_tract_parameters::tract_candidates).
+/// [`tract_candidates`].
 ///
 /// On a contamination list that disagrees with the fit these parameters were gathered under —
 /// by [`TractScoringFits::locus_parameters`](super::repeat_tract_parameters::TractScoringFits::locus_parameters).
@@ -2084,8 +2077,8 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
 /// genotype across its alleles by the responsibility `copy share × cached emission`,
 /// normalised over the genotype's own alleles. **Posteriors, not called genotypes** — the
 /// spec's explicit ruling, which is HipSTR's choice and not production's hard assignment
-/// (`src/ssr/cohort/em.rs:1192`): a call would push a thinly covered tract's numbers toward
-/// whichever genotype won by a whisker.
+/// (`d9e7b076:src/ssr/cohort/em.rs:1192`): a call would push a thinly covered tract's numbers
+/// toward whichever genotype won by a whisker.
 ///
 /// The posteriors are minted here by scoring each row once against the converged frequencies
 /// — the loop leaves only the last row's posterior behind, so a caller wanting every row's
@@ -2385,9 +2378,9 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
             let buffers = scratch.contaminant_frequency_buffers_mut(row);
             // **What comes back is how many batches had nothing left to read a frequency off**
             // — a locus scored against a contaminating population nobody measured. Reporting it
-            // is E2b's, which is where the run says what contamination it used; it is bound
-            // here rather than dropped so that the next reader sees it is owed rather than
-            // handled.
+            // belongs to the run's report of what contamination it used, which does not report
+            // it yet; it is bound here rather than dropped so that the next reader sees it is
+            // owed rather than handled.
             let _own_batch_had_no_evidence = fill_own_batch_contaminant_row(
                 buffers.batch_allele_copies,
                 SampleAlleleCopies::new(buffers.own_expected_copies),
@@ -2432,7 +2425,7 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
 ///    configuration ([`run_frequency_loop`]).
 ///
 /// **Spec §2's pseudocode has a third, outermost loop — the discovery round (§4.1) — and it
-/// is not here.** Milestone E1 found that discovery's eligible set reads no posterior, so
+/// is not here.** Building it showed that discovery's eligible set reads no posterior, so
 /// discovery runs as a **pre-pass inside candidate selection** before this arm is called
 /// (`DiscoveryMode::BeforeTheLoop`;
 /// `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5), and the loops here
@@ -2460,9 +2453,8 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
 ///
 /// # A sample the candidate step ruled uncallable leaves before the first pass
 ///
-/// It is given **no scratch row at all** (spec §5.0's ruling, and the choice B2 and C3b both
-/// recorded as this step's). The rows are the run's sample order with the gaps closed up, so
-/// the M-step sums the rows there are, the convergence delta divides by the chromosomes those
+/// It is given **no scratch row at all** (spec §5.0's ruling). The rows are the run's sample
+/// order with the gaps closed up, so the M-step sums the rows there are, the convergence delta divides by the chromosomes those
 /// rows carry, and the site quality's count axis runs over the same cohort — none of them
 /// having to be told to skip anything. The final pass walks the run's samples against a row
 /// cursor and writes [`SampleGenotypeCall::Missing`] where a sample has no row.
@@ -2759,7 +2751,7 @@ where
             }
             // The cap counts **adopted** rounds — each one a table rebuild and a rerun of
             // the frequency loop — mirroring production's `for _ in 0..refit_max_rounds`
-            // (`src/ssr/cohort/em.rs:572`): at the cap, the numbers the last round
+            // (`d9e7b076:src/ssr/cohort/em.rs:572`): at the cap, the numbers the last round
             // adopted stand and no further attribution runs.
             if rounds_adopted >= refit_config.max_rounds {
                 break outcome;
