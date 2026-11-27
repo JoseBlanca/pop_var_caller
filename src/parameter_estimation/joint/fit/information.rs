@@ -1073,13 +1073,14 @@ mod tests {
         DrawnCohort, DrawnLibrary, as_cohort, draw_cohort_of_libraries,
         draw_cohort_with_duplications,
     };
+    use crate::parameter_estimation::joint::fit::beta_quadrature::digamma;
     use crate::parameter_estimation::joint::fit::standard_errors::{
         StandardError, StandardErrors, cohort_covariance, inverse_of_positive_definite,
     };
     use crate::parameter_estimation::joint::fit::{
         DensityReport, DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFit,
         JointFitConfig, LibraryAtPosition, MAX_RECORDED_SPREAD, MIN_POSITIONS_PER_CHUNK,
-        Parameters, PassKeeps, Statistics, candidate_read_probability, digamma, expectation_pass,
+        Parameters, PassKeeps, Statistics, candidate_read_probability, expectation_pass,
         fill_depth_weights, fit_jointly, genotype_frequencies, one_position,
     };
 
