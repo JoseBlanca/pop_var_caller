@@ -5,15 +5,13 @@
 - **Structural variants**, and deletions longer than 100 bases (`--max-locus-span`).
 - **Satellites**: repeats, or STR bundles, longer than 100 bases. The log reports how many bases
   of the genome they cover, and also the clusters of repeats too close together to be called.
-- **Repeats with units longer than 6 bases.** They are called as ordinary sequence.
 - **Loci deeper than `--max-depth`** (1,000 reads a position in any read group), because such
   depth usually comes from collapsed duplications.
 
 ## What pvc does not write or support
 
 - **No invariant sites and no gVCF.** A site is written only if at least one sample carries an
-  alternative allele. For statistics that need the callable sites, such as nucleotide diversity
-  (π), take them from elsewhere, for instance a depth mask.
+  alternative allele.
 - **Estimated parameters only for diploids.** pvc calls any ploidy from 1 to 16, but
   `estimate-parameters` refuses a ploidy other than 2; call other ploidies with `--defaults`.
   Imputation (`--refine-genotypes`) also runs on diploid samples only.
@@ -28,7 +26,6 @@
 | alleles at an SNP/indel site | 6, reference included (`--max-generic-alleles`) |
 | candidate alleles at an STR | 32, reference included |
 | chromosome length in the VCF | 2,147,483,647 bases |
-| chromosome length with a `.bai` index | about 537 Mb; use `.csi` above that |
 
 ## Refusals
 
