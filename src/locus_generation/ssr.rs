@@ -1069,7 +1069,9 @@ mod classify {
         // splits between spelling and flank deletion, and a split that can give flank bases back
         // does. A deletion that fits wholly inside the tract — a stutter contraction, whichever
         // way the mapper or a left-aligner placed it — comes out as no flank deletion at all.
-        let flank_deletion = flank_bases_deleted(cigar, fp.ref_start, tract_start, tract_end)
+        let edge_deleted =
+            flank_bases_deleted_at_the_edges(cigar, fp.ref_start, tract_start, tract_end);
+        let flank_deletion = flank_deletion_of(edge_deleted)
             .filter(|deleted| deleted.left as usize <= left && deleted.right as usize <= right)
             .unwrap_or(FlankDeletion::NONE);
         let (input_span, flank_deletion) = match input_span {
@@ -1102,12 +1104,8 @@ mod classify {
         if let Some(span) = &input_span {
             let (aligned_before, aligned_after) =
                 aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract_start, tract_end);
-            if deletion_takes_flank_bases_at_a_tract_edge(
-                cigar,
-                fp.ref_start,
-                tract_start,
-                tract_end,
-            ) && aligned_before >= MIN_ALIGNED_FLANK_BASES
+            if edge_deleted != (0, 0)
+                && aligned_before >= MIN_ALIGNED_FLANK_BASES
                 && aligned_after >= MIN_ALIGNED_FLANK_BASES
             {
                 return complete_or_low_quality(read, span.clone(), flank_deletion, qual_buffer);
@@ -1356,7 +1354,7 @@ mod classify {
 
     /// **How many reference bases the read's deletions take inside each flank of the window**,
     /// as `(left flank, right flank)` — the flanks being `window` less `tract`. Coordinates as in
-    /// [`deletion_takes_flank_bases_at_a_tract_edge`].
+    /// [`flank_bases_deleted_at_the_edges`].
     fn reference_bases_deleted_in_the_flanks(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -1389,11 +1387,17 @@ mod classify {
     /// the value the measurement in [`classify_read`]'s comment was taken at.
     const MIN_ALIGNED_FLANK_BASES: u32 = 5;
 
-    /// **Does a deletion in the CIGAR take flank bases at the tract's edge?** — either crossing
-    /// the edge, taking bases from both sides of the tract's first base or of its last, or lying
-    /// in the flank and ending at the tract's first base or starting just after its last.
-    /// `tract_start`/`tract_end` are 0-based reference positions, the end exclusive, as is
-    /// `ref_start`.
+    /// **How many flank bases the read's deletions take at the tract's edges**, as `(before the
+    /// tract, after it)` — `(0, 0)` when no deletion takes any. A deletion counts on the left when
+    /// it crosses the tract's first base or ends at it, taking the flank bases before it; on the
+    /// right when it crosses the tract's last base or starts just after it, taking the flank bases
+    /// after; one covering the whole tract counts on both sides. Where two deletions count on one
+    /// side, the later one's count stands. `tract_start`/`tract_end` are 0-based reference
+    /// positions, the end exclusive, as is `ref_start`.
+    ///
+    /// Classification uses the one count two ways: whether it is `(0, 0)` decides whether a
+    /// read's own alignment, deletion and all, counts as having crossed the tract, and
+    /// [`flank_deletion_of`] turns it into the flank deletion recorded beside the spelling.
     ///
     /// **A deletion that touches the edge counts** (`str_edge_deletion_alleles.md` §5.1, amended
     /// 2026-10-18). Where a run of one base is followed by a different base, a read that misreads
@@ -1404,13 +1408,13 @@ mod classify {
     /// 30x, 565 of the 926 reference-length reads were such reads. Recorded, the read keeps its
     /// flank deletion, and calling compares it with each allele over the wider extent (§5.6), where
     /// it matches the deletion allele but for the misread base.
-    fn deletion_takes_flank_bases_at_a_tract_edge(
+    fn flank_bases_deleted_at_the_edges(
         cigar: &[CigarOp],
         ref_start: u32,
         tract_start: u32,
         tract_end: u32,
-    ) -> bool {
-        let mut at = ref_start;
+    ) -> (u32, u32) {
+        let (mut left, mut right, mut at) = (0_u32, 0_u32, ref_start);
         for op in cigar {
             match op {
                 CigarOp::Match(n)
@@ -1419,17 +1423,18 @@ mod classify {
                 | CigarOp::Skip(n) => at += n,
                 CigarOp::Deletion(n) => {
                     let (from, to) = (at, at + n);
-                    if (from < tract_start && to >= tract_start)
-                        || (from <= tract_end && to > tract_end)
-                    {
-                        return true;
+                    if from < tract_start && to >= tract_start {
+                        left = tract_start - from;
+                    }
+                    if from <= tract_end && to > tract_end {
+                        right = to - tract_end;
                     }
                     at = to;
                 }
                 _ => {}
             }
         }
-        false
+        (left, right)
     }
 
     /// **How many flank bases beside each edge the delimiter will not open a gap in**, as `(left,
@@ -1556,7 +1561,7 @@ mod classify {
     /// **Does an insertion or deletion in the CIGAR sit in the guarded flank bases** — the
     /// `widths.0` reference bases before the tract or the `widths.1` after it? A deletion counts
     /// when it takes any of those bases, an insertion when it sits between two of them or at the
-    /// edge. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
+    /// edge. Coordinates as in [`flank_bases_deleted_at_the_edges`].
     fn indel_in_the_guarded_flank(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -1594,38 +1599,10 @@ mod classify {
         false
     }
 
-    /// **How many flank bases the read's deletions take beside the tract**, or `None` when no
-    /// deletion crosses or touches either edge (or one takes more than 255 flank bases, which no
-    /// flank this path holds is long enough for). A deletion crossing the tract's first base, or
-    /// ending at it, takes the flank bases before it; one crossing its last base, or starting just
-    /// after it, the flank bases after; one covering the whole tract, both. Coordinates as in
-    /// [`deletion_takes_flank_bases_at_a_tract_edge`], which says why touching counts.
-    fn flank_bases_deleted(
-        cigar: &[CigarOp],
-        ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
-    ) -> Option<FlankDeletion> {
-        let (mut left, mut right, mut at) = (0_u32, 0_u32, ref_start);
-        for op in cigar {
-            match op {
-                CigarOp::Match(n)
-                | CigarOp::SeqMatch(n)
-                | CigarOp::SeqMismatch(n)
-                | CigarOp::Skip(n) => at += n,
-                CigarOp::Deletion(n) => {
-                    let (from, to) = (at, at + n);
-                    if from < tract_start && to >= tract_start {
-                        left = tract_start - from;
-                    }
-                    if from <= tract_end && to > tract_end {
-                        right = to - tract_end;
-                    }
-                    at = to;
-                }
-                _ => {}
-            }
-        }
+    /// **The flank deletion [`flank_bases_deleted_at_the_edges`] counted, as a
+    /// [`FlankDeletion`]**, or `None` when it counted none on either side, or more than 255 on
+    /// one (which no flank this path holds is long enough for).
+    fn flank_deletion_of((left, right): (u32, u32)) -> Option<FlankDeletion> {
         let deleted = FlankDeletion {
             left: u8::try_from(left).ok()?,
             right: u8::try_from(right).ok()?,
@@ -1684,7 +1661,7 @@ mod classify {
 
     /// **How many aligned bases a read has before the tract and after it**, as `(before,
     /// after)` — match operations only, so deleted, skipped, clipped and inserted bases do not
-    /// count. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
+    /// count. Coordinates as in [`flank_bases_deleted_at_the_edges`].
     fn aligned_bases_beyond_the_tract(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -1987,6 +1964,31 @@ mod classify {
 
         // Reference frame: 6-base flanks around a CACACA tract → "GGGGGGCACACATTTTTT".
         const FRAME: &[u8] = b"GGGGGGCACACATTTTTT";
+
+        /// The flank deletion classification records for a read with this CIGAR.
+        fn flank_bases_deleted(
+            cigar: &[CigarOp],
+            ref_start: u32,
+            tract_start: u32,
+            tract_end: u32,
+        ) -> Option<FlankDeletion> {
+            flank_deletion_of(flank_bases_deleted_at_the_edges(
+                cigar,
+                ref_start,
+                tract_start,
+                tract_end,
+            ))
+        }
+
+        /// Whether classification reads this CIGAR as a deletion taking flank bases at an edge.
+        fn deletion_takes_flank_bases_at_a_tract_edge(
+            cigar: &[CigarOp],
+            ref_start: u32,
+            tract_start: u32,
+            tract_end: u32,
+        ) -> bool {
+            flank_bases_deleted_at_the_edges(cigar, ref_start, tract_start, tract_end) != (0, 0)
+        }
 
         fn locus() -> SsrLocus {
             SsrLocus {
