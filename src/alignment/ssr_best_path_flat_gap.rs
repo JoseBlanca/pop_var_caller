@@ -142,9 +142,9 @@ const UNREACHABLE: f64 = f64::NEG_INFINITY;
 ///    the ruler from the slip cutoff.
 ///
 ///    `SPEC-FOLLOWUP(alignment §3/§9)`: the spec models the band as floor + a constant headroom and
-/// lists the amount as open; it should be amended to the three-term geometry band above. Owner to
-/// fold in (delegated 2026-07-23); recorded in the banding implementation report and
-/// `PROJECT_STATUS.md` so the deferral is tracked, not only in this comment.
+///    lists the amount as open; it should be amended to the three-term geometry band above. Owner to
+///    fold in (delegated 2026-07-23); recorded in the banding implementation report and
+///    `PROJECT_STATUS.md` so the deferral is tracked, not only in this comment.
 ///
 /// 3. **`BAND_HEADROOM` — this constant.** With the floor and the run-off covered, what is left is
 ///    a genuine score-neutral bow: an insertion balanced by a later deletion, net zero. Every such

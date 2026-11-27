@@ -24,7 +24,7 @@
 //! of two reads at low depth: one crossing read and one deciding partial now reach it.
 //!
 //! **Precisely.** For a partial read of sample `s` with bases `w` that held flank `h`
-//! ([`HeldFlank::of_witness`]), and an allele `a` of the merge's table with flank deletion
+//! ([`HeldFlank::of_witness`](crate::locus_generation::HeldFlank::of_witness)), and an allele `a` of the merge's table with flank deletion
 //! `(dl, dr)`:
 //!
 //! ```text
@@ -39,7 +39,7 @@
 //!
 //! **Selection's bar only.** The copy with the counted reads feeds nomination, admission and the
 //! cap's "this sample earned it" test; the leftover's read count and error mass, which reach the
-//! record's `DP`, are taken from the merge's own rows ([`leftover_of`](super::leftover_of)), and
+//! record's `DP`, are taken from the merge's own rows ([`leftover_of`](crate::calling::allele_candidates::leftover_of)), and
 //! the read likelihood is handed the merge's own rows and partials, so a partial read is never
 //! scored as complete and never counted twice.
 
