@@ -1,5 +1,5 @@
 use super::*;
-use crate::calling::likelihood::TEST_TRACT_LEN;
+use crate::locus_generation::SsrDetail;
 use crate::types::{AlleleId, ContigId, Motif, Position};
 
 pub(super) fn generic_reference() -> CandidateAlleles {
@@ -23,7 +23,7 @@ fn a_worker_written_site_quality() -> Phred {
 /// A `static` rather than a function, so that a call site can borrow it for as long as the
 /// parameters live: `BTreeMap::new` is a `const fn`, and a temporary would be freed at the
 /// end of the statement that built the view.
-static NO_SUBSTITUTION_RATES: std::collections::BTreeMap<
+pub(super) static NO_SUBSTITUTION_RATES: std::collections::BTreeMap<
     crate::parameter_estimation::repeat_strata::StratumKey,
     crate::parameter_estimation::Estimate<crate::types::ErrorRate>,
 > = std::collections::BTreeMap::new();
@@ -52,7 +52,7 @@ fn diploid_call(first: u16, second: u16, quality: f32) -> SampleGenotypeCall {
     }
 }
 
-fn two_allele_locus() -> (CandidateAlleles, ExpectedAlleleCopies) {
+pub(super) fn two_allele_locus() -> (CandidateAlleles, ExpectedAlleleCopies) {
     let mut alleles = generic_reference();
     alleles.admit(Box::from(b"T".as_slice()));
     let copies = ExpectedAlleleCopies::new(vec![2.6, 1.4], &alleles);
@@ -61,7 +61,7 @@ fn two_allele_locus() -> (CandidateAlleles, ExpectedAlleleCopies) {
 
 /// A repeat tract with two candidate lengths — the path the gene-diversity seed
 /// marker belongs to, and the only one on which a locus may carry it.
-fn str_two_allele_locus() -> (CandidateAlleles, ExpectedAlleleCopies) {
+pub(super) fn str_two_allele_locus() -> (CandidateAlleles, ExpectedAlleleCopies) {
     let mut alleles = CandidateAlleles::new(
         Box::from(b"ATAT".as_slice()),
         LocusKind::Ssr(SsrDetail {
@@ -75,7 +75,7 @@ fn str_two_allele_locus() -> (CandidateAlleles, ExpectedAlleleCopies) {
     (alleles, copies)
 }
 
-fn region() -> GenomeRegion {
+pub(super) fn region() -> GenomeRegion {
     GenomeRegion {
         contig: ContigId(3),
         start: Position(940),
@@ -588,25 +588,7 @@ fn an_artifact_summary_naming_an_allele_the_locus_lacks_is_refused() {
 use crate::parameter_estimation::joint::contamination::ContaminationSource;
 use std::collections::BTreeMap;
 
-/// Two candidates' repeat counts, **different from each other**, for a tract fixture whose
-/// candidate table holds two lengths. Distinct so that a lookup reading one candidate's
-/// count for another is a different stratum rather than the same one.
-fn two_repeat_counts() -> Vec<NonZeroU32> {
-    vec![
-        NonZeroU32::new(6).expect("six repeats"),
-        NonZeroU32::new(7).expect("seven repeats"),
-    ]
-}
-
-fn ssr_detail() -> SsrDetail {
-    SsrDetail {
-        motif: Motif::new(b"AT").expect("a dinucleotide motif"),
-        left_flank: Box::from(b"CCCGGG".as_slice()),
-        right_flank: Box::from(b"TTTAAA".as_slice()),
-    }
-}
-
-fn no_strata() -> StratumFits {
+pub(super) fn no_strata() -> StratumFits {
     StratumFits::over(&[], BTreeMap::new())
 }
 
@@ -734,11 +716,11 @@ fn diploid_ploidy() -> Ploidy {
     Ploidy::try_new(2).expect("a diploid")
 }
 
-fn outbred_samples(samples: usize) -> Vec<InbreedingF> {
+pub(super) fn outbred_samples(samples: usize) -> Vec<InbreedingF> {
     vec![InbreedingF::try_new(0.0).expect("a legal coefficient"); samples]
 }
 
-fn one_read_group() -> Vec<ReadGroupCalibration> {
+pub(super) fn one_read_group() -> Vec<ReadGroupCalibration> {
     vec![ReadGroupCalibration::unscaled()]
 }
 
@@ -763,7 +745,7 @@ fn neutral_seed() -> SpectrumSeed {
 /// for as long as the parameters are and a helper that built one inside would hand back a
 /// borrow of something already dropped. A run with no mixture has nothing to read it, so
 /// the uncontaminated branch never looks at it.
-fn frozen_parameters<'a>(
+pub(super) fn frozen_parameters<'a>(
     calibration: &'a [ReadGroupCalibration],
     contamination: &'a [ContaminationView],
     batching: &'a SequencingBatches,
@@ -1024,131 +1006,6 @@ fn frozen_parameters_refuse_a_run_with_no_samples() {
     );
 }
 
-/// Evidence and the allele table have to be on the same path: the discriminant that
-/// chose the candidates is the one that chooses the read model.
-///
-/// **Handing a repeat tract's alleles a SNP/indel's evidence would not crash** — the
-/// generic row would score the tract's sequences as though they were substitutions,
-/// giving a different likelihood at every sample and a plausible genotype at the end of
-/// it.
-#[test]
-#[should_panic(expected = "belong to different loci")]
-fn evidence_on_the_wrong_path_for_its_allele_table_is_refused() {
-    let (tract_alleles, _) = str_two_allele_locus();
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let per_sample = [GenericLocusSample {
-        evidence: GenericSampleEvidence::empty(),
-        genotype_must_be_missing: false,
-    }];
-    let evidence = LocusEvidence::generic(region(), &per_sample);
-    evidence.assert_matches_locus_and_run(&tract_alleles, &parameters);
-}
-
-/// The evidence and the run's per-sample parameters are indexed by one sample order, so
-/// two lists of different lengths are two different orders.
-#[test]
-#[should_panic(expected = "indexed by a different sample order")]
-fn evidence_covering_a_different_sample_count_from_the_run_is_refused() {
-    let (alleles, _) = two_allele_locus();
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(3);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let per_sample = [GenericLocusSample {
-        evidence: GenericSampleEvidence::empty(),
-        genotype_must_be_missing: false,
-    }];
-    let evidence = LocusEvidence::generic(region(), &per_sample);
-    evidence.assert_matches_locus_and_run(&alleles, &parameters);
-}
-
-/// Both paths pass their own check, and each carries the locus's region and the run's
-/// sample count.
-///
-/// **A repeat tract's evidence carries no missing-genotype flag at all**, and the
-/// absence is the design: a tract's discovery round can put back a length the cap cut,
-/// so no sample is set aside there.
-#[test]
-fn evidence_that_matches_its_locus_and_its_run_is_accepted_on_both_paths() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(2);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let (generic_alleles, _) = two_allele_locus();
-    let generic_samples = [
-        GenericLocusSample {
-            evidence: GenericSampleEvidence::empty(),
-            genotype_must_be_missing: false,
-        },
-        GenericLocusSample {
-            evidence: GenericSampleEvidence::empty(),
-            genotype_must_be_missing: true,
-        },
-    ];
-    let generic = LocusEvidence::generic(region(), &generic_samples);
-    generic.assert_matches_locus_and_run(&generic_alleles, &parameters);
-    assert_eq!(generic.region(), region());
-    assert_eq!(generic.sample_count(), 2);
-    match generic {
-        LocusEvidence::Generic { per_sample, .. } => {
-            assert!(!per_sample[0].genotype_must_be_missing);
-            assert!(per_sample[1].genotype_must_be_missing);
-        }
-        LocusEvidence::Ssr { .. } => panic!("built on the SNP/indel path"),
-    }
-
-    let (tract_alleles, _) = str_two_allele_locus();
-    let detail = ssr_detail();
-    let tract_samples = [
-        SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
-        SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
-    ];
-    let counts = two_repeat_counts();
-    let tract = LocusEvidence::ssr(region(), &tract_samples, &detail, &counts);
-    tract.assert_matches_locus_and_run(&tract_alleles, &parameters);
-    assert_eq!(tract.region(), region());
-    assert_eq!(tract.sample_count(), 2);
-}
-
-/// A locus whose evidence list is empty is evidence that went missing, not a locus
-/// nobody covered — a sample with no reads gets an empty *entry*, and the prior decides
-/// its genotype alone.
-#[test]
-#[should_panic(expected = "evidence that went missing")]
-fn evidence_naming_no_sample_at_all_is_refused() {
-    let _ = LocusEvidence::generic(region(), &[]);
-}
-
 /// Each sample reads and writes its own row of the two flat tables, and the rows do not
 /// overlap.
 ///
@@ -1407,167 +1264,6 @@ fn a_locus_carries_a_missing_call_beside_called_ones_in_run_order() {
     assert!(!inference.per_sample[0].is_missing());
     assert!(inference.per_sample[1].is_missing());
     assert!(!inference.per_sample[2].is_missing());
-}
-
-/// An STR **bundle**'s allele table takes the repeat path's evidence in its bundle shape —
-/// the runs and each candidate's run parse (`str_bundle_loci.md` §7).
-///
-/// **No fixture reached this cell before, and two mutations lived there.** Deleting the
-/// bundle arm from the accepting match left the whole suite green, and so did widening the
-/// SNP/indel arm to accept a bundle — the second of which routes a repeat bundle to the
-/// SNP/indel row: a plausible genotype at every sample, nothing failing.
-#[test]
-fn ssr_evidence_against_a_bundle_allele_table_is_accepted() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let bundle = CandidateAlleles::new(
-        Box::from(b"CAGCAG".as_slice()),
-        LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
-    );
-    let detail = crate::locus_generation::SsrBundleDetail::default();
-    let per_sample = [SsrSampleEvidence::of_bundle(&[], TEST_TRACT_LEN)];
-    // One parse, because a bundle built from a reference alone is called over one allele.
-    let parses = [RunParse::default()];
-    let evidence = LocusEvidence::ssr_bundle(region(), &per_sample, &detail, &parses);
-    evidence.assert_matches_locus_and_run(&bundle, &parameters);
-}
-
-/// **A segment's evidence is refused against a bundle's table**, and a bundle's against a
-/// segment's: each shape carries what its own read model scores, a repeat count per candidate
-/// or a run parse, and the other model cannot read it.
-#[test]
-#[should_panic(expected = "belong to different loci")]
-fn segment_evidence_against_a_bundle_allele_table_is_refused() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-    let bundle = CandidateAlleles::new(
-        Box::from(b"CAGCAG".as_slice()),
-        LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
-    );
-    let detail = ssr_detail();
-    let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
-    let counts = [NonZeroU32::new(6).expect("six repeats")];
-    let evidence = LocusEvidence::ssr(region(), &per_sample, &detail, &counts);
-    evidence.assert_matches_locus_and_run(&bundle, &parameters);
-}
-
-/// The other half of the same cell: SNP/indel evidence at a repeat bundle is refused.
-///
-/// This is the mutation that bites — an accepting arm widened to admit a bundle scores
-/// a repeat locus with the SNP/indel read model, and nothing anywhere fails.
-#[test]
-#[should_panic(expected = "belong to different loci")]
-fn generic_evidence_against_a_bundle_allele_table_is_refused() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let no_declared_batching = one_batch(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &no_declared_batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let bundle = CandidateAlleles::new(
-        Box::from(b"CAGCAG".as_slice()),
-        LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
-    );
-    let per_sample = [GenericLocusSample {
-        evidence: GenericSampleEvidence::empty(),
-        genotype_must_be_missing: false,
-    }];
-    let evidence = LocusEvidence::generic(region(), &per_sample);
-    evidence.assert_matches_locus_and_run(&bundle, &parameters);
-}
-
-/// The repeat constructor's own empty-list guard, which its SNP/indel twin's test does
-/// not reach.
-///
-/// **Measured: this was the one assertion in the module no test noticed.** Downgrading
-/// all sixteen of the implementation's release-held checks to `debug_assert!` and
-/// running under `--release` failed a test for fifteen of them; this was the sixteenth.
-/// The two constructors are a copy-paste pair, which is the shape in which one half
-/// drifts from the other.
-#[test]
-#[should_panic(expected = "evidence that went missing")]
-fn ssr_evidence_naming_no_sample_at_all_is_refused() {
-    let detail = ssr_detail();
-    let _ = LocusEvidence::ssr(region(), &[], &detail, &two_repeat_counts());
-}
-
-/// **A tract with no candidate repeat counts at all is refused**, and it is a different
-/// failure from the empty sample list beside it: a tract is called over at least its
-/// reference length, so a run that supplied none lost the counts on the way in.
-///
-/// **Refused here rather than left to the parameter assembly**, which would otherwise ask
-/// for a table of `read groups × 0` cells and refuse it naming the table rather than the
-/// locus.
-#[test]
-#[should_panic(expected = "supplied no candidate repeat counts")]
-fn ssr_evidence_with_no_candidate_repeat_counts_is_refused() {
-    let detail = ssr_detail();
-    let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
-    let _ = LocusEvidence::ssr(region(), &per_sample, &detail, &[]);
-}
-
-/// **Repeat counts that are not one per candidate are refused where the two still name each
-/// other**, rather than at whichever genotype first read the wrong cell.
-///
-/// The counts run parallel to the candidate table, so a table with more candidates than
-/// counts would pair one candidate's bases with another candidate's stratum — a wrong
-/// slippage model per candidate, with a well-formed genotype coming back and nothing
-/// failing.
-#[test]
-#[should_panic(expected = "called over 2 candidates and 1 repeat counts")]
-fn a_tract_whose_repeat_counts_are_not_one_per_candidate_is_refused() {
-    let calibration = one_read_group();
-    let inbreeding = outbred_samples(1);
-    let strata = no_strata();
-    let batching = SequencingBatches::all_together_over(1, 1);
-    let parameters = frozen_parameters(
-        &calibration,
-        &[],
-        &batching,
-        &inbreeding,
-        &strata,
-        &NO_SUBSTITUTION_RATES,
-    );
-
-    let detail = ssr_detail();
-    let mut alleles = CandidateAlleles::new(
-        Box::from(b"ATATAT".as_slice()),
-        LocusKind::Ssr(ssr_detail()),
-    );
-    alleles.admit(Box::from(b"ATATATAT".as_slice()));
-    let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
-    // Two candidates, one count.
-    let counts = [NonZeroU32::new(6).expect("six repeats")];
-    let evidence = LocusEvidence::ssr(region(), &per_sample, &detail, &counts);
-    evidence.assert_matches_locus_and_run(&alleles, &parameters);
 }
 
 /// A scratch that was never sized for a locus is refused by name, rather than handing a
