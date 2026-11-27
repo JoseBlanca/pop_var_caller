@@ -28,7 +28,7 @@
 //!   the locus, so every observation is whole and that count is the sum of `num_obs` — which is
 //!   why psp mode need not decode the evidence here at all. **That equality is a claim about
 //!   real data, not a theorem** (spec §6 trap 7); a counter-example — a read whose evidence
-//!   stops inside a one-base locus — moves this rule to "build every body". Plan step B2
+//!   stops inside a one-base locus — moves this rule to "build every body". A measurement
 //!   checked **8,784,182 one-base records and found no disagreement and no such read**, on two
 //!   tomato stores: six accessions over 200 kb of one chromosome at a mean 14.4 reads compared
 //!   with the reference, and one accession over 8 Mb of all twelve at 10.3. **This rule decides

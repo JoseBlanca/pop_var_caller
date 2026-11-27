@@ -39,9 +39,9 @@
 //! implementations from the same intervals and assert identical loci (spec
 //! §8.0). What sharing one function used to guarantee by construction is now a
 //! test — a weaker guarantee, and the price of a production tree an experiment
-//! cannot break. Since promotion step C24 production's side is its post-filter
-//! as it stood at commit `d9e7b076`, copied into the test-only
-//! `crate::production_post_filter`, because production itself is being deleted.
+//! cannot break. Production has since been deleted (2026-09-13); its side of the
+//! test is its post-filter as it stood at commit `d9e7b076`, copied into the
+//! test-only `crate::production_post_filter`.
 //!
 //! **The differential's blind spot, stated because it is not obvious.** Both
 //! sides run the *same* inputs through *transcribed* logic, so an input class no
@@ -66,8 +66,8 @@
 //!    rather than in a test file (spec §5.1).
 //! 5. **[`Motif`] is ng's too**, against spec §4's expectation — see below.
 //!
-//! Milestone A2 adds the knobs (period scope, copy floors) and A3 the windowing;
-//! both keep the differential green. **Nothing else differs on purpose** — and
+//! Two additions, the knobs (period scope, copy floors) and the windowing, keep the
+//! differential green. **Nothing else differs on purpose** — and
 //! anything that differs by accident is what the differential exists to catch.
 //!
 //! ## Order (unchanged from production; `postprocess`'s own numbering)
@@ -601,8 +601,8 @@ impl Default for SsrSegmentCriteria {
 
 /// Clean raw scanner intervals before [`classify`] — **not optional** (spec §5b).
 ///
-/// A validated finding, not a guess (`scanner_parity`, Milestone D of the
-/// scanner plan). trf-mod hands `build_loci` a *clean* candidate set:
+/// A validated finding, not a guess (`scanner_parity`, the scanner's golden-catalog
+/// test). trf-mod hands `build_loci` a *clean* candidate set:
 /// statistically significant repeats, redundancy already eliminated. Our scanner
 /// is deliberately permissive (`min_copies = 2`), so it also emits low-copy noise
 /// in aperiodic sequence **and every period-multiple of every real tract**. Fed
@@ -983,8 +983,8 @@ pub fn classify(
     // `contig_len` read from the reference's contig table, not derived from
     // whatever slice is in hand.
     //
-    // `WindowedRefSeq::contigs()` (B3) is that table, and reading from it is the
-    // **walk's** obligation (Milestone D) — it is the only party that holds both
+    // `WindowedRefSeq::contigs()` is that table, and reading from it is the
+    // **walk's** obligation — it is the only party that holds both
     // the reference and the window. Nothing `classify` can be handed proves where the
     // number came from, so this is a contract stated here and discharged there,
     // not a check that was forgotten.
@@ -1078,7 +1078,7 @@ pub fn classify(
     //    start-sorted for the streaming clustering.
     kept.sort_by_key(|r| (r.start, r.end));
     // `bundle_threshold` IS the bundle radius (spec §2.4) — see `SsrSegmentCriteria`.
-    // A3: the cluster members come back rather than being deleted (`Classified`).
+    // The cluster members come back rather than being deleted (`Classified`).
     let (kept, bundled) = split_bundles(kept, p.bundle_threshold);
 
     // 4-5. per record: end-trim + copy floor, recompute purity + floor, embed.
@@ -1440,7 +1440,7 @@ pub(crate) fn recompute_purity(tract: &[u8], motif: &[u8]) -> f32 {
 ///    enclosing tract joined a bundle, whose hull then swallowed the locus. **One repeat
 ///    inside another is a bundle** (owner, 2026-07-20) — there are no clean bases
 ///    between them at all, so neither can have a flank, which is what the bundle rule is
-///    for (spec §2.4). The same flaw [`crate::region_typing::absorb_into`] documents
+///    for (spec §2.4). The same flaw `region_typing::absorb_into` documents
 ///    for satellites ("noise against a span that can be 2 Mb long"); it bites at 100 bp
 ///    too.
 /// 2. **The chain used the last member's `end` as the cluster's reach.** A long tract
@@ -1694,7 +1694,7 @@ mod tests {
     }
 
     /// The port must not drift from the type it was copied from. Production's
-    /// `ssr::types::Motif::new`, recorded at commit `d9e7b076` (promotion step C24): it
+    /// `ssr::types::Motif::new`, recorded at commit `d9e7b076`: it
     /// kept `AT`, `CAG` and `ACGTAC` verbatim with periods 2, 3 and 6, and refused the
     /// seven-base `ACGTACG`.
     #[test]
@@ -2135,7 +2135,7 @@ mod tests {
     // The oracle the Revision made necessary. ng's `classify` and production's
     // `build_loci` are two copies of one policy; this drives both from the same
     // intervals and asserts they still agree. Production's side is its frozen copy
-    // in `crate::production_post_filter` since promotion step C24. It is the
+    // in `crate::production_post_filter`, made when production was deleted. It is the
     // tripwire on silent drift, and it is expected to be re-pinned the day an experiment
     // deliberately moves ng's classification away from the catalog's rules.
 
@@ -2401,7 +2401,7 @@ mod tests {
     /// This is not an exotic input. Real references **soft-mask repeats**, which
     /// is precisely the sequence this module exists to process, so lower case is
     /// the mainstream case. And the failure is silent: `SsrSegment` compares by value,
-    /// so a lower-case motif reaching Milestone D simply fails to match the
+    /// so a lower-case motif reaching the walk simply fails to match the
     /// catalog's — a wrong locus, not a crash.
     ///
     /// *Two `upper()` calls now, not three: the third folded `ref_bytes`, which
@@ -2928,7 +2928,7 @@ mod tests {
     ///
     /// Pinned by nothing until now: every other test that reads `bundled` runs at
     /// `bases_start = 1`, where window offsets and genomic coordinates coincide —
-    /// so the convention could silently flip and no test would notice. Milestone D
+    /// so the convention could silently flip and no test would notice. The walk
     /// re-bases these to build each `SsrBundle`'s hull; if they were already
     /// genomic it would **double-shift every hull by `bases_start`**, silently.
     ///

@@ -14,16 +14,15 @@
 //! the other, so both have to be the same quantity measured the same way. Nothing here scores
 //! or fits anything.
 //!
-//! **The sliding window and its histogram fold are production's**
-//! (`SlidingWindowCoverageAccumulator`,
-//! transcribed with its tests under the freeze rule that `src/sample_summary/` is not edited).
-//! The copy is deliberate and is held to its original's recorded output by a differential test
-//! (`production_parity.rs`, frozen at promotion step C13) — and ng's version has already
-//! diverged from it twice, on purpose. A window built from fewer
-//! than [`WindowCoverageConfig::min_window_positions`] covered positions reports nothing, where
-//! production's would report a number; and the depth bin width is fitted to each sample rather
-//! than configured, so the two sides' histograms are cut on different axes and only the windows
-//! are still comparable.
+//! **The sliding window and its histogram fold began as a copy of the deleted caller's**
+//! `SlidingWindowCoverageAccumulator`, transcribed with its tests while that caller still existed
+//! and could not be edited. That caller is gone, and this module is free to change. Its recorded
+//! output still checks the window means: the test module `old_caller_windows.rs` compares 200
+//! generated streams against the digests it emitted. Two departures from it are deliberate. A
+//! window built from fewer than [`WindowCoverageConfig::min_window_positions`] covered positions
+//! reports nothing, where the old accumulator reported a number; and the depth bin width is fitted
+//! to each sample rather than configured, so only the windows, not the histograms, are still
+//! comparable.
 //!
 //! **Which way this module depends.** On `locus_generation` and `types`, and on nothing in
 //! `run`: the cohort merge calls into this module, never the reverse. [`depth`], the rule that
@@ -33,17 +32,14 @@
 //! state each case in the two shapes the merge draws.
 
 mod accumulator;
-/// The rule that turns a drawn record into covered positions. **`pub` since plan step C3**, whose
-/// whole-store recomputation
-/// ([`examples/ng_window_coverage_probe.rs`](../../../examples/ng_window_coverage_probe.rs)) is
-/// the second caller: an oracle that reimplemented the rule would be testing its own copy of it
-/// rather than the cache's walk, which is the only thing that differs between them.
+/// The rule that turns a drawn record into covered positions. Public because the cohort merge's
+/// observation cache (`run::cohort_merge::observation_cache`) walks every record through it.
 pub mod depth;
 mod depth_grid;
 pub mod histogram_line;
 
 #[cfg(test)]
-mod production_parity;
+mod old_caller_windows;
 
 pub use accumulator::WindowCoverageAccumulator;
 
@@ -61,8 +57,7 @@ pub const WINDOW_BP: u32 = 500;
 pub const GC_BINS: u32 = 50;
 
 /// Depth bins, before the overflow bin that follows them — **kept at 400, and no longer soft; but
-/// what the measurement of 2026-09-07 settled is the scaling, not the count** (spec §3.4, plan
-/// step D2).
+/// what the measurement of 2026-09-07 settled is the scaling, not the count** (spec §3.4).
 ///
 /// Production bins depth at a fixed 0.5× in 2,000 bins to 1,000×, which is 400 kB a sample
 /// against a 500 kB per-open-sample budget, and which serves one end of the depth axis at a
@@ -122,7 +117,7 @@ pub const DEPTH_GRID_LOWEST_READS: f64 = 1.0;
 pub const DEPTH_GRID_HIGHEST_READS: f64 = 10_000.0;
 
 /// How many times the sample's median window depth the regular bins are to span — **kept at ten
-/// by measurement 2026-09-07** (spec §3.4, plan step D2).
+/// by measurement 2026-09-07** (spec §3.4).
 ///
 /// Ten leaves room above the single-copy peak for a four-copy carrier and below it for a sample
 /// whose median sits above its own mode. **A multiple, not a count**: the width the bins are cut
@@ -209,7 +204,7 @@ pub const MIN_WINDOW_POSITIONS: u32 = 50;
 ///
 /// **There is no `Default`**, and the values live in the constants above instead: every field
 /// here changes what the run measures, so the configuration is spelled at the site that builds
-/// the accumulator — plan step C2, inside the merge's observation cache — and a misconfigured
+/// the accumulator — inside the merge's observation cache — and a misconfigured
 /// run fails there rather than quietly measuring something else.
 ///
 /// **The constants are not all of the same kind.** [`WINDOW_BP`] and [`GC_BINS`] are
@@ -254,8 +249,8 @@ impl WindowCoverageConfig {
     /// the fit reads as "this sample cannot be scaled", so a misconfigured run would cost every
     /// sample its histogram and say nothing.
     ///
-    /// The boundary that supplies the configuration is plan step C2, where the merge's
-    /// observation cache builds one accumulator per sample.
+    /// The boundary that supplies the configuration is the merge's observation cache, which
+    /// builds one accumulator per sample.
     pub(crate) fn assert_valid(&self) {
         assert!(self.window_bp >= 1, "window_bp must be >= 1");
         assert!(self.gc_bins >= 1, "gc_bins must be >= 1");

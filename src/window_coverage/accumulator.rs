@@ -1,12 +1,13 @@
 //! The centred sliding window, transcribed from production's
 //! `SlidingWindowCoverageAccumulator` (`src/sample_summary/coverage.rs`) with its tests.
 //!
-//! Production is frozen, so this is a copy rather than a call. What changed in the copying is
-//! only the vocabulary: ng's [`ContigId`] / [`Position`] coordinates instead of a pair of
-//! `u32`s, the emitted pair carried beside its centre instead of holding a coordinate of its
-//! own, longer names for three fields, and the two histogram fields spec §7 drops. The window
-//! arithmetic — the two-pointer buffer, the finalisation frontier, the contig reset — is
-//! unchanged, and the tests below are production's, which is what makes that claim checkable.
+//! Production could not be edited while it existed, so this is a copy rather than a call;
+//! production has since been deleted. What changed in the copying is only the vocabulary: ng's
+//! [`ContigId`] / [`Position`] coordinates instead of a pair of `u32`s, the emitted pair carried
+//! beside its centre instead of holding a coordinate of its own, longer names for three fields, and
+//! the two histogram fields spec §7 drops. The window arithmetic — the two-pointer buffer, the
+//! finalisation frontier, the contig reset — is unchanged, and the tests below are production's,
+//! which is what makes that claim checkable.
 
 use std::collections::VecDeque;
 
