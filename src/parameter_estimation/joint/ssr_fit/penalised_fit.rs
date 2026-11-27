@@ -491,6 +491,39 @@ const RIDGE: f64 = 1e-6;
 /// zero or one to working precision.
 const LARGEST_UNBOUNDED: f64 = 40.0;
 
+/// **The between-locus share a concentration `c` stands for, `1 / (1 + c)`.** The fit keeps one
+/// quantity under two names: the concentration, which the pairwise likelihood and the counting
+/// take, and the between-locus share, which the between curve smooths (as its logit, `−ln c`) and
+/// the report writes.
+fn share_of(concentration: f64) -> f64 {
+    1.0 / (1.0 + concentration)
+}
+
+/// **The concentration a between-locus share stands for, `1/share − 1`**: the inverse of
+/// [`share_of`].
+fn concentration_of(share: f64) -> f64 {
+    1.0 / share - 1.0
+}
+
+/// **The between-locus share at a logit of the between curve**, held to the shares the
+/// concentration search allows ([`CONCENTRATION_SEARCH`]).
+fn share_of_logit(logit: f64) -> f64 {
+    logistic(logit).clamp(
+        share_of(CONCENTRATION_SEARCH.1),
+        share_of(CONCENTRATION_SEARCH.0),
+    )
+}
+
+/// **The largest fall-off a class's stutter may take, 0.99**, wherever a fall-off is read off its
+/// logit: in a round, after a jump, in the standard errors and in the reported curves.
+const LARGEST_FALL_OFF: f64 = 0.99;
+
+/// **The largest slip rate a jump may set, 0.95.** Only a jump applies it
+/// ([`Period::set_state`]): an ordinary round (`count`) does not clamp the slip rate, so a round
+/// and a jump obey different bounds. Whether a round should clamp it too would change output, and
+/// is left to the owner.
+const LARGEST_SLIP_RATE_AFTER_A_JUMP: f64 = 0.95;
+
 /// One class's fitted numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PenalisedClass {
@@ -946,7 +979,7 @@ fn fitted_period_from(
         period.shares_curve = previous.shares_curve.clone();
         period.multipliers = previous.multipliers.clone();
         started_close = true;
-        share_from_pairs = previous.spread_from_pairs;
+        share_from_pairs = previous.share_from_pairs;
     }
     // With read groups fitted apart, the loop starts where one stutter for every read group
     // settles: a round at one stutter scores the pooled rows, several times fewer than the keyed
@@ -975,7 +1008,7 @@ fn fitted_period_from(
         let Some(tables) = period.pair_tables(classes, homozygote_excess, fit.allele_span) else {
             break;
         };
-        let spreads = period.between_curve.refit(
+        let between_logits = period.between_curve.refit(
             &tables,
             fit,
             if alternation == 0 && !share_from_pairs {
@@ -988,7 +1021,8 @@ fn fitted_period_from(
         let mut moved: f64 = 0.0;
         for (point, class) in period.class_at_point.iter().enumerate() {
             if class.is_some() {
-                let concentration = float::exp(-spreads[point])
+                // The between curve holds the share's logit, which is `−ln c`.
+                let concentration = float::exp(-between_logits[point])
                     .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1);
                 moved = larger_change(
                     moved,
@@ -1061,8 +1095,8 @@ fn fitted_period_from(
 ///   at one stutter, and a class's [`StratumFit::slippage`] holds that one; stutter per slippage
 ///   group is not built (`str_library_stutter.md`).
 /// - When a class's read groups do not fit together ([`StratumEvidence::check_read_groups`]), or
-/// two   classes with reads share a motif length and a repeat count. Two classes at one repeat
-/// count   where one has no reads do not panic: each comes back, the one without reads refused.
+///   two classes with reads share a motif length and a repeat count. Two classes at one repeat
+///   count where one has no reads do not panic: each comes back, the one without reads refused.
 /// - When the stutter prior's settings cannot be used
 ///   ([`PenalisedFitConfig::stutter_prior_problem`]) and there is a class to fit.
 ///
@@ -1545,7 +1579,7 @@ struct Period {
     distinct_rows: Vec<Option<usize>>,
     error_seconds: f64,
     /// Whether F was read off pairs of samples, so is not a number of the counting objective.
-    spread_from_pairs: bool,
+    share_from_pairs: bool,
     /// **Each read group's multiplier**, indexed as the evidence's read groups, when the fit scores
     /// read groups apart: `None` for a cohort of one read group, or with no pull configured.
     multipliers: Option<Vec<f64>>,
@@ -1660,7 +1694,7 @@ impl Period {
             last_counts: vec![None; points],
             distinct_rows: vec![None; points],
             error_seconds: 0.0,
-            spread_from_pairs: false,
+            share_from_pairs: false,
         })
     }
 
@@ -1754,9 +1788,9 @@ impl Period {
                 continue;
             }
             self.slippage[point] = Slippage {
-                level: logistic(next()).min(0.95),
+                level: logistic(next()).min(LARGEST_SLIP_RATE_AFTER_A_JUMP),
                 shorter_share: logistic(next()),
-                fall_off: logistic(next()).clamp(0.0, 0.99),
+                fall_off: logistic(next()).clamp(0.0, LARGEST_FALL_OFF),
             };
             self.concentration[point] =
                 float::exp(next()).clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1);
@@ -1949,14 +1983,15 @@ impl Period {
     }
 
     /// **Rounds of penalised counting** until no number moves by more than the tolerance or the
-    /// rounds run out. With `spread_held`, the concentration stays where it is. After each round,
-    /// `round_ended` is told the rounds run so far and that round's largest change.
+    /// rounds run out. With `share_held`, the concentration (and so the between-locus share) stays
+    /// where it is. After each round, `round_ended` is told the rounds run so far and that round's
+    /// largest change.
     fn count(
         &mut self,
         classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
         fit: &PenalisedFitConfig,
-        spread_held: bool,
+        share_held: bool,
         round_ended: &dyn Fn(usize, f64),
     ) {
         let points = self.points();
@@ -2150,7 +2185,7 @@ impl Period {
                     }
                 }
             }
-            let between = if spread_held {
+            let between = if share_held {
                 None
             } else {
                 Some(self.between_curve.refit(
@@ -2200,14 +2235,11 @@ impl Period {
                 let new_slippage = Slippage {
                     level: logistic(level[point]),
                     shorter_share: logistic(shorter[point]),
-                    fall_off: logistic(fall_off[point]).clamp(0.0, 0.99),
+                    fall_off: logistic(fall_off[point]).clamp(0.0, LARGEST_FALL_OFF),
                 };
                 let new_concentration = between.as_ref().map_or(self.concentration[point], |b| {
-                    let share = logistic(b[point]).clamp(
-                        1.0 / (1.0 + CONCENTRATION_SEARCH.1),
-                        1.0 / (1.0 + CONCENTRATION_SEARCH.0),
-                    );
-                    (1.0 / share - 1.0).clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1)
+                    concentration_of(share_of_logit(b[point]))
+                        .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1)
                 });
                 let new_shares = softmax_with_reference(
                     &share_logits[point * (alleles - 1)..(point + 1) * (alleles - 1)],
@@ -2263,8 +2295,8 @@ impl Period {
         }
         self.rounds_per_counting.push(rounds_here);
         self.squarem = SquaremCycle::Idle;
-        if spread_held {
-            self.spread_from_pairs = true;
+        if share_held {
+            self.share_from_pairs = true;
         }
     }
 
@@ -2317,7 +2349,7 @@ impl Period {
     /// rows a repeat count, the three stutter numbers first, then F when it is counted with them,
     /// then the shares from `share_offset`.
     fn error_layout(&self) -> ErrorLayout {
-        let f_in_counting = !self.spread_from_pairs && self.between_locus_share_measurable;
+        let f_in_counting = !self.share_from_pairs && self.between_locus_share_measurable;
         let share_offset = 3 + usize::from(f_in_counting);
         let width = share_offset + self.alleles - 1;
         ErrorLayout {
@@ -2363,10 +2395,10 @@ impl Period {
             let slippage = Slippage {
                 level: logistic(theta[0]),
                 shorter_share: logistic(theta[1]),
-                fall_off: logistic(theta[2]).clamp(0.0, 0.99),
+                fall_off: logistic(theta[2]).clamp(0.0, LARGEST_FALL_OFF),
             };
             let concentration = if f_in_counting {
-                (1.0 / logistic(theta[3]) - 1.0)
+                concentration_of(logistic(theta[3]))
                     .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1)
             } else {
                 self.concentration[point]
@@ -2629,7 +2661,7 @@ impl Period {
         let covariance = penalised_sandwich(&joint.curvature, &joint.spread, &joint.penalty, size);
         // F off pairs of samples: the same formula over F's curve alone. It does not use the joint
         // `H`, so its errors stand whether or not that one could be inverted.
-        let pairs_counted = self.spread_from_pairs && self.between_locus_share_measurable;
+        let pairs_counted = self.share_from_pairs && self.between_locus_share_measurable;
         let pairs_variance: Option<Vec<f64>> = pairs_counted
             .then(|| {
                 let mut curvature = vec![0.0; points * points];
@@ -2683,7 +2715,7 @@ impl Period {
             .map(|point| {
                 self.class_at_point[point]?;
                 let concentration = self.concentration[point];
-                let share = 1.0 / (1.0 + concentration);
+                let share = share_of(concentration);
                 // c = e^(−logit F), so dc / dlogit F = −c.
                 let f_errors = |f_variance: Option<f64>| {
                     (
@@ -2819,7 +2851,7 @@ impl Period {
                         .then_some(self.concentration[point]),
                     between_locus_share: self
                         .between_locus_share_measurable
-                        .then(|| 1.0 / (1.0 + self.concentration[point])),
+                        .then(|| share_of(self.concentration[point])),
                     working_concentration: self.concentration[point],
                     expected_slipped_reads: self.last_counts[point]
                         .as_ref()
@@ -2856,16 +2888,11 @@ impl Period {
             level: scalar_curve(&self.level_curve, &logistic),
             shorter_share: scalar_curve(&self.shorter_curve, &logistic),
             fall_off: scalar_curve(&self.fall_off_curve, &|value| {
-                logistic(value).clamp(0.0, 0.99)
+                logistic(value).clamp(0.0, LARGEST_FALL_OFF)
             }),
-            between_locus_share: self.between_locus_share_measurable.then(|| {
-                scalar_curve(&self.between_curve, &|value| {
-                    logistic(value).clamp(
-                        1.0 / (1.0 + CONCENTRATION_SEARCH.1),
-                        1.0 / (1.0 + CONCENTRATION_SEARCH.0),
-                    )
-                })
-            }),
+            between_locus_share: self
+                .between_locus_share_measurable
+                .then(|| scalar_curve(&self.between_curve, &share_of_logit)),
             allele_length_variation: (0..alleles)
                 .map(|allele| ParameterCurve {
                     first_repeats: lowest,
