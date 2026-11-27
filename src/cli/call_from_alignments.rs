@@ -832,16 +832,12 @@ pub fn run_call_from_alignments(
         merge_parameters,
     )
     .map_err(|source| CallFromAlignmentsCliError::Run { source })?
-    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(args.max_depth));
-    let caller = match &explain {
-        Some((regions, _)) => caller.with_explain_loci(regions.clone()),
-        None => caller,
-    };
-    let caller = caller.with_min_site_quality(
-        crate::types::Phred::try_new(args.min_site_quality)
-            .expect("`parse_min_site_quality` admits only valid qualities"),
-    );
-    let caller = caller.with_low_base_quality_weight(args.low_base_quality_weight);
+    .with_settings(calling_run::calling_settings(
+        args.max_depth,
+        explain.as_ref().map(|(regions, _)| regions),
+        args.min_site_quality,
+        args.low_base_quality_weight,
+    ));
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let metadata = calling_run::header_for(

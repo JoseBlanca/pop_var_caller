@@ -41,7 +41,6 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use super::read_filter_provenance::READ_FILTER_PROVENANCE_PREFIX;
-use super::records::DEFAULT_MIN_SITE_QUALITY;
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
 use crate::calling::run_parameters::RunParameters;
@@ -56,22 +55,20 @@ use crate::region_typing::GenomeRegions;
 use crate::run::edge_deletion_gathering::{EdgeDeletionGathering, EdgeDeletionGatheringCounts};
 use crate::run::fragment_keeper::{FragmentKeeper, KeptRecord};
 use crate::run::side_pool::SidePool;
-use crate::types::{Bp, Phred, ReadGroupId};
+use crate::types::{Bp, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
 use crate::calling::allele_candidates::CandidateSelectionConfig;
 
 use super::callers::{
-    A_REFERENCE_WITH_NO_PATH, CohortCallingInputs, CohortCallingOutcome, CohortCallingTallies,
+    CallingSettings, CohortCallingInputs, CohortCallingOutcome, CohortCallingTallies,
     DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES, MergeParameters,
     call_cohort_from_sources_handing_each_record_over, call_cohort_from_sources_in_rounds,
-    refuse_a_catalog_built_on_another_reference, refuse_parameters_assembled_for_another_cohort,
-    refuse_two_references_that_are_not_one,
+    reference_path_to_name, refuse_a_catalog_built_on_another_reference,
+    refuse_parameters_assembled_for_another_cohort, refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::{MergeReference, ObservationCache};
-use super::depth_ceiling::DepthCeiling;
-use super::explain::ExplainRegions;
 use super::psp_prefetch::{DEFAULT_PSP_PREFETCH_BUDGET_BYTES, PspPrefetch};
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
@@ -448,18 +445,9 @@ pub struct PspVariantCaller {
     /// written under a looser cap is thinned to it as its records are decoded
     /// ([`read_cap`](super::psp_source::read_cap)).
     max_reads_per_position: u32,
-    /// The most reads one read group may have at a locus before the locus is dropped for the
-    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
-    depth_ceiling: DepthCeiling,
-    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
-    explain: Option<ExplainRegions>,
-    /// The site quality below which a called locus is not written (`--min-site-quality`).
-    min_site_quality: Phred,
-    /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
-    low_base_quality_weight: f64,
-    /// Whether the run gathers fragments for the output (read phase spec §2.4); see
-    /// [`Self::with_fragments_gathered`]. On unless the run turns it off.
-    gathers_fragments: bool,
+    /// The run's own settings: the depth ceiling, the loci to explain, the site-quality floor,
+    /// the low-base-quality weight and whether fragments are gathered.
+    settings: CallingSettings,
 }
 
 impl PspVariantCaller {
@@ -517,11 +505,7 @@ impl PspVariantCaller {
         // every segment this run loops over is drawn from it, so a catalog built on another
         // build of the assembly puts every tract at the wrong position — silently, and
         // genome-wide.
-        let reference_path = reference_with_checksums
-            .fasta_path
-            .as_deref()
-            .or(reference.info().fasta_path.as_deref())
-            .unwrap_or_else(|| Path::new(A_REFERENCE_WITH_NO_PATH));
+        let reference_path = reference_path_to_name(reference.info(), reference_with_checksums);
         refuse_a_catalog_built_on_another_reference(
             &segmentation,
             reference_with_checksums,
@@ -552,57 +536,26 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            depth_ceiling: DepthCeiling::default(),
-            explain: None,
-            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
-                .expect("the default threshold is a valid quality"),
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            gathers_fragments: true,
+            settings: CallingSettings::default(),
         })
+    }
+
+    /// **The same caller, configured with `settings`** — direct mode's
+    /// [`with_settings`](super::callers::AlignedFilesVariantCaller::with_settings).
+    #[must_use]
+    pub fn with_settings(mut self, settings: CallingSettings) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// **The same caller, gathering fragments only if `gathered`** — direct mode's
     /// [`with_fragments_gathered`](super::callers::AlignedFilesVariantCaller::with_fragments_gathered),
-    /// which says what turning it off changes, and why the file does not. Pass
+    /// which says why it is set apart. Pass
     /// [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header the output is
     /// written under.
     #[must_use]
     pub fn with_fragments_gathered(mut self, gathered: bool) -> Self {
-        self.gathers_fragments = gathered;
-        self
-    }
-
-    /// The same caller, charging the low-base-quality penalty at `weight` times its tail
-    /// (`doc/devel/ng/spec/low_base_quality.md`); zero leaves it off. The default is
-    /// [`DEFAULT_LOW_BASE_QUALITY_WEIGHT`](crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT).
-    #[must_use]
-    pub fn with_low_base_quality_weight(mut self, weight: f64) -> Self {
-        self.low_base_quality_weight = weight;
-        self
-    }
-
-    /// The same caller, writing no locus whose site quality falls below `quality`
-    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
-    #[must_use]
-    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
-        self.min_site_quality = quality;
-        self
-    }
-
-    /// The same caller, explaining every locus that overlaps `regions`
-    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
-    #[must_use]
-    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
-        self.explain = Some(regions);
-        self
-    }
-
-    /// The same caller, dropping for the whole cohort every locus where some sample has a read
-    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
-    #[must_use]
-    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
-        self.depth_ceiling = ceiling;
+        self.settings.gathers_fragments = gathered;
         self
     }
 
@@ -727,11 +680,7 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes,
             max_reads_per_position,
-            depth_ceiling,
-            explain,
-            min_site_quality,
-            low_base_quality_weight,
-            gathers_fragments,
+            settings,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -782,7 +731,7 @@ impl PspVariantCaller {
             sources.push(
                 PspSummarySource::over(psp, &sample.read_groups)?
                     .with_read_cap(read_cap)
-                    .with_depth_ceiling(Some(depth_ceiling)),
+                    .with_depth_ceiling(Some(settings.depth_ceiling)),
             );
         }
 
@@ -794,10 +743,7 @@ impl PspVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
-            explain: explain.as_ref(),
-            min_site_quality,
-            low_base_quality_weight,
-            gathers_fragments,
+            settings: &settings,
         };
         let CohortCallingOutcome {
             calling,
@@ -826,7 +772,7 @@ impl PspVariantCaller {
             // one at a time gave.
             let hand_over_pool = hand_over_pool(rayon::current_num_threads());
             let mut release = RecordRelease::new(
-                gathers_fragments,
+                settings.gathers_fragments,
                 ReleaseBatching::Batched {
                     pool: &hand_over_pool,
                     kept_a_batch: KEPT_A_BATCH,
@@ -2774,7 +2720,10 @@ mod tests {
             .expect("the cohort matches the run")
             // Three reads a sample are too few to pass the shipped site-quality gate, and
             // this is about what a written record carries beside it.
-            .with_min_site_quality(crate::types::Phred::ZERO)
+            .with_settings(CallingSettings {
+                min_site_quality: crate::types::Phred::ZERO,
+                ..CallingSettings::default()
+            })
             .with_fragments_gathered(gathered);
             let mut handed = Vec::new();
             caller
@@ -2892,7 +2841,10 @@ mod tests {
                 merge_parameters,
             )
             .expect("the cohort matches the run")
-            .with_min_site_quality(crate::types::Phred::ZERO)
+            .with_settings(CallingSettings {
+                min_site_quality: crate::types::Phred::ZERO,
+                ..CallingSettings::default()
+            })
             .with_fragments_gathered(true);
             let mut handed = Vec::new();
             let (tallies, _stored) = caller

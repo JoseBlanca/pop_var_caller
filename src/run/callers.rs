@@ -207,6 +207,52 @@ impl Default for MergeParameters {
     }
 }
 
+/// **What a calling run was configured with beside its model, its ground and its merge** — five
+/// settings both modes take from the command line, held once by each caller and handed to the
+/// calling loop through [`CohortCallingInputs`].
+///
+/// They are consumed at different depths: `depth_ceiling` by each sample's source (the walker in
+/// direct mode, the psp source in psp mode), the other four at each locus. They are grouped
+/// because they are what the run was configured with, not because one stage reads them all.
+#[derive(Debug, Clone)]
+pub struct CallingSettings {
+    /// The most reads one read group may have at a locus before the locus is dropped for the
+    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    pub depth_ceiling: DepthCeiling,
+    /// **The loci to explain, `None` when the run was asked to explain none** — the one
+    /// question each locus is asked (`--explain-loci`, `doc/devel/ng/spec/explain_loci.md`).
+    /// **What is called does not change.**
+    pub explain: Option<ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`,
+    /// [`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
+    pub min_site_quality: Phred,
+    /// How many times its tail the low-base-quality penalty charges; zero leaves it off
+    /// (`--low-base-quality-weight`, `doc/devel/ng/spec/low_base_quality.md`).
+    pub low_base_quality_weight: f64,
+    /// **Whether each written locus asks the merge which allele every read showed** (read phase
+    /// spec §2.2) — the read alleles the fragment keeper turns into fragments. Off where the
+    /// output will read no fragments ([`writer_reads_fragments`](crate::vcf::writer_reads_fragments)):
+    /// asking derives the locus's alleles a second time, on the thread that called it, for
+    /// nothing. With it off, the fragment keeper releases each record as it arrives and every
+    /// record is handed over with empty fragments, so a spill parks none; the records are
+    /// otherwise the same, so an output that reads no fragments is the same file. On by default.
+    pub gathers_fragments: bool,
+}
+
+impl Default for CallingSettings {
+    fn default() -> Self {
+        Self {
+            depth_ceiling: DepthCeiling::default(),
+            explain: None,
+            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
+                .expect("the default threshold is a valid quality"),
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+            gathers_fragments: true,
+        }
+    }
+}
+
 /// A calling run over open alignment files: **reads in, called variants out in genome order**.
 ///
 /// **What it holds for the whole run** is one open [`SampleReads`] per sample, plus the shared
@@ -250,20 +296,11 @@ pub struct AlignedFilesVariantCaller {
     /// The settings every one of this run's locus generators is built with — checked at
     /// `open`, so building a generator from them cannot fail later.
     locus_generator_settings: PileupGeneratorConfig,
-    /// The most reads one read group may have at a locus before the locus is dropped for the
-    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
-    depth_ceiling: DepthCeiling,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
-    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
-    explain: Option<ExplainRegions>,
-    /// The site quality below which a called locus is not written (`--min-site-quality`).
-    min_site_quality: Phred,
-    /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
-    low_base_quality_weight: f64,
-    /// Whether the run gathers fragments for the output (read phase spec §2.4); see
-    /// [`Self::with_fragments_gathered`]. On unless the run turns it off.
-    gathers_fragments: bool,
+    /// The run's own settings: the depth ceiling, the loci to explain, the site-quality floor,
+    /// the low-base-quality weight and whether fragments are gathered.
+    settings: CallingSettings,
 }
 
 impl AlignedFilesVariantCaller {
@@ -324,12 +361,10 @@ impl AlignedFilesVariantCaller {
         }
 
         // **And one after**, because it reads the `@SQ M5` tags each open captured.
-        let reference_path = alignments
-            .reference_with_checksums
-            .fasta_path
-            .as_deref()
-            .or(alignments.reference.info().fasta_path.as_deref())
-            .unwrap_or_else(|| std::path::Path::new(A_REFERENCE_WITH_NO_PATH));
+        let reference_path = reference_path_to_name(
+            alignments.reference.info(),
+            alignments.reference_with_checksums,
+        );
         refuse_two_references_that_are_not_one(
             alignments.reference.info(),
             alignments.reference_with_checksums,
@@ -356,62 +391,26 @@ impl AlignedFilesVariantCaller {
             candidate_selection,
             merge_parameters,
             locus_generator_settings: alignments.locus_generator_settings,
-            depth_ceiling: DepthCeiling::default(),
-            explain: None,
-            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
-                .expect("the default threshold is a valid quality"),
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            gathers_fragments: true,
+            settings: CallingSettings::default(),
         })
     }
 
-    /// **The same run, gathering fragments only if `gathered`** — each record's reads that also
-    /// reach another record, which only the output's phase-writing stages read (read phase spec
-    /// §2.4). Pass [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header
-    /// the output is written under.
-    ///
-    /// With it off, no written locus asks the merge which allele each read showed, the fragment
-    /// keeper releases each record as it arrives instead of holding it until the reads after it
-    /// are in, and every record is handed over with empty fragments — so a spill parks none. The
-    /// records are otherwise the same, so an output that reads no fragments is the same file.
-    /// The default is on: a run that leaves it alone gathers them, as every run did before.
+    /// **The same run, configured with `settings`** — everything [`CallingSettings`] holds,
+    /// replacing the defaults [`Self::open`] starts from.
+    #[must_use]
+    pub fn with_settings(mut self, settings: CallingSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// **The same run, gathering fragments only if `gathered`** — set apart from
+    /// [`Self::with_settings`] because the command learns it only after building the output's
+    /// header. Pass [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header
+    /// the output is written under; [`CallingSettings::gathers_fragments`] says what turning it
+    /// off changes, and why the file does not.
     #[must_use]
     pub fn with_fragments_gathered(mut self, gathered: bool) -> Self {
-        self.gathers_fragments = gathered;
-        self
-    }
-
-    /// The same run, charging the low-base-quality penalty at `weight` times its tail
-    /// (`doc/devel/ng/spec/low_base_quality.md`); zero leaves it off. The default is
-    /// [`DEFAULT_LOW_BASE_QUALITY_WEIGHT`](crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT).
-    #[must_use]
-    pub fn with_low_base_quality_weight(mut self, weight: f64) -> Self {
-        self.low_base_quality_weight = weight;
-        self
-    }
-
-    /// The same run, explaining every locus that overlaps `regions`
-    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
-    #[must_use]
-    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
-        self.explain = Some(regions);
-        self
-    }
-
-    /// The same run, writing no locus whose site quality falls below `quality`
-    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
-    #[must_use]
-    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
-        self.min_site_quality = quality;
-        self
-    }
-
-    /// The same run, dropping for the whole cohort every locus where some sample has a read
-    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
-    #[must_use]
-    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
-        self.depth_ceiling = ceiling;
+        self.settings.gathers_fragments = gathered;
         self
     }
 
@@ -476,7 +475,7 @@ impl AlignedFilesVariantCaller {
             )?;
             walkers.push(
                 AlignmentFilesWalker::over(Arc::clone(&self.segmentation), reads, generators)
-                    .with_depth_ceiling(Some(self.depth_ceiling)),
+                    .with_depth_ceiling(Some(self.settings.depth_ceiling)),
             );
         }
         Ok(RunReadyToWalk {
@@ -753,11 +752,8 @@ impl AlignedFilesVariantCaller {
         // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
         let reference_for_the_merge = self.walk_reference.accessor();
         let contigs = self.walk_reference.contigs();
-        // Taken before `walkers` consumes the run; a handful of regions.
-        let explain = self.explain.clone();
-        let min_site_quality = self.min_site_quality;
-        let low_base_quality_weight = self.low_base_quality_weight;
-        let gathers_fragments = self.gathers_fragments;
+        // Taken before `walkers` consumes the run; the explained loci are a handful of regions.
+        let settings = self.settings.clone();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -777,10 +773,7 @@ impl AlignedFilesVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
-            explain: explain.as_ref(),
-            min_site_quality,
-            low_base_quality_weight,
-            gathers_fragments,
+            settings: &settings,
         };
         let CohortCallingOutcome {
             calling,
@@ -798,7 +791,7 @@ impl AlignedFilesVariantCaller {
                 hand_over(&record, windows, fragments)
             };
             let mut release = RecordRelease::new(
-                gathers_fragments,
+                settings.gathers_fragments,
                 ReleaseBatching::OneAtATime,
                 &prepare,
                 &mut take,
@@ -850,20 +843,8 @@ pub(crate) struct CohortCallingInputs<'a> {
     pub padding_reference: WindowedRefSeq,
     /// The reference's contig names, which the progress lines print the position against.
     pub contigs: &'a ContigList,
-    /// **The loci to explain, `None` when the run was asked to explain none** — the one
-    /// question each locus is asked (`doc/devel/ng/spec/explain_loci.md`).
-    pub explain: Option<&'a ExplainRegions>,
-    /// The site quality below which a called locus is not written (`--min-site-quality`).
-    pub min_site_quality: Phred,
-    /// How many times its tail the low-base-quality penalty charges; zero leaves it off
-    /// (`--low-base-quality-weight`, `doc/devel/ng/spec/low_base_quality.md`).
-    pub low_base_quality_weight: f64,
-    /// **Whether each written locus asks the merge which allele every read showed** (read phase
-    /// spec §2.2) — the read alleles the fragment keeper turns into fragments. Off where the
-    /// output will read no fragments ([`writer_reads_fragments`](crate::vcf::writer_reads_fragments)):
-    /// asking derives the locus's alleles a second time, on the thread that called it, for
-    /// nothing. A record written with it off carries no read alleles and is otherwise the same.
-    pub gathers_fragments: bool,
+    /// The run's own settings. The depth ceiling among them is the sources' and is not read here.
+    pub settings: &'a CallingSettings,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -938,11 +919,9 @@ fn split_the_inputs<'a, G, Source>(
         candidate_selection,
         padding_reference,
         contigs,
-        explain,
-        min_site_quality,
-        low_base_quality_weight,
-        gathers_fragments,
+        settings,
     } = inputs;
+    let explain = settings.explain.as_ref();
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
     }
@@ -967,9 +946,9 @@ fn split_the_inputs<'a, G, Source>(
         // become two different facts.
         run_sample_count: cache.sample_count(),
         padding_reference,
-        min_site_quality,
-        low_base_quality_weight,
-        gathers_fragments,
+        min_site_quality: settings.min_site_quality,
+        low_base_quality_weight: settings.low_base_quality_weight,
+        gathers_fragments: settings.gathers_fragments,
     };
     let ground = CallingGround {
         segmentation,
@@ -2490,7 +2469,20 @@ pub(super) fn refuse_two_references_that_are_not_one(
 
 /// What a refusal names when the reference has checksums but no path to point at — unreachable
 /// while checksums only come from reading a FASTA, and readable rather than blank if it ever is.
-pub(super) const A_REFERENCE_WITH_NO_PATH: &str = "(a reference read from its index alone)";
+const A_REFERENCE_WITH_NO_PATH: &str = "(a reference read from its index alone)";
+
+/// **The reference's path, as the reference refusals name it**: the checksummed copy's FASTA,
+/// else the opened one's, else [`A_REFERENCE_WITH_NO_PATH`].
+pub(super) fn reference_path_to_name<'a>(
+    opened: &'a ReferenceInfo,
+    with_checksums: &'a ReferenceInfo,
+) -> &'a std::path::Path {
+    with_checksums
+        .fasta_path
+        .as_deref()
+        .or(opened.fasta_path.as_deref())
+        .unwrap_or_else(|| std::path::Path::new(A_REFERENCE_WITH_NO_PATH))
+}
 
 /// Compare every sample's contig checksums against the reference's.
 ///
@@ -6200,6 +6192,11 @@ mod records_handed_over_as_the_run_finishes_them {
             source: Box::new(std::io::Error::other("the source gave out")),
         }));
 
+        let settings = CallingSettings {
+            min_site_quality: Phred::ZERO,
+            low_base_quality_weight: 0.0,
+            ..CallingSettings::default()
+        };
         let inputs = CohortCallingInputs {
             segmentation: &segmentation,
             merge_parameters,
@@ -6208,10 +6205,7 @@ mod records_handed_over_as_the_run_finishes_them {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
-            explain: None,
-            min_site_quality: Phred::ZERO,
-            low_base_quality_weight: 0.0,
-            gathers_fragments: true,
+            settings: &settings,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(

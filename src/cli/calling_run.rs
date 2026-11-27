@@ -303,6 +303,26 @@ const NG_SLIPPAGE_REFIT_FREE: &str = "NG_SLIPPAGE_REFIT_FREE";
 /// documented in `doc/user/methods.md`; this variable exists only to measure without it.
 const NG_TRACT_DISCOVERY: &str = "NG_TRACT_DISCOVERY";
 
+/// **The run's own settings, from the flags both calling commands share** — built once here so the
+/// two commands cannot configure a run two ways. Fragments are gathered, the default; the command
+/// turns that off once its header says the output reads none
+/// ([`with_fragments_gathered`](crate::run::callers::AlignedFilesVariantCaller::with_fragments_gathered)).
+pub fn calling_settings(
+    max_depth: u32,
+    explain: Option<&crate::run::explain::ExplainRegions>,
+    min_site_quality: f32,
+    low_base_quality_weight: f64,
+) -> crate::run::callers::CallingSettings {
+    crate::run::callers::CallingSettings {
+        depth_ceiling: crate::run::depth_ceiling::DepthCeiling::at(max_depth),
+        explain: explain.cloned(),
+        min_site_quality: crate::types::Phred::try_new(min_site_quality)
+            .expect("`parse_min_site_quality` admits only valid qualities"),
+        low_base_quality_weight,
+        ..crate::run::callers::CallingSettings::default()
+    }
+}
+
 /// The calling-loop configuration this run asks for: the shipped defaults, with the slippage
 /// re-fit's round count read once from [`NG_SLIPPAGE_REFIT_ROUNDS`], its pull-backs
 /// zeroed where [`NG_SLIPPAGE_REFIT_FREE`] asks for the free setting, and the discovery
