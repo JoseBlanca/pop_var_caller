@@ -1916,6 +1916,262 @@ pub fn where_the_numbers_came_from(parameters: Option<&Path>) -> String {
     }
 }
 
+/// **What a calling pass produced, in either mode** — the part of the run's tail that differs
+/// between the two commands.
+pub enum CalledRun {
+    /// Direct mode's: the calling, and what each sample's walk saw.
+    Walked(crate::run::WrittenCohort),
+    /// psp mode's: the calling, and what this run drew out of each stored file.
+    Stored(
+        crate::run::callers::CohortCallingTallies,
+        crate::run::psp_caller::StoredCohortTallies,
+    ),
+}
+
+impl CalledRun {
+    fn calling_mut(&mut self) -> &mut crate::run::callers::CohortCallingTallies {
+        match self {
+            Self::Walked(written) => &mut written.calling,
+            Self::Stored(calling, _) => calling,
+        }
+    }
+
+    fn window_coverage_histograms_mut(
+        &mut self,
+    ) -> &mut Vec<crate::window_coverage::SampleHistogram> {
+        match self {
+            Self::Walked(written) => &mut written.window_coverage_histograms,
+            Self::Stored(_, stored) => &mut stored.window_coverage_histograms,
+        }
+    }
+
+    fn report<'a>(
+        &'a self,
+        contigs: &'a ContigList,
+        read_groups: &'a ReadGroups,
+        parameters_file: &'a ParametersFile,
+        analysed: &crate::region_typing::GenomeRegions,
+        bounds: crate::run::report::BoundsTheRunCalledUnder,
+    ) -> RunReport<'a> {
+        match self {
+            Self::Walked(written) => RunReport::of(
+                written,
+                contigs,
+                read_groups,
+                parameters_file,
+                analysed,
+                bounds,
+            ),
+            Self::Stored(calling, stored) => RunReport::of_a_stored_cohort(
+                calling,
+                stored,
+                contigs,
+                read_groups,
+                parameters_file,
+                analysed,
+                bounds,
+            ),
+        }
+    }
+}
+
+/// **What the run's tail reads beside the calls**: everything both commands had built before
+/// calling and hand on unchanged.
+pub struct RunTail<'a> {
+    /// The VCF's path, or `-`.
+    pub output: &'a Path,
+    /// The `--explain-loci` regions and the table they are written to, if asked for.
+    pub explain: Option<&'a (crate::run::explain::ExplainRegions, PathBuf)>,
+    /// The reference's contigs.
+    pub contigs: &'a ContigList,
+    /// The run's samples, in its sample order.
+    pub sample_names: &'a [String],
+    /// Each sample's inbreeding coefficient, in the run's sample order.
+    pub inbreeding_by_sample: &'a [InbreedingF],
+    /// What the hidden-duplication filter was asked for; `None` when it is off.
+    pub asked_for: Option<crate::run::paralog_filter::WhatTheOperatorAskedFor>,
+    /// The VCF's header.
+    pub metadata: VcfHeaderMetadata,
+    /// The run's ploidy.
+    pub ploidy: Ploidy,
+    /// The run-wide read-group table.
+    pub read_groups: &'a ReadGroups,
+    /// The parameters file the run logged.
+    pub parameters_file: &'a ParametersFile,
+    /// The ground the run analysed, as the report states it.
+    pub analysed: &'a crate::region_typing::GenomeRegions,
+    /// The bounds the run called under, as the report states them.
+    pub bounds: crate::run::report::BoundsTheRunCalledUnder,
+    /// The satellite bases `--call-satellites` handed to the generic path.
+    pub satellite_bases_on_the_generic_path: u64,
+    /// When the run started, for the closing line.
+    pub started: std::time::Instant,
+    /// The run's log, named in the closing line.
+    pub log: &'a Path,
+}
+
+/// What can stop the run's tail. Each command turns it into its own error, with the same text.
+#[derive(Debug)]
+pub enum RunTailError {
+    /// The calls could not be written, or the records could not be parked for the filter.
+    CallsNotWritten {
+        /// Where they were going.
+        path: PathBuf,
+        /// What pass one said.
+        source: crate::run::paralog_filter::PassOneError,
+    },
+    /// The hidden-duplication filter could not finish the run.
+    ParalogFilter {
+        /// What the filter said.
+        source: crate::run::paralog_filter::ParalogFilterError,
+    },
+    /// The `--explain-loci` explanation could not be written.
+    ExplanationNotWritten {
+        /// The TSV.
+        path: PathBuf,
+        /// What the write hit.
+        source: std::io::Error,
+    },
+}
+
+/// **The tail both calling commands share, from the moment calling returns**: finish the sink,
+/// run the hidden-duplication filter's passes two and three on what it parked, write the
+/// `--explain-loci` table, log the run's report, and say how many records were written.
+///
+/// Only the last step, [`RunScratch::the_run_succeeded`], counts as success: a run that fails
+/// here leaves `scratch` to be removed, or kept, as its flags say.
+///
+/// # Errors
+///
+/// [`RunTailError`], which each command turns into its own error.
+pub fn finish_the_run<E: From<RunTailError>>(
+    sink: crate::run::paralog_filter::CalledRecordSink,
+    mut called: CalledRun,
+    scratch: &mut Option<RunScratch>,
+    tail: RunTail<'_>,
+) -> Result<(), E> {
+    use crate::run::paralog_filter::{self, CalledRecordSink, PassOneError};
+    let RunTail {
+        output,
+        explain,
+        contigs,
+        sample_names,
+        inbreeding_by_sample,
+        asked_for,
+        metadata,
+        ploidy,
+        read_groups,
+        parameters_file,
+        analysed,
+        bounds,
+        satellite_bases_on_the_generic_path,
+        started,
+        log,
+    } = tail;
+    // **The spill has to stay alive until pass three has read it**, so the sink is taken apart
+    // rather than consumed: `finish` would drop the file the next two passes need.
+    let (parked, finished_straight) = match sink {
+        CalledRecordSink::StraightToTheVcf(writer) => {
+            let finished = writer
+                .finish()
+                .map_err(|source| RunTailError::CallsNotWritten {
+                    path: output.to_path_buf(),
+                    source: PassOneError::Vcf(source),
+                })?;
+            (None, Some(finished))
+        }
+        CalledRecordSink::ParkedOnTheSpill(mut spilling) => {
+            spilling
+                .finish_parking()
+                .map_err(|source| RunTailError::CallsNotWritten {
+                    path: output.to_path_buf(),
+                    source: PassOneError::Spill(source),
+                })?;
+            (Some(spilling), None)
+        }
+    };
+
+    // **Passes two and three, through the one function both subcommands call**, so direct mode
+    // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
+    // The filter is asked for its verdicts on the records the explained loci wrote.
+    let mut paralog_explanations = explain.map(|_| {
+        crate::run::explain::ParalogExplanations::wanting(&called.calling_mut().explanations)
+    });
+    let filtered = match &parked {
+        Some(spilling) => Some(
+            paralog_filter::fit_score_and_write_the_calls_explaining(
+                spilling.spill(),
+                // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
+                // each sample's bins are freed as its model is fitted; cloning here would defeat
+                // that and hold a second copy of every sample's — about 80 kB each. Nothing else
+                // reads the field afterwards.
+                std::mem::take(called.window_coverage_histograms_mut()),
+                inbreeding_by_sample,
+                // PANIC-FREE: the sink is the spill only where `asked_for` is `Some`, and this
+                // arm is reached only through that sink.
+                asked_for.expect("the records are parked only when a filter was asked for"),
+                output,
+                metadata,
+                ploidy,
+                paralog_explanations.as_mut(),
+            )
+            .map_err(|source| {
+                // A stop on memory comes after calling: keep what resuming needs.
+                if let Some(scratch) = scratch.as_mut() {
+                    scratch.keep_if_refinement_stopped(&source);
+                }
+                RunTailError::ParalogFilter { source }
+            })?,
+        ),
+        None => None,
+    };
+
+    if let Some(verdicts) = paralog_explanations {
+        verdicts.add_to(&mut called.calling_mut().explanations);
+    }
+    if let Some((_, tsv)) = explain {
+        let mut explanations = std::mem::take(&mut called.calling_mut().explanations);
+        crate::run::explain::write_explanations(tsv, &mut explanations, contigs, sample_names)
+            .map_err(|source| RunTailError::ExplanationNotWritten {
+                path: tsv.clone(),
+                source,
+            })?;
+    }
+
+    // **What the filter did goes at the end of the report**, and is empty on a run with the
+    // filter off — so an off run prints what it printed before the filter existed.
+    let filter_lines = filtered
+        .as_ref()
+        .map(paralog_filter::what_to_tell_the_operator)
+        .unwrap_or_default();
+    log_the_report(
+        output,
+        &called
+            .report(contigs, read_groups, parameters_file, analysed, bounds)
+            .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
+        &filter_lines,
+    );
+    // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives
+    // it left uncalled, so neither calling's count nor the filter's is the file's.
+    let finished = finished_straight
+        .or_else(|| filtered.as_ref().map(|run| run.finished.clone()))
+        .expect("the calls were written by one of the two paths");
+    report_neighbour_evidence(&finished, output);
+    report_read_phase(&finished);
+    let records = finished.records_written;
+    tracing::info!(
+        "done: {} records written to {} in {}",
+        run_output::with_thousands(records),
+        where_the_calls_went(output),
+        run_output::elapsed_text(started.elapsed())
+    );
+    tracing::info!("log: {}", log.display());
+    if let Some(scratch) = scratch.as_mut() {
+        scratch.the_run_succeeded();
+    }
+    Ok(())
+}
+
 /// **The run report, written to the run's log**: the terminal says only how the run ended, and
 /// the counts behind that are the log's (`doc/devel/ng/spec/command_line.md` §7.2). Each line is
 /// prefixed `report:` so it can be found among the log's events; `filter_lines` are the

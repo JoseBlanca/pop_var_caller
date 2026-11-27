@@ -70,10 +70,10 @@ use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN, GenomeRegions};
-use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
+use crate::run::explain::ExplainRegions;
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::run::report::BoundsTheRunCalledUnder;
-use crate::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
+use crate::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError};
 use crate::types::InbreedingF;
 use crate::types::MAX_MOTIF_LEN;
 use crate::vcf::writer::{VcfWriteError, VcfWriter, is_standard_output};
@@ -446,6 +446,21 @@ fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_
     }
 }
 
+/// The shared tail's errors, as this command words them.
+impl From<calling_run::RunTailError> for CallFromAlignmentsCliError {
+    fn from(error: calling_run::RunTailError) -> Self {
+        match error {
+            calling_run::RunTailError::CallsNotWritten { path, source } => {
+                Self::CallsNotWritten { path, source }
+            }
+            calling_run::RunTailError::ParalogFilter { source } => Self::ParalogFilter { source },
+            calling_run::RunTailError::ExplanationNotWritten { path, source } => {
+                Self::ExplanationNotWritten { path, source }
+            }
+        }
+    }
+}
+
 /// Call `--alignment`'s cohort over `--regions` and write `--output`. Logs the run report when it
 /// finishes.
 ///
@@ -716,7 +731,7 @@ pub fn run_call_from_alignments(
         ))
     };
 
-    let mut written = caller
+    let written = caller
         .call_cohort_handing_each_record_over(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
             &mut |record, window_coverage, fragments| {
@@ -725,122 +740,31 @@ pub fn run_call_from_alignments(
         )
         .map_err(|source| CallFromAlignmentsCliError::Run { source })?;
 
-    // **The spill has to stay alive until pass three has read it**, so the sink is taken apart
-    // rather than consumed: `finish` would drop the file the next two passes need.
-    let (parked, finished_straight) = match sink {
-        CalledRecordSink::StraightToTheVcf(writer) => {
-            let finished =
-                writer
-                    .finish()
-                    .map_err(|source| CallFromAlignmentsCliError::CallsNotWritten {
-                        path: args.output.clone(),
-                        source: crate::run::paralog_filter::PassOneError::Vcf(source),
-                    })?;
-            (None, Some(finished))
-        }
-        CalledRecordSink::ParkedOnTheSpill(mut spilling) => {
-            spilling.finish_parking().map_err(|source| {
-                CallFromAlignmentsCliError::CallsNotWritten {
-                    path: args.output.clone(),
-                    source: crate::run::paralog_filter::PassOneError::Spill(source),
-                }
-            })?;
-            (Some(spilling), None)
-        }
-    };
-
-    // **Passes two and three, through the one function both subcommands call**, so direct mode
-    // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
-    // The filter is asked for its verdicts on the records the explained loci wrote.
-    let mut paralog_explanations = explain
-        .as_ref()
-        .map(|_| ParalogExplanations::wanting(&written.calling.explanations));
-    let filtered = match &parked {
-        Some(spilling) => Some(
-            paralog_filter::fit_score_and_write_the_calls_explaining(
-                spilling.spill(),
-                // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
-                // each sample's bins are freed as its model is fitted; cloning here would defeat
-                // that and hold a second copy of every sample's — about 80 kB each. Nothing else
-                // reads the field afterwards.
-                std::mem::take(&mut written.window_coverage_histograms),
-                &inbreeding_by_sample,
-                // PANIC-FREE: the sink is the spill only where `asked_for` is `Some`, and this
-                // arm is reached only through that sink.
-                asked_for.expect("the records are parked only when a filter was asked for"),
-                &args.output,
-                metadata,
-                ploidy,
-                paralog_explanations.as_mut(),
-            )
-            .map_err(|source| {
-                // A stop on memory comes after calling: keep what resuming needs.
-                if let Some(scratch) = &mut scratch {
-                    scratch.keep_if_refinement_stopped(&source);
-                }
-                CallFromAlignmentsCliError::ParalogFilter { source }
-            })?,
-        ),
-        None => None,
-    };
-
-    if let Some(verdicts) = paralog_explanations {
-        verdicts.add_to(&mut written.calling.explanations);
-    }
-    if let Some((_, tsv)) = &explain {
-        write_explanations(
-            tsv,
-            &mut std::mem::take(&mut written.calling.explanations),
-            &contigs,
-            &sample_names,
-        )
-        .map_err(|source| CallFromAlignmentsCliError::ExplanationNotWritten {
-            path: tsv.clone(),
-            source,
-        })?;
-    }
-
-    // **What the filter did goes at the end of the report**, and is empty on a run with the
-    // filter off — so an off run prints what it printed before the filter existed.
-    let filter_lines = filtered
-        .as_ref()
-        .map(paralog_filter::what_to_tell_the_operator)
-        .unwrap_or_default();
-    calling_run::log_the_report(
-        &args.output,
-        &RunReport::of(
-            &written,
-            &contigs,
-            &read_groups,
-            &parameters_file,
-            &analysed_for_the_report,
-            BoundsTheRunCalledUnder {
+    calling_run::finish_the_run::<CallFromAlignmentsCliError>(
+        sink,
+        calling_run::CalledRun::Walked(written),
+        &mut scratch,
+        calling_run::RunTail {
+            output: &args.output,
+            explain: explain.as_ref(),
+            contigs: &contigs,
+            sample_names: &sample_names,
+            inbreeding_by_sample: &inbreeding_by_sample,
+            asked_for,
+            metadata,
+            ploidy,
+            read_groups: &read_groups,
+            parameters_file: &parameters_file,
+            analysed: &analysed_for_the_report,
+            bounds: BoundsTheRunCalledUnder {
                 max_cohort_locus_span: merge_parameters.max_cohort_locus_span.get(),
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
-        )
-        .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
-        &filter_lines,
-    );
-    // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives
-    // it left uncalled, so neither calling's count nor the filter's is the file's.
-    let finished = finished_straight
-        .or_else(|| filtered.as_ref().map(|run| run.finished.clone()))
-        .expect("the calls were written by one of the two paths");
-    calling_run::report_neighbour_evidence(&finished, &args.output);
-    calling_run::report_read_phase(&finished);
-    let records = finished.records_written;
-    tracing::info!(
-        "done: {} records written to {} in {}",
-        run_output::with_thousands(records),
-        calling_run::where_the_calls_went(&args.output),
-        run_output::elapsed_text(started.elapsed())
-    );
-    tracing::info!("log: {}", log.display());
-    if let Some(scratch) = &mut scratch {
-        scratch.the_run_succeeded();
-    }
-    Ok(())
+            satellite_bases_on_the_generic_path,
+            started,
+            log: &log,
+        },
+    )
 }
 
 /// **The run's first words**: on the terminal, what it is doing and on how much; in the log, the
