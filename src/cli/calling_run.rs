@@ -303,6 +303,295 @@ const NG_SLIPPAGE_REFIT_FREE: &str = "NG_SLIPPAGE_REFIT_FREE";
 /// documented in `doc/user/methods.md`; this variable exists only to measure without it.
 const NG_TRACT_DISCOVERY: &str = "NG_TRACT_DISCOVERY";
 
+/// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
+///
+/// **About one record in a hundred of those the filter removes was really a variant.** It was
+/// `0` while the filter's scoring and writing passes did not exist, because that default would
+/// have parked every record and produced no VCF; both passes are built now, so the spec's value
+/// stands and the filter is on unless an operator turns it off with `--hidden-dup-fdr 0`.
+const DEFAULT_PARALOG_FDR: f64 = 0.01;
+
+// **The flags `call-from-alignments` and `call-from-psps` share**, declared once and flattened
+// into both. Two structs rather than one because `--help` lists a command's flags in the order
+// they are declared: the shared flags sit on either side of `--max-depth`, whose text differs
+// between the commands, so each half is flattened where it stood. A new shared flag goes into
+// one of these, and the tests' argument values come from `for_tests` below.
+//
+// (Plain comments rather than doc comments: clap reads a flattened struct's doc comment as the
+// command's description.)
+#[derive(Debug, clap::Args, Clone)]
+pub struct CallingFlags {
+    /// Copies of each chromosome in every sample. Defaults to 2, or to the parameters file's.
+    ///
+    /// With a parameters file it may only repeat the file's ploidy, which the numbers were
+    /// fitted at. At most 16.
+    #[arg(long)]
+    pub ploidy: Option<u8>,
+
+    /// The site quality (QUAL) below which a site is not written. 0 writes every site.
+    ///
+    /// The default, 1, drops the sites whose artifact penalties outweigh their evidence, which
+    /// removes most false calls at little cost in true ones.
+    #[arg(
+        long,
+        default_value_t = crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+        value_parser = crate::cli::calling_run::parse_min_site_quality
+    )]
+    pub min_site_quality: f32,
+
+    /// Charge a site whose variant reads carry more low base qualities than its reference reads,
+    /// at this many times the test's tail, subtracted from QUAL (`BQPEN`). 0 leaves the test off
+    /// (`doc/devel/ng/spec/low_base_quality.md`).
+    #[arg(
+        long,
+        default_value_t = crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+        value_parser = crate::cli::calling_run::parse_low_base_quality_weight
+    )]
+    pub low_base_quality_weight: f64,
+
+    /// Threads to use; 0 uses every core. The output is the same at any number.
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
+
+    /// Replace the VCF and the log if they are already there. Without it, a run refuses before
+    /// reading anything.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Where to write the run's log. Defaults to `pvc_calls.log` beside the VCF.
+    ///
+    /// The log holds the inputs by name, every setting's value, and the run's full report.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+
+    /// The directory for the run's scratch files. Defaults to the VCF's directory, or the
+    /// working directory when the VCF goes to standard output.
+    ///
+    /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
+    /// it ends, whether it succeeded or failed, unless --keep-tmp-on-error; a run that is
+    /// killed, or stops on an internal error, leaves it behind. While the hidden-dup filter is
+    /// on, every call waits there until the whole genome is called: several times the
+    /// compressed VCF's size.
+    #[arg(long)]
+    pub tmp_dir: Option<PathBuf>,
+
+    /// Keep the run's scratch directory, and the hidden-dup filter's spill in it, when the run
+    /// stops on an error. Its path is logged. A run that finishes removes it as usual. A run
+    /// stopped by a refinement window over --refine-window-bytes, after calling, keeps it with or
+    /// without this flag, so `pvc resume-calling` can finish it.
+    ///
+    /// The spill holds every called record, so on a large cohort the kept directory can take
+    /// terabytes: remove it once it is no longer needed.
+    #[arg(long)]
+    pub keep_tmp_on_error: bool,
+}
+
+// The advanced flags both calling commands share; see `CallingFlags`.
+#[derive(Debug, clap::Args, Clone)]
+pub struct AdvancedCallingFlags {
+    /// The most alleles a SNP/indel locus is called over, the reference among them.
+    ///
+    /// Where more segregate, the worst supported are left out. Repeat (STR) loci are not
+    /// affected: they have their own limit of 32.
+    #[arg(
+        long,
+        default_value_t = crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        help_heading = "Advanced"
+    )]
+    pub max_generic_alleles: u16,
+
+    /// The widest locus assembled, in reference bases — and so the longest deletion called.
+    ///
+    /// The run's log says how many loci were too wide and how long they were. Long reads want a
+    /// larger value than short ones.
+    #[arg(long, default_value_t = crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
+    pub max_locus_span: u32,
+
+    /// The false-discovery rate allowed among the calls the hidden-dup filter removes. 0 turns
+    /// the filter off.
+    ///
+    /// The filter removes calls better explained by a hidden duplication — two copies of a
+    /// sequence collapsed onto one in the reference — than by a variant. While it is on, the
+    /// run needs scratch space in --tmp-dir of several times the compressed VCF's size.
+    #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
+    pub hidden_dup_fdr: f64,
+
+    /// Keep the calls the hidden-dup filter removes, marked `hiddenDup` in the FILTER column,
+    /// instead of dropping them.
+    #[arg(long, help_heading = "Advanced")]
+    pub hidden_dup_tag: bool,
+
+    /// The width, in bases, of the stretch of genome over which the hidden-dup filter estimates
+    /// how common hidden duplications are. 0 uses one genome-wide rate.
+    ///
+    /// Each call's rate comes from the calls within half the window on either side, pulled toward
+    /// the genome-wide rate where few calls are near.
+    #[arg(
+        long,
+        value_name = "BASES",
+        default_value_t = crate::run::paralog_filter::DEFAULT_HIDDEN_DUP_WINDOW_BASES,
+        help_heading = "Advanced"
+    )]
+    pub hidden_dup_window: u64,
+
+    /// Whether to re-call each sample's genotypes with the evidence of the samples it shares
+    /// stretches of chromosome with, and of its own neighbouring sites. Off by default; `auto`
+    /// runs it on a diploid cohort of at least 10 samples whose median inbreeding is at least
+    /// 0.5, and `on` on any diploid cohort of two or more. The VCF header says whether it ran
+    /// and why. Where it does not run, on a diploid cohort, phase is
+    /// written from reads alone (`GT` `a|b` with a `PS`); the header's `##readBackedPhase=` line
+    /// states its thresholds.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = RefineGenotypesArg::Off,
+        help_heading = "Advanced"
+    )]
+    pub refine_genotypes: RefineGenotypesArg,
+
+    /// The share of the neighbour-evidence pass's drawn paths that must agree on how two
+    /// neighbouring heterozygous sites are phased for the VCF to phase them together. 1, all of
+    /// them, is the strictest; lower values give longer phase blocks with more wrong links.
+    /// The default, 0.8, was measured to keep wrong links under 1 in 200 from 12 samples up.
+    #[arg(
+        long,
+        default_value = "0.8",
+        value_parser = parse_path_agreement,
+        help_heading = "Advanced"
+    )]
+    pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
+
+    /// The most memory, in bytes, one window of genotype refinement may hold: its records' lines,
+    /// numbers and reads, and each sample's state while it is solved. Windows shrink to fit it,
+    /// down to --refine-window-floor; a cohort whose smallest window still does not fit stops
+    /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
+    /// walk's arrays, about 1 kB a record it walks, and the memory allocator holds about a sixth
+    /// more: on 2,176 samples at 48 threads the process peaked at about 1.3 times the budget. The
+    /// run estimates that peak before calling and at each window, and warns, without stopping,
+    /// where it is above 85% of the memory the run may use (the machine's, or the job's limit
+    /// where lower, such as a systemd unit's MemoryMax), naming a budget that would fit.
+    #[arg(
+        long,
+        default_value_t = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+        help_heading = "Advanced"
+    )]
+    pub refine_window_bytes: u64,
+
+    /// The shortest each margin of a genotype refinement window may become when windows shrink to
+    /// fit --refine-window-bytes, in bases; the core shrinks with them. Shorter margins hold less
+    /// memory but may cut off evidence: a sample copies stretches of up to about 300 kb.
+    #[arg(
+        long,
+        value_name = "BASES",
+        default_value_t = crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_window_floor: u64,
+
+    /// The shortest a genotype refinement window's core may become, in bases, when a window with
+    /// margins at --refine-window-floor is still over --refine-window-bytes. The margins keep their
+    /// length, so no record loses the evidence around it; a shorter core only makes more windows,
+    /// each solving its margins again. Defaults to --refine-window-floor.
+    #[arg(
+        long,
+        value_name = "BASES",
+        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
+        help_heading = "Advanced"
+    )]
+    pub refine_core_floor: Option<u64>,
+
+    /// Walk at most this many records a kb, evenly spaced, in each genotype refinement window's
+    /// margins farther than 50 kb from its core; 0 walks every record. Stretches no denser than
+    /// that are walked in full. The core and the 50 kb next to it are always walked in full, so
+    /// every record is refined as before but sees fewer of the far records when choosing which
+    /// samples it resembles; the records not walked are held compressed. A window then holds
+    /// less memory and takes less time: on 2,176 tomato samples, 5 a kb held 41% less and took
+    /// half the time, with as many genotypes wrong.
+    #[arg(
+        long,
+        value_name = "RECORDS",
+        default_value = crate::neighbour_evidence::windows::DEFAULT_MARGIN_DENSITY,
+        value_parser = parse_margin_density,
+        help_heading = "Advanced"
+    )]
+    pub refine_margin_density: MarginDensity,
+
+    /// The longest a refinement window's core and each margin may be, in bases, before the budget
+    /// shrinks them (at most 1 Mb, the default margin; the default core is 2 Mb). For measurements
+    /// on short contigs, where a default window would span the contig with no margin.
+    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
+    pub refine_window_max: Option<u64>,
+
+    /// The longest a refinement window's core may be, in bases, before the budget shrinks it. For
+    /// measuring how core length alone changes the output.
+    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
+    pub refine_core_max: Option<u64>,
+}
+
+#[cfg(test)]
+impl CallingFlags {
+    /// The shared flags at their defaults, for a test to override the few it is about.
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            ploidy: None,
+            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+            threads: 0,
+            force: false,
+            log: None,
+            tmp_dir: None,
+            keep_tmp_on_error: false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl AdvancedCallingFlags {
+    /// The advanced flags as the tests hand them to a command: the hidden-duplication filter off,
+    /// refinement on `auto`, every drawn path required to agree before phasing, and the window
+    /// settings at their defaults.
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            max_generic_alleles: crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES
+                .get(),
+            max_locus_span: crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            hidden_dup_fdr: 0.0,
+            hidden_dup_tag: false,
+            hidden_dup_window: 0,
+            refine_genotypes: RefineGenotypesArg::Auto,
+            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
+            refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
+            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
+            refine_core_floor: None,
+            refine_margin_density: MarginDensity(None),
+            refine_window_max: None,
+            refine_core_max: None,
+        }
+    }
+}
+
+/// **The run's own settings, from the flags both calling commands share** — built once here so the
+/// two commands cannot configure a run two ways. Fragments are gathered, the default; the command
+/// turns that off once its header says the output reads none
+/// ([`with_fragments_gathered`](crate::run::callers::AlignedFilesVariantCaller::with_fragments_gathered)).
+pub fn calling_settings(
+    max_depth: u32,
+    explain: Option<&crate::run::explain::ExplainRegions>,
+    min_site_quality: f32,
+    low_base_quality_weight: f64,
+) -> crate::run::callers::CallingSettings {
+    crate::run::callers::CallingSettings {
+        depth_ceiling: crate::run::depth_ceiling::DepthCeiling::at(max_depth),
+        explain: explain.cloned(),
+        min_site_quality: crate::types::Phred::try_new(min_site_quality)
+            .expect("`parse_min_site_quality` admits only valid qualities"),
+        low_base_quality_weight,
+        ..crate::run::callers::CallingSettings::default()
+    }
+}
+
 /// The calling-loop configuration this run asks for: the shipped defaults, with the slippage
 /// re-fit's round count read once from [`NG_SLIPPAGE_REFIT_ROUNDS`], its pull-backs
 /// zeroed where [`NG_SLIPPAGE_REFIT_FREE`] asks for the free setting, and the discovery
@@ -1625,6 +1914,262 @@ pub fn where_the_numbers_came_from(parameters: Option<&Path>) -> String {
         }
         Err(_) => name.into_owned(),
     }
+}
+
+/// **What a calling pass produced, in either mode** — the part of the run's tail that differs
+/// between the two commands.
+pub enum CalledRun {
+    /// Direct mode's: the calling, and what each sample's walk saw.
+    Walked(crate::run::WrittenCohort),
+    /// psp mode's: the calling, and what this run drew out of each stored file.
+    Stored(
+        crate::run::callers::CohortCallingTallies,
+        crate::run::psp_caller::StoredCohortTallies,
+    ),
+}
+
+impl CalledRun {
+    fn calling_mut(&mut self) -> &mut crate::run::callers::CohortCallingTallies {
+        match self {
+            Self::Walked(written) => &mut written.calling,
+            Self::Stored(calling, _) => calling,
+        }
+    }
+
+    fn window_coverage_histograms_mut(
+        &mut self,
+    ) -> &mut Vec<crate::window_coverage::SampleHistogram> {
+        match self {
+            Self::Walked(written) => &mut written.window_coverage_histograms,
+            Self::Stored(_, stored) => &mut stored.window_coverage_histograms,
+        }
+    }
+
+    fn report<'a>(
+        &'a self,
+        contigs: &'a ContigList,
+        read_groups: &'a ReadGroups,
+        parameters_file: &'a ParametersFile,
+        analysed: &crate::region_typing::GenomeRegions,
+        bounds: crate::run::report::BoundsTheRunCalledUnder,
+    ) -> RunReport<'a> {
+        match self {
+            Self::Walked(written) => RunReport::of(
+                written,
+                contigs,
+                read_groups,
+                parameters_file,
+                analysed,
+                bounds,
+            ),
+            Self::Stored(calling, stored) => RunReport::of_a_stored_cohort(
+                calling,
+                stored,
+                contigs,
+                read_groups,
+                parameters_file,
+                analysed,
+                bounds,
+            ),
+        }
+    }
+}
+
+/// **What the run's tail reads beside the calls**: everything both commands had built before
+/// calling and hand on unchanged.
+pub struct RunTail<'a> {
+    /// The VCF's path, or `-`.
+    pub output: &'a Path,
+    /// The `--explain-loci` regions and the table they are written to, if asked for.
+    pub explain: Option<&'a (crate::run::explain::ExplainRegions, PathBuf)>,
+    /// The reference's contigs.
+    pub contigs: &'a ContigList,
+    /// The run's samples, in its sample order.
+    pub sample_names: &'a [String],
+    /// Each sample's inbreeding coefficient, in the run's sample order.
+    pub inbreeding_by_sample: &'a [InbreedingF],
+    /// What the hidden-duplication filter was asked for; `None` when it is off.
+    pub asked_for: Option<crate::run::paralog_filter::WhatTheOperatorAskedFor>,
+    /// The VCF's header.
+    pub metadata: VcfHeaderMetadata,
+    /// The run's ploidy.
+    pub ploidy: Ploidy,
+    /// The run-wide read-group table.
+    pub read_groups: &'a ReadGroups,
+    /// The parameters file the run logged.
+    pub parameters_file: &'a ParametersFile,
+    /// The ground the run analysed, as the report states it.
+    pub analysed: &'a crate::region_typing::GenomeRegions,
+    /// The bounds the run called under, as the report states them.
+    pub bounds: crate::run::report::BoundsTheRunCalledUnder,
+    /// The satellite bases `--call-satellites` handed to the generic path.
+    pub satellite_bases_on_the_generic_path: u64,
+    /// When the run started, for the closing line.
+    pub started: std::time::Instant,
+    /// The run's log, named in the closing line.
+    pub log: &'a Path,
+}
+
+/// What can stop the run's tail. Each command turns it into its own error, with the same text.
+#[derive(Debug)]
+pub enum RunTailError {
+    /// The calls could not be written, or the records could not be parked for the filter.
+    CallsNotWritten {
+        /// Where they were going.
+        path: PathBuf,
+        /// What pass one said.
+        source: crate::run::paralog_filter::PassOneError,
+    },
+    /// The hidden-duplication filter could not finish the run.
+    ParalogFilter {
+        /// What the filter said.
+        source: crate::run::paralog_filter::ParalogFilterError,
+    },
+    /// The `--explain-loci` explanation could not be written.
+    ExplanationNotWritten {
+        /// The TSV.
+        path: PathBuf,
+        /// What the write hit.
+        source: std::io::Error,
+    },
+}
+
+/// **The tail both calling commands share, from the moment calling returns**: finish the sink,
+/// run the hidden-duplication filter's passes two and three on what it parked, write the
+/// `--explain-loci` table, log the run's report, and say how many records were written.
+///
+/// Only the last step, [`RunScratch::the_run_succeeded`], counts as success: a run that fails
+/// here leaves `scratch` to be removed, or kept, as its flags say.
+///
+/// # Errors
+///
+/// [`RunTailError`], which each command turns into its own error.
+pub fn finish_the_run<E: From<RunTailError>>(
+    sink: crate::run::paralog_filter::CalledRecordSink,
+    mut called: CalledRun,
+    scratch: &mut Option<RunScratch>,
+    tail: RunTail<'_>,
+) -> Result<(), E> {
+    use crate::run::paralog_filter::{self, CalledRecordSink, PassOneError};
+    let RunTail {
+        output,
+        explain,
+        contigs,
+        sample_names,
+        inbreeding_by_sample,
+        asked_for,
+        metadata,
+        ploidy,
+        read_groups,
+        parameters_file,
+        analysed,
+        bounds,
+        satellite_bases_on_the_generic_path,
+        started,
+        log,
+    } = tail;
+    // **The spill has to stay alive until pass three has read it**, so the sink is taken apart
+    // rather than consumed: `finish` would drop the file the next two passes need.
+    let (parked, finished_straight) = match sink {
+        CalledRecordSink::StraightToTheVcf(writer) => {
+            let finished = writer
+                .finish()
+                .map_err(|source| RunTailError::CallsNotWritten {
+                    path: output.to_path_buf(),
+                    source: PassOneError::Vcf(source),
+                })?;
+            (None, Some(finished))
+        }
+        CalledRecordSink::ParkedOnTheSpill(mut spilling) => {
+            spilling
+                .finish_parking()
+                .map_err(|source| RunTailError::CallsNotWritten {
+                    path: output.to_path_buf(),
+                    source: PassOneError::Spill(source),
+                })?;
+            (Some(spilling), None)
+        }
+    };
+
+    // **Passes two and three, through the one function both subcommands call**, so direct mode
+    // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
+    // The filter is asked for its verdicts on the records the explained loci wrote.
+    let mut paralog_explanations = explain.map(|_| {
+        crate::run::explain::ParalogExplanations::wanting(&called.calling_mut().explanations)
+    });
+    let filtered = match &parked {
+        Some(spilling) => Some(
+            paralog_filter::fit_score_and_write_the_calls_explaining(
+                spilling.spill(),
+                // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
+                // each sample's bins are freed as its model is fitted; cloning here would defeat
+                // that and hold a second copy of every sample's — about 80 kB each. Nothing else
+                // reads the field afterwards.
+                std::mem::take(called.window_coverage_histograms_mut()),
+                inbreeding_by_sample,
+                // PANIC-FREE: the sink is the spill only where `asked_for` is `Some`, and this
+                // arm is reached only through that sink.
+                asked_for.expect("the records are parked only when a filter was asked for"),
+                output,
+                metadata,
+                ploidy,
+                paralog_explanations.as_mut(),
+            )
+            .map_err(|source| {
+                // A stop on memory comes after calling: keep what resuming needs.
+                if let Some(scratch) = scratch.as_mut() {
+                    scratch.keep_if_refinement_stopped(&source);
+                }
+                RunTailError::ParalogFilter { source }
+            })?,
+        ),
+        None => None,
+    };
+
+    if let Some(verdicts) = paralog_explanations {
+        verdicts.add_to(&mut called.calling_mut().explanations);
+    }
+    if let Some((_, tsv)) = explain {
+        let mut explanations = std::mem::take(&mut called.calling_mut().explanations);
+        crate::run::explain::write_explanations(tsv, &mut explanations, contigs, sample_names)
+            .map_err(|source| RunTailError::ExplanationNotWritten {
+                path: tsv.clone(),
+                source,
+            })?;
+    }
+
+    // **What the filter did goes at the end of the report**, and is empty on a run with the
+    // filter off — so an off run prints what it printed before the filter existed.
+    let filter_lines = filtered
+        .as_ref()
+        .map(paralog_filter::what_to_tell_the_operator)
+        .unwrap_or_default();
+    log_the_report(
+        output,
+        &called
+            .report(contigs, read_groups, parameters_file, analysed, bounds)
+            .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
+        &filter_lines,
+    );
+    // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives
+    // it left uncalled, so neither calling's count nor the filter's is the file's.
+    let finished = finished_straight
+        .or_else(|| filtered.as_ref().map(|run| run.finished.clone()))
+        .expect("the calls were written by one of the two paths");
+    report_neighbour_evidence(&finished, output);
+    report_read_phase(&finished);
+    let records = finished.records_written;
+    tracing::info!(
+        "done: {} records written to {} in {}",
+        run_output::with_thousands(records),
+        where_the_calls_went(output),
+        run_output::elapsed_text(started.elapsed())
+    );
+    tracing::info!("log: {}", log.display());
+    if let Some(scratch) = scratch.as_mut() {
+        scratch.the_run_succeeded();
+    }
+    Ok(())
 }
 
 /// **The run report, written to the run's log**: the terminal says only how the run ended, and

@@ -147,12 +147,12 @@ fn the_ground_and_the_catalog_have_defaults_a_person_need_not_type() {
     assert!(args.regions.is_none(), "no BED means the whole genome");
     assert!(args.catalog.is_none());
     assert_eq!(
-        args.ploidy, None,
+        args.calling.ploidy, None,
         "a ploidy nobody typed is absent, not two — which is what lets a supplied file's own \
          ploidy be taken without the flag's default contradicting it",
     );
     assert_eq!(
-        calling_run::ploidy_asked_for(args.ploidy)
+        calling_run::ploidy_asked_for(args.calling.ploidy)
             .expect("two is a ploidy")
             .get(),
         calling_run::DEFAULT_PLOIDY,
@@ -171,8 +171,8 @@ fn a_ploidy_past_what_the_caller_scores_is_refused_and_names_the_ceiling() {
     argv.extend(["--ploidy", "20"]);
     let args = args_of(&argv);
 
-    let refused =
-        calling_run::ploidy_asked_for(args.ploidy).expect_err("twenty copies cannot be scored");
+    let refused = calling_run::ploidy_asked_for(args.calling.ploidy)
+        .expect_err("twenty copies cannot be scored");
 
     let rendered = crate::error_render::format_error_chain(&refused);
     assert!(
@@ -186,6 +186,7 @@ fn a_ploidy_past_what_the_caller_scores_is_refused_and_names_the_ceiling() {
                 argv.extend(["--ploidy", "16"]);
                 argv
             })
+            .calling
             .ploidy
         )
         .is_ok(),
@@ -199,7 +200,7 @@ fn a_ploidy_of_zero_is_refused() {
     let mut argv = a_defaults_run();
     argv.extend(["--ploidy", "0"]);
 
-    assert!(calling_run::ploidy_asked_for(args_of(&argv).ploidy).is_err());
+    assert!(calling_run::ploidy_asked_for(args_of(&argv).calling.ploidy).is_err());
 }
 
 /// **`--output` naming a directory is refused before the reference is read.**
@@ -278,12 +279,16 @@ fn an_existing_vcf_is_refused_unless_the_run_is_forced() {
         "an earlier run's calls\n",
     );
 
+    let unforced = a_run_writing_to(output);
     let forced = CallFromAlignmentsArgs {
-        force: true,
-        log: Some(directory.path().join("forced.log")),
-        tmp_dir: None,
-        keep_tmp_on_error: false,
-        ..a_run_writing_to(output)
+        calling: crate::cli::calling_run::CallingFlags {
+            force: true,
+            log: Some(directory.path().join("forced.log")),
+            tmp_dir: None,
+            keep_tmp_on_error: false,
+            ..unforced.calling
+        },
+        ..unforced
     };
     let past_the_check = run_call_from_alignments(&forced).expect_err("there is no reference");
     assert!(
@@ -305,33 +310,11 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         catalog: None,
         alignments: vec![PathBuf::from("one.cram")],
         output,
-        force: false,
-        log: None,
-        tmp_dir: None,
-        keep_tmp_on_error: false,
         regions: None,
         parameters: None,
         defaults: true,
-        ploidy: None,
         build_index_if_missing: false,
-        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        hidden_dup_fdr: 0.0,
-        min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        low_base_quality_weight:
-            crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-        hidden_dup_tag: false,
-        hidden_dup_window: 0,
-        refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-        phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-        refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-        refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-        refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-        refine_window_max: None,
-        refine_core_floor: None,
-        refine_core_max: None,
         locus_builder_regions_len: None,
-        threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
@@ -341,6 +324,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         max_reads_per_position: None,
         max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
+        calling: crate::cli::calling_run::CallingFlags::for_tests(),
+        advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
     }
 }
 
@@ -400,33 +385,11 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         catalog: None,
         alignments: vec![directory.path().join("one.cram")],
         output: directory.path().join("calls.vcf"),
-        force: false,
-        log: None,
-        tmp_dir: None,
-        keep_tmp_on_error: false,
         regions: None,
         parameters: None,
         defaults: true,
-        ploidy: None,
         build_index_if_missing: false,
-        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        hidden_dup_fdr: 0.0,
-        min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        low_base_quality_weight:
-            crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-        hidden_dup_tag: false,
-        hidden_dup_window: 0,
-        refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-        phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-        refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-        refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-        refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-        refine_window_max: None,
-        refine_core_floor: None,
-        refine_core_max: None,
         locus_builder_regions_len: None,
-        threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
@@ -436,6 +399,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         max_reads_per_position: None,
         max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
+        calling: crate::cli::calling_run::CallingFlags::for_tests(),
+        advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
     };
 
     let refused = segments_over(
@@ -633,33 +598,11 @@ fn a_cohort_on_disk() -> (
         catalog: Some(cohort.catalog),
         alignments: cohort.alignments,
         output: cohort.directory.path().join("calls.vcf"),
-        force: false,
-        log: None,
-        tmp_dir: None,
-        keep_tmp_on_error: false,
         regions: None,
         parameters: None,
         defaults: true,
-        ploidy: None,
         build_index_if_missing: false,
-        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        hidden_dup_fdr: 0.0,
-        min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        low_base_quality_weight:
-            crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-        hidden_dup_tag: false,
-        hidden_dup_window: 0,
-        refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-        phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-        refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-        refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-        refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-        refine_window_max: None,
-        refine_core_floor: None,
-        refine_core_max: None,
         locus_builder_regions_len: None,
-        threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
@@ -669,6 +612,8 @@ fn a_cohort_on_disk() -> (
         max_reads_per_position: None,
         max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
+        calling: crate::cli::calling_run::CallingFlags::for_tests(),
+        advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
     };
     (cohort.directory, cohort.zeta, cohort.alpha, args)
 }
@@ -738,7 +683,10 @@ fn a_runs_logged_parameters_passed_back_call_the_same_vcf() {
     let again = CallFromAlignmentsArgs {
         parameters: Some(parameters.clone()),
         defaults: false,
-        force: true,
+        calling: crate::cli::calling_run::CallingFlags {
+            force: true,
+            ..args.calling.clone()
+        },
         ..args.clone()
     };
     run_call_from_alignments(&again).expect("the run under its own logged parameters");
@@ -1053,7 +1001,7 @@ fn the_written_parameters_file_records_what_this_run_counted_as_a_repeat() {
 
     let written = std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
         &args.output,
-        args.log.as_deref(),
+        args.calling.log.as_deref(),
     ))
     .expect("it was written");
     let file = ParametersFile::from_toml(&written).expect("what this run wrote, it can read");
@@ -1313,12 +1261,12 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
     let args = args_of(&a_defaults_run());
 
     assert!(
-        (args.hidden_dup_fdr - 0.01).abs() < 1e-12,
+        (args.advanced.hidden_dup_fdr - 0.01).abs() < 1e-12,
         "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
-        args.hidden_dup_fdr
+        args.advanced.hidden_dup_fdr
     );
     assert!(
-        !args.hidden_dup_tag,
+        !args.advanced.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
 }
@@ -1331,11 +1279,11 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
 #[test]
 fn the_hidden_dup_window_defaults_to_fifty_thousand_bases() {
     let args = args_of(&a_defaults_run());
-    assert_eq!(args.hidden_dup_window, 50_000);
+    assert_eq!(args.advanced.hidden_dup_window, 50_000);
 
     let mut genome_wide = a_defaults_run();
     genome_wide.extend(["--hidden-dup-window", "0"]);
-    assert_eq!(args_of(&genome_wide).hidden_dup_window, 0);
+    assert_eq!(args_of(&genome_wide).advanced.hidden_dup_window, 0);
 }
 
 /// **Direct mode refuses a target that is not a false-discovery rate, and this is what says so.**
@@ -1351,7 +1299,7 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused_in_direct_mode_too() {
     let (_reference, _alignments, _directory, mut args) = a_cohort_on_disk();
 
     for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
-        args.hidden_dup_fdr = asked;
+        args.advanced.hidden_dup_fdr = asked;
         let refused = run_call_from_alignments(&args).expect_err("not a false-discovery rate");
         assert!(
             matches!(

@@ -132,7 +132,6 @@ impl<T> AlignmentFilesWalker<T> {
         self.loci_over_the_depth_ceiling
     }
 
-    #[cfg(test)]
     /// The individual this walk is of.
     #[must_use]
     pub fn sample_name(&self) -> &str {

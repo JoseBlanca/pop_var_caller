@@ -41,7 +41,6 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use super::read_filter_provenance::READ_FILTER_PROVENANCE_PREFIX;
-use super::records::DEFAULT_MIN_SITE_QUALITY;
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
 use crate::calling::run_parameters::RunParameters;
@@ -53,24 +52,23 @@ use crate::read::input::reference::OpenReference;
 use crate::read_phase::fragments::RecordFragments;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
-use crate::run::fragment_keeper::KeptRecord;
+use crate::run::edge_deletion_gathering::{EdgeDeletionGathering, EdgeDeletionGatheringCounts};
+use crate::run::fragment_keeper::{FragmentKeeper, KeptRecord};
 use crate::run::side_pool::SidePool;
-use crate::types::{Bp, Phred, ReadGroupId};
+use crate::types::{Bp, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
 use crate::calling::allele_candidates::CandidateSelectionConfig;
 
 use super::callers::{
-    A_REFERENCE_WITH_NO_PATH, CohortCallingInputs, CohortCallingOutcome, CohortCallingTallies,
+    CallingSettings, CohortCallingInputs, CohortCallingOutcome, CohortCallingTallies,
     DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES, MergeParameters,
     call_cohort_from_sources_handing_each_record_over, call_cohort_from_sources_in_rounds,
-    refuse_a_catalog_built_on_another_reference, refuse_parameters_assembled_for_another_cohort,
-    refuse_two_references_that_are_not_one,
+    reference_path_to_name, refuse_a_catalog_built_on_another_reference,
+    refuse_parameters_assembled_for_another_cohort, refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::{MergeReference, ObservationCache};
-use super::depth_ceiling::DepthCeiling;
-use super::explain::ExplainRegions;
 use super::psp_prefetch::{DEFAULT_PSP_PREFETCH_BUDGET_BYTES, PspPrefetch};
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
@@ -447,18 +445,9 @@ pub struct PspVariantCaller {
     /// written under a looser cap is thinned to it as its records are decoded
     /// ([`read_cap`](super::psp_source::read_cap)).
     max_reads_per_position: u32,
-    /// The most reads one read group may have at a locus before the locus is dropped for the
-    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
-    depth_ceiling: DepthCeiling,
-    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
-    explain: Option<ExplainRegions>,
-    /// The site quality below which a called locus is not written (`--min-site-quality`).
-    min_site_quality: Phred,
-    /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
-    low_base_quality_weight: f64,
-    /// Whether the run gathers fragments for the output (read phase spec §2.4); see
-    /// [`Self::with_fragments_gathered`]. On unless the run turns it off.
-    gathers_fragments: bool,
+    /// The run's own settings: the depth ceiling, the loci to explain, the site-quality floor,
+    /// the low-base-quality weight and whether fragments are gathered.
+    settings: CallingSettings,
 }
 
 impl PspVariantCaller {
@@ -516,11 +505,7 @@ impl PspVariantCaller {
         // every segment this run loops over is drawn from it, so a catalog built on another
         // build of the assembly puts every tract at the wrong position — silently, and
         // genome-wide.
-        let reference_path = reference_with_checksums
-            .fasta_path
-            .as_deref()
-            .or(reference.info().fasta_path.as_deref())
-            .unwrap_or_else(|| Path::new(A_REFERENCE_WITH_NO_PATH));
+        let reference_path = reference_path_to_name(reference.info(), reference_with_checksums);
         refuse_a_catalog_built_on_another_reference(
             &segmentation,
             reference_with_checksums,
@@ -551,57 +536,26 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            depth_ceiling: DepthCeiling::default(),
-            explain: None,
-            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
-                .expect("the default threshold is a valid quality"),
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            gathers_fragments: true,
+            settings: CallingSettings::default(),
         })
+    }
+
+    /// **The same caller, configured with `settings`** — direct mode's
+    /// [`with_settings`](super::callers::AlignedFilesVariantCaller::with_settings).
+    #[must_use]
+    pub fn with_settings(mut self, settings: CallingSettings) -> Self {
+        self.settings = settings;
+        self
     }
 
     /// **The same caller, gathering fragments only if `gathered`** — direct mode's
     /// [`with_fragments_gathered`](super::callers::AlignedFilesVariantCaller::with_fragments_gathered),
-    /// which says what turning it off changes, and why the file does not. Pass
+    /// which says why it is set apart. Pass
     /// [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header the output is
     /// written under.
     #[must_use]
     pub fn with_fragments_gathered(mut self, gathered: bool) -> Self {
-        self.gathers_fragments = gathered;
-        self
-    }
-
-    /// The same caller, charging the low-base-quality penalty at `weight` times its tail
-    /// (`doc/devel/ng/spec/low_base_quality.md`); zero leaves it off. The default is
-    /// [`DEFAULT_LOW_BASE_QUALITY_WEIGHT`](crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT).
-    #[must_use]
-    pub fn with_low_base_quality_weight(mut self, weight: f64) -> Self {
-        self.low_base_quality_weight = weight;
-        self
-    }
-
-    /// The same caller, writing no locus whose site quality falls below `quality`
-    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
-    #[must_use]
-    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
-        self.min_site_quality = quality;
-        self
-    }
-
-    /// The same caller, explaining every locus that overlaps `regions`
-    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
-    #[must_use]
-    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
-        self.explain = Some(regions);
-        self
-    }
-
-    /// The same caller, dropping for the whole cohort every locus where some sample has a read
-    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
-    #[must_use]
-    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
-        self.depth_ceiling = ceiling;
+        self.settings.gathers_fragments = gathered;
         self
     }
 
@@ -726,11 +680,7 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes,
             max_reads_per_position,
-            depth_ceiling,
-            explain,
-            min_site_quality,
-            low_base_quality_weight,
-            gathers_fragments,
+            settings,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -781,7 +731,7 @@ impl PspVariantCaller {
             sources.push(
                 PspSummarySource::over(psp, &sample.read_groups)?
                     .with_read_cap(read_cap)
-                    .with_depth_ceiling(Some(depth_ceiling)),
+                    .with_depth_ceiling(Some(settings.depth_ceiling)),
             );
         }
 
@@ -793,10 +743,7 @@ impl PspVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
-            explain: explain.as_ref(),
-            min_site_quality,
-            low_base_quality_weight,
-            gathers_fragments,
+            settings: &settings,
         };
         let CohortCallingOutcome {
             calling,
@@ -810,48 +757,36 @@ impl PspVariantCaller {
             // records fold back in genome order. **The VCF is the same either way**, which is what
             // `the_round_driver_writes_what_the_streaming_driver_writes` holds them to.
         } = {
-            // **Every finished record passes the gathering of the calls before it is prepared**
-            // (`str_edge_deletion_alleles.md` §6): an STR record widened over a flank is
-            // reconciled with the generic records it overlaps, and held ones are released in
-            // the writer's order. So the drivers hand records over unprepared, and the records
-            // are prepared here, on this thread, as the gathering releases them.
-            let mut gathering =
-                crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
-            // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
-            // the same order, with only the read alleles of reads seen at two records or more —
-            // or, where the output reads no fragments, at once and with none. It takes them a batch
-            // of [`KEPT_A_BATCH`] at a time, waiting in `gathered`.
-            let mut keeper =
-                crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
-            // **Then prepared on the pool, a batch at a time, and handed over in order.**
-            // Preparing — the VCF line and, with the filter on, the spill entry — needs the record
-            // alone, so it need not wait its turn on this thread: at 2,176 tomato samples it cost
-            // 1.7 ms a record here, with most of the pool idle. Released records wait in `kept`
-            // until [`PREPARED_A_BATCH`] have, are prepared together, and are handed over in the
-            // order they were released, so the output is what preparing one at a time gave. A
-            // refusal reaches the driver at the record that filled the batch, and is named at that
-            // record's locus — as before, a later locus than the one refused, since the keeper
-            // already held records back.
-            let mut kept = Vec::new();
-            let mut gathered = Vec::new();
-            // **Both on threads of their own** ([`hand_over_pool`]), so their tasks do not queue
-            // behind the region builds the merge's pool is running.
+            // **Every finished record passes the chain both modes share** ([`RecordRelease`]): the
+            // gathering of the calls, which reconciles an STR record widened over a flank with the
+            // generic records it overlaps, then the fragment keeper, then `prepare`, then
+            // `hand_over`. So the drivers hand records over unprepared.
+            //
+            // **Here in batches, prepared on the pool.** Preparing — the VCF line and, with the
+            // filter on, the spill entry — needs the record alone, so it need not wait its turn on
+            // this thread: at 2,176 tomato samples it cost 1.7 ms a record here, with most of the
+            // pool idle. The keeper takes [`KEPT_A_BATCH`] records at a time and the preparation
+            // [`PREPARED_A_BATCH`], both on threads of their own ([`hand_over_pool`]) so their
+            // tasks do not queue behind the region builds the merge's pool is running. The records
+            // are handed over in the order they were released, so the output is what preparing
+            // one at a time gave.
             let hand_over_pool = hand_over_pool(rayon::current_num_threads());
+            let mut release = RecordRelease::new(
+                settings.gathers_fragments,
+                ReleaseBatching::Batched {
+                    pool: &hand_over_pool,
+                    kept_a_batch: KEPT_A_BATCH,
+                    prepared_a_batch: PREPARED_A_BATCH,
+                },
+                prepare,
+                hand_over,
+            );
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
-                Ok::<_, E>((record, windows.to_vec()))
+                Ok::<_, std::convert::Infallible>((record, windows.to_vec()))
             };
             let mut gather = |(record, windows): (VcfRecord, Vec<WindowCoverage>),
-                              _: &[WindowCoverage]|
-             -> Result<(), E> {
-                gathered.extend(gathering.accept(record, windows));
-                if gathered.len() >= KEPT_A_BATCH {
-                    let batch = std::mem::take(&mut gathered);
-                    hand_over_pool.run(|| keeper.accept_batch(batch, &mut kept));
-                }
-                if kept.len() >= PREPARED_A_BATCH {
-                    prepare_and_hand_over(&mut kept, &hand_over_pool, prepare, hand_over)?;
-                }
-                Ok(())
+                              _: &[WindowCoverage]| {
+                release.accept(record, windows)
             };
             let outcome = if merge_parameters
                 .cohort_locus_builder_regions_in_flight
@@ -874,35 +809,9 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
-            // What calling left in the batch goes first. Then the keeper takes the records the
-            // gathering released that it had not taken yet, and those the gathering still held,
-            // and releases everything: the order they were released in.
-            let mut released = kept;
-            gathered.extend(gathering.finish());
-            keeper.accept_batch(gathered, &mut released);
-            keeper.finish(&mut released);
-            if keeper.keeps_fragments() {
-                crate::run::fragment_keeper::log_counts(keeper.counts());
-            }
-            let mut released = released.into_iter();
-            loop {
-                let batch: Vec<_> = released.by_ref().take(PREPARED_A_BATCH).collect();
-                if batch.is_empty() {
-                    break;
-                }
-                let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
-                let prepared = prepare_on_the_pool(batch, prepare);
-                for (locus, prepared) in loci.into_iter().zip(prepared) {
-                    prepared
-                        .and_then(|(ready, windows)| hand_over(ready, &windows))
-                        .map_err(|source| RunError::RecordNotWritten {
-                            locus,
-                            source: Box::new(source),
-                        })?;
-                }
-            }
+            let gathering = release.finish()?;
             let mut outcome = outcome;
-            outcome.calling.after_gathering(gathering.counts());
+            outcome.calling.after_gathering(gathering);
             outcome
         };
         // **The sources come back so that a mode can turn them into per-sample facts**, and
@@ -1384,21 +1293,28 @@ where
 }
 
 /// **Prepare the waiting records on the pool and hand them over in order**, leaving `waiting`
-/// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there.
+/// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there and is
+/// named at the locus of the record refused.
 fn prepare_and_hand_over<P, E>(
     waiting: &mut Vec<KeptRecord<Vec<WindowCoverage>>>,
     pool: &SidePool,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
     hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
-) -> Result<(), E>
+) -> Result<(), RunError>
 where
     P: Send,
-    E: Send,
+    E: std::error::Error + Send + Sync + 'static,
 {
     let batch = std::mem::take(waiting);
-    for prepared in pool.run(|| prepare_on_the_pool(batch, prepare)) {
-        let (ready, windows) = prepared?;
-        hand_over(ready, &windows)?;
+    let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
+    let prepared = pool.run(|| prepare_on_the_pool(batch, prepare));
+    for (locus, prepared) in loci.into_iter().zip(prepared) {
+        prepared
+            .and_then(|(ready, windows)| hand_over(ready, &windows))
+            .map_err(|source| RunError::RecordNotWritten {
+                locus,
+                source: Box::new(source),
+            })?;
     }
     Ok(())
 }
@@ -1439,6 +1355,174 @@ fn hand_over_threads(workers: usize) -> usize {
 
 /// The fewest merge threads a run has before the hand-over gets threads of its own.
 const FEWEST_WORKERS_FOR_A_HAND_OVER_POOL: usize = 12;
+
+// ============================================================================================
+// The record hand-over chain, shared by both modes
+// ============================================================================================
+
+/// **How a [`RecordRelease`] takes its records through the keeper and the preparation**: one at
+/// a time on the calling thread, as direct mode does, or in batches on a side pool, as psp mode
+/// does. The records, their order and their fragments are the same either way.
+pub(crate) enum ReleaseBatching<'p> {
+    /// Each record released by the gathering goes through the keeper at once, and each record the
+    /// keeper releases is prepared and handed over at once, on the calling thread.
+    OneAtATime,
+    /// The keeper takes `kept_a_batch` gathered records at a time on `pool`, and the released
+    /// records are prepared `prepared_a_batch` at a time on `pool` and handed over in order.
+    Batched {
+        pool: &'p SidePool,
+        kept_a_batch: usize,
+        prepared_a_batch: usize,
+    },
+}
+
+/// **The chain every finished record passes between the calling driver and the output**: the
+/// gathering of the calls (`str_edge_deletion_alleles.md` §6), then the fragment keeper (read
+/// phase spec §2.4), then `prepare`, then `hand_over`, in genome order. Both modes build one; they
+/// differ only in [`ReleaseBatching`].
+///
+/// **A refusal is named at the record refused.** The gathering holds a record for up to 256
+/// bases and the keeper until reads move [`READ_REACH`](crate::read_phase::fragments::READ_REACH)
+/// past it, so the record `hand_over` refuses is usually not the locus the driver just called.
+/// Each error leaves as [`RunError::RecordNotWritten`] naming the refused record's own locus.
+pub(crate) struct RecordRelease<'a, Prepare, HandOver> {
+    gathering: EdgeDeletionGathering,
+    keeper: FragmentKeeper<Vec<WindowCoverage>>,
+    /// Released by the gathering, waiting for the keeper (batched only).
+    gathered: Vec<(VcfRecord, Vec<WindowCoverage>)>,
+    /// Released by the keeper, waiting to be prepared and handed over.
+    kept: Vec<KeptRecord<Vec<WindowCoverage>>>,
+    batching: ReleaseBatching<'a>,
+    prepare: &'a Prepare,
+    hand_over: &'a mut HandOver,
+}
+
+impl<'a, Prepare, HandOver, P, E> RecordRelease<'a, Prepare, HandOver>
+where
+    Prepare: Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync,
+    HandOver: FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    P: Send,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    /// A chain whose keeper keeps fragments only if `gathers_fragments`
+    /// ([`FragmentKeeper::for_a_run`]).
+    pub(crate) fn new(
+        gathers_fragments: bool,
+        batching: ReleaseBatching<'a>,
+        prepare: &'a Prepare,
+        hand_over: &'a mut HandOver,
+    ) -> Self {
+        Self {
+            gathering: EdgeDeletionGathering::default(),
+            keeper: FragmentKeeper::for_a_run(gathers_fragments),
+            gathered: Vec::new(),
+            kept: Vec::new(),
+            batching,
+            prepare,
+            hand_over,
+        }
+    }
+
+    /// **Take one finished record**, handing over whatever it releases.
+    ///
+    /// # Errors
+    ///
+    /// The first record `prepare` or `hand_over` refuses, as [`RunError::RecordNotWritten`] at
+    /// that record's locus.
+    pub(crate) fn accept(
+        &mut self,
+        record: VcfRecord,
+        windows: Vec<WindowCoverage>,
+    ) -> Result<(), RunError> {
+        match self.batching {
+            ReleaseBatching::OneAtATime => {
+                for (record, windows) in self.gathering.accept(record, windows) {
+                    self.keeper.accept(record, windows, &mut self.kept);
+                    Self::hand_over_in_order(self.kept.drain(..), self.prepare, self.hand_over)?;
+                }
+            }
+            ReleaseBatching::Batched {
+                pool,
+                kept_a_batch,
+                prepared_a_batch,
+            } => {
+                self.gathered.extend(self.gathering.accept(record, windows));
+                if self.gathered.len() >= kept_a_batch {
+                    let batch = std::mem::take(&mut self.gathered);
+                    let (keeper, kept) = (&mut self.keeper, &mut self.kept);
+                    pool.run(|| keeper.accept_batch(batch, kept));
+                }
+                if self.kept.len() >= prepared_a_batch {
+                    prepare_and_hand_over(&mut self.kept, pool, self.prepare, self.hand_over)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **Release everything still held and hand it over**, in the order it was released: what
+    /// waited to be prepared first, then what the keeper had not taken, then what the gathering
+    /// still held. Logs the keeper's counts where it keeps fragments, and returns the gathering's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::accept`].
+    pub(crate) fn finish(mut self) -> Result<EdgeDeletionGatheringCounts, RunError> {
+        let mut released = std::mem::take(&mut self.kept);
+        let mut gathered = std::mem::take(&mut self.gathered);
+        gathered.extend(self.gathering.finish());
+        self.keeper.accept_batch(gathered, &mut released);
+        self.keeper.finish(&mut released);
+        if self.keeper.keeps_fragments() {
+            crate::run::fragment_keeper::log_counts(self.keeper.counts());
+        }
+        match self.batching {
+            ReleaseBatching::OneAtATime => {
+                Self::hand_over_in_order(released.into_iter(), self.prepare, self.hand_over)?;
+            }
+            ReleaseBatching::Batched {
+                prepared_a_batch, ..
+            } => {
+                let mut released = released.into_iter();
+                loop {
+                    let batch: Vec<_> = released.by_ref().take(prepared_a_batch).collect();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
+                    let prepared = prepare_on_the_pool(batch, self.prepare);
+                    for (locus, prepared) in loci.into_iter().zip(prepared) {
+                        prepared
+                            .and_then(|(ready, windows)| (self.hand_over)(ready, &windows))
+                            .map_err(|source| RunError::RecordNotWritten {
+                                locus,
+                                source: Box::new(source),
+                            })?;
+                    }
+                }
+            }
+        }
+        Ok(self.gathering.counts())
+    }
+
+    /// Prepare and hand over each of `records` on this thread, in order.
+    fn hand_over_in_order(
+        records: impl Iterator<Item = KeptRecord<Vec<WindowCoverage>>>,
+        prepare: &Prepare,
+        hand_over: &mut HandOver,
+    ) -> Result<(), RunError> {
+        for (record, windows, fragments) in records {
+            let locus = record.region();
+            prepare(record, &windows, fragments)
+                .and_then(|ready| hand_over(ready, &windows))
+                .map_err(|source| RunError::RecordNotWritten {
+                    locus,
+                    source: Box::new(source),
+                })?;
+        }
+        Ok(())
+    }
+}
 
 /// The merge's cache over `sources`, telling `prefetch` where every cover begins when there is
 /// one. **The prefetch moves into the hook**, so it stops when the calling pass drops the cache.
@@ -2636,7 +2720,10 @@ mod tests {
             .expect("the cohort matches the run")
             // Three reads a sample are too few to pass the shipped site-quality gate, and
             // this is about what a written record carries beside it.
-            .with_min_site_quality(crate::types::Phred::ZERO)
+            .with_settings(CallingSettings {
+                min_site_quality: crate::types::Phred::ZERO,
+                ..CallingSettings::default()
+            })
             .with_fragments_gathered(gathered);
             let mut handed = Vec::new();
             caller
@@ -2754,7 +2841,10 @@ mod tests {
                 merge_parameters,
             )
             .expect("the cohort matches the run")
-            .with_min_site_quality(crate::types::Phred::ZERO)
+            .with_settings(CallingSettings {
+                min_site_quality: crate::types::Phred::ZERO,
+                ..CallingSettings::default()
+            })
             .with_fragments_gathered(true);
             let mut handed = Vec::new();
             let (tallies, _stored) = caller

@@ -13,6 +13,7 @@ use crate::locus_generation::{LocusKind, WitnessedLocusPositions};
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
 use crate::ref_seq::InMemoryRefSeq;
+use crate::types::Position;
 use crate::types::{AlleleId, ContigId, Genotype, Phred, ReadGroupId};
 use crate::window_coverage::WindowCoverage;
 

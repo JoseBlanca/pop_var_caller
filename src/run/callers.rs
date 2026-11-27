@@ -59,6 +59,7 @@ use crate::read_phase::fragments::RecordFragments;
 use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
+use crate::run::cohort_merge::build::LocusReads;
 #[cfg(test)]
 use crate::run::cohort_merge::build::RegionOutcome;
 use crate::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
@@ -84,6 +85,7 @@ use super::explain::{
     ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows,
     ssr_evidence_rows, too_wide_rows,
 };
+use super::psp_caller::{RecordRelease, ReleaseBatching};
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
     base_before_left_flank, evidence_for_output, padding_base_beside, read_alleles_for_record,
@@ -205,6 +207,52 @@ impl Default for MergeParameters {
     }
 }
 
+/// **What a calling run was configured with beside its model, its ground and its merge** — five
+/// settings both modes take from the command line, held once by each caller and handed to the
+/// calling loop through [`CohortCallingInputs`].
+///
+/// They are consumed at different depths: `depth_ceiling` by each sample's source (the walker in
+/// direct mode, the psp source in psp mode), the other four at each locus. They are grouped
+/// because they are what the run was configured with, not because one stage reads them all.
+#[derive(Debug, Clone)]
+pub struct CallingSettings {
+    /// The most reads one read group may have at a locus before the locus is dropped for the
+    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    pub depth_ceiling: DepthCeiling,
+    /// **The loci to explain, `None` when the run was asked to explain none** — the one
+    /// question each locus is asked (`--explain-loci`, `doc/devel/ng/spec/explain_loci.md`).
+    /// **What is called does not change.**
+    pub explain: Option<ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`,
+    /// [`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
+    pub min_site_quality: Phred,
+    /// How many times its tail the low-base-quality penalty charges; zero leaves it off
+    /// (`--low-base-quality-weight`, `doc/devel/ng/spec/low_base_quality.md`).
+    pub low_base_quality_weight: f64,
+    /// **Whether each written locus asks the merge which allele every read showed** (read phase
+    /// spec §2.2) — the read alleles the fragment keeper turns into fragments. Off where the
+    /// output will read no fragments ([`writer_reads_fragments`](crate::vcf::writer_reads_fragments)):
+    /// asking derives the locus's alleles a second time, on the thread that called it, for
+    /// nothing. With it off, the fragment keeper releases each record as it arrives and every
+    /// record is handed over with empty fragments, so a spill parks none; the records are
+    /// otherwise the same, so an output that reads no fragments is the same file. On by default.
+    pub gathers_fragments: bool,
+}
+
+impl Default for CallingSettings {
+    fn default() -> Self {
+        Self {
+            depth_ceiling: DepthCeiling::default(),
+            explain: None,
+            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
+                .expect("the default threshold is a valid quality"),
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+            gathers_fragments: true,
+        }
+    }
+}
+
 /// A calling run over open alignment files: **reads in, called variants out in genome order**.
 ///
 /// **What it holds for the whole run** is one open [`SampleReads`] per sample, plus the shared
@@ -248,20 +296,11 @@ pub struct AlignedFilesVariantCaller {
     /// The settings every one of this run's locus generators is built with — checked at
     /// `open`, so building a generator from them cannot fail later.
     locus_generator_settings: PileupGeneratorConfig,
-    /// The most reads one read group may have at a locus before the locus is dropped for the
-    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
-    depth_ceiling: DepthCeiling,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
-    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
-    explain: Option<ExplainRegions>,
-    /// The site quality below which a called locus is not written (`--min-site-quality`).
-    min_site_quality: Phred,
-    /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
-    low_base_quality_weight: f64,
-    /// Whether the run gathers fragments for the output (read phase spec §2.4); see
-    /// [`Self::with_fragments_gathered`]. On unless the run turns it off.
-    gathers_fragments: bool,
+    /// The run's own settings: the depth ceiling, the loci to explain, the site-quality floor,
+    /// the low-base-quality weight and whether fragments are gathered.
+    settings: CallingSettings,
 }
 
 impl AlignedFilesVariantCaller {
@@ -322,12 +361,10 @@ impl AlignedFilesVariantCaller {
         }
 
         // **And one after**, because it reads the `@SQ M5` tags each open captured.
-        let reference_path = alignments
-            .reference_with_checksums
-            .fasta_path
-            .as_deref()
-            .or(alignments.reference.info().fasta_path.as_deref())
-            .unwrap_or_else(|| std::path::Path::new(A_REFERENCE_WITH_NO_PATH));
+        let reference_path = reference_path_to_name(
+            alignments.reference.info(),
+            alignments.reference_with_checksums,
+        );
         refuse_two_references_that_are_not_one(
             alignments.reference.info(),
             alignments.reference_with_checksums,
@@ -354,62 +391,26 @@ impl AlignedFilesVariantCaller {
             candidate_selection,
             merge_parameters,
             locus_generator_settings: alignments.locus_generator_settings,
-            depth_ceiling: DepthCeiling::default(),
-            explain: None,
-            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
-                .expect("the default threshold is a valid quality"),
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            gathers_fragments: true,
+            settings: CallingSettings::default(),
         })
     }
 
-    /// **The same run, gathering fragments only if `gathered`** — each record's reads that also
-    /// reach another record, which only the output's phase-writing stages read (read phase spec
-    /// §2.4). Pass [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header
-    /// the output is written under.
-    ///
-    /// With it off, no written locus asks the merge which allele each read showed, the fragment
-    /// keeper releases each record as it arrives instead of holding it until the reads after it
-    /// are in, and every record is handed over with empty fragments — so a spill parks none. The
-    /// records are otherwise the same, so an output that reads no fragments is the same file.
-    /// The default is on: a run that leaves it alone gathers them, as every run did before.
+    /// **The same run, configured with `settings`** — everything [`CallingSettings`] holds,
+    /// replacing the defaults [`Self::open`] starts from.
+    #[must_use]
+    pub fn with_settings(mut self, settings: CallingSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// **The same run, gathering fragments only if `gathered`** — set apart from
+    /// [`Self::with_settings`] because the command learns it only after building the output's
+    /// header. Pass [`writer_reads_fragments`](crate::vcf::writer_reads_fragments) of the header
+    /// the output is written under; [`CallingSettings::gathers_fragments`] says what turning it
+    /// off changes, and why the file does not.
     #[must_use]
     pub fn with_fragments_gathered(mut self, gathered: bool) -> Self {
-        self.gathers_fragments = gathered;
-        self
-    }
-
-    /// The same run, charging the low-base-quality penalty at `weight` times its tail
-    /// (`doc/devel/ng/spec/low_base_quality.md`); zero leaves it off. The default is
-    /// [`DEFAULT_LOW_BASE_QUALITY_WEIGHT`](crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT).
-    #[must_use]
-    pub fn with_low_base_quality_weight(mut self, weight: f64) -> Self {
-        self.low_base_quality_weight = weight;
-        self
-    }
-
-    /// The same run, explaining every locus that overlaps `regions`
-    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
-    #[must_use]
-    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
-        self.explain = Some(regions);
-        self
-    }
-
-    /// The same run, writing no locus whose site quality falls below `quality`
-    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
-    #[must_use]
-    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
-        self.min_site_quality = quality;
-        self
-    }
-
-    /// The same run, dropping for the whole cohort every locus where some sample has a read
-    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
-    #[must_use]
-    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
-        self.depth_ceiling = ceiling;
+        self.settings.gathers_fragments = gathered;
         self
     }
 
@@ -474,7 +475,7 @@ impl AlignedFilesVariantCaller {
             )?;
             walkers.push(
                 AlignmentFilesWalker::over(Arc::clone(&self.segmentation), reads, generators)
-                    .with_depth_ceiling(Some(self.depth_ceiling)),
+                    .with_depth_ceiling(Some(self.settings.depth_ceiling)),
             );
         }
         Ok(RunReadyToWalk {
@@ -751,11 +752,8 @@ impl AlignedFilesVariantCaller {
         // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
         let reference_for_the_merge = self.walk_reference.accessor();
         let contigs = self.walk_reference.contigs();
-        // Taken before `walkers` consumes the run; a handful of regions.
-        let explain = self.explain.clone();
-        let min_site_quality = self.min_site_quality;
-        let low_base_quality_weight = self.low_base_quality_weight;
-        let gathers_fragments = self.gathers_fragments;
+        // Taken before `walkers` consumes the run; the explained loci are a handful of regions.
+        let settings = self.settings.clone();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -775,58 +773,41 @@ impl AlignedFilesVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
-            explain: explain.as_ref(),
-            min_site_quality,
-            low_base_quality_weight,
-            gathers_fragments,
+            settings: &settings,
         };
         let CohortCallingOutcome {
             calling,
             sources,
             window_coverage_histograms,
         } = {
-            // Every finished record passes the gathering of the calls before it is handed over
-            // (`str_edge_deletion_alleles.md` §6), as in psp mode.
-            let mut gathering =
-                crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
-            // Then the fragment keeper (read phase spec §2.4), as in psp mode: one that keeps
-            // nothing where the output reads no fragments.
-            let mut keeper =
-                crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
-            let mut kept = Vec::new();
+            // **Every finished record passes the chain both modes share** ([`RecordRelease`]):
+            // the gathering of the calls (`str_edge_deletion_alleles.md` §6), then the fragment
+            // keeper (read phase spec §2.4), here one record at a time on this thread.
+            let prepare = |record: VcfRecord, _: &[WindowCoverage], fragments: RecordFragments| {
+                Ok::<_, E>((record, fragments))
+            };
+            let mut take = |(record, fragments): (VcfRecord, RecordFragments),
+                            windows: &[WindowCoverage]| {
+                hand_over(&record, windows, fragments)
+            };
+            let mut release = RecordRelease::new(
+                settings.gathers_fragments,
+                ReleaseBatching::OneAtATime,
+                &prepare,
+                &mut take,
+            );
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
                 genotyper,
-                &|record, _| Ok::<_, E>(record),
-                &mut |record: VcfRecord, windows| {
-                    for (record, windows) in gathering.accept(record, windows.to_vec()) {
-                        keeper.accept(record, windows, &mut kept);
-                        for (record, windows, fragments) in kept.drain(..) {
-                            hand_over(&record, &windows, fragments)?;
-                        }
-                    }
-                    Ok(())
+                &|record, _| Ok::<_, std::convert::Infallible>(record),
+                &mut |record: VcfRecord, windows: &[WindowCoverage]| {
+                    release.accept(record, windows.to_vec())
                 },
             )?;
-            let mut released = Vec::new();
-            for (record, windows) in gathering.finish() {
-                keeper.accept(record, windows, &mut released);
-            }
-            keeper.finish(&mut released);
-            if keeper.keeps_fragments() {
-                crate::run::fragment_keeper::log_counts(keeper.counts());
-            }
-            for (record, windows, fragments) in released {
-                hand_over(&record, &windows, fragments).map_err(|source| {
-                    RunError::RecordNotWritten {
-                        locus: record.region(),
-                        source: Box::new(source),
-                    }
-                })?;
-            }
+            let gathering = release.finish()?;
             let mut outcome = outcome;
-            outcome.calling.after_gathering(gathering.counts());
+            outcome.calling.after_gathering(gathering);
             outcome
         };
         Ok(WrittenCohort {
@@ -862,20 +843,8 @@ pub(crate) struct CohortCallingInputs<'a> {
     pub padding_reference: WindowedRefSeq,
     /// The reference's contig names, which the progress lines print the position against.
     pub contigs: &'a ContigList,
-    /// **The loci to explain, `None` when the run was asked to explain none** — the one
-    /// question each locus is asked (`doc/devel/ng/spec/explain_loci.md`).
-    pub explain: Option<&'a ExplainRegions>,
-    /// The site quality below which a called locus is not written (`--min-site-quality`).
-    pub min_site_quality: Phred,
-    /// How many times its tail the low-base-quality penalty charges; zero leaves it off
-    /// (`--low-base-quality-weight`, `doc/devel/ng/spec/low_base_quality.md`).
-    pub low_base_quality_weight: f64,
-    /// **Whether each written locus asks the merge which allele every read showed** (read phase
-    /// spec §2.2) — the read alleles the fragment keeper turns into fragments. Off where the
-    /// output will read no fragments ([`writer_reads_fragments`](crate::vcf::writer_reads_fragments)):
-    /// asking derives the locus's alleles a second time, on the thread that called it, for
-    /// nothing. A record written with it off carries no read alleles and is otherwise the same.
-    pub gathers_fragments: bool,
+    /// The run's own settings. The depth ceiling among them is the sources' and is not read here.
+    pub settings: &'a CallingSettings,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -902,6 +871,310 @@ pub(crate) struct CohortCallingOutcome<S> {
     pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
+/// **The read-only values every locus of a run is called and written with** — what both drivers
+/// hand [`call_and_assemble`], so the two cannot build a record two ways.
+///
+/// Built once, by [`split_the_inputs`], from the run's [`CohortCallingInputs`]. The round driver
+/// shares one across its pool, which is why it is read-only.
+struct LocusCallingContext<'a, G> {
+    genotyper: &'a G,
+    /// The run's `--explain-loci` regions, `None` when it asked for none.
+    explain: Option<&'a ExplainRegions>,
+    /// The model's numbers, frozen once at the top of the run.
+    frozen: FrozenParameters<'a>,
+    candidate_selection: &'a CandidateSelectionConfig,
+    /// The repeat-tract selection, at the run's ploidy and with the loop's discovery bar.
+    tract_selection: SsrSelectionConfig,
+    calling_loop_config: &'a RunnableCallingLoopConfig,
+    /// Read off the cache rather than passed beside it — see [`split_the_inputs`].
+    run_sample_count: usize,
+    /// The one accessor the records' padding bases and flanks are read through.
+    padding_reference: WindowedRefSeq,
+    min_site_quality: Phred,
+    low_base_quality_weight: f64,
+    gathers_fragments: bool,
+}
+
+/// What a driver needs of [`CohortCallingInputs`] beside the [`LocusCallingContext`]: the ground
+/// it walks and how the merge cuts it.
+struct CallingGround<'a> {
+    segmentation: &'a Segmentation,
+    merge_parameters: MergeParameters,
+    contigs: &'a ContigList,
+}
+
+/// **Split a run's inputs into what each locus is called with and what the driver walks** — the
+/// set-up both drivers share. It also tells the cache which loci to explain, so a locus the merge
+/// drops is explained too.
+fn split_the_inputs<'a, G, Source>(
+    inputs: CohortCallingInputs<'a>,
+    genotyper: &'a G,
+    cache: &mut ObservationCache<Source>,
+) -> (LocusCallingContext<'a, G>, CallingGround<'a>) {
+    let CohortCallingInputs {
+        segmentation,
+        merge_parameters,
+        parameters,
+        calling_loop_config,
+        candidate_selection,
+        padding_reference,
+        contigs,
+        settings,
+    } = inputs;
+    let explain = settings.explain.as_ref();
+    if let Some(regions) = explain {
+        cache.explaining_drops(regions.clone());
+    }
+    let frozen = parameters.view();
+    // The discovery pre-pass is a *selection* pass (research doc
+    // tract_genotype_accuracy_2026-09-03 §6.5), so the loop configuration's discovery setting is
+    // honoured by handing selection its bar — `None`, the shipped default, runs no pre-pass and
+    // selects byte-identically. Same as `call_cohort`.
+    let tract_selection = SsrSelectionConfig {
+        discovery: calling_loop_config.discovery.pre_pass_bar(),
+        ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
+    };
+    let context = LocusCallingContext {
+        genotyper,
+        explain,
+        frozen,
+        candidate_selection,
+        tract_selection,
+        calling_loop_config,
+        // **The cohort's size is read off the cache rather than passed beside it**, so the
+        // number the genotyper is told and the number of sources actually being merged cannot
+        // become two different facts.
+        run_sample_count: cache.sample_count(),
+        padding_reference,
+        min_site_quality: settings.min_site_quality,
+        low_base_quality_weight: settings.low_base_quality_weight,
+        gathers_fragments: settings.gathers_fragments,
+    };
+    let ground = CallingGround {
+        segmentation,
+        merge_parameters,
+        contigs,
+    };
+    (context, ground)
+}
+
+/// **One worker's scratch for calling loci and building their records**, reused locus after
+/// locus. The streaming driver owns one; the round driver one per pool task.
+struct LocusWorker<S> {
+    shaping: GenericEvidenceScratch,
+    tract_shaping: SsrEvidenceScratch,
+    scratch: CallingScratch<S>,
+    padding_scratch: Vec<u8>,
+    /// The reference either side of the locus its partial reads need (spec
+    /// `read_likelihoods.md` §5.3), read into buffers the worker keeps.
+    beside_scratch: ReferenceBesideScratch,
+    /// **The last written record's per-sample windows**, refilled per record. The record itself
+    /// carries no window, by design — a run with the filter off writes byte for byte what it
+    /// wrote before this work — so the windows travel beside it (`spec/window_coverage.md` §3.5).
+    window_coverage: Vec<WindowCoverage>,
+    /// What became of the repeat tracts this worker called.
+    tracts: TractOutcomes,
+}
+
+impl<S: Default> LocusWorker<S> {
+    fn new(run_sample_count: usize) -> Self {
+        Self {
+            shaping: GenericEvidenceScratch::default(),
+            tract_shaping: SsrEvidenceScratch::default(),
+            scratch: CallingScratch::default(),
+            padding_scratch: Vec::new(),
+            beside_scratch: ReferenceBesideScratch::default(),
+            window_coverage: Vec::with_capacity(run_sample_count),
+            tracts: TractOutcomes::default(),
+        }
+    }
+}
+
+/// What became of one locus, and its explanation rows where the run explains it.
+type CalledAndExplained = (
+    LocusOutcome<Result<CalledLocus, RunError>>,
+    Option<Vec<ExplainRow>>,
+);
+
+/// **Call one cohort locus and build its record** — the per-locus work of both drivers.
+///
+/// In order: re-read the spellings the merge cut short, read the reference beside the locus, call
+/// it down its kind's path, and for a called locus that some written genotype carries an
+/// alternative at, read the padding bases, build the evidence, apply `--min-site-quality`, gather
+/// the read alleles and assemble the record. A written record's per-sample windows are left in
+/// `worker.window_coverage`. The explanation rows, where the locus is explained, come back
+/// complete.
+///
+/// # Errors
+///
+/// [`RunError::ReferenceBesideLocusUnreadable`] when the reference beside the locus cannot be
+/// read, before the locus is called, so no explanation comes back. A padding base the reference
+/// will not serve is a called locus's own outcome, `LocusOutcome::Called(Err(..))`.
+fn call_and_assemble<S, G>(
+    context: &LocusCallingContext<'_, G>,
+    worker: &mut LocusWorker<S>,
+    observation: CohortObservation,
+    reads: &LocusReads<'_, '_>,
+) -> Result<CalledAndExplained, RunError>
+where
+    G: LocusGenotyper<S>,
+{
+    let LocusCallingContext {
+        genotyper,
+        explain,
+        frozen,
+        candidate_selection,
+        tract_selection,
+        calling_loop_config,
+        run_sample_count,
+        padding_reference,
+        min_site_quality,
+        low_base_quality_weight,
+        gathers_fragments,
+    } = context;
+    let LocusWorker {
+        shaping,
+        tract_shaping,
+        scratch,
+        padding_scratch,
+        beside_scratch,
+        window_coverage,
+        tracts,
+    } = worker;
+    let region = observation.region;
+    let mut observation = observation;
+    reread_spellings_cut_short(padding_reference, &mut observation, beside_scratch).map_err(
+        |source| RunError::ReferenceBesideLocusUnreadable {
+            locus: region,
+            source,
+        },
+    )?;
+    let reference_beside = reference_beside_locus(padding_reference, &observation, beside_scratch)
+        .map_err(|source| RunError::ReferenceBesideLocusUnreadable {
+            locus: region,
+            source,
+        })?;
+    let (built, explanation) = call_one_cohort_locus(
+        *genotyper,
+        &observation,
+        reference_beside,
+        *explain,
+        frozen,
+        candidate_selection,
+        tract_selection,
+        calling_loop_config,
+        *run_sample_count,
+        shaping,
+        tract_shaping,
+        tracts,
+        scratch,
+        |inference, remap, unmatched, verdict| {
+            // **Asked before the reference is read**, so a locus that establishes no variant
+            // costs no fetch and no evidence gathering.
+            if !a_written_genotype_carries_an_alternative(&inference) {
+                return Ok(CalledLocus::NoAlternative);
+            }
+            let alleles = inference.alleles();
+            // Read first: it lies left of the padding base, and that read evicts behind itself.
+            let before_left_flank = base_before_left_flank(
+                padding_reference,
+                inference.region,
+                alleles,
+                padding_scratch,
+            )
+            .map_err(|source| RunError::PaddingBaseUnreadable {
+                locus: inference.region,
+                source,
+            })?;
+            let padding = padding_base_beside(
+                padding_reference,
+                inference.region,
+                alleles,
+                padding_scratch,
+            )
+            .map_err(|source| RunError::PaddingBaseUnreadable {
+                locus: inference.region,
+                source,
+            })?;
+            let evidence = evidence_for_output(
+                &inference,
+                &observation,
+                remap,
+                unmatched,
+                verdict,
+                padding,
+                before_left_flank,
+                *low_base_quality_weight,
+            );
+            // **The gate reads the quality the record would carry**, after the artifact
+            // correction, and before the windows are taken: a locus below it is not written, so
+            // nothing of it reaches the file or the filter after (`calling_quality.md` §3.5).
+            if evidence.corrected_site_quality < *min_site_quality {
+                return Ok(CalledLocus::BelowMinimumSiteQuality(
+                    evidence.corrected_site_quality,
+                ));
+            }
+            // Asked only now, for a locus that is written (read phase spec §2.2), and only where
+            // the output reads fragments.
+            let read_alleles = if *gathers_fragments {
+                read_alleles_for_record(remap, reads)
+            } else {
+                RecordReadAlleles::default()
+            };
+            // **Taken before the evidence is consumed**, into the worker's buffer.
+            window_coverage.clear();
+            window_coverage.extend(evidence.samples.iter().map(|sample| sample.window_coverage));
+            Ok(CalledLocus::Written(assemble_record(
+                &inference,
+                evidence,
+                read_alleles,
+            )))
+        },
+    );
+    let explanation = explanation.map(|mut rows| {
+        if let Some(end) = end_of_a_called_locus(&built) {
+            outcome_rows(&mut rows, region, end);
+        }
+        rows
+    });
+    Ok((built, explanation))
+}
+
+/// **The tail both drivers share**: the explanation rows of the loci the merge dropped or found
+/// too wide, then the sources and their histograms back out of the cache.
+///
+/// Called only after the driver's two error returns, so a run that failed never finishes an
+/// accumulator: a half-walked sample's histogram would describe the ground the run reached and
+/// say nothing about that, which is the same reasoning `sources`' own doc gives.
+fn finish_the_calling<Source>(
+    cache: ObservationCache<Source>,
+    explain: Option<&ExplainRegions>,
+    mut calling: CohortCallingTallies,
+) -> CohortCallingOutcome<Source>
+where
+    Source: ObservationSource<Error = RunError>,
+{
+    let mut cache = cache;
+    // The loci the merge dropped or refused, where the run explains them.
+    if let Some(dropped) = cache.take_dropped_loci() {
+        calling.explanations.extend(dropped.into_rows());
+    }
+    if let Some(regions) = explain {
+        calling
+            .explanations
+            .extend(too_wide_rows(regions, &calling.loci_too_wide_to_assemble));
+    }
+    let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
+    // What this run's yardsticks are, for something outside it to check — off unless the run was
+    // asked for it, beside the per-record rows (`cohort_merge::recorded_windows`).
+    record_the_histograms(&window_coverage_histograms);
+    CohortCallingOutcome {
+        calling,
+        sources,
+        window_coverage_histograms,
+    }
+}
+
 /// **Call one cohort and hand every record over as it is finished, keeping none — the body both
 /// modes drive** (spec §3.1: "both callers drive one merge and one calling loop").
 ///
@@ -922,9 +1195,11 @@ pub(crate) struct CohortCallingOutcome<S> {
 /// §12.2's oracle.
 ///
 /// `hand_over` is given each record in genome order and may refuse. **The first refusal is the
-/// run's answer**, naming the locus it was writing, and no record is handed over after it — but
-/// the merge is not stopped, because its sink cannot say so (see the note beside `stopped` in
-/// the body). So the merge finishes the analysed ground before the error is returned.
+/// run's answer**, and `hand_over` names the locus itself ([`RunError::RecordNotWritten`]): what
+/// it writes may be a record it held back, not the one just handed in. No record is handed over
+/// after it — but the merge is not stopped, because its sink cannot say so (see the note beside
+/// `stopped` in the body). So the merge finishes the analysed ground before the error is
+/// returned.
 ///
 /// # Not every called locus becomes a record
 ///
@@ -963,7 +1238,7 @@ pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, P,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
-    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), RunError>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send,
@@ -971,48 +1246,14 @@ where
     S: Default,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let CohortCallingInputs {
-        segmentation,
-        merge_parameters,
-        parameters,
-        calling_loop_config,
-        candidate_selection,
-        padding_reference,
-        contigs,
-        explain,
-        min_site_quality,
-        low_base_quality_weight,
-        gathers_fragments,
-    } = inputs;
-    if let Some(regions) = explain {
-        cache.explaining_drops(regions.clone());
-    }
-    // **The cohort's size is read off the cache rather than passed beside it**, so the number
-    // the genotyper is told and the number of sources actually being merged cannot become two
-    // different facts.
-    let run_sample_count = cache.sample_count();
-    let frozen = parameters.view();
-    let mut shaping = GenericEvidenceScratch::default();
-    let mut tract_shaping = SsrEvidenceScratch::default();
-    // The discovery pre-pass is a *selection* pass (research doc
-    // tract_genotype_accuracy_2026-09-03 §6.5), so the loop configuration's discovery setting is
-    // honoured by handing selection its bar — `None`, the shipped default, runs no pre-pass and
-    // selects byte-identically. Same as `call_cohort`, which is the point of this function.
-    let tract_selection = SsrSelectionConfig {
-        discovery: calling_loop_config.discovery.pre_pass_bar(),
-        ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
-    };
-    let mut scratch: CallingScratch<S> = CallingScratch::default();
-    let mut padding_scratch = Vec::new();
-    let mut beside_scratch = ReferenceBesideScratch::default();
+    let (context, ground) = split_the_inputs(inputs, genotyper, &mut cache);
+    let mut worker = LocusWorker::<S>::new(context.run_sample_count);
     let mut records_written = 0_u64;
     let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut loci_called_but_not_written = 0_u64;
     let mut loci_below_minimum_site_quality = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
-    // Counted rather than collected — see the other driver.
-    let mut tracts = TractOutcomes::default();
     // **The merge's sink cannot fail**, so the first failure is stashed and the sink does
     // nothing after it. Reported ahead of whatever the merge itself then returns, because it
     // happened first.
@@ -1025,136 +1266,29 @@ where
     // first chromosome it is the rest of the genome decoded for nothing. Fixing it means the
     // merge's sink saying *stop* — one `ControlFlow` through both drivers and the region
     // builder — which is a change to the merge's interface and not this step's.
-    let mut progress = CallingProgress::new(contigs, segmentation.analysed_regions());
+    let mut progress = CallingProgress::new(ground.contigs, ground.segmentation.analysed_regions());
     let mut stopped: Option<RunError> = None;
-    // **One buffer for the run, refilled per record.** It is dense over the run's samples and
-    // lives only from `evidence_for_output` to the sink, which is why the sink takes a slice
-    // rather than the record carrying one.
-    let mut window_coverage: Vec<WindowCoverage> = Vec::with_capacity(run_sample_count);
 
     let merged = merge_cohort_handing_each_locus_over_covering_samples_in_parallel(
-        segmentation.analysed_regions(),
+        ground.segmentation.analysed_regions(),
         &mut cache,
-        merge_parameters.cohort_locus_builder_regions_len,
-        merge_parameters.max_cohort_locus_span,
-        merge_parameters.min_alt_reads,
+        ground.merge_parameters.cohort_locus_builder_regions_len,
+        ground.merge_parameters.max_cohort_locus_span,
+        ground.merge_parameters.min_alt_reads,
         &mut |observation, reads| {
             if stopped.is_some() {
                 return;
             }
             let region = observation.region;
-            let mut observation = observation;
-            if let Err(source) = reread_spellings_cut_short(
-                &padding_reference,
-                &mut observation,
-                &mut beside_scratch,
-            ) {
-                stopped = Some(RunError::ReferenceBesideLocusUnreadable {
-                    locus: region,
-                    source,
-                });
-                return;
-            }
-            let reference_beside =
-                match reference_beside_locus(&padding_reference, &observation, &mut beside_scratch)
-                {
-                    Ok(beside) => beside,
-                    Err(source) => {
-                        stopped = Some(RunError::ReferenceBesideLocusUnreadable {
-                            locus: region,
-                            source,
-                        });
+            let (built, explanation) =
+                match call_and_assemble(&context, &mut worker, observation, reads) {
+                    Ok(called) => called,
+                    Err(error) => {
+                        stopped = Some(error);
                         return;
                     }
                 };
-            let (built, explanation) = call_one_cohort_locus(
-                genotyper,
-                &observation,
-                reference_beside,
-                explain,
-                &frozen,
-                candidate_selection,
-                &tract_selection,
-                calling_loop_config,
-                run_sample_count,
-                &mut shaping,
-                &mut tract_shaping,
-                &mut tracts,
-                &mut scratch,
-                |inference, remap, unmatched, verdict| {
-                    // **Asked before the reference is read**, so a locus that establishes
-                    // no variant costs no fetch and no evidence gathering.
-                    if !a_written_genotype_carries_an_alternative(&inference) {
-                        return Ok(CalledLocus::NoAlternative);
-                    }
-                    let alleles = inference.alleles();
-                    // Read first: it lies left of the padding base, and that read evicts
-                    // behind itself.
-                    let before_left_flank = base_before_left_flank(
-                        &padding_reference,
-                        inference.region,
-                        alleles,
-                        &mut padding_scratch,
-                    )
-                    .map_err(|source| RunError::PaddingBaseUnreadable {
-                        locus: inference.region,
-                        source,
-                    })?;
-                    let padding = padding_base_beside(
-                        &padding_reference,
-                        inference.region,
-                        alleles,
-                        &mut padding_scratch,
-                    )
-                    .map_err(|source| RunError::PaddingBaseUnreadable {
-                        locus: inference.region,
-                        source,
-                    })?;
-                    let evidence = evidence_for_output(
-                        &inference,
-                        &observation,
-                        remap,
-                        unmatched,
-                        verdict,
-                        padding,
-                        before_left_flank,
-                        low_base_quality_weight,
-                    );
-                    // **The gate reads the quality the record would carry**, after the artifact
-                    // correction, and before the windows are taken: a locus below it is not
-                    // written, so nothing of it reaches the file or the filter after
-                    // (`calling_quality.md` §3.5).
-                    if evidence.corrected_site_quality < min_site_quality {
-                        return Ok(CalledLocus::BelowMinimumSiteQuality(
-                            evidence.corrected_site_quality,
-                        ));
-                    }
-                    // Asked only now, for a locus that is written (read phase spec §2.2), and only
-                    // where the output reads fragments.
-                    let read_alleles = if gathers_fragments {
-                        read_alleles_for_record(remap, reads)
-                    } else {
-                        RecordReadAlleles::default()
-                    };
-                    // **Taken before the evidence is consumed**, into a buffer refilled per
-                    // record rather than allocated: the record itself carries no window, by
-                    // design — a run with the filter off writes byte for byte what it wrote
-                    // before this work — so the pair travels beside it, and this is the last
-                    // place it exists (`spec/window_coverage.md` §3.5).
-                    window_coverage.clear();
-                    window_coverage
-                        .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(CalledLocus::Written(assemble_record(
-                        &inference,
-                        evidence,
-                        read_alleles,
-                    )))
-                },
-            );
-            if let Some(mut rows) = explanation {
-                if let Some(end) = end_of_a_called_locus(&built) {
-                    outcome_rows(&mut rows, region, end);
-                }
+            if let Some(rows) = explanation {
                 explanations.extend(rows);
             }
             progress.locus_passed(region, records_written);
@@ -1181,18 +1315,17 @@ where
                             contig: region.contig,
                             position: region.start,
                         },
-                        &window_coverage,
+                        &worker.window_coverage,
                     );
-                    match prepare(record, &window_coverage)
-                        .and_then(|ready| hand_over(ready, &window_coverage))
+                    match prepare(record, &worker.window_coverage)
+                        .map_err(|source| RunError::RecordNotWritten {
+                            locus: region,
+                            source: Box::new(source),
+                        })
+                        .and_then(|ready| hand_over(ready, &worker.window_coverage))
                     {
                         Ok(()) => records_written += 1,
-                        Err(source) => {
-                            stopped = Some(RunError::RecordNotWritten {
-                                locus: region,
-                                source: Box::new(source),
-                            });
-                        }
+                        Err(error) => stopped = Some(error),
                     }
                 }
             }
@@ -1205,34 +1338,20 @@ where
     merged?;
     progress.finished(records_written);
 
-    // **After the two error returns, so a run that failed never finishes an accumulator.** A
-    // half-walked sample's histogram would describe the ground the run reached and say nothing
-    // about that, which is the same reasoning `sources`' own doc gives.
-    // The loci the merge dropped or refused, where the run explains them.
-    if let Some(dropped) = cache.take_dropped_loci() {
-        explanations.extend(dropped.into_rows());
-    }
-    if let Some(regions) = explain {
-        explanations.extend(too_wide_rows(regions, &loci_too_wide_to_assemble));
-    }
-    let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
-    // What this run's yardsticks are, for something outside it to check — off unless the run was
-    // asked for it, beside the per-record rows (`cohort_merge::recorded_windows`).
-    record_the_histograms(&window_coverage_histograms);
-    Ok(CohortCallingOutcome {
-        calling: CohortCallingTallies {
+    Ok(finish_the_calling(
+        cache,
+        context.explain,
+        CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
             loci_below_minimum_site_quality,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
-            tracts,
+            tracts: worker.tracts,
             explanations,
             edge_deletion_gathering: Default::default(),
         },
-        sources,
-        window_coverage_histograms,
-    })
+    ))
 }
 
 /// **What became of this run's repeat tracts** — the partition the run report prints, the way
@@ -1944,9 +2063,9 @@ impl CohortWalkTallies {
     ///
     /// # Panics
     ///
-    /// If the names and the walkers are different lengths, which would pair one sample's name
-    /// with another's counts — a wrong run report rather than a crash, and the accident the
-    /// run's single sample order exists to prevent.
+    /// If the names and the walkers are different lengths, or a walker is not of the sample named
+    /// beside it, which would pair one sample's name with another's counts — a wrong run report
+    /// rather than a crash, and the accident the run's single sample order exists to prevent.
     fn of(
         sample_names: Vec<String>,
         walkers: Vec<RunWalker>,
@@ -1965,23 +2084,37 @@ impl CohortWalkTallies {
             per_sample: sample_names
                 .into_iter()
                 .zip(walkers)
-                .map(|(sample_name, walker)| SampleWalkTallies {
-                    regions: walker.counts().clone(),
-                    // **The slot holds a pileup generator or nothing**, which is what
-                    // `generic_path_generators` builds, so the two arms below are the two
-                    // real cases and the third is unreachable rather than merged in: a tally
-                    // of another kind there would be a generator set built for a different
-                    // path, and this reports it as counting nothing — which is what a
-                    // generator set nobody mis-wired also reports. Nothing in a run can
-                    // produce it; if `generic_path_generators` ever fills the slot from a
-                    // caller's choice, this becomes two facts and needs two answers.
-                    read_filters: walker.generators().read_filter_counts(),
-                    snp_indel: match walker.generators().generic_counts() {
-                        Some(GeneratorCounts::Pileup(counts)) => Some(*counts),
-                        Some(_) | None => None,
-                    },
-                    loci_over_the_depth_ceiling: walker.loci_over_the_depth_ceiling(),
-                    sample_name,
+                .map(|(sample_name, walker)| {
+                    // **Asserted by name, as psp mode asserts its own pairing**: every walker
+                    // carries its sample's name, so a walker handed back out of order is caught
+                    // here rather than reported under its neighbour's name.
+                    assert_eq!(
+                        walker.sample_name(),
+                        sample_name,
+                        "the walk of {} came back where the run expects {}, so a report built \
+                         from it would put one sample's counts under another sample's name. \
+                         This is a defect in ng rather than anything about the data.",
+                        walker.sample_name(),
+                        sample_name,
+                    );
+                    SampleWalkTallies {
+                        regions: walker.counts().clone(),
+                        // **The slot holds a pileup generator or nothing**, which is what
+                        // `generic_path_generators` builds, so the two arms below are the two
+                        // real cases and the third is unreachable rather than merged in: a tally
+                        // of another kind there would be a generator set built for a different
+                        // path, and this reports it as counting nothing — which is what a
+                        // generator set nobody mis-wired also reports. Nothing in a run can
+                        // produce it; if `generic_path_generators` ever fills the slot from a
+                        // caller's choice, this becomes two facts and needs two answers.
+                        read_filters: walker.generators().read_filter_counts(),
+                        snp_indel: match walker.generators().generic_counts() {
+                            Some(GeneratorCounts::Pileup(counts)) => Some(*counts),
+                            Some(_) | None => None,
+                        },
+                        loci_over_the_depth_ceiling: walker.loci_over_the_depth_ceiling(),
+                        sample_name,
+                    }
                 })
                 .collect(),
             assembly_check,
@@ -2336,7 +2469,20 @@ pub(super) fn refuse_two_references_that_are_not_one(
 
 /// What a refusal names when the reference has checksums but no path to point at — unreachable
 /// while checksums only come from reading a FASTA, and readable rather than blank if it ever is.
-pub(super) const A_REFERENCE_WITH_NO_PATH: &str = "(a reference read from its index alone)";
+const A_REFERENCE_WITH_NO_PATH: &str = "(a reference read from its index alone)";
+
+/// **The reference's path, as the reference refusals name it**: the checksummed copy's FASTA,
+/// else the opened one's, else [`A_REFERENCE_WITH_NO_PATH`].
+pub(super) fn reference_path_to_name<'a>(
+    opened: &'a ReferenceInfo,
+    with_checksums: &'a ReferenceInfo,
+) -> &'a std::path::Path {
+    with_checksums
+        .fasta_path
+        .as_deref()
+        .or(opened.fasta_path.as_deref())
+        .unwrap_or_else(|| std::path::Path::new(A_REFERENCE_WITH_NO_PATH))
+}
 
 /// Compare every sample's contig checksums against the reference's.
 ///
@@ -6046,6 +6192,11 @@ mod records_handed_over_as_the_run_finishes_them {
             source: Box::new(std::io::Error::other("the source gave out")),
         }));
 
+        let settings = CallingSettings {
+            min_site_quality: Phred::ZERO,
+            low_base_quality_weight: 0.0,
+            ..CallingSettings::default()
+        };
         let inputs = CohortCallingInputs {
             segmentation: &segmentation,
             merge_parameters,
@@ -6054,10 +6205,7 @@ mod records_handed_over_as_the_run_finishes_them {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
-            explain: None,
-            min_site_quality: Phred::ZERO,
-            low_base_quality_weight: 0.0,
-            gathers_fragments: true,
+            settings: &settings,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -6065,9 +6213,12 @@ mod records_handed_over_as_the_run_finishes_them {
             inputs,
             &the_shipped_genotyper(),
             &|record, _| Ok::<_, std::io::Error>(record),
-            &mut |_record, _window_coverage| {
+            &mut |record: VcfRecord, _window_coverage| {
                 handed += 1;
-                Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
+                Err(RunError::RecordNotWritten {
+                    locus: record.region(),
+                    source: Box::new(std::io::Error::other("the disk is full")),
+                })
             },
         );
         // Matched rather than `expect_err`, so the failure message can name which of the two
@@ -6361,6 +6512,128 @@ mod records_handed_over_as_the_run_finishes_them {
                     },
                     "the first of the two positions, which is where it stopped",
                 );
+                assert!(source.to_string().contains("the disk is full"));
+            }
+            other => panic!("expected the record refusal, got {other:?}"),
+        }
+    }
+
+    /// **A record the output refuses is named at its own locus, even when the run was calling a
+    /// later one.** The gathering holds a record for up to 256 bases and the fragment keeper
+    /// until reads move 1,000 bases past it, so the record `hand_over` refuses is often not the
+    /// locus just called. Here one sample varies at three positions 5 kb apart: calling the
+    /// third releases the first, and the refusal must name the first, where the file stopped.
+    #[test]
+    fn a_held_back_record_the_output_refuses_is_named_at_its_own_locus() {
+        use crate::bam::cram_files::{ContigSpec, build_fasta};
+        use crate::calling::parameters_file::DeclaredInbreeding;
+        use crate::read::input::read_groups::build_read_groups;
+        use crate::read::input::test_fixtures::read_named_with_length;
+        use crate::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
+        use noodles_sam::alignment::record_buf::Sequence;
+
+        const CONTIG: (&str, usize) = ("chrLong", 20_000);
+        let (_reference_dir, fasta) = build_fasta(&[ContigSpec {
+            name: CONTIG.0.to_string(),
+            length: CONTIG.1 as u64,
+        }])
+        .expect("the fixture reference builds");
+        let from_the_index = read_reference_info(ReferenceSource::Fai(
+            crate::reference_info::sibling_fai_path(&fasta),
+        ))
+        .expect("the fixture index reads");
+        let reference = OpenReference::new(Arc::new(ReferenceInfo {
+            fasta_path: Some(fasta),
+            md5: from_the_index.md5,
+            contigs: from_the_index.contigs.clone(),
+        }));
+
+        let mut carrying = [b'A'; 30];
+        carrying[5] = b'C';
+        let reads: Vec<RecordBuf> = [10_usize, 5_010, 10_010]
+            .into_iter()
+            .flat_map(|start| {
+                (0..3).map(move |read| {
+                    let mut record =
+                        read_named_with_length(&format!("zeta-{start}-r{read}"), 0, start, 30);
+                    *record.sequence_mut() = Sequence::from(carrying.to_vec());
+                    record
+                })
+            })
+            .collect();
+        let (_zeta_dir, zeta) = indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &[(CONTIG.0, CONTIG.1, None)],
+                &[(&read_group_for("zeta"), Some("zeta"))],
+            ),
+            &reads,
+            "zeta.bam",
+        );
+        let bounds = [crate::regions::ContigBounds {
+            name: CONTIG.0,
+            length: CONTIG.1 as u32,
+        }];
+        let segmentation = Arc::into_inner(crate::run::test_fixtures::build_segmentation_under(
+            vec![TypedRegion {
+                region: GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(1),
+                    end: Position(CONTIG.1 as u64),
+                },
+                kind: RegionKind::Generic,
+            }],
+            GenomeRegions::whole_contigs(&bounds),
+            crate::run::test_fixtures::catalog_header(),
+        ))
+        .expect("the fixture holds the only handle");
+        let read_groups =
+            build_read_groups(std::slice::from_ref(&zeta)).expect("the fixture declares its group");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        let caller = AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference: &reference,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig::default(),
+                reference_with_checksums: reference.info(),
+            },
+            segmentation,
+            parameters,
+            shipped_calling_loop(),
+            CandidateSelectionConfig::DEFAULT,
+            MergeParameters::DEFAULT,
+        )
+        .expect("one readable sample over a readable reference opens");
+
+        let mut offered = Vec::new();
+        let stopped = caller
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage, _fragments| {
+                    offered.push(record.region());
+                    Err(std::io::Error::other("the disk is full"))
+                },
+            )
+            .expect_err("a refused record ends the run");
+
+        assert_eq!(
+            offered,
+            vec![GenomeRegion {
+                contig: ContigId(0),
+                start: Position(15),
+                end: Position(15),
+            }],
+            "one record offered, the first, and none after the refusal",
+        );
+        match stopped {
+            RunError::RecordNotWritten { locus, source } => {
+                assert_eq!(locus, offered[0], "the refused record's own locus");
                 assert!(source.to_string().contains("the disk is full"));
             }
             other => panic!("expected the record refusal, got {other:?}"),
@@ -7348,26 +7621,16 @@ mod records_handed_over_as_the_run_finishes_them {
 }
 
 // ============================================================================================
-// PROTOTYPE (2026-09-09 concurrency review) — the round-of-regions calling driver.
-//
-// Everything below this line is scaffolding for a measurement, not a shipping shape. It is
-// reached only when `NG_ROUND_CALL` is set in the environment.
+// The round-of-regions calling driver — psp mode's, whenever a round holds more than one region.
 // ============================================================================================
 
-/// One worker's mutable state for a round of regions. Rayon builds one per task split.
+/// One worker's state for a round of regions: a [`LocusWorker`] and the run's shared tract total.
 ///
-/// **The tract counts leave on `Drop`**, into the run's shared total: `map_init` gives no way to
-/// read a worker's state back, and a round's scratch is dropped when its `par_iter` finishes.
+/// **The tract counts leave on `Drop`**, into the run's shared total: the stream keeps its
+/// workers' scratch to itself, reusing it from region to region, and drops it when the calling
+/// pass ends, inside the stream's thread scope and so before the total is read.
 struct RoundCallScratch<'a, S> {
-    shaping: GenericEvidenceScratch,
-    tract_shaping: SsrEvidenceScratch,
-    scratch: CallingScratch<S>,
-    padding_scratch: Vec<u8>,
-    /// The reference either side of the locus its partial reads need (spec
-    /// `read_likelihoods.md` §5.3), read into buffers the worker keeps.
-    beside_scratch: ReferenceBesideScratch,
-    window_coverage: Vec<WindowCoverage>,
-    tracts: TractOutcomes,
+    worker: LocusWorker<S>,
     totals: &'a std::sync::Mutex<TractOutcomes>,
 }
 
@@ -7377,10 +7640,11 @@ impl<S> Drop for RoundCallScratch<'_, S> {
             .totals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        total.called += self.tracts.called;
-        total.too_many_alleles += self.tracts.too_many_alleles;
-        total.without_whole_repeats += self.tracts.without_whole_repeats;
-        total.bundles += self.tracts.bundles;
+        let tracts = &self.worker.tracts;
+        total.called += tracts.called;
+        total.too_many_alleles += tracts.too_many_alleles;
+        total.without_whole_repeats += tracts.without_whole_repeats;
+        total.bundles += tracts.bundles;
     }
 }
 
@@ -7417,7 +7681,7 @@ pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, P, E>(
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
-    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), RunError>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send + Sync,
@@ -7426,28 +7690,7 @@ where
     P: Send,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let CohortCallingInputs {
-        segmentation,
-        merge_parameters,
-        parameters,
-        calling_loop_config,
-        candidate_selection,
-        padding_reference,
-        contigs,
-        explain,
-        min_site_quality,
-        low_base_quality_weight,
-        gathers_fragments,
-    } = inputs;
-    if let Some(regions) = explain {
-        cache.explaining_drops(regions.clone());
-    }
-    let run_sample_count = cache.sample_count();
-    let frozen = parameters.view();
-    let tract_selection = SsrSelectionConfig {
-        discovery: calling_loop_config.discovery.pre_pass_bar(),
-        ..SsrSelectionConfig::at_ploidy(frozen.ploidy())
-    };
+    let (context, ground) = split_the_inputs(inputs, genotyper, &mut cache);
     let mut records_written = 0_u64;
     let mut loci_called_but_not_written = 0_u64;
     let mut loci_below_minimum_site_quality = 0_u64;
@@ -7455,181 +7698,55 @@ where
     let mut loci_with_nobody_to_call = Vec::new();
     let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
     let mut explanations: Vec<ExplainRow> = Vec::new();
-    let mut progress = CallingProgress::new(contigs, segmentation.analysed_regions());
+    let mut progress = CallingProgress::new(ground.contigs, ground.segmentation.analysed_regions());
     let mut stopped: Option<RunError> = None;
 
-    let padding_reference = &padding_reference;
-    let frozen = &frozen;
-    let tract_selection = &tract_selection;
+    let context = &context;
     let tract_totals_ref = &tract_totals;
 
     let make_scratch = || RoundCallScratch::<S> {
-        shaping: GenericEvidenceScratch::default(),
-        tract_shaping: SsrEvidenceScratch::default(),
-        scratch: CallingScratch::default(),
-        padding_scratch: Vec::new(),
-        beside_scratch: ReferenceBesideScratch::default(),
-        window_coverage: Vec::with_capacity(run_sample_count),
-        tracts: TractOutcomes::default(),
+        worker: LocusWorker::new(context.run_sample_count),
         totals: tract_totals_ref,
     };
-    let call_locus =
-        |worker: &mut RoundCallScratch<'_, S>,
-         observation: CohortObservation,
-         reads: &crate::run::cohort_merge::build::LocusReads<'_, '_>| {
-            let region = observation.region;
-            let RoundCallScratch {
-                shaping,
-                tract_shaping,
-                scratch,
-                padding_scratch,
-                beside_scratch,
-                window_coverage,
-                tracts,
-                totals: _,
-            } = worker;
-            let mut observation = observation;
-            if let Err(source) =
-                reread_spellings_cut_short(padding_reference, &mut observation, beside_scratch)
-            {
-                return (
-                    RoundLocusOutcome::CalledFailed(RunError::ReferenceBesideLocusUnreadable {
-                        locus: region,
-                        source,
-                    }),
-                    None,
-                );
-            }
-            let reference_beside =
-                match reference_beside_locus(padding_reference, &observation, beside_scratch) {
-                    Ok(beside) => beside,
-                    Err(source) => {
-                        return (
-                            RoundLocusOutcome::CalledFailed(
-                                RunError::ReferenceBesideLocusUnreadable {
-                                    locus: region,
-                                    source,
-                                },
-                            ),
-                            None,
-                        );
-                    }
-                };
-            let (built, explanation) = call_one_cohort_locus(
-                genotyper,
-                &observation,
-                reference_beside,
-                explain,
-                frozen,
-                candidate_selection,
-                tract_selection,
-                calling_loop_config,
-                run_sample_count,
-                shaping,
-                tract_shaping,
-                tracts,
-                scratch,
-                |inference, remap, unmatched, verdict| {
-                    if !a_written_genotype_carries_an_alternative(&inference) {
-                        return Ok(CalledLocus::NoAlternative);
-                    }
-                    let alleles = inference.alleles();
-                    // Read first: it lies left of the padding base, and that read evicts
-                    // behind itself.
-                    let before_left_flank = base_before_left_flank(
-                        padding_reference,
-                        inference.region,
-                        alleles,
-                        padding_scratch,
-                    )
-                    .map_err(|source| RunError::PaddingBaseUnreadable {
-                        locus: inference.region,
-                        source,
-                    })?;
-                    let padding = padding_base_beside(
-                        padding_reference,
-                        inference.region,
-                        alleles,
-                        padding_scratch,
-                    )
-                    .map_err(|source| RunError::PaddingBaseUnreadable {
-                        locus: inference.region,
-                        source,
-                    })?;
-                    let evidence = evidence_for_output(
-                        &inference,
-                        &observation,
-                        remap,
-                        unmatched,
-                        verdict,
-                        padding,
-                        before_left_flank,
-                        low_base_quality_weight,
-                    );
-                    // **The gate reads the quality the record would carry**, after the artifact
-                    // correction, and before the windows are taken: a locus below it is not
-                    // written, so nothing of it reaches the file or the filter after
-                    // (`calling_quality.md` §3.5).
-                    if evidence.corrected_site_quality < min_site_quality {
-                        return Ok(CalledLocus::BelowMinimumSiteQuality(
-                            evidence.corrected_site_quality,
-                        ));
-                    }
-                    // Asked only now, for a locus that is written (read phase spec §2.2), and only
-                    // where the output reads fragments.
-                    let read_alleles = if gathers_fragments {
-                        read_alleles_for_record(remap, reads)
-                    } else {
-                        RecordReadAlleles::default()
-                    };
-                    window_coverage.clear();
-                    window_coverage
-                        .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(CalledLocus::Written(assemble_record(
-                        &inference,
-                        evidence,
-                        read_alleles,
-                    )))
-                },
-            );
-            // **Finished on this worker, where the record still exists**, and folded on the
-            // calling thread with the locus's own outcome, so no lock is taken.
-            let explanation = explanation.map(|mut rows| {
-                if let Some(end) = end_of_a_called_locus(&built) {
-                    outcome_rows(&mut rows, region, end);
-                }
-                rows
-            });
-            let outcome = match built {
-                LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
-                LocusOutcome::TractWithoutWholeRepeats => RoundLocusOutcome::CountedInside(region),
-                LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
-                LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
-                    RoundLocusOutcome::CalledNotWritten(region)
-                }
-                LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
-                    RoundLocusOutcome::CalledBelowMinimumSiteQuality(region)
-                }
-                LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
-                    match prepare(record, window_coverage) {
-                        Ok(ready) => RoundLocusOutcome::CalledRecord(
-                            ready,
-                            std::mem::take(window_coverage),
-                            region,
-                        ),
-                        // Reported where the calling thread reaches this locus, in genome order, as a
-                        // refusal of `hand_over` would be.
-                        Err(source) => {
-                            RoundLocusOutcome::CalledFailed(RunError::RecordNotWritten {
-                                locus: region,
-                                source: Box::new(source),
-                            })
-                        }
-                    }
-                }
-            };
-            (outcome, explanation)
+    let call_locus = |round: &mut RoundCallScratch<'_, S>,
+                      observation: CohortObservation,
+                      reads: &LocusReads<'_, '_>| {
+        let region = observation.region;
+        let worker = &mut round.worker;
+        let (built, explanation) = match call_and_assemble(context, worker, observation, reads) {
+            Ok(called) => called,
+            Err(error) => return (RoundLocusOutcome::CalledFailed(error), None),
         };
+        // **The explanation is finished on this worker, where the record still exists**, and
+        // folded on the calling thread with the locus's own outcome, so no lock is taken.
+        let outcome = match built {
+            LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
+            LocusOutcome::TractWithoutWholeRepeats => RoundLocusOutcome::CountedInside(region),
+            LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
+            LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
+                RoundLocusOutcome::CalledNotWritten(region)
+            }
+            LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
+                RoundLocusOutcome::CalledBelowMinimumSiteQuality(region)
+            }
+            LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
+                match prepare(record, &worker.window_coverage) {
+                    Ok(ready) => RoundLocusOutcome::CalledRecord(
+                        ready,
+                        std::mem::take(&mut worker.window_coverage),
+                        region,
+                    ),
+                    // Reported where the calling thread reaches this locus, in genome order, as a
+                    // refusal of `hand_over` would be.
+                    Err(source) => RoundLocusOutcome::CalledFailed(RunError::RecordNotWritten {
+                        locus: region,
+                        source: Box::new(source),
+                    }),
+                }
+            }
+        };
+        (outcome, explanation)
+    };
     let mut take = |(outcome, explanation): (RoundLocusOutcome<P>, Option<Vec<ExplainRow>>)| {
         if let Some(rows) = explanation {
             explanations.extend(rows);
@@ -7669,12 +7786,7 @@ where
                 );
                 match hand_over(ready, &windows) {
                     Ok(()) => records_written += 1,
-                    Err(source) => {
-                        stopped = Some(RunError::RecordNotWritten {
-                            locus: region,
-                            source: Box::new(source),
-                        });
-                    }
+                    Err(error) => stopped = Some(error),
                 }
             }
         }
@@ -7682,12 +7794,14 @@ where
     // **The stream of regions** ([`stream`](crate::run::cohort_merge::stream)): the next rounds'
     // ground is read while earlier rounds' regions are built.
     let merged = crate::run::cohort_merge::stream::merge_and_call_streaming(
-        segmentation.analysed_regions(),
+        ground.segmentation.analysed_regions(),
         &mut cache,
-        merge_parameters.cohort_locus_builder_regions_len,
-        merge_parameters.cohort_locus_builder_regions_in_flight,
-        merge_parameters.max_cohort_locus_span,
-        merge_parameters.min_alt_reads,
+        ground.merge_parameters.cohort_locus_builder_regions_len,
+        ground
+            .merge_parameters
+            .cohort_locus_builder_regions_in_flight,
+        ground.merge_parameters.max_cohort_locus_span,
+        ground.merge_parameters.min_alt_reads,
         make_scratch,
         call_locus,
         &mut take,
@@ -7712,17 +7826,10 @@ where
     let tracts = tract_totals
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // The loci the merge dropped or refused, where the run explains them.
-    if let Some(dropped) = cache.take_dropped_loci() {
-        explanations.extend(dropped.into_rows());
-    }
-    if let Some(regions) = explain {
-        explanations.extend(too_wide_rows(regions, &loci_too_wide_to_assemble));
-    }
-    let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
-    record_the_histograms(&window_coverage_histograms);
-    Ok(CohortCallingOutcome {
-        calling: CohortCallingTallies {
+    Ok(finish_the_calling(
+        cache,
+        context.explain,
+        CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
             loci_below_minimum_site_quality,
@@ -7732,7 +7839,5 @@ where
             explanations,
             edge_deletion_gathering: Default::default(),
         },
-        sources,
-        window_coverage_histograms,
-    })
+    ))
 }

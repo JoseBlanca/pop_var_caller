@@ -55,13 +55,12 @@ use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::read_phase::record_reads::RecordReadAlleles;
 use crate::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
 use crate::run::cohort_merge::build::LocusReads;
-use crate::types::{GenomeRegion, Position};
+use crate::types::GenomeRegion;
 use crate::vcf::assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput};
-use crate::vcf::{FilterVerdict, MapqPool, PaddingBase, TractAnnotation};
+use crate::vcf::{
+    FIRST_POSITION_OF_A_CONTIG, FilterVerdict, MapqPool, PaddingBase, TractAnnotation,
+};
 use crate::window_coverage::WindowCoverage;
-
-/// The first base of every contig, 1-based — the one position with no base to its left.
-const FIRST_POSITION_OF_A_CONTIG: Position = Position(1);
 
 /// **Whether this locus establishes a variant at all**, which is what decides if it reaches
 /// the file (`doc/devel/ng/spec/vcf_output.md` §9).
