@@ -1315,11 +1315,7 @@ impl Sections {
 
     /// Every read group any of these sections is filed under.
     fn read_groups_used(&self) -> std::collections::BTreeSet<ReadGroupId> {
-        let keys: Box<dyn Iterator<Item = SectionKey> + '_> = match self {
-            Self::Resident(sections) => Box::new(sections.keys().copied()),
-            Self::Backed { directory, .. } => Box::new(directory.keys().copied()),
-        };
-        keys.map(SectionKey::read_group).collect()
+        self.keys().map(SectionKey::read_group).collect()
     }
 
     /// The sections a walk built, checked against their own keys.
