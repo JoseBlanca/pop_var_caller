@@ -133,8 +133,8 @@ by document kind:
   plug into).
   - [`ng_step_interfaces.md`](arch/ng_step_interfaces.md) — the common domain
     newtypes and one swappable trait per pipeline step.
-  - [`module_layout.md`](arch/module_layout.md) — the `src/ng/` module tree: one
-    folder per step (trait + impls + tests together), shared vocabulary, `bench/`.
+  - [`module_layout.md`](arch/module_layout.md) — the module tree under `src/`: one
+    folder per step (trait + impls + tests together), and the shared vocabulary.
   - [`read_filtering.md`](arch/read_filtering.md) — step 1's types & interfaces,
     distilled (the code-facing companion to the spec).
   - [`read_filtering_stages.md`](arch/read_filtering_stages.md) — the renames, the two verdict
@@ -180,7 +180,7 @@ by document kind:
     (`SampleCensusEvidence`, the five-bit depth code, the STR difference list, `CensusWriter`) and
     [`parameter_prepass_joint_fit.md`](arch/parameter_prepass_joint_fit.md) (`JointFit`, the
     three site classes, `HomozygoteExcess` beside `InbreedingF`, contamination as a value or a
-    stated reason there is none). All three land in `src/ng/parameter_estimation/joint/`.
+    stated reason there is none). All three land in `src/parameter_estimation/joint/`.
   - [`candidate_alleles.md`](arch/candidate_alleles.md) — **step 6's real interface**, which
     `ng_step_interfaces.md` deferred: `CandidateSelectionConfig`, `SelectionVerdict`,
     `UnmatchedSupport`, `AlleleRemap` and `LocusSelection`, plus `select_generic`. No trait — two
@@ -243,7 +243,7 @@ by document kind:
     alone before any calling code, because without the motif there is no ladder. Its oracle is a
     differential with a failing state at both ends: production's candidate set reproduced with its
     three replaced rules switched in, and the measured improvement with them switched out.
-  - [`vcf_output.md`](impl_plan/vcf_output.md) — the `src/ng/vcf/` module: the written record's
+  - [`vcf_output.md`](impl_plan/vcf_output.md) — the `src/vcf/` module: the written record's
     carrier type (the one join nothing holds today — per-sample depths, allele counts and mapq
     pools summed in the worker before the evidence is released), encoding on golden files, the
     header, the ordered writer with the one legal POS tie, a `bcftools` strict-parse gate before
