@@ -798,9 +798,9 @@ population of 400 samples simulated with msprime (100 samples each at 30×, 10×
 refinement cut the variant genotypes missed at 2× from 12,220 to 1,546, and 7 of 94,860 phase
 links were wrong ([Accuracy](accuracy.md#imputation-genotype-refinement-and-filling)). In a
 cohort of 40 samples from the same kind of simulation, all at 2×, it got more genotypes right
-(29,381 to 31,378) but fewer heterozygotes (7,521 to 7,042). Earlier runs, of an older version,
-on cohorts built from 64 founder haplotypes at 3×, found it removed 13% of the wrong genotypes
-at 50 samples and gave 74% more at 10 samples, and 4.7% of its phase links wrong at 50 samples.
+(29,381 to 31,378) but fewer heterozygotes (7,521 to 7,042). On cohorts built from 64 founder
+haplotypes at 3×, it removed 18% of the wrong genotypes at 50 samples and 4% at 10 samples; an
+older version had 4.7% of its phase links wrong at 50 samples.
 [Genotypes from neighbouring sites](neighbour_evidence.md#when-it-runs) gives the details. This
 is why `--refine-genotypes auto` runs it only on inbred cohorts.
 
