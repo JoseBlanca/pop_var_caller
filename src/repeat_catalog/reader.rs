@@ -317,7 +317,7 @@ impl RepeatCatalog {
     ///
     /// **The floors only.** The scoring weights are a separate question with a separate
     /// answer, because a reader that only reads has no weights to offer — it is not scanning
-    /// anything. A caller that scans as well as reads asks [`check_scored_with`] itself.
+    /// anything. No command both scans and reads, so nothing here checks the weights.
     ///
     /// **And a bundle radius of at least one base**, the same floor the scan path's `classify`
     /// asserts (owner, 2026-10-09): at 0 every locus fails its own flank test. Refused here, at

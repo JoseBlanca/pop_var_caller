@@ -111,9 +111,9 @@ pub struct LocusEvidenceForOutput {
     pub artifact_penalties: Option<ArtifactPenalties>,
     /// The tract's motif, at a repeat tract — `None` at a SNP or indel.
     ///
-    /// **Not on the called locus today.** `RepeatTractProvenance` records which rung the tract's
-    /// prior came from and how many scoring cells were defaulted, not the motif itself; the
-    /// motif reaches the merge in `candidate_alleles_ssr.md`'s Milestone A, which is unbuilt.
+    /// Read off the called locus's candidate table, where selection stamped the locus kind and
+    /// its motif (or, at an STR bundle, each run's motif): see
+    /// `run::records`, which fills this field.
     pub repeat_tract: Option<TractAnnotation>,
     /// The filter this locus is written on.
     ///
@@ -459,7 +459,7 @@ impl WidenedTract {
 ///
 /// A dropped allele's `AD` entry is added to that sample's `DP − ΣAD`, which ng already writes
 /// and already documents as *reads no written allele explains*
-/// ([`SampleReadCounts`](crate::vcf::SampleReadCounts)) — the column that already holds a
+/// ([`SampleReadCounts`]) — the column that already holds a
 /// dropped candidate's reads and the partial observations. So the depth is conserved and lands
 /// in the field whose meaning already covers it.
 ///
@@ -467,9 +467,16 @@ impl WidenedTract {
 ///
 /// **A refused locus writes every sample as a no-call** (spec §8), so no genotype names any
 /// allele and this rule, applied literally, would empty the ALT column of a record whose whole
-/// purpose is to say the caller could not decide. The same holds for a cohort genotyped
-/// homozygous-reference throughout. In both cases the record is left exactly as it was: the
-/// alternatives it carries are the only statement it has to make.
+/// purpose is to say the caller could not decide. So when no genotype names any allele, the
+/// record is left exactly as it was: the alternatives it carries are the only statement it has to
+/// make.
+///
+/// A cohort genotyped homozygous-reference throughout is **not** covered by that guard: allele 0
+/// is named, so this function would drop every alternative and leave a record with no ALT. That
+/// record never reaches here, because
+/// [`a_written_genotype_carries_an_alternative`](crate::run::records::a_written_genotype_carries_an_alternative)
+/// keeps such a locus out of the file before its record is built. The same is true of a refused
+/// locus, so the guard above is defensive.
 ///
 /// # What is left alone
 ///

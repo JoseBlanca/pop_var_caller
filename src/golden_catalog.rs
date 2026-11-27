@@ -3,10 +3,9 @@
 //! `tests/data/tandem_repeat/golden.ssr_catalog.bed.gz` is the catalog production's `ssr-catalog`
 //! built — `trf-mod`, then its post-filter — on the synthetic STR-diversity reference beside it. Four
 //! of ng's tests treat it as an oracle: the scanner's recall, the resident partition, the repeat
-//! catalog's shipping stack, and the reference digest. They read it through production's
-//! `ssr::catalog::io::CatalogReader`; production is being deleted, so this is the part of that
-//! reader the tests use, written for the one file they read. The scanner's test moved to it at
-//! promotion step C12, and the other three move at C19.
+//! catalog's shipping stack, and the reference digest. They used to read it through production's
+//! `ssr::catalog::io::CatalogReader`; that reader went with production, so this is the part of
+//! it the tests use, written for the one file they read.
 //!
 //! The file is BGZF-compressed text: a `## key: value` metadata block, a `#`-prefixed column header,
 //! and one tab-separated row per locus — `chrom start end motif purity_fraction ref_seq_start

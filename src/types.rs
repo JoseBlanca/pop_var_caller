@@ -1,7 +1,26 @@
-//! Shared ng vocabulary — the domain newtypes cross-step code speaks. It starts as this
-//! one file and splits into concept modules (`units`, `locus`, …) as clusters grow
-//! (`doc/devel/ng/arch/module_layout.md` principle 3). Seeded here with only what the
-//! `RefSeq` reference accessor needs.
+//! The caller's shared vocabulary: small types, most of them one number with a meaning, that
+//! code in different steps passes to each other. Each type says what its value is, so a
+//! probability cannot be passed where a Phred score was meant; a type whose values have a valid
+//! range checks it once, at construction.
+//!
+//! The types fall into five groups:
+//!
+//! - **coordinates**: [`ContigId`], [`Position`], [`GenomePosition`], [`GenomeRegion`], [`Bp`];
+//! - **qualities**: [`MapQual`], [`BaseQual`], [`LogProb`], [`SummedLogError`],
+//!   [`MismatchFraction`], [`Phred`], [`ErrorRate`];
+//! - **read groups and batches**: [`ReadGroupId`], [`ChainId`], [`BatchId`],
+//!   [`BatchOfEachReadGroup`], [`BatchOfEachSample`];
+//! - **population parameters**: `GenotypeFrequency` (test-only), [`InbreedingF`],
+//!   [`ExpectedHeterozygosity`], [`ExpectedAlternativeFrequency`], [`Ploidy`];
+//! - **alleles and genotypes**: [`AlleleId`], [`Motif`], [`SsrPeriod`], [`Genotype`],
+//!   [`GenotypeRows`].
+//!
+//! [`DomainError`] is the one error the checked constructors of every group return; [`Motif`]
+//! has its own, [`MotifError`].
+//!
+//! It is one file on purpose: each type is short and stands alone, so the file reads as a
+//! dictionary. Splitting it by group would make every group import the shared error. Revisit
+//! that when one group passes about 600 lines of code.
 
 use std::fmt;
 
@@ -20,7 +39,7 @@ impl ContigId {
 }
 
 /// A **1-based** reference position — the coordinate ng speaks everywhere
-/// (`ng_step_interfaces.md` §1), matching VCF/SAM/IGV and the production engine.
+/// (`ng_step_interfaces.md` §1), matching VCF/SAM/IGV.
 /// Unconstrained: any `u64` is a legal value at the type level, so the field is
 /// public and there is no checked constructor.
 ///
@@ -677,11 +696,10 @@ const PHRED_PER_NAT: f64 = 10.0 / std::f64::consts::LN_10;
 // because their consumers are *other* steps: the likelihood (step 7) reads
 // the error rate, the genotype prior (step 8) reads the genotype
 // frequencies, the inbreeding coefficient and the expected heterozygosity,
-// and ploidy reaches both. **Step 7 has no module yet and step 8's holds no
-// code** — defining the types here is what keeps them from importing out of a
-// sibling step's module when they arrive. They are also the seed of the
-// `genotype`/`params` split `module_layout.md` principle 3 anticipates for
-// this file.
+// and ploidy reaches both. Defining the types here is what keeps those steps
+// from importing out of a sibling step's module. They would be the seed of a
+// `params` group if this file were ever split (`module_layout.md` principle
+// 3).
 //
 // Each follows `MismatchFraction`'s shape: private field, checked
 // `try_new`, `.get()`. `try_new` is the **boundary** constructor — it
@@ -883,8 +901,8 @@ impl ExpectedHeterozygosity {
     /// (`spec/calling_priors.md` §4.1) — while a diverse outcrosser would sit above.
     ///
     /// Taken from production's `DEFAULT_DIVERSITY_PRIOR`
-    /// (`src/var_calling/diversity.rs`), value and reasoning. Production is frozen and
-    /// this constant is ng's own: the two are not tied, and ng may move this one.
+    /// (`src/var_calling/diversity.rs`, deleted with production), value and reasoning. This
+    /// constant is ng's own, and ng may move it.
     ///
     /// **A value of the type rather than a bare `f64`**, following [`AlleleId::REFERENCE`]
     /// — the same reason. As a loose float it constructs an [`ErrorRate`], an
@@ -2222,7 +2240,7 @@ mod tests {
 
     /// A batch renders as the bare index, so a message can supply its own word for it —
     /// "batch {batch}", not "batch batch 2". Untested until mutation testing gave `Display` a
-    /// prefix and the whole suite stayed green (C2's review).
+    /// prefix and the whole suite stayed green (a code review's mutation run).
     #[test]
     fn a_batch_renders_as_the_index_alone() {
         assert_eq!(BatchId(2).to_string(), "2");

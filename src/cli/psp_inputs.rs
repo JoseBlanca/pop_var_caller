@@ -1,10 +1,10 @@
-//! **What a `--psp` argument list names** — the one rule three commands share.
+//! **What a `--psp` argument list names** — the one rule the commands that read psps share.
 //!
-//! `call-from-psps`, `estimate-parameters` and (at plan step D1) `regenerate-census` all take the
-//! same words: a psp per sample, or a directory holding them, with the flag repeated. **A run
-//! types the same thing at every step, so the three had better mean the same thing by it** — and
-//! the rule is not obvious enough to be safely written three times: a directory contributes the
-//! psps *directly* inside it, sorted by name, and sub-directories are not descended into.
+//! `call-from-psps` and `estimate-parameters` take the same words, as will the planned
+//! `regenerate-census`: a psp per sample, or a directory holding them, with the flag repeated. **A
+//! run types the same thing at every step, so the commands had better mean the same thing by it** —
+//! and the rule is not obvious enough to be safely written more than once: a directory contributes
+//! the psps *directly* inside it, sorted by name, and sub-directories are not descended into.
 //!
 //! **Sorted, because the order is the run's sample order.** It reaches the VCF's sample columns
 //! and the parameters file's rows, so two runs naming one directory must open the same cohort the

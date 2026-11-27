@@ -3,7 +3,7 @@
 //! Everything past this header is `src/paralog/mod.rs` from its first item to its end, line for
 //! line and byte for byte; production keeps these items in its `mod.rs`, whose module declarations
 //! ng cannot share, so they live in a file of their own here, where a textual guard
-//! (`copy_fidelity.rs`, deleted at promotion step C3) could reach them. Every value is the tomato2
+//! (`copy_fidelity.rs`, deleted with production) could reach them. Every value is the tomato2
 //! prototype's, inherited and **not re-measured** — a drift in any of them changes the score
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.2, plan step A1).
 /// A per-read allele error floor (`ε`): the VAF assigned to a genotype's

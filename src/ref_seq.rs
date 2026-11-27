@@ -104,11 +104,11 @@ fn validate_window(
     }
 }
 
-/// Narrow ng's `u64` request to the `u32` production's `ChromRefFetcher` takes.
+/// Narrow ng's `u64` request to the `u32` that [`RawChromReader::fetch`] takes.
 ///
-/// **The one place ng's width meets production's, and it fails rather than folds.**
-/// `src/fasta/` is frozen (spec Revision), so ng cannot widen it; but a silent
-/// narrowing here would reintroduce exactly the bug B2 removed a few lines up —
+/// **The one place ng's width meets the reader's `u32`, and it fails rather than folds.**
+/// The reader is a copy of production's fetcher and kept its width; a silent
+/// narrowing here would reintroduce the bug a review removed from the code above —
 /// the `unwrap_or(u32::MAX)` that turned a >4 Gb contig into a wrong number with
 /// no error. So a request this fetcher cannot express is `OutOfBounds`, reported
 /// against the contig's real (`u64`) length.
@@ -140,9 +140,9 @@ fn narrow_for_fetcher(
 /// that" is a compile-time fact rather than a runtime error — and so that a consumer
 /// states what it needs rather than naming a concrete impl.
 ///
-/// Coordinates are bare `u64` (1-based `start_1based`, `length`) rather than newtypes, to
-/// match the production `MultiChromRefFetcher::fetch` signature so a winning impl ports
-/// back with no signature change (ref_seq.md, Decision 3).
+/// Coordinates are bare `u64` (1-based `start_1based`, `length`) rather than newtypes. That
+/// matched the deleted production caller's `MultiChromRefFetcher::fetch` signature, so a
+/// winning implementation could port back with no signature change (ref_seq.md, Decision 3).
 pub trait RefSeq {
     /// Write the canonical `{A,C,G,T,N}` bases for the `length` bases starting at 1-based
     /// `start_1based` on `contig` into `dst`. On success, `dst`'s previous contents are
@@ -631,7 +631,7 @@ pub struct WindowedRefSeq {
     /// measured, and the second cost the `.fai` parse was hiding.
     contigs: Arc<ContigList>,
     /// The `.fai`, parsed once and shared — `None` when this accessor parses it itself
-    /// at every contig open ([`new`](Self::new) vs
+    /// at every contig open (`new` vs
     /// [`with_shared_index`](Self::with_shared_index)).
     ///
     /// It is the *index* that is shared here and never the reader: k accessors over one
@@ -1217,7 +1217,7 @@ mod tests {
     }
 
     /// Production's `RawContigRefCache::fetch_raw_slice` over this fixture, recorded at commit
-    /// `d9e7b076` (promotion step C25): every one of its 72 slices — each start, each length,
+    /// `d9e7b076`: every one of its 72 slices — each start, each length,
     /// both contigs — was the matching run of the contig's bytes exactly as the FASTA holds
     /// them, case and ambiguity codes untouched. So each slice is compared against that run of
     /// the recorded contig.

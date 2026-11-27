@@ -2,8 +2,8 @@
 //! a catalog built on it, and two samples' indexed alignment files.
 //!
 //! **One copy, and all three commands use it.** `generate-psps` and `call-from-alignments` each
-//! grew their own, and Milestone C of `doc/devel/ng/impl_plan/run_driver_psp_mode.md` recorded
-//! the duplication as a debt; `call-from-psps` would have been the third, and it is the one
+//! grew their own, and `doc/devel/ng/impl_plan/run_driver_psp_mode.md` recorded the duplication
+//! as a debt; `call-from-psps` would have been the third, and it is the one
 //! command that has to be driven over *the files another command wrote*, so it cannot have a
 //! private cohort at all.
 //!

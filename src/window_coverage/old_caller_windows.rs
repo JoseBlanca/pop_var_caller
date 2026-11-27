@@ -1,22 +1,22 @@
-//! Does the transcription still compute production's window? A differential against the
-//! accumulator it was copied from.
+//! Does the transcription still compute the old caller's window? A check against the recorded
+//! output of the accumulator it was copied from.
 //!
-//! **Production's side is frozen since promotion step C13.** Until then each of the 200 generated
-//! streams was fed to production's accumulator beside ng's and every window compared. Production is
-//! being deleted, and its 447,581 windows are too many to commit one by one, so what it emitted on
-//! each stream was recorded at commit `d9e7b076` as a count and a digest
-//! (`testdata/production_windows_by_seed.tsv`), and ng's stream is reduced the same way and compared.
-//! **What that gives up:** a divergence still fails, at the seed it happens in, but no longer names
-//! the window or the field; bisecting it needs ng's windows printed and read by hand. The prose below
-//! describes the comparison as it was built.
+//! **The old caller's side is a recording.** Until that caller was deleted (2026-09-13), each of
+//! the 200 generated streams was fed to its accumulator beside this one and every window compared.
+//! Its 447,581 windows are too many to commit one by one, so what it emitted on each stream was
+//! recorded at commit `d9e7b076` as a count and a digest
+//! (`testdata/production_windows_by_seed.tsv`), and this accumulator's stream is reduced the same
+//! way and compared. **What that gives up:** a divergence still fails, at the seed it happens in,
+//! but no longer names the window or the field; bisecting it needs the windows printed and read by
+//! hand. The prose below describes the comparison as it was built.
 //!
-//! [`accumulator`](super::accumulator) claims to be `SlidingWindowCoverageAccumulator`
-//! (`src/sample_summary/coverage.rs`) with its vocabulary changed and its arithmetic untouched.
-//! The transcribed unit tests check the arithmetic against hand-computed means; this checks it
-//! against the original, on streams neither test was written for — jumping positions, repeated
-//! positions, `N` bases in both cases, contig changes, and window widths from one base to
-//! wider than the 500 the run configures, over contigs long enough that a 500-base window
-//! genuinely slides rather than swallowing the contig whole.
+//! [`accumulator`](super::accumulator) claims to be the deleted caller's
+//! `SlidingWindowCoverageAccumulator` (`src/sample_summary/coverage.rs`) with its vocabulary
+//! changed and its arithmetic untouched. The transcribed unit tests check the arithmetic against
+//! hand-computed means; this checks it against the original, on streams neither test was written
+//! for — jumping positions, repeated positions, `N` bases in both cases, contig changes, and window
+//! widths from one base to wider than the 500 the run configures, over contigs long enough that a
+//! 500-base window genuinely slides rather than swallowing the contig whole.
 //!
 //! **This has narrowed to the windows, and will not narrow further.** ng's accumulator has
 //! both of its additions now: the floor (spec §3.3), which is switched off here so the two

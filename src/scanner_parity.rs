@@ -2,7 +2,7 @@
 //!
 //! [`find_tandem_repeats`](crate::tandem_repeat::find_tandem_repeats) must
 //! reproduce the **final catalog** the external `trf-mod` produces, run through
-//! production's post-filter (`ssr::catalog::postprocess`) — since promotion step C12 a frozen
+//! production's post-filter (`ssr::catalog::postprocess`) — now a frozen
 //! copy of it, [`production_post_filter`](crate::production_post_filter), and the golden
 //! catalog read by ng's own [`golden_catalog`](crate::golden_catalog).
 //!

@@ -1,13 +1,13 @@
-# Production's coverage windows for src/window_coverage/production_parity.rs, one row per generated
+# Production's coverage windows for src/window_coverage/old_caller_windows.rs, one row per generated
 # stream: every window in emission order, reduced to its count and an FNV-1a digest over each
 # window's contig (u32), centre (u32), mean depth and GC fraction (each f32 as its bit pattern), all
 # little-endian. The full stream is 447,581 windows, too large to commit window by window.
 #
-# First frozen at promotion plan step C13 from production's
+# First frozen, before production was deleted, from production's
 # sample_summary::coverage::SlidingWindowCoverageAccumulator at commit d9e7b076, on streams drawing
 # depths 0 to 39. Re-recorded 2026-10-08 on the same streams with depths 1 to 39, when ng stopped
 # counting a base at depth 0 as covered: production counted it, so the two no longer agree there.
-# Production being deleted, the rows were written by `record_the_stream_digests` from ng's
+# Production being gone by then, the rows were written by `record_the_stream_digests` from ng's
 # accumulator at main 9ee6c536 — the one the first recording proved equal to production's on every
 # stream — with the generator changed and nothing else.
 #

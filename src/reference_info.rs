@@ -14,14 +14,17 @@
 //! (spec §3.6). Its output types are ng's own plain data — `ContigInfo` is the
 //! everything-about-a-contig type production never had in one place.
 //!
-//! Landed so far: the data types and the cheap `.fai` reader (Milestone A), and the
-//! from-byte-zero FASTA streaming pass (Milestone B) — `Fasta { fai: None }` reconstructs
-//! geometry + per-contig and whole-reference MD5 in one buffer; `Fasta { fai: Some }` reads
-//! the same and proves the supplied `.fai` describes the same genome (spec §3.3). And
-//! `write_fai` writes a `.fai` byte-identical to `samtools faidx`, atomically (Milestone C).
-//! `ReferenceInfoCache` is the compute-once, single-flight cache over the reader (Milestone D).
-//! `read_fai_verify_in_background` and `read_reference_verifying_or_creating_fai` are the two
-//! composing entry points — background verify, and verify-or-index (Milestone E). Module complete.
+//! What it offers:
+//!
+//! - [`read_reference_info`] with a `.fai` alone: the cheap reader;
+//! - the same with the FASTA (`Fasta { fai: None }`): one streaming pass from byte zero that
+//!   reconstructs the geometry and the per-contig and whole-reference MD5 in one buffer; with a
+//!   `.fai` as well (`Fasta { fai: Some }`), it reads the same and proves the supplied `.fai`
+//!   describes the same genome (spec §3.3);
+//! - [`write_fai`]: a `.fai` byte-identical to `samtools faidx`, written atomically;
+//! - [`ReferenceInfoCache`]: the compute-once, single-flight cache over the reader;
+//! - [`read_fai_verify_in_background`] and [`read_reference_verifying_or_creating_fai`]: the two
+//!   composing entry points — background verify, and verify-or-index.
 
 use crate::fasta::{ContigEntry, ContigList};
 use md5::{Digest, Md5};
@@ -288,10 +291,7 @@ pub enum ReferenceInfoError {
 /// Read a reference. **Pure** — no shared state, no memoisation, no filesystem probing
 /// beyond opening the paths it was handed; every call does the full work the source names
 /// (spec §3.1). A single-call consumer calls this directly; one that reads a reference
-/// repeatedly or from several threads holds a `ReferenceInfoCache` (Milestone D) instead.
-///
-/// Milestone A implements the cheap `Fai` arm; the `Fasta` streaming pass lands in
-/// Milestone B (spec §4).
+/// repeatedly or from several threads holds a [`ReferenceInfoCache`] instead.
 pub fn read_reference_info(source: ReferenceSource) -> Result<ReferenceInfo, ReferenceInfoError> {
     read_reference_info_observing(source, &mut IgnoreBases)
 }
@@ -1451,7 +1451,7 @@ mod tests {
     }
 
     // =================================================================
-    // A3 — test fixtures + committed samtools oracle constants
+    // test fixtures + committed samtools oracle constants
     //      (spec §6, §3.8; arch §7). The oracle is `samtools`, resolved
     //      to committed constants so `samtools` is not a test-time dep.
     // =================================================================
@@ -1644,7 +1644,7 @@ mod tests {
     }
 
     // =================================================================
-    // A4 — read_reference_info, the `Fai` arm (spec §4 Fai arm, §3.8,
+    // read_reference_info, the `Fai` arm (spec §4 Fai arm, §3.8,
     //      §5 T2/T3; arch §5).
     // =================================================================
 
@@ -1742,7 +1742,7 @@ mod tests {
     }
 
     // =================================================================
-    // B (B1+B2) — the FASTA streaming pass (`Fasta { fai: None }`), and
+    // the FASTA streaming pass (`Fasta { fai: None }`), and
     //      its samtools/`.cat`/`faidx.5` oracle (spec §4, §3.4, §3.8).
     // =================================================================
 
@@ -2076,7 +2076,7 @@ mod tests {
     }
 
     // =================================================================
-    // B3 — the fasta-vs-`.fai` check (`Fasta { fai: Some }`, spec §3.3,
+    // the fasta-vs-`.fai` check (`Fasta { fai: Some }`, spec §3.3,
     //      §5 T1).
     // =================================================================
 
@@ -2216,7 +2216,7 @@ mod tests {
     }
 
     // =================================================================
-    // C1 — write_fai (spec §3.9): byte-identical to samtools, atomic.
+    // write_fai (spec §3.9): byte-identical to samtools, atomic.
     // =================================================================
 
     #[test]
@@ -2271,7 +2271,7 @@ mod tests {
     }
 
     // =================================================================
-    // D1 — ReferenceInfoCache: compute-once, single-flight (spec §3.7).
+    // ReferenceInfoCache: compute-once, single-flight (spec §3.7).
     // =================================================================
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2460,7 +2460,7 @@ mod tests {
     }
 
     // =================================================================
-    // E1 — read_fai_verify_in_background (spec §3.10).
+    // read_fai_verify_in_background (spec §3.10).
     // =================================================================
 
     /// A FASTA + matching `.fai` written into a fresh tempdir, both at wrap `w`.
@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     // =================================================================
-    // E2 — read_reference_verifying_or_creating_fai (spec §3.11).
+    // read_reference_verifying_or_creating_fai (spec §3.11).
     // =================================================================
 
     /// Copy the golden FASTA into a fresh dir with **no** sibling `.fai`.

@@ -1,7 +1,7 @@
 //! **ng's copied scorer computes what production's did — asserted on randomised loci, against
 //! production's answers frozen in a fixture.**
 //!
-//! A textual guard (`copy_fidelity.rs`, deleted at promotion step C3) said the *text* was
+//! A textual guard (`copy_fidelity.rs`, deleted with production) said the *text* was
 //! production's. This says the *numbers* are, which is the property the port actually claims
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §7's reuse map: *"the parity oracle is
 //! bit-identical ratios against production's on identical synthetic inputs"*). The differential
@@ -12,11 +12,11 @@
 //! pass on both trees whatever either computes — which is exactly why they cannot serve
 //! as the oracle here.
 //!
-//! # Production's side is a fixture since promotion step C4
+//! # Production's side is a fixture
 //!
 //! Until 2026-09-13 every test here ran production's filter (`src/paralog/`,
-//! `src/var_calling/paralog_filter/calibrate.rs`) beside ng's on the same inputs. Production is
-//! being deleted, so each value production returned was written once, at commit `d9e7b076`, to
+//! `src/var_calling/paralog_filter/calibrate.rs`) beside ng's on the same inputs. Before production
+//! was deleted, each value production returned was written once, at commit `d9e7b076`, to
 //! [`testdata/production_parity_answers.tsv`](testdata/production_parity_answers.tsv) — 6,494
 //! values, keyed by the test section and the case — and the tests now compare ng against that file.
 //! The inputs are still generated here, from the same seeds, so **a change to a generator changes

@@ -1,8 +1,8 @@
 //! **What a run records about itself**: the command line that invoked it and the time it ran, for
 //! the `##commandline` VCF header line and a psp's provenance block.
 //!
-//! Copied from production's `pop_var_caller::common` at promotion step C15, unchanged: ng's
-//! commands had been calling production's copies, and production is being deleted.
+//! Copied unchanged from production's `pop_var_caller::common` when production was deleted: ng's
+//! commands had been calling production's copies.
 
 use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};

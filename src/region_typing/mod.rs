@@ -21,18 +21,20 @@
 //! spec §6). The classification port is a second concern with its own dense test
 //! suite, so it gets its own module.
 //!
-//! ## Production is frozen; ng owns its copies
+//! ## Why the classification is a port
 //!
 //! Step 3 needs an STR classification policy that is 1-based/`u64`, driven by
 //! `RepeatInterval`s, all-knobs, and that hands bundle members back instead of dropping
-//! them. `ssr::catalog::postprocess::build_loci` is none of those things, and **reshaping
-//! it in place is not on the table** (spec Revision 2026-07-16, owner): production stays
-//! exactly as it is, so that it remains an *independent yardstick* for the experiments ng
-//! exists to run.
+//! them. The deleted caller's `ssr::catalog::postprocess::build_loci` was none of those
+//! things, and while that caller existed it was kept unchanged as an independent yardstick
+//! (spec Revision 2026-07-16, owner), so reshaping it in place was ruled out.
 //!
 //! So [`segment_criteria`] is a **port**: the logic transcribed unchanged, the shape
-//! ng's. What sharing one function used to guarantee for free, a test now pins
-//! — see [`segment_criteria`]'s differential against production (spec §8.0).
+//! ng's. What sharing one function would have guaranteed for free, a test pins against a
+//! test-only copy of the original (`crate::production_post_filter`) — see
+//! [`segment_criteria`]'s differential (spec §8.0). The deleted caller no longer constrains
+//! this module: the differential is a tripwire on accidental drift, to be re-pinned when a change
+//! is deliberate.
 
 pub mod reference_runs;
 pub mod run_parse;
@@ -53,16 +55,14 @@ use thiserror::Error;
 /// The set of genome regions to walk — sorted, non-overlapping, coalesced,
 /// clamped, in genomic order.
 ///
-/// **Built through production's `RegionSet`; reimplements no parsing.** That type
-/// already parses BED, coalesces overlapping and adjacent spans, clamps to contig
-/// lengths, resolves names against the contig table, and drops zero-length
-/// contigs — and it is the same code the production caller's `--regions` runs, so
-/// ng and production agree on what a BED *means* by construction rather than by
-/// coincidence. `src/regions.rs` is not edited (spec Revision): this type reads
-/// `RegionSet`'s output through its public accessors and owns the resulting span
-/// list, which is what lets ng add its own constructor
-/// ([`from_normalized_spans`](Self::from_normalized_spans), for spans a psp header
-/// recorded) without touching the frozen file.
+/// **Built through [`RegionSet`]; reimplements no parsing.** That type already parses BED,
+/// coalesces overlapping and adjacent spans, clamps to contig lengths, resolves names against the
+/// contig table, and drops zero-length contigs, so every command agrees on what a BED *means*.
+/// This type reads `RegionSet`'s output through its public accessors and owns the resulting span
+/// list, which is what lets it add a constructor of its own
+/// ([`from_normalized_spans`](Self::from_normalized_spans), for spans a psp header recorded).
+/// That split dates from when `src/regions.rs` belonged to the deleted caller and could not be
+/// edited; it is no longer a constraint.
 ///
 /// **A user BED is not a special case**, which `regions.rs` settled first: *"'Whole
 /// genome' is not a special case — it is the region set whose every region covers
@@ -73,12 +73,11 @@ use thiserror::Error;
 /// Spec §4 called this "the one conversion seam", *"`GenomeRegions` widening (and
 /// **rebasing**) `RegionSet`'s `u32`"*. **There is no rebasing.** `regions::Region`
 /// is already **1-based inclusive** — its own doc says so, and its invariant is
-/// `1 <= start <= end`. So production and ng already agree on the base, and the
-/// only conversion here is `u32` → `u64`, which is lossless and infallible.
+/// `1 <= start <= end`. So both sides already agree on the base, and the only
+/// conversion here is `u32` → `u64`, which is lossless and infallible.
 ///
 /// That is worth stating rather than quietly enjoying: the spec anticipated an
-/// off-by-one seam at ng's busiest boundary and there is none, because the
-/// production author had already made the same call for the same reason.
+/// off-by-one seam at the caller's busiest boundary and there is none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenomeRegions {
     /// In genomic order, non-overlapping, with at least one base between two spans
@@ -633,7 +632,7 @@ pub fn partition_resident_in(
     let contig_len = bases.len() as u64;
     if contig_len == 0 {
         // A zero-length contig has no 1-based position to cover, so it has no
-        // regions. `GenomeRegions` drops these before a caller gets here (C3); this
+        // regions. `GenomeRegions` drops these before a caller gets here; this
         // keeps the function total for a direct caller.
         return (Vec::new(), TypedRegionCounts::default());
     }
@@ -935,7 +934,7 @@ fn charge_region(counts: &mut TypedRegionCounts, region: &TypedRegion, requested
 ///
 /// Absorption is iterated to a **fixed point** (a grown satellite reaches further than
 /// the run it came from) and it subsumes spec §2.1's swallow: containment and adjacency
-/// are the same predicate ([`absorb_into`]). Bundle members are absorbed **before** they
+/// are the same predicate (`absorb_into`). Bundle members are absorbed **before** they
 /// are clustered — an ordering that turned out to be load-bearing twice, once for the
 /// rule and once for windowing; the reasons are at the loop.
 ///
@@ -1096,7 +1095,7 @@ pub(crate) fn resolve_features(
 ///
 /// # Why one sweep gives the iteration's answer
 ///
-/// The iteration ([`absorb_into`], repeated until a pass absorbs nothing) depends only on
+/// The iteration (`absorb_into`, repeated until a pass absorbs nothing) depends only on
 /// which features end up joined to which satellites, never on the order it met them in.
 /// Join two spans when they are **close**: a feature and anything else with a gap of fewer
 /// than `bundle_threshold` bases (overlap counts as no gap), or two satellites that overlap
@@ -2108,7 +2107,7 @@ mod tests {
         assert_eq!(c.repeat_bp_with_no_locus, 0);
     }
 
-    // ---- GenomeRegions (C3) ---------------------------------------------
+    // ---- GenomeRegions --------------------------------------------------
 
     const CONTIGS: &[ContigBounds] = &[
         ContigBounds {
@@ -3357,7 +3356,7 @@ mod tests {
         };
 
         // The golden catalog and the settings it was built at, read by ng's own reader of that
-        // file since promotion step C19.
+        // file (`crate::golden_catalog`).
         let catalog = crate::golden_catalog::golden_catalog();
         let cat_params = catalog.settings;
         let golden = catalog.loci;

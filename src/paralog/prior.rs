@@ -24,7 +24,7 @@
 //! ---
 //!
 //! **ng's copy.** Everything above and below this note is line for line and byte for byte
-//! `src/paralog/prior.rs`, as a textual guard (`copy_fidelity.rs`, deleted at promotion step C3)
+//! `src/paralog/prior.rs`, as a textual guard (`copy_fidelity.rs`, deleted with production)
 //! asserted until then — ng appends this note
 //! to production's header and changes nothing else, except that since 2026-09-14 its `exp` and
 //! `ln` go through [`crate::float`] so that macOS and Linux fit the same π. The EM's start,
@@ -94,7 +94,7 @@ struct UniformBinning {
 
 impl UniformBinning {
     /// Returns `None` for a degenerate binning (`n_bins == 0`, a non-finite
-    /// edge, or `lo >= hi`) — mirroring [`super::GridSpec::new`]'s
+    /// edge, or `lo >= hi`) — mirroring `GridSpec::new`'s
     /// construction-boundary convention.
     fn new(lo: f64, hi: f64, n_bins: usize) -> Option<Self> {
         (n_bins >= 1 && lo.is_finite() && hi.is_finite() && lo < hi).then_some(Self {

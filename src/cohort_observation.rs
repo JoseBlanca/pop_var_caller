@@ -407,8 +407,8 @@ pub enum LocusBorder {
 ///
 /// **This row is one allele of one read group, not one allele of the sample** — see
 /// [`SupportedAllele`], which carries the group. It was one row per allele until the calling
-/// prerequisites split it (`doc/devel/ng/impl_plan/calling_prerequisites.md`, Milestone B step
-/// B1), and the reason for splitting turned out to be general rather
+/// prerequisites split it (`doc/devel/ng/impl_plan/calling_prerequisites.md`, step B1), and the
+/// reason for splitting turned out to be general rather
 /// than the STR path's alone: a read likelihood folds an observation's reads into one term only
 /// when every one of them would get the same number, and reads from two lanes have different
 /// error rates (`doc/devel/ng/spec/read_likelihoods.md` §2.3). Stutter, fitted per read group, is the same
@@ -531,7 +531,7 @@ impl Default for MinAltObs {
 /// (`passes_min_alt_obs`, `variant_caller.rs`). ng's threshold is only the first, so
 /// reaching the constant by name would have let a retune of production's per-sample filter
 /// move ng's cohort keep. Named rather than linked: the deliberate non-reuse is the point,
-/// and production is being deleted.
+/// and production has since been deleted.
 pub const DEFAULT_MIN_ALT_OBS: u32 = 2;
 
 /// What share of one sample's compared reads must be non-reference — the share half of

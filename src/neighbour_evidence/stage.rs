@@ -12,9 +12,10 @@
 //! and the stage never holds more than a window: the bounded buffer of §2.1, at its tightest.
 //! Whether letting calling run ahead would pay is a measurement (§8.6).
 //!
-//! **Whether it runs at all is decided once, before the header is written** ([`decide`]): on by
-//! default for a diploid cohort of at least ten samples whose median inbreeding is at least 0.5,
-//! and the decision, with its reason, goes into the header either way.
+//! **Whether it runs at all is decided once, before the header is written** ([`decide`]), from
+//! `--refine-genotypes`. It is off by default. `auto` runs it on a diploid cohort of at least ten
+//! samples whose median inbreeding is at least 0.5, and `on` on any diploid cohort of two or more.
+//! The decision, with its reason, goes into the header either way.
 
 use rayon::prelude::*;
 

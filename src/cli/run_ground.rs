@@ -8,7 +8,7 @@
 //! the observations, so both belong to every mode rather than to one.
 //!
 //! **Lifted out of `call-from-alignments` when psp mode's walk needed it**
-//! (`run_driver_psp_mode.md` step C1, which says to reuse these). The alternative — a second
+//! (`run_driver_psp_mode.md`, which says to reuse these). The alternative — a second
 //! copy in `generate-psps` — would let the two modes drift on what counts as a repeat, and
 //! the whole psp-mode design rests on a psp being walkable ground that a calling run can
 //! check its own segmentation against (§6.2). One copy is what makes that check meaningful.
@@ -400,9 +400,9 @@ fn addressable_bounds<'a>(
 /// beside the reference.
 ///
 /// **One rule, in one place.** It is part of what a user is promised — every subcommand's
-/// `--catalog` says *"defaults to `<reference>.repeats.parquet`"* — and it is spelled at four
-/// call sites, with a fifth arriving with `regenerate-census`. A copy that drifts is a command
-/// that silently reads a different file from its siblings.
+/// `--catalog` says *"defaults to `<reference>.repeats.parquet`"* — and every command that reads
+/// a catalog asks it here. A copy that drifts is a command that silently reads a different file
+/// from its siblings.
 #[must_use]
 pub fn catalog_path_for(catalog: Option<&Path>, reference: &Path) -> PathBuf {
     catalog.map_or_else(|| sibling_catalog_path(reference), Path::to_path_buf)
@@ -618,10 +618,10 @@ pub fn segments_cut_with(
 /// of [`segments_cut_with`], for a command that has something to ask the catalog's header before
 /// any segment is cut.
 ///
-/// `estimate-parameters` and `regenerate-census` are those commands: each compares the header with
-/// the catalog its psps were walked with, and a catalog that is not theirs would otherwise be met
-/// while cutting, as one that cannot serve the criteria — a message about the file's contents where
-/// the fault is which file was named.
+/// `estimate-parameters` is that command, and the planned `regenerate-census` would be another:
+/// each compares the header with the catalog its psps were walked with, and a catalog that is not
+/// theirs would otherwise be met while cutting, as one that cannot serve the criteria — a message
+/// about the file's contents where the fault is which file was named.
 ///
 /// # Errors
 ///
