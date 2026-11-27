@@ -155,6 +155,7 @@ use crate::types::ReadGroupId;
 #[cfg(test)]
 use super::census::{CensusError, CohortCensusEvidence};
 use super::census::{DepthCap, DepthCode, SampleGenericSections};
+use super::linear_algebra;
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -1402,52 +1403,14 @@ fn binomial(k: u32, n: u32, p: f64) -> f64 {
 }
 
 /// The `wanted` eigenvectors of largest eigenvalue of a small symmetric matrix, by cyclic
-/// Jacobi rotation. One row per sample, so this is fifty by fifty at most.
+/// Jacobi rotation ([`linear_algebra::jacobi_rotations`]). One row per sample, so this is fifty by
+/// fifty at most.
 fn leading_eigenvectors(matrix: &[f64], n: usize, wanted: usize) -> Vec<Vec<f64>> {
-    let mut a = matrix.to_vec();
-    let mut v = vec![0.0; n * n];
-    for i in 0..n {
-        v[i * n + i] = 1.0;
-    }
-    for _ in 0..100 {
-        let off: f64 = (0..n)
-            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-            .map(|(i, j)| a[i * n + j] * a[i * n + j])
-            .sum();
-        if off < 1e-18 {
-            break;
-        }
-        for p in 0..n {
-            for q in (p + 1)..n {
-                if a[p * n + q].abs() < 1e-15 {
-                    continue;
-                }
-                let theta = (a[q * n + q] - a[p * n + p]) / (2.0 * a[p * n + q]);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                for k in 0..n {
-                    let (akp, akq) = (a[k * n + p], a[k * n + q]);
-                    a[k * n + p] = c * akp - s * akq;
-                    a[k * n + q] = s * akp + c * akq;
-                }
-                for k in 0..n {
-                    let (apk, aqk) = (a[p * n + k], a[q * n + k]);
-                    a[p * n + k] = c * apk - s * aqk;
-                    a[q * n + k] = s * apk + c * aqk;
-                }
-                for k in 0..n {
-                    let (vkp, vkq) = (v[k * n + p], v[k * n + q]);
-                    v[k * n + p] = c * vkp - s * vkq;
-                    v[k * n + q] = s * vkp + c * vkq;
-                }
-            }
-        }
-    }
+    let (diagonal, v) = linear_algebra::jacobi_rotations(matrix, n, 1e-18, 1e-15);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| {
-        a[j * n + j]
-            .partial_cmp(&a[i * n + i])
+        diagonal[j]
+            .partial_cmp(&diagonal[i])
             .expect("no NaN in a similarity matrix")
     });
     (0..n)

@@ -39,6 +39,7 @@ pub mod census_moments;
 pub mod contamination;
 pub mod fit;
 pub mod fit_trace;
+mod linear_algebra;
 pub mod loci;
 pub mod sequencing_batches;
 pub mod share_curve;

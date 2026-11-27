@@ -38,6 +38,7 @@ use super::tract_exclusion::{
     self, StratumTractsLeftOut, StutterTailOutcome, StutterTailRule, TractExclusion, TractsLeftOut,
 };
 use super::*;
+use crate::parameter_estimation::joint::linear_algebra;
 use crate::parameter_estimation::joint::slippage_curve::PenalisedPoint;
 use crate::parameter_estimation::progress;
 
@@ -3973,26 +3974,15 @@ fn penalised_sandwich(
     Some(dense_product(&left, &inverse, size))
 }
 
-/// The inverse of a symmetric positive-definite matrix by its Cholesky factor; `None` when it is
-/// not positive definite.
+/// The inverse of a symmetric positive-definite matrix by its Cholesky factor
+/// ([`linear_algebra::cholesky_factor`]); `None` when it is not positive definite.
+///
+/// **The factor is shared with the SNP/indel fit's standard errors; the inverse is not.** This one
+/// solves for each column of the identity by forward then backward substitution, and the SNP/indel
+/// side forms `L⁻ᵀ L⁻¹`. The two sum in different orders, so moving this one to the other's would
+/// change the last digits of the STR standard errors.
 fn dense_inverse(matrix: &[f64], size: usize) -> Option<Vec<f64>> {
-    let mut lower = vec![0.0; size * size];
-    for i in 0..size {
-        for j in 0..=i {
-            let mut sum = matrix[i * size + j];
-            for k in 0..j {
-                sum -= lower[i * size + k] * lower[j * size + k];
-            }
-            if i == j {
-                if sum <= 0.0 || !sum.is_finite() {
-                    return None;
-                }
-                lower[i * size + i] = sum.sqrt();
-            } else {
-                lower[i * size + j] = sum / lower[j * size + j];
-            }
-        }
-    }
+    let lower = linear_algebra::cholesky_factor(matrix, size, &vec![0.0; size]).ok()?;
     let mut inverse = vec![0.0; size * size];
     let mut column = vec![0.0; size];
     for target in 0..size {

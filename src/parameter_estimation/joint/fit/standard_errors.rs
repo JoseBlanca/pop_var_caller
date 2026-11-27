@@ -82,6 +82,7 @@
 //! on a carrier shape, 13.5 on a share that lives in [0, 1], at two samples and 300,000 positions).
 
 use crate::float;
+use crate::parameter_estimation::joint::linear_algebra;
 
 use super::determined::{
     DensityReport, DeterminedShare, DuplicatedReport, SEPARATION_LOG_LIKELIHOOD, STATED_FREQUENCY,
@@ -1635,26 +1636,11 @@ pub(super) fn inverse_of_positive_definite(matrix: &[f64], n: usize) -> Option<V
     inverse_by_cholesky(matrix, n, &vec![0.0; n]).ok()
 }
 
-/// The inverse by the Cholesky factor `matrix = L Lᵀ`, or the position of the first pivot not above
+/// The inverse by the Cholesky factor `matrix = L Lᵀ` ([`linear_algebra::cholesky_factor`]), as
+/// `L⁻ᵀ L⁻¹`, or the position of the first pivot not above
 /// its `floor` (or not finite).
 fn inverse_by_cholesky(matrix: &[f64], n: usize, floor: &[f64]) -> Result<Vec<f64>, usize> {
-    let mut lower = vec![0.0; n * n];
-    for row in 0..n {
-        for column in 0..=row {
-            let mut entry = matrix[row * n + column];
-            for j in 0..column {
-                entry -= lower[row * n + j] * lower[column * n + j];
-            }
-            if row == column {
-                if !(entry > floor[row] && entry.is_finite()) {
-                    return Err(row);
-                }
-                lower[row * n + row] = entry.sqrt();
-            } else {
-                lower[row * n + column] = entry / lower[column * n + column];
-            }
-        }
-    }
+    let lower = linear_algebra::cholesky_factor(matrix, n, floor)?;
     // `L⁻¹`, lower triangular, by forward substitution on each column of the identity.
     let mut lower_inverse = vec![0.0; n * n];
     for column in 0..n {
