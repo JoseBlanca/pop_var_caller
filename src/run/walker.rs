@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use crate::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use crate::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
-use crate::locus_generation::ssr_bundle::SsrBundleGenerator;
+use crate::locus_generation::ssr::bundle::SsrBundleGenerator;
 use crate::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusCounts, LocusGenerationError, SampleLocusObservations,
     SampleLocusObservationsIterator, UnhandledReason,
