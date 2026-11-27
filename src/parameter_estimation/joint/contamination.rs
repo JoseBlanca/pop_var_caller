@@ -1373,7 +1373,7 @@ fn ln_marker(
                 float::ln(weight) + float::ln((total / widest as f64).max(f64::MIN_POSITIVE));
         }
     }
-    ln_sum_exp(&terms)
+    float::ln_sum_exp(&terms)
 }
 
 /// The chance one read shows the alternative allele from a genotype carrying `copies` of it.
@@ -1399,14 +1399,6 @@ fn genotype_priors(frequency: f64, hom_excess: f64) -> [f64; 3] {
 fn binomial(k: u32, n: u32, p: f64) -> f64 {
     let p = p.clamp(1e-12, 1.0 - 1e-12);
     float::powi(p, k as i32) * float::powi(1.0 - p, (n - k.min(n)) as i32)
-}
-
-fn ln_sum_exp(values: &[f64]) -> f64 {
-    let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if largest == f64::NEG_INFINITY {
-        return f64::NEG_INFINITY;
-    }
-    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
 }
 
 /// The `wanted` eigenvectors of largest eigenvalue of a small symmetric matrix, by cyclic

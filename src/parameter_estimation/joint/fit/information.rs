@@ -80,7 +80,7 @@ use crate::float;
 use super::{
     BetaQuadrature, BranchShares, MAX_CANDIDATES, PassModel, Scratch, candidate_read_probability,
     candidate_read_probability_slope, class_rate, expected_reference_reads,
-    genotype_frequencies_slope_in_excess, genotype_frequencies_slope_in_frequency, ln_sum_exp,
+    genotype_frequencies_slope_in_excess, genotype_frequencies_slope_in_frequency,
     reference_read_probability, reference_read_probability_slope,
 };
 
@@ -495,7 +495,7 @@ fn score_the_shares(
         float::exp(class_terms.ln_posterior_per_share + scratch.fixed_alt_ln[class])
             - on_segregating_per_share;
     if branches.duplicated_fitted {
-        let ordinary = ln_sum_exp(&[
+        let ordinary = float::ln_sum_exp(&[
             branches.ln_invariant + scratch.invariant_ln[class],
             branches.ln_fixed_alt + scratch.fixed_alt_ln[class],
             branches.ln_segregating + scratch.segregating_ln[class],

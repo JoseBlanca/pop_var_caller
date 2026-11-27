@@ -1574,14 +1574,6 @@ fn genotype_frequencies_slope_in_excess(f: f64) -> [f64; 3] {
     [moved, -2.0 * moved, moved]
 }
 
-fn ln_sum_exp(values: &[f64]) -> f64 {
-    let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if largest == f64::NEG_INFINITY {
-        return f64::NEG_INFINITY;
-    }
-    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
-}
-
 // ---------------------------------------------------------------------
 // The parameters, and one pass over the data
 // ---------------------------------------------------------------------
@@ -4629,7 +4621,7 @@ fn one_position(
                     + scratch.ln_multiplicity[candidate],
             );
         }
-        let fixed_sum = ln_sum_exp(&scratch.shares);
+        let fixed_sum = float::ln_sum_exp(&scratch.shares);
         scratch.fixed_sum_ln[class] = fixed_sum;
         let fixed_alt = fixed_sum - ln_three;
         scratch.shares.clear();
@@ -4641,7 +4633,7 @@ fn one_position(
                     .push(scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity);
             }
         }
-        let segregating_sum = ln_sum_exp(&scratch.shares);
+        let segregating_sum = float::ln_sum_exp(&scratch.shares);
         scratch.segregating_sum_ln[class] = segregating_sum;
         let segregating = segregating_sum - ln_three;
         scratch.fixed_alt_ln[class] = fixed_alt;
@@ -4664,7 +4656,7 @@ fn one_position(
                     );
                 }
             }
-            let summed = ln_sum_exp(&scratch.shares);
+            let summed = float::ln_sum_exp(&scratch.shares);
             scratch.duplicated_sum_ln[class] = summed;
             // `duplicated_ln` is kept for the scores and not reused in the branch's own sum:
             // `ln d + summed − ln 3` is added left to right, and taking `summed − ln 3` first
@@ -4676,11 +4668,11 @@ fn one_position(
             scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
-        let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        let within = float::ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
         scratch.within_ln[class] = within;
         scratch.class_ln[class] = shares.ln_class[class] + within;
     }
-    let position_ln = ln_sum_exp(&scratch.class_ln);
+    let position_ln = float::ln_sum_exp(&scratch.class_ln);
     scratch.position_ln = position_ln;
     if !position_ln.is_finite() {
         // A position whose likelihood underflowed contributes nothing to any parameter, and it
