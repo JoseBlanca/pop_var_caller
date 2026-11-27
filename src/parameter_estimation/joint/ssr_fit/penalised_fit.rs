@@ -3984,57 +3984,10 @@ fn penalised_sandwich(
     for i in 0..size {
         matrix[i * size + i] += RIDGE;
     }
-    let inverse = dense_inverse(&matrix, size)?;
+    let inverse = linear_algebra::dense_inverse(&matrix, size)?;
     let middle: Vec<f64> = spread.iter().zip(penalty).map(|(b, p)| b + p).collect();
-    let left = dense_product(&inverse, &middle, size);
-    Some(dense_product(&left, &inverse, size))
-}
-
-/// The inverse of a symmetric positive-definite matrix by its Cholesky factor
-/// ([`linear_algebra::cholesky_factor`]); `None` when it is not positive definite.
-///
-/// **The factor is shared with the SNP/indel fit's standard errors; the inverse is not.** This one
-/// solves for each column of the identity by forward then backward substitution, and the SNP/indel
-/// side forms `L⁻ᵀ L⁻¹`. The two sum in different orders, so moving this one to the other's would
-/// change the last digits of the STR standard errors.
-fn dense_inverse(matrix: &[f64], size: usize) -> Option<Vec<f64>> {
-    let lower = linear_algebra::cholesky_factor(matrix, size, &vec![0.0; size]).ok()?;
-    let mut inverse = vec![0.0; size * size];
-    let mut column = vec![0.0; size];
-    for target in 0..size {
-        column.fill(0.0);
-        column[target] = 1.0;
-        for i in 0..size {
-            let known: f64 = (0..i).map(|k| lower[i * size + k] * column[k]).sum();
-            column[i] = (column[i] - known) / lower[i * size + i];
-        }
-        for i in (0..size).rev() {
-            let known: f64 = ((i + 1)..size)
-                .map(|k| lower[k * size + i] * column[k])
-                .sum();
-            column[i] = (column[i] - known) / lower[i * size + i];
-        }
-        for i in 0..size {
-            inverse[i * size + target] = column[i];
-        }
-    }
-    Some(inverse)
-}
-
-fn dense_product(left: &[f64], right: &[f64], size: usize) -> Vec<f64> {
-    let mut out = vec![0.0; size * size];
-    for i in 0..size {
-        for k in 0..size {
-            let a = left[i * size + k];
-            if a == 0.0 {
-                continue;
-            }
-            for j in 0..size {
-                out[i * size + j] += a * right[k * size + j];
-            }
-        }
-    }
-    out
+    let left = linear_algebra::dense_product(&inverse, &middle, size);
+    Some(linear_algebra::dense_product(&left, &inverse, size))
 }
 
 // ---------------------------------------------------------------------

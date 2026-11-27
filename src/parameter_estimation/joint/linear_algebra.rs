@@ -36,6 +36,53 @@ pub(super) fn cholesky_factor(matrix: &[f64], n: usize, floor: &[f64]) -> Result
     Ok(lower)
 }
 
+/// The inverse of a symmetric positive-definite matrix by its Cholesky factor
+/// ([`cholesky_factor`]); `None` when it is not positive definite.
+///
+/// **The factor is shared with the SNP/indel fit's standard errors; the inverse is not.** This one
+/// solves for each column of the identity by forward then backward substitution, and the SNP/indel
+/// side forms `L⁻ᵀ L⁻¹`. The two sum in different orders, so moving this one to the other's would
+/// change the last digits of the STR standard errors.
+pub(super) fn dense_inverse(matrix: &[f64], size: usize) -> Option<Vec<f64>> {
+    let lower = cholesky_factor(matrix, size, &vec![0.0; size]).ok()?;
+    let mut inverse = vec![0.0; size * size];
+    let mut column = vec![0.0; size];
+    for target in 0..size {
+        column.fill(0.0);
+        column[target] = 1.0;
+        for i in 0..size {
+            let known: f64 = (0..i).map(|k| lower[i * size + k] * column[k]).sum();
+            column[i] = (column[i] - known) / lower[i * size + i];
+        }
+        for i in (0..size).rev() {
+            let known: f64 = ((i + 1)..size)
+                .map(|k| lower[k * size + i] * column[k])
+                .sum();
+            column[i] = (column[i] - known) / lower[i * size + i];
+        }
+        for i in 0..size {
+            inverse[i * size + target] = column[i];
+        }
+    }
+    Some(inverse)
+}
+
+pub(super) fn dense_product(left: &[f64], right: &[f64], size: usize) -> Vec<f64> {
+    let mut out = vec![0.0; size * size];
+    for i in 0..size {
+        for k in 0..size {
+            let a = left[i * size + k];
+            if a == 0.0 {
+                continue;
+            }
+            for j in 0..size {
+                out[i * size + j] += a * right[k * size + j];
+            }
+        }
+    }
+    out
+}
+
 /// **Cyclic Jacobi rotations of a symmetric matrix until it is diagonal**: its diagonal (the
 /// eigenvalues, in no particular order) and the accumulated rotation `v`, whose column `i`
 /// (`v[s * n + i]` for each `s`) is the eigenvector of `diagonal[i]`.
