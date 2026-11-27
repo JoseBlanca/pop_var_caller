@@ -653,6 +653,25 @@ impl FlankDeletion {
     }
 }
 
+/// **Whether an insertion at a repeat's right junction belongs to the repeat** — anchored on the
+/// repeat's last base, with the flank after it — given the insertion's last base and the
+/// repeat's.
+///
+/// It belongs to the repeat exactly when the two bases are equal: left-alignment can then carry
+/// the insertion into the repeat, so it is repeat content; otherwise it is the flank's. **Both
+/// paths ask this one function so that each such insertion is owned by exactly one of them**: the
+/// STR path keeps it in the tract's spelling when this says yes (`tract_span_from_input` in
+/// `ssr.rs`), and the generic path claims it when this says no (`claimed_junction_insertion` in
+/// `pileup/open_record.rs`). Two copies of the comparison that drifted apart would count such an
+/// insertion twice, or not at all.
+#[inline]
+pub(crate) fn right_junction_insertion_extends_the_repeat(
+    last_inserted_base: u8,
+    repeat_last_base: u8,
+) -> bool {
+    last_inserted_base == repeat_last_base
+}
+
 /// **`bases`, read as the sequence over `extent`, respelled over the wider `target` extent**:
 /// the reference flank bases between the two are added on each side. `None` when `target` does
 /// not contain `extent` or reaches past the flanks the locus holds.

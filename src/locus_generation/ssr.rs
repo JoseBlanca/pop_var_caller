@@ -695,7 +695,10 @@ mod read_region {
                     }
                     if ref_cur == tract_end
                         && end == Some(read_cur)
-                        && last_inserted == tract_last_base
+                        && crate::locus_generation::right_junction_insertion_extends_the_repeat(
+                            last_inserted,
+                            tract_last_base,
+                        )
                     {
                         end = Some(read_cur + count);
                     }

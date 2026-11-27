@@ -2689,7 +2689,12 @@ fn claimed_junction_insertion(event: &ReadEvent, junction: Option<JunctionAtRegi
         return false;
     };
     event.anchor_pos().saturating_add(1) == junction.first_base
-        && seq.last() != Some(&junction.repeat_last_base)
+        && !seq.last().is_some_and(|&last_inserted| {
+            crate::locus_generation::right_junction_insertion_extends_the_repeat(
+                last_inserted,
+                junction.repeat_last_base,
+            )
+        })
 }
 
 /// **The region's first base, when this event is a deletion the region must claim** — one
