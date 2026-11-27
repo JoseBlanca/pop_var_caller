@@ -157,13 +157,13 @@
 //! the failure this file exists to make visible rather than one to introduce. So this module
 //! documents the set and pins its behaviour; the numbers stay with their readers:
 //! [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER)
-//! beside [`ReadGroupCalibration`](crate::calling::likelihood::ReadGroupCalibration), whose
+//! beside [`ReadGroupCalibration`], whose
 //! `defaulted` constructor is the only thing that *reads* it — the projection in from a file builds
 //! the struct literally, which is the path the reader's check below guards;
 //! [`DEFAULT_OUTLIER_WEIGHT`](crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT) beside
-//! [`RepeatTractOutlierWeight`](crate::calling::likelihood::ssr::RepeatTractOutlierWeight);
+//! [`RepeatTractOutlierWeight`];
 //! [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)
-//! beside [`StratumFits`](crate::parameter_estimation::joint::stratum_fits::StratumFits);
+//! beside [`StratumFits`];
 //! [`DEFAULT_SSR_SUBSTITUTION_RATE`](crate::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE)
 //! beside the assembly that takes it.
 //!
@@ -550,8 +550,8 @@ mod tests {
     /// `scale · exp(q_sum / n)`, so at the default scale of two it is twice the geometric mean of
     /// the reads' own error probabilities and nothing else. Doubling a double is exact, so the
     /// comparison is on `to_bits` as the module's other float assertions are — it is the same
-    /// verdict as `==` on an ordinary finite double, and the habit is what step C3 established so
-    /// that a lost sign on a zero cannot pass.
+    /// verdict as `==` on an ordinary finite double, and the habit is what the float round-trip tests
+    /// (`to_toml`'s `every_float_comes_back_bit_identical`) established so that a lost sign on a zero cannot pass.
     #[test]
     fn a_read_group_with_no_fitted_rate_is_charged_twice_what_its_reads_were_minted_with() {
         let defaulted = ReadGroupCalibration::defaulted();
@@ -631,7 +631,7 @@ mod tests {
     /// covers what the run then scores and reports, and `to_toml` pins that no section is
     /// written. What no test held is the pair above: that a file naming **no slippage row and no
     /// substitution-rate row at all** is a legal file rather than a broken one, which is what a
-    /// defaults run will produce and what step E2 depends on.
+    /// defaults run produces and depends on.
     #[test]
     fn a_file_with_nothing_fitted_for_repeat_tracts_is_still_a_legal_file() {
         let mut file = a_file_using_every_shape();
@@ -685,7 +685,7 @@ mod tests {
     ///
     /// **The fallback share's edited value is 1e-7 on purpose.** `Display` and `Debug` agree on
     /// 0.25 and differ on 1e-7, which `Display` writes as 0.0000001, so a fixture at 0.25 would
-    /// leave the `{:?}` this message is written with unpinned — E1's review measured the revert to
+    /// leave the `{:?}` this message is written with unpinned — a review measured the revert to
     /// `{}` surviving its whole mutation suite when the key held a concentration and the fixture
     /// stood at 3.5. The outlier weight's `{:?}` is convention rather than something this test
     /// holds.
@@ -790,13 +790,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // E2 — a run with no fit and no supplied file
+    // The defaults run: no fit and no supplied file
     // -----------------------------------------------------------------
 
     /// **A run that fitted nothing assembles, and every number it holds is the defaulted one.**
     ///
-    /// This is step E2's whole claim, asserted field by field over the nine `RunParameters`
-    /// holds — a run that got one of them from somewhere else would still assemble, and the
+    /// This is the defaults run's whole claim, asserted field by field over the nine
+    /// `RunParameters` holds — a run that got one of them from somewhere else would still assemble, and the
     /// genotypes would be wrong in a way nothing says.
     #[test]
     fn a_run_with_no_fit_takes_every_default() {
@@ -1038,7 +1038,8 @@ mod tests {
     /// The join is what the assertion is really about. `TS-1` is the run's *first* sample and
     /// `Ailsa Craig` its second, so a builder that stored statements in the order they were made
     /// and zipped them against the run's samples would put the 0.42 on the wrong plant and pass
-    /// every count-based check — which is D2's Blocker one level down.
+    /// every count-based check — the same misplacement the bindings check refuses for whole
+    /// sample lists, one level down.
     #[test]
     fn a_per_sample_statement_lands_on_that_sample_and_overrides_the_run_wide_one() {
         let read_groups = a_runs_read_groups();
@@ -1106,8 +1107,8 @@ mod tests {
 
     /// **A defaults run's parameters write a file, and the file reads back into the same run.**
     ///
-    /// This is what step F1 will do unconditionally (§7: every run writes the parameters it used,
-    /// whatever the numbers came from), and it is the test that says the defaults are a *state the
+    /// This is what every run does (§7: every run writes the parameters it used, whatever the
+    /// numbers came from), and it is the test that says the defaults are a *state the
     /// artefact can hold* rather than an in-memory shape. It goes the whole way — parameters →
     /// file → TOML → file → parameters — so nothing is proved about a file nobody could write.
     ///
@@ -1115,13 +1116,12 @@ mod tests {
     /// legal exactly because every calibration is `Defaulted` and a defaulted number writes no
     /// count; `from_run_parameters` refuses a missing rate under any other warrant.
     ///
-    /// **A defaults run has no census, and step F1 gave that a name of its own.** `of_run` takes a
+    /// **A defaults run has no census, and that has a name of its own.** `of_run` takes a
     /// `CensusIdentity` because §3.1 binds a fitted file to the census it was fitted from, and a
     /// run that fitted nothing has none to name — so it writes
-    /// [`CensusIdentity::of_a_run_with_no_census`], an empty list of terms. This was the first of
-    /// the three questions Milestone D left open; the file's own prose says what a later run does
-    /// with such a list (`to_toml`), and it is not the same answer for a run that has a census and
-    /// a run that does not.
+    /// [`CensusIdentity::of_a_run_with_no_census`], an empty list of terms. The file's own prose
+    /// says what a later run does with such a list (`to_toml`), and it is not the same answer
+    /// for a run that has a census and a run that does not.
     #[test]
     fn a_defaults_run_writes_a_file_that_reads_back_as_the_same_run() {
         let read_groups = a_runs_read_groups();
@@ -1209,11 +1209,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // E3 — the slippage slot, and what a run does without it
+    // The slippage slot, and what a run does without it
     // -----------------------------------------------------------------
 
-    /// **The lookup a defaults run's tract makes, and the model it then falls to** — the trace
-    /// step E3 owed, run rather than read.
+    /// **The lookup a defaults run's tract makes, and the model it then falls to** — traced by
+    /// running it rather than by reading the code.
     ///
     /// **This asks `StratumFits::at` directly rather than through the caller.** That is the
     /// question worth pinning here — every `(read group, candidate)` of a defaults run gets
@@ -1270,8 +1270,7 @@ mod tests {
             &ReadsBehindEachCalibration::nothing_was_fitted(read_groups.len()),
             &declared.of_each_sample(&read_groups),
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
-            // **A defaults run has no census**, which step F1 gave a name of its own; before it
-            // this fixture handed over a census a *fitted* run could have had.
+            // **A defaults run has no census**, which has a name of its own.
             CensusIdentity::of_a_run_with_no_census(),
             &StrRepeatCriteria::default(),
         )

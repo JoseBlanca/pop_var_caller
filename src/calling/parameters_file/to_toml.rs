@@ -5,8 +5,7 @@
 //! **Spec §4 chose TOML for the comments** — each defaulted value carries where its default came
 //! from, and the softest number in the file is a slippage rate fitted from one human genome
 //! standing in for every chemistry a run might use. No serde serializer can emit a comment, so
-//! the writer was always going to be hand-written; step B3 is where the comments land, and this
-//! step is the text they attach to.
+//! the writer is hand-written.
 //!
 //! Two things follow from writing it by hand, and both are why the derived serializer stays for
 //! the tests rather than for the artefact:
@@ -80,7 +79,7 @@ impl ParametersFile {
     ///
     /// Parses back to an equal value through the shape's own `Deserialize`, which is what
     /// `the_written_text_reads_back_as_the_same_file` holds — and what makes this writer and
-    /// step C's reader two halves of one round trip rather than two independent readings of
+    /// the reader (`from_toml`) two halves of one round trip rather than two independent readings of
     /// spec §4.
     ///
     /// **An uncontaminated run writes no `[contamination]` section**, which is spec §5's first
@@ -243,7 +242,7 @@ impl ParametersFile {
             // So the one reader who most needed it — the one holding a file with no
             // `[contamination]` — was the only reader who never saw it, and the word
             // *contamination* appeared nowhere in a defaults run's whole file. Found by a
-            // geneticist reading one (step E3); the fix is that absence says its own name.
+            // geneticist reading one; the fix is that absence says its own name.
             note(
                 &mut out,
                 &[
@@ -690,7 +689,7 @@ impl ParametersFile {
         // no read in that stratum. An *empty table* means no stratum was fitted at all, and then
         // every repeat tract of the run falls through to another caller's shipped constants —
         // which is a stronger claim about the reads than "nothing happened here", and the one a
-        // geneticist reading a defaults run's file took for the weaker (step E3).
+        // geneticist reading a defaults run's file took for the weaker.
         //
         // **So the note is for the empty table only, and a partially fitted run gets none.** That
         // is not an omission: where *some* strata were fitted, how much of a given tract fell back
@@ -1087,15 +1086,14 @@ fn a_derived_note(out: &mut String, paragraphs: &[String]) {
 /// **How much of this file rests on a measurement of the run's own reads**, written above
 /// `format_version` so that it is the first thing a reader meets.
 ///
-/// **The question a geneticist asks first of a file they did not watch being produced**, and
-/// until step F1 the file did not answer it anywhere: spec §7 makes the three sources produce
-/// the same shape on purpose, and the cost is that a run that guessed every number and a run
+/// **The question a geneticist asks first of a file they did not watch being produced.** Spec §7
+/// makes the three sources produce the same shape on purpose, and the cost is that a run that guessed every number and a run
 /// that fitted every number open identically. The answer *is* in the file — one `warrant` a
 /// number — but as a hundred-odd separate answers a reader has to gather, and one who does not
 /// know to gather them reads a defaults run's file as a fit's.
 ///
 /// **Derived from the numbers, never recorded beside them** ([`ParametersFile::what_the_run_fitted`]),
-/// which is the rule step E3 set for the missing-slippage note and holds here for a sharper
+/// which is the rule the missing-slippage note keeps too, and holds here for a sharper
 /// reason: this file invites its reader to edit a value and its warrant (spec §1.2 goal 3), and a
 /// recorded count would then be a sentence at the top contradicting the numbers below it.
 fn how_much_was_fitted(file: &ParametersFile) -> Vec<String> {
@@ -1251,15 +1249,16 @@ fn scalar_with_note(out: &mut String, key: &str, value: &str, note: Option<&'sta
 /// **Where each of the file's defaultable numbers gets its default from** (spec §8).
 ///
 /// One place, so that a number's origin and the sentence a reader is shown cannot drift apart, and
-/// so that step E1 — which turns these into named constants with their origin recorded beside
-/// them — has one list to reconcile against rather than five call sites.
+/// so that the named defaults (`defaults`) have one list to reconcile against rather than five
+/// call sites.
 ///
 /// **§8's fourth default has no entry here and cannot have one yet.** The per-(stratum × slippage
 /// group) slippage numbers are to be defaulted from the GIAB HG002 alignments, and §8 asks for
 /// "which alignments, at what depth, on which date" beside them — but a slippage number carries a
 /// *smoothing origin* and no `Warrant`, so the file has no state in which one is `defaulted` and
 /// nothing for the comment to attach to. The measurement does not exist either (§12 question 1).
-/// Both halves are recorded at Checkpoint B.
+/// Both halves are recorded in
+/// `doc/devel/reports/implementations/ng_parameters_file_b3_2026-08-28.md`.
 mod origins {
     /// The base-quality multiplier, where no usable rate was fitted.
     ///
@@ -1391,8 +1390,9 @@ fn a_toml_string(value: &str) -> String {
 /// where Rust's own formatting gives `NaN` and `inf`; a run should not produce one, and a file
 /// that carries one should say so in a form a reader can parse rather than failing at it.
 ///
-/// **Whether this round-trips every value is step C3's to establish**, on a table of adversarial
-/// ones. This step owes only that what it writes is a TOML float.
+/// **Whether this round-trips every value is `every_float_comes_back_bit_identical`'s to
+/// establish**, on a table of adversarial ones. This function owes only that what it writes is a
+/// TOML float.
 fn a_toml_float(value: f64) -> String {
     if value.is_nan() {
         return "nan".to_owned();
@@ -1427,7 +1427,7 @@ fn a_toml_float(value: f64) -> String {
 /// unreachable from the test suite, which is the defect this whole function was added to close.
 /// **What a reader sees is 9,223,372,036,854,775,807**, which no evidence count can be — there
 /// are no nine quintillion reads — so the saturation announces itself, and refusing a count
-/// sitting at exactly `i64::MAX` is one of the things step C2's `validate` owns on the way back
+/// sitting at exactly `i64::MAX` is one of the things `validate` owns on the way back
 /// in.
 fn a_toml_integer(count: u64) -> String {
     i64::try_from(count).unwrap_or(i64::MAX).to_string()
@@ -1976,9 +1976,9 @@ mod tests {
 
     /// **What the writer emits, read back through the shape's own `Deserialize`.**
     ///
-    /// This is the half of spec §1.2's goal 1 that step B can hold: what the writer puts on disk
+    /// This is the half of spec §1.2's goal 1 that the writer alone can hold: what it puts on disk
     /// is the value it was handed. The other half — a `RunParameters` written and read back to an
-    /// equal `RunParameters` — needs step C's reader and is C4's.
+    /// equal `RunParameters` — is `to_run_parameters`' `the_north_star_round_trip`.
     #[test]
     fn the_written_text_reads_back_as_the_same_file() {
         let written = a_file_using_every_shape();
@@ -2679,7 +2679,7 @@ mod tests {
     /// **No comment line runs off the side of the page**, because a comment is prose and prose
     /// that needs scrolling is prose nobody reads.
     ///
-    /// The rows themselves are long and this step cannot help that — the longest is a slippage
+    /// The rows themselves are long and the writer cannot help that — the longest is a slippage
     /// row, and why it is long is the shape's business rather than the writer's.
     #[test]
     fn no_comment_line_is_longer_than_the_prose_it_carries() {
@@ -2760,7 +2760,7 @@ mod tests {
         let mut file = a_file_using_every_shape();
         file.contamination = None;
         let text = file.to_toml();
-        // **The section header, not the word.** Since step E3 an uncontaminated run writes a
+        // **The section header, not the word.** An uncontaminated run writes a
         // *comment* in place of the section — the explanation of what the absence means used to
         // live inside the section it explains, so the reader holding such a file never saw it —
         // and that comment names the key it is about. What must not appear is the header itself,
@@ -2865,7 +2865,7 @@ mod tests {
 
 #[cfg(test)]
 mod every_float_comes_back_bit_identical {
-    //! **Step C3: whether a float this caller writes reads back as the same double.**
+    //! **Whether a float this caller writes reads back as the same double.**
     //!
     //! Spec §4 says plainly that this "has not been checked here", and spec §1.2 goal 1 is what
     //! rests on it: the two-mode oracle compares VCFs, so a parameter that survives a write to
@@ -2957,7 +2957,7 @@ mod every_float_comes_back_bit_identical {
         // **At the magnitudes the fit works in**, so the table is not only torture: a slip share,
         // a Dirichlet concentration, a held-out error and a per-base substitution rate. **These
         // are the shape of a fitted number, not a fitted number** — the plan's third adversarial
-        // category is C4's, and the module header says so.
+        // category belongs to the round trip on a real fit, and the module header says so.
         (
             0.042_1,
             "a slip share, at the size a stratum's fit gives one",

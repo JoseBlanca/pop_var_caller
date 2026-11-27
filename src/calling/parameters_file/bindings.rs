@@ -3,15 +3,12 @@
 //!
 //! **Two of the four and not all four.** The other two are names: the sample list and the
 //! read-group table are read straight off the run's own `ReadGroups` in `from_run_parameters`,
-//! and there is nothing to derive. These two are derived values, and until this step neither was
-//! derived anywhere.
+//! and there is nothing to derive. These two are derived values, and this file derives them.
 //!
-//! The *shape* of that section landed with the rest of the file (step A1), the writer fills it
-//! (B1) and the reader reads it back (C2). What was missing until here is the step from a run's
-//! own inputs to the two bindings that are not names: `of_run` took the reference digest as
-//! **text**, with its own documentation saying "nothing here can check that it is one", and took
-//! a census identity nothing in this tree could build. **The census identity is minted here and
-//! the reference digest is spelled here** — `ReferenceDigest` is computed upstream, over the
+//! The *shape* of that section is in `mod.rs` with the rest of the file, the projection from a
+//! run (`of_run`) fills it, and the projection back reads it. What this file adds is the step from
+//! a run's own inputs to the two bindings that are not names. **The census identity is minted
+//! here and the reference digest is spelled here** — `ReferenceDigest` is computed upstream, over the
 //! reference itself — so that the value a run writes and the value a later run compares against
 //! come out of one function rather than out of two callers agreeing.
 //!
@@ -323,7 +320,8 @@ impl ParametersFile {
     ///
     /// **The fourth binding — the census — is not here**, because it does not refuse: a file
     /// fitted from a different census of this same cohort is still interpretable, merely less
-    /// warranted, and what a run does with one is step D3's.
+    /// warranted, and what a run does with one is
+    /// [`Self::demoted_to_no_better_than_supplied`].
     ///
     /// # It is handed the run, not a second file
     ///
@@ -354,7 +352,8 @@ impl ParametersFile {
     /// **Anything about the file's agreement with itself**, which is [`Self::validate`]'s: that
     /// the read-group ids run `0..n` with no gap, that the sample list is the file's own
     /// read-group table's first-seen order, that every keyed table covers its axis. A caller
-    /// reading a file into a run wants both, and step D3 is where they are run together. **This
+    /// reading a file into a run wants both, and [`Self::to_run_parameters_for`] is where they
+    /// are run together. **This
     /// one assumes none of them** — it is a public entry point, and a file that has not been
     /// through `validate` is compared just as soundly, because every join here is a lookup
     /// rather than a position.
@@ -653,7 +652,8 @@ impl ParametersFile {
     /// `Supplied` would *promote* every defaulted number — every one of them a claim that
     /// somebody chose a value nobody chose. **The repeat-tract outlier weight is the strongest
     /// case rather than the only one**: it has no fitted state at all and its two legal warrants
-    /// are `supplied` and `defaulted`-at-the-project's-own-0.01, so the promotion there is one
+    /// are `supplied` and `defaulted`-at-the-built-in-0.07
+    /// ([`DEFAULT_OUTLIER_WEIGHT`](crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT)), so the promotion there is one
     /// `validate` would accept and no reader could see. A defaulted calibration multiplier of
     /// exactly 1.0 promoted to `supplied` says the same false thing more quietly.
     /// [`Provenance::weaker_of`] is a no-op for every already-weaker number and the right answer
@@ -665,7 +665,10 @@ impl ParametersFile {
     ///
     /// # What is not demoted, because it is not a warrant
     ///
-    /// Five numbers in this file carry a `Warrant` and the demotion moves all five. **The rest
+    /// Nine keys in this file carry a `Warrant`, and the demotion moves all nine: the
+    /// base-quality multiplier, the inbreeding coefficient, the two fallback between-locus
+    /// shares, the substitution rate, the stutter multiplier, the two misread-after-a-run
+    /// excesses, and the outlier weight. **The rest
     /// carry other vocabularies, and none of those has a *handed over* state**: a slippage
     /// number says it came off the stratum's own fit, its period's curve, or a blend; the prior
     /// seed says which rung it came from; a contamination fraction says which reads it was
@@ -677,9 +680,9 @@ impl ParametersFile {
     /// fitted it is a different run. Nothing in the file says otherwise.
     ///
     /// **This is open and it is the owner's**, recorded in `PROJECT_STATUS.md`, which offers
-    /// three ways out and recommends the one D3 did *not* take — refusing such a file like the
-    /// other three bindings. D3 builds what the plan and §2.1 describe; if the owner takes that
-    /// recommendation, this method and the door above it go.
+    /// three ways out and recommends the one this method does *not* take — refusing such a file
+    /// like the other three bindings. This method builds what the plan and §2.1 describe; if the
+    /// owner takes that recommendation, this method and the door above it go.
     #[must_use]
     pub fn demoted_to_no_better_than_supplied(&self) -> Self {
         let mut demoted = self.clone();
@@ -807,9 +810,9 @@ pub struct ParametersForThisRun {
 /// **What comparing a run's census against a file's found** — spec §6's fourth binding, which
 /// demotes rather than refusing.
 ///
-/// **Three states rather than two, and the third is why.** Until step F1 this was
-/// `Option<String>`, `None` documented as *they agree*. A run with no census of its own — every
-/// direct-mode run (`run_streaming.md` §2) — makes no comparison at all, and folding that into
+/// **Three states rather than two, and the third is why.** As `Option<String>`, `None` would
+/// have to mean *they agree*. A run with no census of its own — every direct-mode run
+/// (`run_streaming.md` §2) — makes no comparison at all, and folding that into
 /// `None` tells whatever reports it that the file matched this run's census when no census
 /// existed. The demotion is what a run says about its own numbers (§13 test 5), so the difference
 /// has to survive as far as the report.
@@ -1891,7 +1894,7 @@ mod tests {
 
 #[cfg(test)]
 mod the_fourth_binding_demotes {
-    //! **Step D3: a file fitted from another census of this cohort is used, and every number in
+    //! **A file fitted from another census of this cohort is used, and every number in
     //! it says so.**
     //!
     //! Spec §6's fourth binding is the one that does not refuse. The numbers are still numbers —
@@ -2108,15 +2111,15 @@ mod the_fourth_binding_demotes {
         );
     }
 
-    /// **⚑ The door applies the demotion**, which is the whole of what D3 composes and the one
-    /// thing every other test here can be green without.
+    /// **⚑ The door applies the demotion**, which is the whole of what the door composes and
+    /// the one thing every other test here can be green without.
     ///
     /// The warrant assertions below and in `no_warrant_survives_the_demotion_stronger_than_
     /// supplied` are made against `demoted_to_no_better_than_supplied` *called directly*, and
     /// the one that goes through the door looks at the **agreeing** case. So a door that noticed
     /// the disagreement, reported it, and then projected the file undemoted left all 168 tests
-    /// green — which is exactly this step's own silent failure: identical genotypes and a run
-    /// that overstates every warrant it prints.
+    /// green — which is exactly the silent failure a demotion exists to prevent: identical
+    /// genotypes and a run that overstates every warrant it prints.
     #[test]
     fn the_door_demotes_and_not_only_the_method() {
         let read = read_for(

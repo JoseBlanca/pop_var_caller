@@ -1,13 +1,13 @@
 //! **What a run used, projected onto the file's shape** — every number
-//! [`RunParameters`](crate::calling::run_parameters::RunParameters) holds, mapped to the row
+//! [`RunParameters`] holds, mapped to the row
 //! that carries it (`doc/devel/ng/spec/parameters_file.md` §3).
 //!
-//! No TOML here: this step produces a [`ParametersFile`] value and stops. The text is step B2's,
-//! and keeping the two apart is what lets the projection be tested on the shape rather than on a
+//! No TOML here: this module produces a [`ParametersFile`] value and stops. The text is
+//! `to_toml`'s, and keeping the two apart is what lets the projection be tested on the shape rather than on a
 //! rendering of it.
 //!
 //! What the projection needs beyond the assembled parameters, and the rules it keeps, are
-//! documented on [`ParametersFile::of_run`] itself — this module is private, so prose here
+//! documented on [`ParametersFile::of_run_under`] itself — this module is private, so prose here
 //! reaches no rendered page.
 
 #[cfg(test)]
@@ -56,13 +56,13 @@ use crate::types::{InbreedingF, ReadGroupId};
 ///
 /// Spec §7 is *one writer, three sources — a file the user supplied, the defaults in the binary,
 /// or the fit — and after assembly the run cannot tell them apart*. The multiplier and its
-/// warrant do come out of [`RunParameters`](crate::calling::run_parameters::RunParameters)
+/// warrant do come out of [`RunParameters`]
 /// the same way whatever the source, but **the count beside them does not**, and until
 /// 2026-08-31 `ParametersFile::of_run` took the fit's own
 /// `BTreeMap<ReadGroupId, Estimate<ErrorRate>>` for it. Two of the three sources cannot produce
 /// one:
 ///
-/// - **the defaults run has no rates**, which E2 handled by admitting an empty map;
+/// - **the defaults run has no rates**, which was first handled by admitting an empty map;
 /// - **a run scoring from a supplied file has no rates either.** The file carries the *counts*
 ///   and never the rates — the fitted error rate is nowhere in it, because what a fit produces
 ///   and calling reads is the multiplier. So such a run has counts to write and no `Estimate` to
@@ -201,6 +201,28 @@ impl ReadsBehindEachCalibration {
 
 impl ParametersFile {
     #[cfg(test)]
+    /// As [`Self::of_run_under`], for a run that sorted its repeats under `repeat_routing`.
+    #[must_use]
+    pub fn of_run(
+        run: &RunParameters,
+        read_groups: &ReadGroups,
+        reads_behind_each_calibration: &ReadsBehindEachCalibration,
+        inbreeding_by_sample: &[Estimate<InbreedingF>],
+        reference: &ReferenceDigest,
+        census: CensusIdentity,
+        repeat_routing: &StrRepeatCriteria,
+    ) -> Self {
+        Self::of_run_under(
+            run,
+            read_groups,
+            reads_behind_each_calibration,
+            inbreeding_by_sample,
+            reference,
+            census,
+            Some(repeat_routing),
+        )
+    }
+
     /// **Write down what this run scored its reads under.**
     ///
     /// **This is spec §7's one writer, and it is reached from all three of its sources** — a
@@ -217,6 +239,9 @@ impl ParametersFile {
     /// `reference` and `census` are what the file is bound to (spec §3.1, §6), and neither is
     /// derivable from the numbers. **A run with no census passes
     /// [`CensusIdentity::of_a_run_with_no_census`]**, which is the defaults run and direct mode.
+    /// `repeat_routing` is the repeat criteria the run sorted its loci under, and is `None` under
+    /// `--generic-path-only`, which asked no catalog anything; the file then records no
+    /// `[repeat_routing]` (spec §3.9: absent means the file does not say).
     ///
     /// # It reads more than `RunParameters`, and that is the point
     ///
@@ -256,7 +281,7 @@ impl ParametersFile {
     ///
     /// **The reference arrives as the run's own [`ReferenceDigest`] and is spelled here**, so
     /// that the string this writes and the string a later run compares it against come out of
-    /// one function — step D2's is what does the comparing. A file naming another reference is
+    /// one function — [`Self::refuse_if_not_this_runs_inputs`] is what does the comparing. A file naming another reference is
     /// refused (spec §6), so a file this run is allowed to write already names this run's
     /// reference, and the run's own digest is the only value this could write.
     ///
@@ -271,7 +296,7 @@ impl ParametersFile {
     ///
     /// **⚑ One run still cannot satisfy this signature**: `ReferenceDigest::of` refuses a
     /// reference read from a `.fai` alone, which holds no bases to digest, while spec §7 says
-    /// writing is unconditional. **Left required at step F1 and recorded rather than solved**,
+    /// writing is unconditional. **Left required and recorded rather than solved**,
     /// because the two missing bindings are not the same kind of thing: a run with no census
     /// cannot check a binding that *demotes*, and spec §2.1 says what to do then; a run with no
     /// reference digest cannot check one that **refuses**, which is §6's strongest guarantee —
@@ -304,13 +329,13 @@ impl ParametersFile {
     ///
     /// - **the read-group table covers this run's libraries**, and **covers this run's samples**.
     ///   Two checks, whose messages share no opening phrase: a test pinning one of them by a
-    ///   shared substring passes when the other fires, which is how the first draft of this
-    ///   step's own test could not fail.
+    ///   shared substring passes when the other fires, which is how an earlier test of this
+    ///   function could not fail.
     /// - **the counts behind the multipliers cover exactly the run's read groups.** They are
     ///   joined to the calibration axis by position, so a set of another length would write
-    ///   another run's reads beside this run's multipliers. **The fit's own two further checks
-    ///   are [`ReadsBehindEachCalibration::of_the_fits_rates`]'s**, where the rates are, and are
-    ///   not restated here.
+    ///   another run's reads beside this run's multipliers. **Checks particular to one source
+    ///   belong to that source's constructor** of [`ReadsBehindEachCalibration`], and are not
+    ///   restated here.
     /// - **the inbreeding estimates are the run's own**, one per sample and each carrying the
     ///   coefficient the parameters hold.
     /// - **every repeat-tract substitution rate is keyed to one of the run's read groups.** Every
@@ -333,34 +358,6 @@ impl ParametersFile {
     /// ([`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble)):
     /// both calling commands build this file at startup, to write it into the run's log before a
     /// read is decoded, so a panic here discards a startup and never a cohort's calling work.
-    #[must_use]
-    pub fn of_run(
-        run: &RunParameters,
-        read_groups: &ReadGroups,
-        reads_behind_each_calibration: &ReadsBehindEachCalibration,
-        inbreeding_by_sample: &[Estimate<InbreedingF>],
-        reference: &ReferenceDigest,
-        census: CensusIdentity,
-        repeat_routing: &StrRepeatCriteria,
-    ) -> Self {
-        Self::of_run_under(
-            run,
-            read_groups,
-            reads_behind_each_calibration,
-            inbreeding_by_sample,
-            reference,
-            census,
-            Some(repeat_routing),
-        )
-    }
-
-    /// As `of_run`, for a run that may have sorted no repeats: `repeat_routing`
-    /// is `None` under `--generic-path-only`, which asked no catalog anything, and the file then
-    /// records no `[repeat_routing]` (spec §3.9: absent means the file does not say).
-    ///
-    /// # Panics
-    ///
-    /// As `of_run`.
     #[must_use]
     pub fn of_run_under(
         run: &RunParameters,
@@ -984,7 +981,7 @@ fn warranted_value(
         // deliberately *not* treated this way — see `of_run`'s three rules.
         //
         // **A `supplied` number with nothing behind it writes no count either**, which is a
-        // narrower rule than the one above and was added at step E2. `Supplied` keeps its count
+        // narrower rule than the one above and came with the defaults run. `Supplied` keeps its count
         // in general, and must: a file demoted under spec §2.1 marks every number `supplied`,
         // and those numbers were fitted on some cohort. But a coefficient an operator typed
         // (`parameters_file::DeclaredInbreeding`) is `Supplied` with a count of **zero**, and
@@ -1925,7 +1922,7 @@ mod tests {
     }
 
     /// **A *fitted* count of zero is a count, and the warrant is what makes one absent** — with
-    /// the one exception step E2 added.
+    /// one exception.
     ///
     /// *Fitted from nothing* and *a stated constant* are two different claims, and a rule that
     /// dropped every zero count would collapse them: a fit that produced a number from no reads
@@ -2659,7 +2656,7 @@ mod tests {
     /// which is Q21 and unlike any library in this project**, and so showed the multiplier below
     /// one and the reads made *more* confident. Spec §5's third row says this since 2026-10-22.
     ///
-    /// **What this guards.** Step E1 added a rung to `validate` reading *a `defaulted` multiplier
+    /// **What this guards.** A rung was once added to `validate` reading *a `defaulted` multiplier
     /// is [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER)
     /// and nothing else*, on the model of the outlier weight's and the fallback concentration's,
     /// and it **refused the file this test's run writes**. The rung is gone and this is what stops
@@ -2755,9 +2752,10 @@ mod tests {
     /// **What the projection writes is a legal file** — it parses back to the same value through
     /// the shape's own serde derives.
     ///
-    /// Not the round trip step C4 owes: that one starts from a `RunParameters` off a real fit and
-    /// comes back to a `RunParameters`, and would catch a wrong value. This one only says that a
-    /// projected file is expressible as TOML at all, which is what step B2 will render.
+    /// Not the round trip on a real fit (`to_run_parameters`' `the_north_star_round_trip`):
+    /// that one starts from a `RunParameters` off a real fit and comes back to a
+    /// `RunParameters`, and would catch a wrong value. This one only says that a projected file
+    /// is expressible as TOML at all.
     #[test]
     fn the_projected_file_is_expressible_as_toml() {
         let written = the_projected_file();
@@ -2766,11 +2764,11 @@ mod tests {
         assert_eq!(read, written);
     }
 
-    /// **A fitted run writes a file, and it reads back as the same file** — Checkpoint B's claim,
-    /// end to end from `RunParameters` through the hand-written writer.
+    /// **A fitted run writes a file, and it reads back as the same file**, end to end from
+    /// `RunParameters` through the hand-written writer.
     ///
-    /// Not step C4's round trip, which comes back to a `RunParameters` and needs the reader; this
-    /// one stops at the shape. What it adds to the writer's own tests is that the text a *run*
+    /// Not the round trip on a real fit, which comes back to a `RunParameters` and needs the
+    /// reader; this one stops at the shape. What it adds to the writer's own tests is that the text a *run*
     /// produces parses — the every-shape fixture is hand-built, and a projection can emit a row
     /// that fixture has no equivalent of.
     #[test]
@@ -2826,7 +2824,7 @@ mod tests {
     }
 
     /// **The read group whose rate went missing is `Borrowed`, and that is now what makes this
-    /// refuse.** Step E2 made a missing rate legal where the calibration is `Defaulted` — the run
+    /// refuse.** The defaults run made a missing rate legal where the calibration is `Defaulted` — the run
     /// with no fit, which has no rates for anybody and writes no counts — so the message this
     /// pins moved with it, from *has a calibration and no fitted rate* to one that names the
     /// warrant. A rate set missing a **fitted or borrowed** read group's entry is still the two
@@ -2861,7 +2859,7 @@ mod tests {
     }
 
     /// **A rate set covering *some* of the run's read groups is refused at the door, not at the
-    /// row.** Step E2 turned that guard from `==` into *empty or complete*, and only the wide case
+    /// row.** The defaults run turned that guard from `==` into *empty or complete*, and only the wide case
     /// above pinned it: with the guard relaxed to `<=`, a short set slips past the door and is
     /// caught one frame later by the per-row rule instead, under a message about one read group
     /// rather than about the fit. Both refuse, and which one speaks is the difference between
@@ -3875,8 +3873,8 @@ mod tests {
 /// defaults run has nothing to have. So one test a source, each asserting what its own source can
 /// still say about the counts — which is what a single test over one fixture cannot.
 ///
-/// **The supplied-file case is the one that did not work**, and it is why step F1 changed the
-/// writer's signature. Measured on this fixture before the change:
+/// **The supplied-file case is the one that did not work**, and it is why the writer's
+/// signature changed. Measured on this fixture before the change:
 /// `of_run` panicked with *read group 0's calibration is Supplied and no rate was offered for
 /// it*, so a run scoring from a file could not write the file it used at all — two of spec §7's
 /// three sources worked, and the one the format exists for did not.
@@ -4010,8 +4008,8 @@ mod one_writer_three_sources {
     /// **What a run that was DEMOTED writes into its own `[fitted_from].census`** — the terms it
     /// read, never its own.
     ///
-    /// This is the question step F1 is the first place to face, because it is the first place a
-    /// run writes a file it might have demoted. Three answers were possible and two of them say
+    /// This is a question for every run that writes its parameters, because such a run may write
+    /// back a file it has demoted. Three answers were possible and two of them say
     /// something false:
     ///
     /// - **this run's own census** would claim the numbers were fitted under terms they were not;

@@ -8,16 +8,16 @@
 //! `to_toml`'s `the_written_text_reads_back_as_the_same_file` writes the whole fixture and reads
 //! it back equal, and the parent module's `the_documented_inline_form_parses` pins that the
 //! one-row-a-line inline form the hand-written writer emits is a form the derived reader accepts.
-//! So the parsing was settled in step B, and nothing here re-implements it.
+//! So the parsing was settled when the writer was built, and nothing here re-implements it.
 //!
 //! **What this module adds is the one thing the `toml` crate does not hand back as data: which
 //! line failed.** The crate renders a line number in its own prose, but the only position it
 //! exposes is a byte range ([`toml::de::Error::span`]) — the document text it rendered against,
 //! the key path, and the line itself are all private. A caller that wants to *do* something with
 //! the position — put it in a run's own error shape, point an editor at it — has to re-derive it
-//! from that span against the text it still holds. That is
-//! [`ParametersFileError::line`](super::ParametersFileError::line), and this is the one moment
-//! the span and the text are in the same place.
+//! from that span against the text it still holds. That is the `line` of
+//! [`ParametersFileError::Malformed`](super::ParametersFileError::Malformed::line), and this is
+//! the one moment the span and the text are in the same place.
 //!
 //! # Measured: a refusal raised *after* the document parsed still carries a position
 //!
@@ -39,7 +39,7 @@
 //!
 //! **It does not judge what the file says.** A document that parses and means nothing — an
 //! inbreeding coefficient of 1.7, an allele length variation whose shares do not sum to one, a
-//! contamination table in which no row was measured — is accepted here and refused by step C2's
+//! contamination table in which no row was measured — is accepted here and refused by
 //! `validate`, which runs after this and before the projection back to `RunParameters`.
 //!
 //! **It translates two of the parser's messages into the file's vocabulary, and only two.** Spec
@@ -50,7 +50,7 @@
 //! u8` — where `u8`, `f64` and `u64` appear nowhere in this file, its comments or its spec; and
 //! an `observations` table left empty or given two entries reported *wanted exactly 1 element*,
 //! naming neither the key nor any of the three units, in the very path the file's own header
-//! invites. Owner's ruling of 2026-08-30, after C1's reader pass raised both.
+//! invites. Owner's ruling of 2026-08-30, after a review of the reader raised both.
 //!
 //! **The first is a clause added to this module's own message**, with the parser's diagnostic —
 //! line, column, offending line and caret — kept underneath as the error's source
@@ -824,7 +824,7 @@ mod tests {
         the_failure_is_on_line(&error, line);
 
         // The section's **header**, which is several lines above the key that was removed —
-        // B3's note sits between them — so the header's line is found rather than counted back
+        // the writer's comment on the section sits between them — so the header's line is found rather than counted back
         // from the key's.
         let (a_section, key_line) = the_written_file_with("rung = \"fitted_curve\"\n", "");
         let header = a_section

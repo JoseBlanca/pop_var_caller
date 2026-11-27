@@ -62,8 +62,8 @@ impl ParametersFile {
     /// **Which groups of numbers this file's run fitted from its own reads, and which it did
     /// not.**
     ///
-    /// **Derived from the file every time rather than recorded in it**, which is the rule step E3
-    /// set for the note about missing slippage and the reason it holds here too: a recorded count
+    /// **Derived from the file every time rather than recorded in it**, which is the rule the
+    /// note about missing slippage keeps, and the reason holds here too: a recorded count
     /// is a second statement of something the numbers already say, and the two can come to
     /// disagree — most easily when a person edits a value and its warrant, which is exactly what
     /// the file invites them to do (§1.2 goal 3).
@@ -468,7 +468,7 @@ mod tests {
 
     /// **A demoted file's substitution rates stop counting as fitted, and its slippage does not.**
     ///
-    /// The half of spec §2.1's demotion this step could close and the half it could not, asserted
+    /// The half of spec §2.1's demotion this file closes and the half it cannot, asserted
     /// together so that neither can move without the other being looked at. Until 2026-08-31 the
     /// substitution-rate predicate read `is_empty()`, so a demoted file counted another cohort's
     /// rates among the groups fitted from the reader's reads.

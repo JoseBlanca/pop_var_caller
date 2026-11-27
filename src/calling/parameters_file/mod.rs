@@ -2,11 +2,11 @@
 //! each number's warrant is and which inputs it was fitted from
 //! (`doc/devel/ng/spec/parameters_file.md`).
 //!
-//! Today those numbers exist only in memory:
-//! [`RunParameters`](crate::calling::run_parameters::RunParameters) assembles them from the
-//! parameter pre-pass and calling reads them through a borrowed view. Nothing writes them down
-//! and nothing can read them in. This module is the type that does both — the file's **shape**,
-//! which is deliberately not `RunParameters` itself:
+//! In memory,
+//! [`RunParameters`](crate::calling::run_parameters::RunParameters) assembles those numbers from
+//! the parameter pre-pass and calling reads them through a borrowed view. This module writes them
+//! down and reads them back in. Its centre is the file's **shape**, which is deliberately not
+//! `RunParameters` itself:
 //!
 //! - **`RunParameters` is dense and indexed; the file is named.** The calibration and
 //!   contamination axes are `Vec`s indexed by read-group id, and the inbreeding coefficients are
@@ -22,7 +22,7 @@
 //!   |---|---|
 //!   | no read group identified any contamination | no `[contamination]` section |
 //!   | a read group was measured and found clean | a row whose `measurement` has `share_of_reads_from_another_sample = 0` and non-zero evidence counts |
-//!   | a read group's error rate could not be fitted | a multiplier of 1.0 whose `warrant` is `defaulted` |
+//!   | a read group's error rate could not be fitted | a stated multiplier whose `warrant` is `defaulted`: 2.0 in a run that fitted nothing, otherwise the pre-pass's stated error rate over the library's own mean reported error (spec §5) |
 //!   | a stratum was furnished from its period's curves | no row for it in `allele_length_variation_by_stratum` |
 //!   | a slippage group put no read in a stratum | no row for that pair in `slippage_by_stratum_and_group` |
 //!   | the fit could not place a stratum's between-locus share | no `between_locus_share` key, and no `between_locus_share_standard_error`, on its row of `allele_length_variation_by_stratum` |
@@ -50,13 +50,13 @@
 //! rejected, is written down in
 //! `doc/devel/reports/implementations/ng_parameters_file_a1_2026-08-28.md`.
 //!
-//! The tree, in the one-row-a-line inline-table form **the hand-written writer of step B2 is
-//! meant to emit** — which is not what `serde`'s own serializer produces today; that writes
-//! `[[array of tables]]` headers instead, and `testdata/every_shape.toml` is what it
-//! actually emits:
+//! The tree below is abridged, in the one-row-a-line inline-table form **the hand-written writer
+//! (`to_toml`) emits**; `testdata/every_shape_as_written.toml` is every section in full, comments
+//! included. `serde`'s own serializer writes `[[array of tables]]` headers instead, and
+//! `testdata/every_shape.toml` is what it emits:
 //!
 //! ```toml
-//! format_version = 3
+//! format_version = 10
 //! ploidy = 2
 //!
 //! [fitted_from]                    # §3.1 — and what a mismatch refuses
@@ -154,8 +154,8 @@
 //! three refusals of §6 and the fourth binding's demotion.
 //!
 //! **Three ways in, and they answer three different questions.** [`ParametersFile::from_toml`] asks
-//! whether the text is this shape. `ParametersFile::to_run_parameters` asks whether it means
-//! something, and gives the parameters it means.
+//! whether the text is this shape. `ParametersFile::to_run_parameters`, which only tests
+//! call, asks whether it means something, and gives the parameters it means.
 //! [`ParametersFile::to_run_parameters_for`] asks whether it means something **about this run**,
 //! and is the one a run calls.
 //!
@@ -176,15 +176,15 @@
 //!   Every field of `[repeat_tracts]` and of `[stated_constants]` is now a table or an array, so
 //!   the golden file has neither header line and the largest section of the file opens unnamed.
 //!   That is
-//!   `serde`'s rendering and not the artefact's design: the writer of step B2 emits the section
-//!   headers itself. **Read `testdata/every_shape.toml` as a record of the key names, not as the
+//!   `serde`'s rendering and not the artefact's design: the hand-written writer emits the
+//!   section headers itself. **Read `testdata/every_shape.toml` as a record of the key names, not as the
 //!   file a run will produce.**
 //! - **`serde` emits a struct's table-valued fields after its scalar ones**, whatever the
 //!   declared order. So `format_version` and `ploidy` open the file because they are the only
 //!   scalars at the top level, not because they are declared first; and in a `Blend` row
-//!   `smoothing` is emitted *last*, after `expected_slipped_reads`, because it became a table. A
-//!   hand-written writer that means to match serde's bytes has to do the same — or, better,
-//!   choose its own order and pin it with its own golden file.
+//!   `smoothing` is emitted *last*, after `expected_slipped_reads`, because it became a table.
+//!   The hand-written writer does not follow serde's order: it chooses its own, pinned by its
+//!   own golden file, `testdata/every_shape_as_written.toml`.
 
 mod between_locus_share;
 mod bindings;
@@ -281,9 +281,9 @@ pub const FORMAT_VERSION: u32 = 10;
 /// **Why a parameters file could not be used.**
 ///
 /// **It lives here rather than in the reader**, because it is the module's answer and not one
-/// file's: reading the text is only the first of the three ways a file is refused. Step C2's
-/// `validate` refuses a file that parses and means nothing — an inbreeding coefficient outside
-/// its range, an allele length variation that does not sum to one — and step D2's bindings refuse one
+/// file's: reading the text is only the first of the three ways a file is refused. `validate`
+/// refuses a file that parses and means nothing — an inbreeding coefficient outside
+/// its range, an allele length variation that does not sum to one — and the bindings check refuses one
 /// fitted against a different reference, a different sample list, or a read-group axis with a
 /// gap in it (spec §6). Both add variants, and neither belongs to `from_toml`.
 ///
@@ -376,8 +376,8 @@ pub enum ParametersFileError {
     /// already uses", and that sentence is wrong about the shape: §6 and §13's fourth test both
     /// ask for the field *and* the two values that differ, and a bare field name cannot answer
     /// *which of my three references was this fitted on*. **Owner's ruling of 2026-08-30: exceed
-    /// the census.** (The verdict it was compared against, `Freshness`, went with the sidecar at
-    /// `psp_census_pair.md`'s Milestone E; what the census refuses on now is
+    /// the census.** (The verdict it was compared against, `Freshness`, went when the census
+    /// sidecar was removed (`psp_census_pair.md`); what the census refuses on now is
     /// [`CensusVerdict`](crate::run::CensusVerdict).)
     #[error(
         "the parameters file was fitted from other inputs: {field} is {in_the_file} in the file \
@@ -890,7 +890,8 @@ pub struct BaseQualityCalibrationRow {
     /// multiplier and a provenance and keeps no count, but spec §3.3 asks for one and the fit
     /// produced one: it is on the `Estimate<ErrorRate>` that
     /// [`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble)
-    /// reads and does not store. **So step B1's projection has to be handed that estimate**, the
+    /// reads and does not store. **So the projection from a run (`of_run`) has to be handed that
+    /// estimate**, the
     /// same motion the inbreeding coefficient needs.
     pub error_probability_multiplier: WarrantedValue,
 }
@@ -924,9 +925,9 @@ pub struct Contamination {
     /// path — so a file spelling it as unmeasured rows and read literally would take the mixture
     /// path instead, with every fraction zero, where absence takes the plain formula.
     ///
-    /// **Both are refused by step C2**, which is where the table meets the run's dense read-group
+    /// **Both are refused by `validate`**, before the table meets the run's dense read-group
     /// axis; no shape can say a `Vec` is non-empty, and none can say *not every row is absent*.
-    /// (Not step C1: that step is parsing, and both of these parse.)
+    /// (Not by the reader: that is parsing, and both of these parse.)
     pub by_read_group: Vec<ContaminationRow>,
 }
 
@@ -965,7 +966,7 @@ pub struct ContaminationRow {
 /// **A fraction of zero here is a real answer** — this read group was measured and found clean —
 /// because the evidence counts beside it are what say it was measured at all.
 ///
-/// **A measurement whose counts are both zero is writable and is refused by step C2**, not by the
+/// **A measurement whose counts are both zero is writable and is refused by `validate`**, not by the
 /// shape. It is exactly the in-memory `UNMEASURED_READ_GROUP`
 /// ([`run_parameters.rs`](crate::calling::run_parameters)), so a projection written from the
 /// *view* rather than from the fit's estimate would produce one: a row saying *measured* while
@@ -973,7 +974,8 @@ pub struct ContaminationRow {
 /// nothing. **`NonZeroU64` would make it unwritable and was not taken**, because a fit that
 /// returns an estimate with no evidence behind it would then have no file to be written to at
 /// all, and whether that can happen is a question about the contamination estimator rather than
-/// about this shape — step C4's round trip on a real fit is what will answer it.
+/// about this shape — the round trip on a real fit (`to_run_parameters`'
+/// `the_north_star_round_trip`) is where it would show.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContaminationMeasurement {
@@ -1055,8 +1057,7 @@ pub struct SampleBatchRow {
 /// kilobytes: negligible beside the VCF it sits next to, and still openable in an editor. **The
 /// other cohort-sized axis is the larger by two orders of magnitude** — the repeat-tract
 /// substitution rate, keyed by (read group × stratum × ploidy), which spec §9's correction of
-/// 2026-08-28 prices at up to 62 MB where this one is 0.44 MB. This doc said *only* until step B2
-/// produced a file to count.
+/// 2026-08-28 prices at up to 62 MB where this one is 0.44 MB.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inbreeding {
@@ -1064,7 +1065,7 @@ pub struct Inbreeding {
     /// least one sample, so an empty list is a run whose sample order went missing rather than a
     /// run with none, which is what
     /// [`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble)
-    /// asserts in release. **Refused by step C2**, alongside the contamination table's two empty
+    /// asserts in release. **Refused by `validate`**, alongside the contamination table's two empty
     /// shapes and for the same reason: no shape can say a `Vec` is non-empty.
     pub by_sample: Vec<InbreedingRow>,
 }
@@ -1088,8 +1089,8 @@ pub struct InbreedingRow {
     /// **The warrant exists upstream and the seam into calling drops it.** The pre-pass produces
     /// an `Estimate<InbreedingF>`; the seam is
     /// [`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble),
-    /// which takes a bare `Vec<InbreedingF>`. So **step B1's projection has to be handed the
-    /// estimates rather than that vector**, or every sample's coefficient reads as supplied when
+    /// which takes a bare `Vec<InbreedingF>`. So **the projection from a run (`of_run`) has to be
+    /// handed the estimates rather than that vector**, or every sample's coefficient reads as supplied when
     /// it was fitted.
     pub inbreeding_coefficient: WarrantedValue,
 }
@@ -1377,7 +1378,7 @@ pub struct PairedNumber {
 /// The missing one was [`Self::ZeroDiversity`], and it went missing because the upstream enum's
 /// own documentation buries it: the variant sits directly under a twenty-line comment block
 /// about a variant that was deleted, so it reads as part of that block's epitaph rather than as
-/// a state of its own. Nothing caught it until step B1 wrote the match that turns one into the
+/// a state of its own. Nothing caught it until the projection from a run wrote the match that turns one into the
 /// other — which is why that match is exhaustive by construction and is now the guard against
 /// this whole class of drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1565,9 +1566,10 @@ pub struct SharesOrigin {
     ///
     /// **Written separately from [`LevelOrigin::expected_slipped_reads`] and not yet known to be the same
     /// number.** Upstream the two fields carry near-identical documentation but state their
-    /// absence conditions differently, and nothing here can settle which. Step C4's round trip
-    /// on a real fit is where to compare them across every stratum: if they never differ, one of
-    /// these belongs on [`SlippageRow`] instead of two here.
+    /// absence conditions differently, and nothing here can settle which. The round trip on a
+    /// real fit (`to_run_parameters`' `the_north_star_round_trip`) is where to compare them
+    /// across every stratum: if they never differ, one of these belongs on [`SlippageRow`]
+    /// instead of two here.
     pub expected_slipped_reads: Option<f64>,
     /// Where the share of slipped reads showing a shorter tract came from.
     pub shorter_share_smoothing: ShareSmoothing,
@@ -1916,16 +1918,17 @@ pub(crate) mod tests {
     ///
     /// **Sample names come from `@RG SM` and are whatever the sequencing centre typed.** Every
     /// string in an earlier version of this fixture was bare ASCII, so nothing here would have
-    /// noticed a writer that mangled a quote or a non-ASCII byte — and step B replaces serde's
-    /// writer, which escapes correctly, with one that has to.
+    /// noticed a writer that mangled a quote or a non-ASCII byte — and a run writes its file
+    /// with the hand-written writer, which has to escape these itself, not with serde's.
     const AWKWARD_SAMPLE: &str = "Ailsa ‘Craig’ \"×2\"";
 
     /// A share the curve carried that needs all seventeen significant digits to recover.
     ///
     /// **One value in the fixture that a short-digit formatter cannot round-trip.** Spec §4 says
-    /// whether the crate emits enough digits "has not been checked here"; step C3 is where that
-    /// is settled, and this is only the fixture's part of it — with every float a short decimal,
-    /// narrowing one of them from `f64` to `f32` left the emitted file byte-identical.
+    /// whether the crate emits enough digits "has not been checked here"; `to_toml`'s
+    /// `every_float_comes_back_bit_identical` settles that, and this is only the fixture's part
+    /// of it — with every float a short decimal, narrowing one of them from `f64` to `f32` left
+    /// the emitted file byte-identical.
     const FULL_PRECISION: f64 = 1.0 / 3.0;
 
     /// **Where each of the fixture's four slippage rows sits.**
@@ -2707,7 +2710,8 @@ pub(crate) mod tests {
     /// its table-valued ones whatever the declared order, so no ordering of this tree can
     /// produce the "value after table" error; moving `ploidy` to the last field of
     /// [`ParametersFile`] leaves the emitted bytes identical. Whether the file *opens* with
-    /// `format_version` and `ploidy` is step B's writer to decide and step B's test to hold.
+    /// `format_version` and `ploidy` is the hand-written writer's to decide, and its golden file
+    /// (`testdata/every_shape_as_written.toml`) holds it.
     #[test]
     fn every_section_of_the_shape_survives_a_serde_round_trip() {
         let written = a_file_using_every_shape();
@@ -2723,9 +2727,9 @@ pub(crate) mod tests {
     /// changed nesting all fail here and nowhere else.
     ///
     /// **The golden file is `serde`'s output and not the artefact a run will write** — the
-    /// hand-written writer of step B2 emits one-row-a-line inline tables and carries comments,
-    /// and owes a golden file of its own. What this one holds in the meantime is the *names*,
-    /// which are the same under either writer.
+    /// hand-written writer emits one-row-a-line inline tables and carries comments, and its
+    /// golden file is `testdata/every_shape_as_written.toml`. What this one holds is the
+    /// *names*, which are the same under either writer.
     #[test]
     fn the_whole_shape_emits_the_documented_toml() {
         let text = toml::to_string(&a_file_using_every_shape()).expect("serialises");
@@ -2832,7 +2836,7 @@ pub(crate) mod tests {
     /// asserted below: the eight it never writes are the seed's other three rungs, three of the
     /// share curve's four, and two of the share shape's three. The earlier **numerator** here —
     /// eleven — was a guess and the true figure was fourteen; the denominator moved from
-    /// twenty-one to twenty-two because step B1 added a variant, not because it was miscounted, and
+    /// twenty-one to twenty-two because the projection from a run added a variant, not because it was miscounted, and
     /// to twenty-five when the file's version 2 added a start's three outcomes, all in the fixture.)
     #[test]
     fn every_enum_variant_spells_as_the_file_says() {
@@ -3129,10 +3133,10 @@ pub(crate) mod tests {
     /// **Each of spec §5's five states is a missing key, and each is distinct from the value a
     /// reader might otherwise collapse it into.**
     ///
-    /// Distinctness in the *types* is what Milestone A owes; that collapsing two of them **changes
-    /// an answer** is step C5's, on fixtures built for it, and that they survive a round trip is
-    /// step C4's. What this holds is the shape: for every one of the five, the absent form writes
-    /// no key at all, and the form it is confusable with writes a different document.
+    /// That collapsing two of them **changes an answer**, and that they survive a round trip, is
+    /// `to_run_parameters`' `the_five_states_survive_the_round_trip`, on fixtures built for it.
+    /// What this holds is the shape: for every one of the five, the absent form writes no key at
+    /// all, and the form it is confusable with writes a different document.
     #[test]
     fn each_of_the_five_states_is_a_missing_key_and_not_a_value() {
         let fitted = a_file_using_every_shape();
@@ -3279,12 +3283,11 @@ pub(crate) mod tests {
     /// Both say something spec §5 requires to be said another way, and **neither can be made
     /// unspellable by a shape**: no type can say a `Vec` is non-empty, or that not every row of
     /// one is absent, or that two counts are not both zero without refusing an estimate the fit
-    /// might legitimately produce. So they are step C2's to refuse — the step that takes the file
-    /// to `RunParameters` and meets the run's dense read-group axis.
+    /// might legitimately produce. So they are `validate`'s to refuse, on the way from the file
+    /// to `RunParameters` and the run's dense read-group axis.
     ///
-    /// **Inverted at step C2, which landed the refusal.** Both now fail
-    /// [`ParametersFile::validate`], naming the field — and both still *parse*, which is the half
-    /// this test is now for. `validate` runs on a parsed value, so a reader that rejected these
+    /// Both fail [`ParametersFile::validate`], naming the field — and both still *parse*, which
+    /// is the half this test is for. `validate` runs on a parsed value, so a reader that rejected these
     /// earlier, at the text, would make the refusal unreachable and its message never seen; the
     /// two halves have to fail in that order to fail with the message that explains them.
     #[test]
@@ -3462,13 +3465,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// **The inline form the module documents parses**, which is the claim steps B and C meet on.
+    /// **The inline form the module documents parses**, which is the claim the writer and the
+    /// reader meet on.
     ///
-    /// The hand-written writer of step B2 emits one row a line as an inline table; `serde`'s
-    /// serializer emits `[[array of tables]]` headers instead, so every other test here parses
-    /// the one shape that writer will *not* produce. The nesting this reaches is four deep —
-    /// `share_of_reads_that_slip_origin.smoothing.blend.curve` — which is the part worth knowing about before both
-    /// the writer and the reader are built.
+    /// The hand-written writer emits one row a line as an inline table; `serde`'s serializer
+    /// emits `[[array of tables]]` headers instead, so every other test here parses the one
+    /// shape that writer does *not* produce. The nesting this reaches is four deep —
+    /// `share_of_reads_that_slip_origin.smoothing.blend.curve`.
     #[test]
     fn the_documented_inline_form_parses() {
         let text = r#"
