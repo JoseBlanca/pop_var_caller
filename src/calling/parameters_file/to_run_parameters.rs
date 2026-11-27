@@ -1,5 +1,5 @@
 //! **A parameters file, back into the shape a run scores with** — the reverse of
-//! `from_run_parameters`, and the half of step C2 that makes the round trip a round trip
+//! `from_run_parameters`, and the half that makes the round trip a round trip
 //! (`doc/devel/ng/spec/parameters_file.md` §1.2 goal 1).
 //!
 //! # What it is not
@@ -17,9 +17,10 @@
 //! `SequencingBatches` are there for the same reason.
 //!
 //! **It does not check the file against the run.** The four bindings of spec §6 — the reference's
-//! digest, the sample list, the read-group table, the census — are step D2's, and this module
-//! reads none of them except as the file's own axes: the read-group table for its length and the
-//! sample list for its order. It hands none of them back, because its caller is already holding
+//! digest, the sample list, the read-group table, the census — are checked in `bindings`
+//! (`refuse_if_not_this_runs_inputs` and the census demotion). This module reads none of them
+//! except as the file's own axes: the read-group table to place each row on the target axis by
+//! its sample and `@RG ID`, and the sample list for its names. It hands none of them back, because its caller is already holding
 //! the [`ParametersFile`] they are written in. A file that projects here is a file that *means
 //! something*; whether it means it about **this** run is the next question.
 //!
@@ -119,9 +120,9 @@ pub struct RunParametersFromFile {
 /// differently. A file fitted on that cohort is still the right file, and reading it must not
 /// depend on the two orders coinciding.
 ///
-/// So the projection asks this where each row goes. With no run to speak of that is the file's
-/// own order, which is what [`ParametersFile::to_run_parameters`] wants; with a run it is the
-/// run's.
+/// So the projection asks this where each row goes. With a run it is the run's order; with no
+/// run, which only this module's tests do (`ParametersFile::to_run_parameters`), it is the
+/// file's own.
 pub(super) struct WhereTheFilesRowsBelong {
     /// For each read group the file numbers `0..n`, the position it takes on the target axis.
     read_group: Vec<usize>,
@@ -220,8 +221,11 @@ impl ParametersFile {
         self.project_onto(&its_own_order)
     }
 
-    /// [`Self::to_run_parameters`] with the file's rows put where **a run** wants them, rather
-    /// than where the file happens to list them.
+    /// **Read this file back into the parameters a run scores with**, with the file's rows put
+    /// where **a run** wants them rather than where the file happens to list them.
+    ///
+    /// [`Self::validate`] runs first, so a file that parses and means nothing is refused here
+    /// rather than becoming a plausible run.
     ///
     /// **`order` must have been built after [`Self::refuse_if_not_this_runs_inputs`] passed**,
     /// which is what makes every lookup below find its row: that refusal is where a sample or a
@@ -935,8 +939,8 @@ pub(super) mod tests {
 
     /// The run's read-group table, rebuilt from the identity block the file carries.
     ///
-    /// **Step D2's job is to compare this against the run's own**, and this is not that: it is
-    /// the table the file *says* the numbers were fitted from, which is the only one a round
+    /// **Comparing this against the run's own is `refuse_if_not_this_runs_inputs`' job**, and
+    /// this is not that: it is the table the file *says* the numbers were fitted from, which is the only one a round
     /// trip through the file can use.
     pub(in crate::calling::parameters_file) fn the_files_read_groups(
         file: &ParametersFile,
@@ -960,9 +964,7 @@ pub(super) mod tests {
     /// file recorded, unchanged.
     ///
     /// **The file does not carry the fitted error rate and never has** — it carries the
-    /// *multiplier* that rate produced, which is what `RunParameters` keeps too. Until step F1
-    /// this helper built an `Estimate<ErrorRate>` around a placeholder rate of 1e-3 to satisfy
-    /// `of_run`'s old signature, which had only the fit's door; the writer now takes
+    /// *multiplier* that rate produced, which is what `RunParameters` keeps too. So the writer takes
     /// [`ReadsBehindEachCalibration`], whose three constructors are spec §7's three sources, and
     /// this is the file's one.
     pub(in crate::calling::parameters_file) fn the_counts_the_projection_out_reads(
@@ -1023,7 +1025,7 @@ pub(super) mod tests {
     /// The round trip above cannot see that: its fixture is `fitted_here` *and* has fitted
     /// strata, so the re-derivation gives the right answer for the wrong reason. **This one
     /// varies the warrant while leaving the strata alone**, which is exactly the state spec
-    /// §2.1's demotion produces and step D3 depends on.
+    /// §2.1's demotion produces and the door that applies it depends on.
     #[test]
     fn the_bottom_rungs_warrant_is_the_files_and_not_worked_out_from_its_strata() {
         for warrant in [Warrant::Supplied, Warrant::Borrowed, Warrant::FittedHere] {
@@ -1484,7 +1486,7 @@ pub(super) mod tests {
 
 #[cfg(test)]
 mod the_north_star_round_trip {
-    //! **Step C4: a run's parameters, written and read back, equal field for field.**
+    //! **A run's parameters, written and read back, equal field for field.**
     //!
     //! Spec §1.2 goal 1 and §13's first test, and the plan calls it "the test the whole design
     //! rests on". What it holds is that direct mode and psp mode score the same reads under the
@@ -1521,10 +1523,10 @@ mod the_north_star_round_trip {
     //! None of that is written down anywhere in the file — the file carries the rows the lookup
     //! is built from, and the lookup is what a locus asks.
     //!
-    //! **Two things the trip does not cover, and neither is this step's.** The identity block —
+    //! **Two things the trip does not cover, and neither is this test's.** The identity block —
     //! the digest, the census, the sample list and the read-group table — is fed back into the
     //! second write rather than round-tripped, because `to_run_parameters` deliberately carries
-    //! none of spec §6's four bindings; they are step D2's. And **the tract ladder's fallback
+    //! none of spec §6's four bindings; `bindings` checks them. And **the tract ladder's fallback
     //! carries a warrant this fixture cannot test**: the warrant travels through the projection
     //! (since 2026-08-30), but here it is `fitted_here` beside fitted strata, which is also what
     //! re-deriving it would give, so a projection that lost it would be invisible.
@@ -2399,7 +2401,7 @@ mod the_north_star_round_trip {
 
 #[cfg(test)]
 mod the_five_states_survive_the_round_trip {
-    //! **Step C5: absent, zero and default are three different claims, and collapsing any two of
+    //! **Absent, zero and default are three different claims, and collapsing any two of
     //! them changes an answer.**
     //!
     //! Spec §5 is a table of five rows and one sentence — *`Option<T>` is absence, never a

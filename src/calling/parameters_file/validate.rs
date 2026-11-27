@@ -1,7 +1,7 @@
 //! **Refusing a file that parses and means nothing** — the constraints no shape can state.
 //!
-//! Step C1's reader answers one question: is this text TOML that spells this shape? A file can
-//! pass that and still say something no run can mean — an inbreeding coefficient of 1.7, a length
+//! The reader (`from_toml`) answers one question: is this text TOML that spells this shape? A
+//! file can pass that and still say something no run can mean — an inbreeding coefficient of 1.7, a length
 //! spectrum whose shares sum to 1.4, a contamination table in which nobody was measured. **Owner's
 //! decision of 2026-08-28**, because no step of the plan owned it. Spec §9's own sentence is about
 //! the other half — "a **malformed** file fails at read **with a line number**, which is what using
@@ -15,13 +15,14 @@
 //! answers a question about the *text*, and a caller that wants to read a file and inspect it —
 //! this module's own tests among them — should not have to satisfy the run's constraints to do so.
 //!
-//! **⚑ Nothing in a run calls this yet.** The projection back to `RunParameters` is the caller
-//! that must run it first, and that is the other half of step C2; until it lands, reading a
-//! parameters file through this module's public entry point does not validate it.
+//! **The projection back to `RunParameters` runs it first**: both
+//! [`ParametersFile::to_run_parameters_for`](super::ParametersFile::to_run_parameters_for), the
+//! entry point a run calls, and the projection it goes through call `validate` before reading a
+//! row.
 //!
 //! # What it cannot give, and says so rather than pretending
 //!
-//! **No line number.** The refusals of C1 come from a parser holding a byte span; these come from
+//! **No line number.** The reader's refusals come from a parser holding a byte span; these come from
 //! walking a value that no longer remembers where it was written. What is given instead is **the
 //! key's full path in the file's own spelling** — `inbreeding.by_sample[sample = "TS-1"]` — which a
 //! reader can search for, and which survives the file being reformatted.
@@ -57,7 +58,7 @@
 //! **An evidence count of exactly `i64::MAX` is the writer's saturation marker, not a
 //! measurement.** TOML's integers are signed and 64-bit, so a `u64` count above `2^63 − 1` has no
 //! representation; the writer saturates rather than emitting a number three different readers gave
-//! three different answers to (step B2). A count arriving back at exactly that value is therefore
+//! three different answers to (measured when the writer was built). A count arriving back at exactly that value is therefore
 //! either a saturated write or a number nobody could have counted — 9.2 quintillion reads — and
 //! reading it as evidence would put a number the writer knows it lost into a run's report.
 
@@ -650,7 +651,7 @@ impl ParametersFile {
         // surfaces as a panic at whichever locus first carries one of that library's reads
         // (`run_parameters.rs`, module documentation). Checked here so the message is about the
         // file. **Whether these ids are the *run's* ids is a different question** — that is one of
-        // spec §6's bindings and belongs to step D2; this only asks whether the file is coherent
+        // spec §6's bindings and belongs to `refuse_if_not_this_runs_inputs`; this only asks whether the file is coherent
         // with itself.
         let mut seen: Vec<u32> = self
             .fitted_from
@@ -687,7 +688,8 @@ impl ParametersFile {
         // projects, and gives every sample its neighbour's inbreeding coefficient and batch.
         //
         // **This is the file's agreement with itself, not with the run** — whether these are the
-        // *run's* samples is spec §6's second binding and step D2's.
+        // *run's* samples is spec §6's second binding, checked by
+        // `refuse_if_not_this_runs_inputs`.
         let mut first_seen: Vec<&str> = Vec::with_capacity(self.fitted_from.samples.len());
         for row in &self.fitted_from.read_groups {
             if !first_seen.contains(&row.sample.as_str()) {
@@ -766,7 +768,7 @@ impl ParametersFile {
         // (`from_run_parameters`'s `repeat_tracts_of`), because a read group the declaration does
         // not name has no slippage group — `StratumFits::at` answers `UnknownReadGroup` for it and
         // no slippage number is ever looked up under it. **A run with no repeat tracts at all
-        // declares none**, which is Milestone E's defaults run and the single-sample case
+        // declares none**, which is the defaults run (no fit, no supplied file) and the single-sample case
         // `CLAUDE.md` puts first; requiring density here refused a file this caller had just
         // written.
         names_only_the_read_groups(
@@ -810,18 +812,6 @@ impl ParametersFile {
         )
     }
 
-    /// **No repeat-tract table names one thing twice.**
-    ///
-    /// **A duplicate here is silent in a way a gap is not.** Each of these four tables becomes a
-    /// map keyed by the row's own fields, so a second row for one key overwrites the first and
-    /// nothing says which of the two the run scored under — the order the rows happen to sit in
-    /// decides it. `StratumFits::over`, which builds the same map from the *fit's* outcomes,
-    /// carries a release-level assert against exactly this, on the stated grounds that "the two
-    /// levels can differ by a factor of five".
-    ///
-    /// **And this is the input path where it is plausible.** The fit cannot produce a duplicate;
-    /// a person copying a `slippage_by_stratum_and_group` row to edit it and forgetting to change
-    /// the stratum can. The refusal names the key, which the projection could not.
     /// **Every slippage group and every batch is numbered below the file's read-group count.**
     ///
     /// Both are numbered from 0 and each holds at least one read group, so a number at or above
@@ -888,6 +878,18 @@ impl ParametersFile {
         Ok(())
     }
 
+    /// **No repeat-tract table names one thing twice.**
+    ///
+    /// **A duplicate here is silent in a way a gap is not.** Each of these four tables becomes a
+    /// map keyed by the row's own fields, so a second row for one key overwrites the first and
+    /// nothing says which of the two the run scored under — the order the rows happen to sit in
+    /// decides it. `StratumFits::over`, which builds the same map from the *fit's* outcomes,
+    /// carries a release-level assert against exactly this, on the stated grounds that "the two
+    /// levels can differ by a factor of five".
+    ///
+    /// **And this is the input path where it is plausible.** The fit cannot produce a duplicate;
+    /// a person copying a `slippage_by_stratum_and_group` row to edit it and forgetting to change
+    /// the stratum can. The refusal names the key, which the projection could not.
     fn no_repeat_tract_table_names_one_thing_twice(&self) -> Result<(), ParametersFileError> {
         let tracts = &self.repeat_tracts;
         names_each_key_once(
@@ -1028,8 +1030,8 @@ impl ParametersFile {
                 ));
             }
             // **⚑ Every warrant is free on this key, `defaulted` included — and it is the one
-            // key of the file's three defaultable numbers where that is so.** Step E1 added a
-            // rung here reading *`defaulted` implies
+            // key of the file's three defaultable numbers where that is so.** A rung was once
+            // added here reading *`defaulted` implies
             // [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`], as the outlier weight and the tract
             // ladder's fallback concentration already do*, and it **refused a file this caller
             // had just written**. It is recorded rather than left out, so that the next reader
@@ -3847,7 +3849,7 @@ mod tests {
 
     /// **A count at exactly the largest integer TOML holds is the writer's saturation marker.**
     ///
-    /// Step B2 measured that a `u64` above `2^63 − 1` gave three different answers from three
+    /// A `u64` above `2^63 − 1` was measured to give three different answers from three
     /// readers, so every integer this writer emits saturates rather than emitting one nobody
     /// agrees on. A count arriving back at exactly that value is a number the writer knows it
     /// lost; read as evidence it would put 9.2 quintillion reads into a run's report.
