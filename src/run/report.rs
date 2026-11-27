@@ -125,18 +125,15 @@ impl<'a> RunReport<'a> {
         analysed: &GenomeRegions,
         bounds: BoundsTheRunCalledUnder,
     ) -> Self {
-        Self {
-            calling: &written.calling,
-            samples: WhatEachSampleDid::TheirReadsWereWalked(&written.walk),
+        Self::new(
+            &written.calling,
+            WhatEachSampleDid::TheirReadsWereWalked(&written.walk),
             contigs,
             read_groups,
             parameters,
-            where_the_ground_is: describe(analysed, contigs),
-            analysed_bases: analysed.iter().map(|region| region.len()).sum(),
-            max_cohort_locus_span: bounds.max_cohort_locus_span,
-            max_candidate_alleles: bounds.max_candidate_alleles,
-            satellite_bases_on_the_generic_path: 0,
-        }
+            analysed,
+            bounds,
+        )
     }
 
     /// Gather what a finished run over **stored files** has to say (spec §5.3).
@@ -155,9 +152,30 @@ impl<'a> RunReport<'a> {
         analysed: &GenomeRegions,
         bounds: BoundsTheRunCalledUnder,
     ) -> Self {
+        Self::new(
+            calling,
+            WhatEachSampleDid::TheirStoredFilesWereRead(stored),
+            contigs,
+            read_groups,
+            parameters,
+            analysed,
+            bounds,
+        )
+    }
+
+    /// The constructor both modes share: everything but what each sample did is the same.
+    fn new(
+        calling: &'a CohortCallingTallies,
+        samples: WhatEachSampleDid<'a>,
+        contigs: &'a ContigList,
+        read_groups: &'a ReadGroups,
+        parameters: &'a ParametersFile,
+        analysed: &GenomeRegions,
+        bounds: BoundsTheRunCalledUnder,
+    ) -> Self {
         Self {
             calling,
-            samples: WhatEachSampleDid::TheirStoredFilesWereRead(stored),
+            samples,
             contigs,
             read_groups,
             parameters,
