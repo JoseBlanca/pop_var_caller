@@ -667,20 +667,14 @@ fn a_measured_view(measurement: &ContaminationMeasurement) -> ContaminationView 
 /// `defaulted` value — a stated constant has nothing behind it — and a count of zero says the
 /// same thing in the shape memory has. What the file adds is the ability to say it by leaving
 /// the key out, which is what makes a hand-written file legible.
+///
+/// **The unit is dropped here and nowhere else.** `Estimate<T>`'s count is a bare `u64` whose unit
+/// follows the quantity; the file names the unit because a reader cannot be sent to the source to
+/// find it. The projection out puts the right one back, per quantity, so the trip is lossless —
+/// the file's own `every_evidence_count_names_the_unit_its_quantity_is_fitted_over` is what holds
+/// that.
 fn an_evidence_count(count: Option<EvidenceCount>) -> u64 {
-    match count {
-        // **The unit is dropped here and nowhere else.** `Estimate<T>`'s count is a bare `u64`
-        // whose unit follows the quantity; the file names the unit because a reader cannot be
-        // sent to the source to find it. The projection out puts the right one back, per
-        // quantity, so the trip is lossless — the file's own
-        // `every_evidence_count_names_the_unit_its_quantity_is_fitted_over` is what holds that.
-        Some(
-            EvidenceCount::Reads(count)
-            | EvidenceCount::CoveredPositions(count)
-            | EvidenceCount::BasesCompared(count),
-        ) => count,
-        None => 0,
-    }
+    count.map_or(0, EvidenceCount::count)
 }
 
 fn a_period(at: &str, period: u8) -> Result<SsrPeriod, ParametersFileError> {

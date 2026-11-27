@@ -1920,7 +1920,12 @@ fn a_misread_after_run_row(row: &MisreadAfterRunRow) -> String {
     an_inline_table(&fields)
 }
 
-fn the_word_for_warrant(warrant: Warrant) -> &'static str {
+/// The file's own spelling of a warrant: what the writer writes, and what a refusal in
+/// `validate` quotes back.
+///
+/// **The `serde` spelling rather than `{:?}`**, which would print the Rust variant name — a
+/// word that appears nowhere in the file the reader is being sent to edit.
+pub(super) fn the_word_for_warrant(warrant: Warrant) -> &'static str {
     match warrant {
         Warrant::FittedHere => "fitted_here",
         Warrant::Borrowed => "borrowed",

@@ -61,6 +61,7 @@
 //! either a saturated write or a number nobody could have counted — 9.2 quintillion reads — and
 //! reading it as evidence would put a number the writer knows it lost into a run's report.
 
+use super::to_toml::the_word_for_warrant;
 use super::{
     BetweenLocusShare, ContaminationMeasurement, EvidenceCount, InformationalNumber,
     LevelSmoothing, MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile,
@@ -1446,23 +1447,10 @@ impl ParametersFile {
                     "has the warrant `{}`, and nothing fits this number: it is either the \
                      built-in {built_in:?}, which is `defaulted`, or one you wrote here, which \
                      is `supplied`",
-                    the_word_for(other)
+                    the_word_for_warrant(other)
                 ),
             )),
         }
-    }
-}
-
-/// The file's own spelling of a warrant, for a refusal that has to quote one back.
-///
-/// **The `serde` spelling rather than `{:?}`**, which would print the Rust variant name — a
-/// word that appears nowhere in the file the reader is being sent to edit.
-fn the_word_for(warrant: Warrant) -> &'static str {
-    match warrant {
-        Warrant::FittedHere => "fitted_here",
-        Warrant::Borrowed => "borrowed",
-        Warrant::Supplied => "supplied",
-        Warrant::Defaulted => "defaulted",
     }
 }
 
