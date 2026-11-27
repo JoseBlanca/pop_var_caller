@@ -51,9 +51,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::to_run_parameters::WhereTheFilesRowsBelong;
 use super::{
-    BaseQualityCalibrationRow, CensusIdentity, CensusTerm, InbreedingRow, ParametersFile,
-    ParametersFileError, ReadGroupRow, RepeatRouting, RepeatTracts, RunParametersFromFile,
-    StatedConstants, StutterMultiplierRow, SubstitutionRateRow, Warrant,
+    BaseQualityCalibrationRow, CensusIdentity, CensusTerm, InbreedingRow, MisreadAfterRunRow,
+    MisreadAfterRuns, ParametersFile, ParametersFileError, ReadGroupRow, RepeatRouting,
+    RepeatTracts, RunParametersFromFile, StatedConstants, StutterMultiplierRow,
+    SubstitutionRateRow, Warrant,
 };
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::census::RecordingTerms;
@@ -764,10 +765,20 @@ impl ParametersFile {
         {
             stutter_multiplier.warrant = no_better_than_supplied(stutter_multiplier.warrant);
         }
-        if let Some(misread) = misread_after_runs {
-            for row in &mut misread.entries {
-                row.as_the_run.warrant = no_better_than_supplied(row.as_the_run.warrant);
-                row.other_wrong.warrant = no_better_than_supplied(row.other_wrong.warrant);
+        if let Some(MisreadAfterRuns { entries }) = misread_after_runs {
+            for MisreadAfterRunRow {
+                read_group: _,
+                shortest_run: _,
+                longest_run: _,
+                base: _,
+                as_the_run,
+                other_wrong,
+                through_reads: _,
+                arriving_first_reads: _,
+            } in entries
+            {
+                as_the_run.warrant = no_better_than_supplied(as_the_run.warrant);
+                other_wrong.warrant = no_better_than_supplied(other_wrong.warrant);
             }
         }
         let StatedConstants {
