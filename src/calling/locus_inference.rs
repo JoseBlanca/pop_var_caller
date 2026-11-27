@@ -228,6 +228,8 @@ pub struct RepeatTractProvenance {
     /// simply never fitted. Splitting that count the same way means giving that lookup a typed
     /// absence, which is a change to the parameter side and is recorded as open rather than made
     /// here.
+    ///
+    /// [`FrozenParameters::ssr_substitution_rate_at`]: super::FrozenParameters::ssr_substitution_rate_at
     cells_whose_read_group_the_fit_does_not_describe: usize,
     /// How many cells found no fitted substitution rate and took the stated constant, which is
     /// defined as the SNP/indel path's own default so that a run cannot default its two error
@@ -487,6 +489,8 @@ pub struct LocusInference {
     /// hands back its baseline unchanged in exactly those two cases
     /// ([`qual_refine.rs:79`](../../../src/vcf/qual_refine.rs)), and `None` is that same
     /// answer as a type rather than as an early return.
+    ///
+    /// [`allele_candidates::SelectionVerdict::Selected`]: super::allele_candidates::SelectionVerdict::Selected
     artifact_test_counts: Option<ArtifactTestCounts>,
 }
 
@@ -566,6 +570,8 @@ impl LocusInference {
     /// pass compares against a reads-only estimate made before it
     /// (`doc/devel/ng/spec/calling_em_loop.md` §3), so settling on the first pass is a
     /// real outcome and not a comparison against nothing.
+    ///
+    /// [`AlleleId`]: crate::types::AlleleId
     #[allow(
         clippy::too_many_arguments,
         reason = "the architecture fixes this type's fields as a flat list \

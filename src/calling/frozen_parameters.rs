@@ -27,6 +27,9 @@ use std::collections::BTreeMap;
 /// **read group** — a sample sequenced from two libraries has two of each. The inbreeding
 /// coefficients are per **sample**, in the run's sample order, the same order
 /// [`LocusEvidence`] and [`LocusInference::per_sample`] use.
+///
+/// [`LocusEvidence`]: super::LocusEvidence
+/// [`LocusInference::per_sample`]: super::LocusInference::per_sample
 #[derive(Copy, Clone, Debug)]
 pub struct FrozenParameters<'a> {
     calibration_by_read_group: &'a [ReadGroupCalibration],
@@ -71,8 +74,10 @@ pub struct FrozenParameters<'a> {
     /// **Defaulted unless a constructor is told otherwise** ([`Self::with_repeat_tract_outlier_weight`]),
     /// and the value a run gets that way is the inherited constant it would have scored under
     /// anyway. The one caller with another value is
-    /// [`RunParameters::view`](run_parameters::RunParameters::view), which passes on whatever
+    /// [`RunParameters::view`], which passes on whatever
     /// its own parameters hold.
+    ///
+    /// [`RunParameters::view`]: super::run_parameters::RunParameters::view
     repeat_tract_outlier_weight: RepeatTractOutlierWeight,
     /// **Each read group's misread table after runs** (`str_context_error_fit.md` §6); a read
     /// group absent from it scores under [`MisreadTable::defaults`].
@@ -134,6 +139,9 @@ impl<'a> FrozenParameters<'a> {
     /// read group, so an empty list is that axis going missing — and the symptom would
     /// otherwise be an out-of-range index at whichever locus first carried a read, naming
     /// neither the axis nor the locus.
+    ///
+    /// [`genotype_prior`]: super::genotype_prior
+    /// [`ContaminationMixture::uncontaminated`]: super::ContaminationMixture::uncontaminated
     #[allow(
         clippy::too_many_arguments,
         reason = "the run's frozen parameters, and the list is the point: every one of them is \
@@ -315,7 +323,7 @@ impl<'a> FrozenParameters<'a> {
     ///
     /// **A builder rather than an eleventh argument to the two constructors**, because no fit
     /// produces this number and almost every call site wants the compiled-in value. The
-    /// exception is [`RunParameters::view`](run_parameters::RunParameters::view), whose two
+    /// exception is [`RunParameters::view`], whose two
     /// arms pass on what a parameters file supplied; the other **25** call sites in this
     /// repository — 27 in all, counted with
     /// `grep -rn "FrozenParameters::new(\|FrozenParameters::uncontaminated("` — would each
@@ -323,6 +331,8 @@ impl<'a> FrozenParameters<'a> {
     ///
     /// **A caller that omits it is not silently wrong**: it gets the inherited constant, which
     /// is what the run would have scored under.
+    ///
+    /// [`RunParameters::view`]: super::run_parameters::RunParameters::view
     #[inline]
     #[must_use]
     pub fn with_repeat_tract_outlier_weight(mut self, weight: RepeatTractOutlierWeight) -> Self {
@@ -331,7 +341,9 @@ impl<'a> FrozenParameters<'a> {
     }
 
     /// **The same view with each read group's own misread table** — what
-    /// [`RunParameters::view`](run_parameters::RunParameters::view) passes on.
+    /// [`RunParameters::view`] passes on.
+    ///
+    /// [`RunParameters::view`]: super::run_parameters::RunParameters::view
     #[inline]
     #[must_use]
     pub fn with_misread_tables(mut self, tables: &'a BTreeMap<ReadGroupId, MisreadTable>) -> Self {
@@ -351,8 +363,10 @@ impl<'a> FrozenParameters<'a> {
 
     /// **The share of a repeat tract's reads charged to none of its candidate alleles**, with
     /// its warrant — what
-    /// [`TractScoringFits`](inference::repeat_tract_parameters::TractScoringFits) reads once a
+    /// [`TractScoringFits`] reads once a
     /// locus and hands the scoring row.
+    ///
+    /// [`TractScoringFits`]: super::inference::repeat_tract_parameters::TractScoringFits
     #[inline]
     #[must_use]
     pub fn repeat_tract_outlier_weight(&self) -> RepeatTractOutlierWeight {
@@ -373,6 +387,8 @@ impl<'a> FrozenParameters<'a> {
     /// **The branch that decides which formula runs deserves a name** — see
     /// [`ContaminationMixture::is_absent`], which exists for this reason. Asking it as an
     /// emptiness test announces at the call site only that a list is empty.
+    ///
+    /// [`ContaminationMixture::is_absent`]: super::ContaminationMixture::is_absent
     #[inline]
     #[must_use]
     pub fn contamination_is_absent(&self) -> bool {

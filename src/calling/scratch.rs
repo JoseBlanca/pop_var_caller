@@ -109,11 +109,13 @@ pub(crate) struct EmissionCost {
 /// locus's shape for its lifetime.
 ///
 /// `SsrEmissionScratch` is the repeat-tract emission model's own working memory — the
-/// associated `Scratch` of whichever [`SsrEmissionModel`](likelihood::ssr_emission::SsrEmissionModel)
+/// associated `Scratch` of whichever [`SsrEmissionModel`]
 /// the run scores tracts with. **It has no default**, so every construction names the model
 /// it is for, the way the `SsrRowScratch` it wraps already does: that seam exists for a
 /// bake-off between two emission models, and a defaulted parameter would let a run switch
 /// models with no call site changing.
+///
+/// [`SsrEmissionModel`]: super::likelihood::ssr_emission::SsrEmissionModel
 #[derive(Default, Debug)]
 pub struct CallingScratch<SsrEmissionScratch> {
     /// Candidate selection's per-allele running totals and its survivor list.
@@ -139,6 +141,8 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// One entry per allele: the locus's **seed concentration** — one positive number per
     /// allele, read as chromosomes the prior behaves as though it had already seen
     /// ([`genotype_prior`]'s module doc). Built once per locus.
+    ///
+    /// [`genotype_prior`]: super::genotype_prior
     seed_concentration: Vec<f64>,
     /// One entry per allele: the sample being scored, its own concentration — the seed plus
     /// what the *other* samples showed here.
@@ -208,6 +212,8 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// A compacted copy of [`FrozenParameters::inbreeding_coefficient_by_sample`], because
     /// the loop walks one coefficient per row and the run's slice has an entry for every
     /// sample including the ones with no row.
+    ///
+    /// [`FrozenParameters::inbreeding_coefficient_by_sample`]: super::FrozenParameters::inbreeding_coefficient_by_sample
     inbreeding_coefficient_by_row: Vec<InbreedingF>,
     /// What the last `prepare_for_locus` reset and the table build has counted since — spec
     /// §13 test 5's instrument.
@@ -267,7 +273,7 @@ pub struct CallingScratch<SsrEmissionScratch> {
     ssr_row: SsrRowScratch<SsrEmissionScratch>,
     /// **The tract's fitted scoring parameters, one cell per `(read group, candidate)`** —
     /// gathered once per repeat tract and read by every row of it
-    /// ([`inference::repeat_tract_parameters`](super::calling::inference::repeat_tract_parameters)).
+    /// ([`inference::repeat_tract_parameters`]).
     ///
     /// **Held here rather than built per locus** for the reason every buffer in this type is:
     /// its seven vectors are cleared and refilled at each tract, so a worker allocates them once
@@ -275,6 +281,8 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// these vectors, so a struct owning both would be self-referential — and those are one
     /// allocation per tract, which is the cost the repeat path pays and the SNP/indel path does
     /// not.
+    ///
+    /// [`inference::repeat_tract_parameters`]: super::inference::repeat_tract_parameters
     tract_fits: crate::calling::inference::repeat_tract_parameters::TractScoringFits,
     /// How many per-locus slippage re-fit rounds the last locus adopted — zero at the shipped
     /// configuration, and at every SNP/indel locus, where the round is structurally ignored
@@ -284,6 +292,8 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// have stopped and nothing on the scoring path reads it. It lives on the scratch because
     /// [`LocusInference`] does not carry it and a test of the round's stopping rule needs
     /// *something* the loop exposes to assert a round count against.
+    ///
+    /// [`LocusInference`]: super::LocusInference
     slippage_refit_rounds: u32,
     /// How many **rows** the buffers above are sized for. Zero means never prepared.
     ///
@@ -981,6 +991,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// On an unprepared scratch; on a run with no batches or no samples, which is a run whose
     /// batching went missing rather than a run without one; and on a table longer than a
     /// `usize` can index.
+    ///
+    /// [`fill_batch_allele_copies`]: super::fill_batch_allele_copies
     pub(crate) fn prepare_contaminant_tables(&mut self, batch_count: usize, run_samples: usize) {
         self.assert_prepared();
         assert!(
@@ -1212,8 +1224,10 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// **The tract's fitted scoring parameters, to gather into once per repeat tract.**
     ///
     /// Cleared and refilled by
-    /// [`TractScoringFits::gather_for_locus`](super::calling::inference::repeat_tract_parameters::TractScoringFits::gather_for_locus),
+    /// [`TractScoringFits::gather_for_locus`],
     /// which is the only thing that writes it.
+    ///
+    /// [`TractScoringFits::gather_for_locus`]: super::inference::repeat_tract_parameters::TractScoringFits::gather_for_locus
     #[inline]
     pub(crate) fn tract_fits_mut(
         &mut self,

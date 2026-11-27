@@ -44,6 +44,9 @@ pub struct GenericLocusSample<'a> {
     /// is the same number under every genotype and cancels, so the read likelihood cannot
     /// tell a sample that lost a real allele from one that had a handful of error reads
     /// dropped — and the second is nearly every sample at nearly every locus.
+    ///
+    /// [`allele_candidates::UnmatchedSupport::genotype_must_be_missing`]: super::allele_candidates::UnmatchedSupport::genotype_must_be_missing
+    /// [`SampleGenotypeCall::Missing`]: super::SampleGenotypeCall::Missing
     pub genotype_must_be_missing: bool,
 }
 
@@ -76,6 +79,8 @@ impl GenericLocusSample<'_> {
 /// sum over samples reproducible (`doc/devel/ng/spec/calling_em_loop.md` §8). The merge's
 /// own `CohortObservation::per_sample` holds only the covering samples and is a different
 /// list; converting between them is the input edge's work, not this type's.
+///
+/// [`LocusInference::per_sample`]: super::LocusInference::per_sample
 #[derive(Copy, Clone, Debug)]
 pub enum LocusEvidence<'a> {
     /// A SNP/indel locus: what each sample showed, and which samples the candidate cap
@@ -308,12 +313,14 @@ impl<'a> LocusEvidence<'a> {
     /// **A locus can still have none.** A run must count such a locus and carry on rather than
     /// die on it (owner's ruling, 2026-09-01), so whoever drives the calling asks this before
     /// handing the locus to a genotyper — and
-    /// [`LocusGenotyper::call_locus`](inference::LocusGenotyper::call_locus) keeps its
+    /// [`LocusGenotyper::call_locus`] keeps its
     /// precondition that there is somebody to call, since its scratch cannot be prepared for
     /// no rows.
     ///
     /// **A repeat tract sets no sample aside**, so on that path this is always the run's whole
     /// sample count (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
+    ///
+    /// [`LocusGenotyper::call_locus`]: super::inference::LocusGenotyper::call_locus
     #[inline]
     #[must_use]
     pub fn callable_sample_count(&self) -> usize {
@@ -366,6 +373,8 @@ impl<'a> LocusEvidence<'a> {
     /// On any of the three disagreements, in release as well as debug: each is a comparison
     /// of two integers or two discriminants, against a defect that would otherwise reach the
     /// output as a genotype.
+    ///
+    /// [`CallingScratch::prepare_for_locus`]: super::CallingScratch::prepare_for_locus
     pub fn assert_matches_locus_and_run(
         &self,
         alleles: &CandidateAlleles,
