@@ -1,12 +1,19 @@
-//! **Small dense matrix routines the fits share**: a Cholesky factor, and cyclic Jacobi rotations
-//! for the eigenvectors of a symmetric matrix. Pure linear algebra, with no model in it.
+//! **Small matrix routines for the fits**, pure linear algebra with no model in it:
+//!
+//! - shared by the fits: a Cholesky factor, and cyclic Jacobi rotations for the eigenvectors of a
+//!   symmetric matrix;
+//! - used by the repeat-tract (STR) fit alone: its inverse and product of dense matrices, for the
+//!   standard errors, and a banded symmetric matrix with its Cholesky factor, for Newton's method
+//!   along each curve.
 //!
 //! Each fit keeps the parts of these that set its numbers: its own thresholds, its own ordering of
-//! the eigenpairs, and its own order of summation when it turns a factor into an inverse. Only `+ −
-//! × ÷` and `sqrt` are used, each rounded exactly by IEEE 754, in a fixed order, so every routine
-//! gives the same bits on every platform.
+//! the eigenpairs, and its own order of summation when it turns a factor into an inverse. Apart
+//! from the banded factor's log-determinant, which takes [`float::ln`], only `+ − × ÷` and `sqrt`
+//! are used, each rounded exactly by IEEE 754, in a fixed order, so every routine gives the same
+//! bits on every platform.
 //!
-//! Matrices are `n × n`, row-major, in one slice.
+//! A dense matrix is `n × n`, row-major, in one slice; a banded one keeps only its lower band
+//! ([`SymmetricBand`]).
 
 use crate::float;
 
@@ -274,10 +281,7 @@ mod tests {
         assert!((values[0] - 1.0).abs() < 1e-12 && (values[1] - 3.0).abs() < 1e-12);
         for (i, value) in diagonal.iter().enumerate() {
             let vector = [v[i], v[2 + i]];
-            let image = [
-                2.0 * vector[0] + vector[1],
-                vector[0] + 2.0 * vector[1],
-            ];
+            let image = [2.0 * vector[0] + vector[1], vector[0] + 2.0 * vector[1]];
             assert!((image[0] - value * vector[0]).abs() < 1e-12);
             assert!((image[1] - value * vector[1]).abs() < 1e-12);
         }
