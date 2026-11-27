@@ -14,36 +14,43 @@ Everything here is crate-private machinery inside the two caller objects
 
 ## Module home
 
-`src/ng/run/cohort_merge/`, a folder inside the run module
+`src/run/cohort_merge/`, a folder inside the run module
 ([`run_streaming.md`](run_streaming.md)'s tree):
 
 ```
-src/ng/run/cohort_merge/
-├── mod.rs               – the five run parameters, the shared analysed-region guard,
+src/run/cohort_merge/
+├── mod.rs               – the merge's parameters, the shared analysed-region guard,
 │                          the module's test fixtures
 ├── close.rs             – LocusCloser: the reach walk that closes loci and judges them,
 │                          the two per-locus verdicts
-├── build.rs             – build_region: assembling survivors into CohortObservations;
-│                          CohortObservation, SampleSupport, RegionOutcome live here
+├── build.rs             – assembling a region's survivors into CohortObservations
 ├── observation_cache.rs – ObservationCache: one forward reader per sample and the window
 │                          the builders read; building_regions_of, the geometry
-├── organise.rs          – Organiser: ordered release and overlap resolution
-├── serial.rs            – the oracle, and the same merge read through the cache
-└── parallel.rs          – the builders working a round of regions at a time
+├── observation_cache/
+│   └── round_view.rs    – RoundView: one round's records, sealed so that its regions read
+│                          them while the cache reads on
+├── frontier.rs          – Frontier: the overlap rule, applied as regions are handed over
+├── serial.rs            – the drivers that build one region at a time: the oracle (tests
+│                          only), the merge read through the cache, and the form a run drives
+├── stream.rs            – the driver that builds and calls rounds of regions on the pool
+│                          while later rounds are read (psp mode, more than one region in flight)
+├── rounds.rs            – the round driver, kept for tests as the stream's reference
+└── recorded_windows.rs  – an opt-in file of the windows a run read at each written record
 ```
 
-**Amended 2026-08-18, after milestone E**, in three places: the cache is its own file, not part
-of `organise.rs` (the argument for keeping them together assumed the organiser would be the
-cache's only writer, and the cached serial driver is a second one); the observation types live
-with the code that builds them rather than in `mod.rs`; and the two drivers of milestone C and
-the parallel arrangement of milestone E are files this tree did not have.
+`CohortObservation` and `SampleSupport`, the types a built locus is, live outside the module in
+`src/cohort_observation.rs`, so that the calling code can read them without depending on the run.
+
+The tree was first sketched with an organiser of its own (`organise.rs`) and one parallel driver
+(`parallel.rs`). Both are gone: the organiser's job — overlap resolution and release in genome
+order — is now `Frontier` plus whichever driver runs, and §4 describes what replaced them.
 
 `close.rs` holds everything decided before anything is assembled; `build.rs`
 holds the only code that touches heavy columns. **This revises
 [`run_streaming.md`](run_streaming.md) (arch) §3.2**, whose `calling.rs` sketched a `k_way_merge`
-free function: that function is superseded by this module — `call_vars_in_segment` calls
-`build_region` (or consumes its output) instead. Recorded rather than quietly changed, because
-that document still shows the old shape.
+free function: that function is superseded by this module, whose drivers the run's callers
+(`src/run/callers.rs`, `src/run/psp_caller.rs`) drive. Recorded rather than quietly changed,
+because that document still shows the old shape.
 
 ---
 
@@ -52,9 +59,10 @@ that document still shows the old shape.
 One pass through, before any type appears. The *why* for each step is the spec section named;
 nothing here re-argues one.
 
-1. **The organiser divides the genome into building regions** — `cohort_locus_builder_regions_len`
-   bases each, 20 by default — and never puts a boundary inside an STR or bundle segment, where a
-   builder would have no locus to start (spec §6.1).
+1. **The driver divides the genome into building regions** — `cohort_locus_builder_regions_len`
+   bases each, 500 by default, narrowed by the calling run to spread work over its threads
+   (`round_shape_for` in `src/cli/calling_run.rs`) — and never puts a boundary inside an STR or
+   bundle segment, where a builder would have no locus to start (spec §6.1).
 2. **It fills the observation cache** to cover the regions in play, drawing each sample's one
    forward reader along. This is the module's memory, which is why the regions are short and the
    builders stay close together (spec §6.4).
@@ -72,10 +80,11 @@ nothing here re-argues one.
    (spec §4.2).
 6. **It starts loci only inside its own region but follows one past the end** if a deletion carries
    it there, so builders overlap by design (spec §6.1).
-7. **The organiser resolves the overlaps**: of two overlapping loci the one starting earlier
+7. **The frontier resolves the overlaps**: of two overlapping loci the one starting earlier
    stands, the other is dropped — a failed locus wins the same way an emitted one does (spec §6.1).
-8. **It releases in genome order**, holding a region until its predecessor has arrived, sums the
-   failed counts, and evicts the cache behind what it has released (spec §6.3).
+8. **The driver hands the loci over in genome order**, a region only once its predecessor has
+   been handed over, gathers the failed spans, and evicts the cache behind what it has handed
+   over (spec §6.3).
 
 **Nothing coordinates the builders.** They share no mutable state, exchange no messages, and never
 learn whether their start position was inside someone else's locus. Correctness comes from the
@@ -88,14 +97,14 @@ it; each row says what carries over and what does not.
 
 | production | where | how it relates |
 |---|---|---|
-| the reach walk that groups positions into variant groups | `derive_is_kept` [`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs), `reach` [`:46-48`](../../../../src/var_calling/cohort_integration.rs) | **the closest ancestor** — step 3 is this walk, consuming merged observations instead of decoded columns |
-| projecting each sample's alleles onto the group span and unifying them | `PerGroupMerger` [`per_group_merger.rs:585`](../../../../src/var_calling/per_group_merger.rs), module doc [`:1-20`](../../../../src/var_calling/per_group_merger.rs) | step 5 is this, minus the likelihoods it also computes — here the builder emits evidence only |
-| the k-way merge across samples | `PerPositionMerger` [`per_position_merger.rs:145`](../../../../src/var_calling/per_position_merger.rs) | **upstream of this module**, and what makes step 3 a single pass ([`run_streaming.md`](run_streaming.md) §3.2) |
-| emitting out-of-order results in genome order | `VcfWriter`'s reorder map [`vcf_writer.rs:162-176`](../../../../src/var_calling/vcf_writer.rs), gap guard [`:152-158`](../../../../src/var_calling/vcf_writer.rs) | step 8's structure, carried whole |
-| the keep threshold | `max_nonref_obs` per sample in `derive_is_kept`, default 2 [`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs) | step 4's second verdict, per sample as production's is, with a share added for depth |
-| cutting work at gaps no group can span | `merge_block_ranges` [`cohort_integration.rs:403-430`](../../../../src/var_calling/cohort_integration.rs) | **not carried** — this design overlaps and resolves instead (spec §5) |
-| the staged producer/caller pipeline | [`pipeline.rs:1-30`](../../../../src/var_calling/pipeline.rs) | **not carried** — production's fold is serial on one thread; here it is what parallelises |
-| deferring the expensive columns until the keep decision | `TwoPhaseSegment` [`sample_reader.rs:698`](../../../../src/var_calling/sample_reader.rs), `set_variable_rows` [`:789`](../../../../src/var_calling/sample_reader.rs) | the psp path only; the direct path defers nothing (§2) |
+| the reach walk that groups positions into variant groups | `derive_is_kept` `cohort_integration.rs:166-187`, `reach` `:46-48` | **the closest ancestor** — step 3 is this walk, consuming merged observations instead of decoded columns |
+| projecting each sample's alleles onto the group span and unifying them | `PerGroupMerger` `per_group_merger.rs:585`, module doc `:1-20` | step 5 is this, minus the likelihoods it also computes — here the builder emits evidence only |
+| the k-way merge across samples | `PerPositionMerger` `per_position_merger.rs:145` | **upstream of this module**, and what makes step 3 a single pass ([`run_streaming.md`](run_streaming.md) §3.2) |
+| emitting out-of-order results in genome order | `VcfWriter`'s reorder map `vcf_writer.rs:162-176`, gap guard `:152-158` | step 8's structure, carried whole |
+| the keep threshold | `max_nonref_obs` per sample in `derive_is_kept`, default 2 `var_calling/mod.rs:72` | step 4's second verdict, per sample as production's is, with a share added for depth |
+| cutting work at gaps no group can span | `merge_block_ranges` `cohort_integration.rs:403-430` | **not carried** — this design overlaps and resolves instead (spec §5) |
+| the staged producer/caller pipeline | `pipeline.rs:1-30` | **not carried** — production's fold is serial on one thread; here it is what parallelises |
+| deferring the expensive columns until the keep decision | `TwoPhaseSegment` `sample_reader.rs:698`, `set_variable_rows` `:789` | the psp path only; the direct path defers nothing (§2) |
 
 ## 1. The constants (`mod.rs`)
 
@@ -148,7 +157,7 @@ pub struct MinAltObs(pub NonZeroU32);
 /// checked `new`, which refuses anything that is not a fraction of one rather than clamping.
 pub struct MinAltReadShare(f64);
 
-/// Production's default, carried over ([`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs)).
+/// Production's default, carried over (`var_calling/mod.rs:72`).
 pub const DEFAULT_MIN_ALT_OBS: u32 = 2;
 
 /// Two reads in a hundred — the owner's number (spec §4.3), chosen against loci-kept counts on
@@ -196,14 +205,15 @@ pub struct CohortLocusBuilderRegionsInFlight(pub NonZeroUsize);
 
 **It is the only one of the four with no constant default**, and deliberately: what it should
 be depends on the machine's cores and on how much memory the cohort's width leaves, neither of
-which is knowable where the other three defaults are written. A run given no value takes
-`one_per_worker_thread()` — one region in flight per thread in rayon's pool. Like the other
+which is knowable where the other three defaults are written. It is not a command-line
+parameter: a calling run derives it with the region width (`round_shape_for` in
+`src/cli/calling_run.rs`). Like the other
 three, its resolved value belongs in the run's output, because two runs differing only in it
 differ in memory and in nothing a reader of the output can see.
 
 ## 2. What a builder reads
 
-**A builder never touches a reader.** It reads observations from the cache the organiser owns (§4),
+**A builder never touches a reader.** It reads observations from the cache the driver owns (§4),
 which holds one forward reader per sample and is the only thing in this module that pulls. So this
 document declares no source trait: `ObservationSource` belongs to
 [`run_streaming.md`](run_streaming.md) arch §2, which owns it because it is what lets one calling
@@ -219,7 +229,7 @@ impl SequenceObservation {
     ///
     /// **The one definition of "non-reference" in the codebase.** `CensusWriter::add_generic`
     /// makes this comparison inline today
-    /// ([`census.rs:2084`](../../../../src/ng/parameter_estimation/joint/census.rs)) and should
+    /// ([`census.rs:2084`](../../../../src/parameter_estimation/joint/census.rs)) and should
     /// call this instead — two spellings of one test are two things that can disagree.
     pub fn matches_reference(&self, reference_bases: &[u8]) -> bool;
 }
@@ -229,7 +239,7 @@ impl SampleLocusObservations {
     ///
     /// `region.end` today, but named: production's grouping arithmetic is
     /// `pos + max(span, 1) − 1` (`reach`,
-    /// [`cohort_integration.rs:46-48`](../../../../src/var_calling/cohort_integration.rs)), and
+    /// `cohort_integration.rs:46-48`), and
     /// whoever compares the two should find one place where they agree rather than an
     /// open-coded expression at each use.
     pub fn reach(&self) -> Position;
@@ -249,20 +259,20 @@ through the samples' observations merged by position and keeps three running val
 current locus starts, how far it reaches, and its non-reference total. Each observation it passes
 extends the reach if it goes further and adds to the total; when the next observation starts beyond
 the reach, the locus is closed and judged. That is production's group walk
-(`derive_is_kept`, [`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs))
+(`derive_is_kept`, `cohort_integration.rs:166-187`)
 with the columns removed — extending the reach as it scans is what makes a second pass over the
 locus unnecessary, however far a late observation widens it.
 
 **Production materialises the columns; here they would be waste.** `CohortSpanFold` holds three
 parallel vectors over a whole block
-([`cohort_integration.rs:64-78`](../../../../src/var_calling/cohort_integration.rs)) because a psp
+(`cohort_integration.rs:64-78`) because a psp
 reader has just decoded that block and the columns are what it decoded. A builder in the direct
 path is handed observations, so building vectors from them only to walk the vectors would allocate
 per region for nothing. **There is no `PositionSummaries` type.**
 
 **When the psp path arrives it may hand these over precomputed**, since a file can store what a
 walk must derive, and the deferred half is fetched only for the loci that survive (run spec §3.3;
-production's shape, [`sample_reader.rs:698-712,789`](../../../../src/var_calling/sample_reader.rs)).
+production's shape, `sample_reader.rs:698-712,789`).
 The walk above is unchanged by that: it consumes a position, a reach and a count per observation,
 and does not care which of them were read and which were computed.
 
@@ -280,7 +290,7 @@ materialised (§2).
 /// **A locus is closed when the next observation starts beyond the current reach.** Until then
 /// each observation extends the reach if it goes further and adds its non-reference reads to
 /// the running total — production's group walk with the columns removed
-/// ([`derive_is_kept`, `cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs)).
+/// (`derive_is_kept`, `cohort_integration.rs:166-187`).
 pub struct LocusCloser<'a> { /* the per-sample cursors, the open locus's start, reach and total */ }
 
 impl<'a> Iterator for LocusCloser<'a> {
@@ -312,7 +322,7 @@ pub enum Verdict {
 **Contract.** The walk is a pure function of the observations it is given and the two parameters:
 the same input yields the same loci with the same verdicts, whatever building region it was
 started from and whatever the reach did along the way. Reach arithmetic saturates, as production's
-does ([`:46-48`](../../../../src/var_calling/cohort_integration.rs)). A locus's members are
+does (`:46-48`). A locus's members are
 borrowed from the cache, so closing costs no copy.
 
 **The merge across samples happens here, over the cache's windows.** The cache holds one window
@@ -334,172 +344,140 @@ and not a fixpoint, its columns being position-ordered across the cohort.
 
 ---
 
-## 4. The builder and the organiser (`build.rs`, `organise.rs`)
+## 4. The builder, the frontier and the drivers (`build.rs`, `frontier.rs`, `serial.rs`, `stream.rs`)
 
-A builder owns one region and works alone. The organiser holds every builder's output, resolves
-the overlaps between them, and emits in genome order (spec §6.1, §6.3).
+A builder owns one region and works alone. A **driver** deals the regions out, draws the cache
+forward, and hands the built loci on in genome order; where regions are built in parallel, it
+hands each region's loci through the **frontier**, which resolves the overlaps between them
+(spec §6.1, §6.3). This section first sketched one component, an *organiser*, doing all of the
+driver's and the frontier's work; the code split it, and what follows is the code's shape.
+
+### The builder
 
 ```rust
-/// One builder's whole job over one region (spec §6.2): derive the position summaries from
-/// the cache, fold them, close loci, apply both verdicts, and assemble the survivors.
+/// One builder's whole job over one region (spec §6.2): close loci over the window the cache
+/// hands it, apply both verdicts, assemble the survivors, and hand each to `keep` as it is
+/// built — each span too wide to assemble goes to `refused` instead.
 ///
-/// **Takes the cache by shared reference and mutates nothing.** It holds no reader, seeks
-/// nothing, and cannot disturb another builder (spec §6.4, goal 1).
+/// **Reads the window and mutates nothing shared.** It holds no reader, seeks nothing, and
+/// cannot disturb another builder (spec §6.4, goal 1). `build` builds one held record's
+/// evidence on demand, which is how a run over psp files builds only the loci it keeps.
 ///
-/// **Starts a locus only inside `region`, and may finish one outside it.** The first half is
-/// what assigns ownership — a locus belongs to the builder whose region holds its first
-/// position — and the second is what keeps a locus whole when a deletion carries it past the
-/// end (spec §6.1). So the returned loci may reach beyond `region`, and a builder reads past
-/// its own end to follow them.
-pub fn build_region(
-    region: &GenomeRegion,
-    cache: &ObservationCache,
-    bound: MaxCohortLocusSpan,
+/// **Starts a locus only inside `builder_region`, and may finish one outside it.** The first
+/// half assigns ownership — a locus belongs to the builder whose region holds its first
+/// position — and the second keeps a locus whole when a deletion carries it past the end
+/// (spec §6.1).
+pub fn build_region_handing_over_windowed<'a, E>(
+    builder_region: GenomeRegion,
+    window: &WindowedCohort<'a>,
+    max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_reads: MinAltReads,
-) -> RegionOutcome;
-
-/// What one region delivers to the organiser — exactly one per region, even when every field
-/// is empty: the drain's index sequence must stay gapless and the counts must all arrive to be
-/// summed (spec §6.3, §3.3).
-pub struct RegionOutcome {
-    /// The survivors, in genome order. Loci are disjoint within one region, so position is a
-    /// total order (spec §9).
-    pub observations: Vec<CohortObservation>,
-    /// **The ground of the loci that failed `max_cohort_locus_span`, in genome order.** A failed locus is an
-    /// ordinary locus everywhere but emission (spec §3.2): it owns its ground and displaces
-    /// what overlaps it, so the organiser needs its span even though nothing is built for it.
-    /// Without these spans the loci a neighbouring builder built inside that ground — from a
-    /// view that never saw what opened there — would survive with nothing to displace them.
-    pub failed: Vec<GenomeRegion>,
-}
-
-/// Every sample's evidence over one cohort locus, against one allele table — the answer to
-/// the run arch's "OPEN: CohortObservation's shape" (run arch §8).
-pub struct CohortObservation {
-    /// The locus span: first position to furthest reach, ≤ `max_cohort_locus_span` (spec §4.1).
-    pub region: GenomeRegion,
-    /// The distinct alleles the samples showed, each a sequence over the **whole** span —
-    /// every member observation projected to the span's width and identical projections
-    /// unified (spec §4.2). The reference allele is one of them. Exact-match unification is
-    /// sound only because indels were left-aligned upstream
-    /// ([`read/left_align.rs:92`](../../../../src/ng/read/left_align.rs)); without that the
-    /// same deletion becomes two alleles and one variant's evidence splits in half.
-    pub alleles: Vec<Box<[u8]>>,
-    /// Indexed by the run's sample order. A sample with no coverage over the span has no
-    /// support at all, which is a different fact from reference-only support and stays one.
-    pub per_sample: Vec<SampleSupport>,
-}
-
-/// One sample's evidence at one locus, expressed against the locus's allele table.
-pub struct SampleSupport {
-    /// Parallel to `CohortObservation::alleles`. Where two of this sample's own observations
-    /// projected onto the same allele, their counts and per-read moments are summed; support
-    /// is never merged *across* alleles, because a genotype likelihood needs them apart
-    /// (spec §4.2).
-    pub per_allele: Vec<SequenceObservation>,
-    /// Reads that covered the locus and produced no observation — carried through from the
-    /// members, not re-derived.
-    pub reads_without_observation: u32,
-}
+    keep: &mut impl FnMut(CohortObservation, &LocusReads<'_, '_>),
+    refused: &mut Vec<GenomeRegion>,
+    build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
+    dropped: Option<&DroppedLoci>,   // the --explain-loci log, when one is kept
+) -> Result<(), E>;
 ```
 
-**Contract, `build_region`.** The outcome is a pure function of the region's records and `max_cohort_locus_span`
-(spec §9): same input, same observations, same failed spans, at any builder count and any division
-into regions. Assembly happens only for loci that passed both verdicts — a failed locus costs no
-heavy decode (spec §3.2). Cursor requests stay monotonic (spec §11). Errors end the region and name
-the sample and span (run spec §9).
+**Handing over rather than returning** is what keeps a run's memory at spec §5.1's bound: the
+caller's `keep` genotypes each locus where it is built and keeps one call per sample, where a
+returned `Vec<CohortObservation>` would hold every covering sample's reads for a whole region.
+The collecting form, `build_region`, survives for tests only; its doc states the builders' input
+contract the frontier's argument rests on.
+
+**What a locus becomes** — `CohortObservation` in `src/cohort_observation.rs`:
+
+| field | what it holds |
+|---|---|
+| `region` | the locus span, first position to furthest reach (spec §4.1) |
+| `alleles` | the distinct alleles the samples showed, each over the whole span, the reference first; exact-match unification is sound only because indels were left-aligned upstream (spec §4.2) |
+| `per_sample` | one `SampleSupport` per **covering** sample, each naming its sample — a sample with no coverage has no entry, which is a different fact from all-reference support |
+| `kind` | SNP/indel site or repeat tract, as the generator minted it |
+| `window_coverage` | each covering sample's depth and GC over the window centred on the locus's first base |
+| `allele_flank_deletions` | per allele, the flank deletion it carries, if any |
+
+`SampleSupport` holds, per allele the sample showed, its counts and per-read moments, plus the
+sample's partial observations and the reads that covered the locus without an observation.
+
+**Contract.** The loci handed over are a pure function of the region's records and the two
+bounds (spec §9): same input, same loci, same refused spans, at any thread count and any division
+into regions. Assembly happens only for loci that passed both verdicts — a refused locus costs no
+heavy decode (spec §3.2). Errors end the region and name the sample (run spec §9).
+
+### The observation cache
 
 ```rust
 /// Every sample's observations over the ground currently assigned to builders (spec §6.4).
 ///
-/// **One reader per sample for the whole run, forward only.** Builders read this and never a
-/// reader: they hold no observations, seek nothing, and cannot mutate it. The organiser is the
-/// only writer — it draws the readers forward when it hands out a region, and drops ground once
-/// the loci over it are resolved and released.
-///
-/// **This is the module's dominant memory** (spec §8), which is why regions are short: what it
-/// spans is `builders × CohortLocusBuilderRegionsLen`, plus the tail of observations reaching
-/// past that span.
-pub struct ObservationCache { /* per sample: a forward reader and a window of observations */ }
+/// **One reader per sample for the whole run, forward only.** Builders read a window of it and
+/// never a reader. The driver is the only writer: it draws the readers forward before a region
+/// is built and drops ground once the loci over it are handed over.
+pub struct ObservationCache<S> { /* per sample: a source and a window of held records */ }
 
-impl ObservationCache {
+impl<S: ObservationSource> ObservationCache<S> {
     /// Draw every sample forward until `region` is covered, and far enough past it to hold
-    /// what a locus starting inside it can reach. Called by the organiser before the region
-    /// is handed out; the readers it draws from are the run's, one per sample
-    /// ([`run_streaming.md`](run_streaming.md) arch §2).
-    fn cover(&mut self, region: GenomeRegion) -> Result<(), RunError>;
+    /// what a locus starting inside it can reach. `cover_in_parallel` does the same with the
+    /// samples drawn concurrently, reaching the same fixpoint.
+    fn cover(&mut self, region: GenomeRegion) -> Result<(), E>;
 
-    /// Every sample's observations overlapping `span`, for the length of the call — a builder's
-    /// only way in, and read-only by construction.
-    fn with_observations<R>(&self, span: GenomeRegion, f: impl FnOnce(&[&[SampleLocusObservations]]) -> R) -> R;
+    /// Every sample's held records overlapping `span`, for the length of the call — a
+    /// builder's only way in, and read-only by construction.
+    pub fn with_observations<R>(&self, span: GenomeRegion, f: impl FnOnce(&WindowedCohort<'_>) -> R) -> R;
 
-    /// Drop everything before `position`. Called once the organiser has released every locus
-    /// that could have started there.
+    /// Drop everything that ends before `position`.
     fn evict_before(&mut self, position: GenomePosition);
-}
-
-/// Holds the builders' outcomes and the observation cache, resolves the overlaps between
-/// neighbouring regions, and releases loci in genome order (spec §6.1, §6.3, §6.4).
-pub struct Organiser { /* next_expected, held: BTreeMap<RegionIndex, RegionOutcome>, … */ }
-
-impl Organiser {
-    pub fn submit(&mut self, index: RegionIndex, outcome: RegionOutcome);
-
-    /// Everything now releasable, in genome order. **A region is releasable only once its
-    /// predecessor has arrived**, because that is what says whether a locus owned earlier
-    /// covers this region's first loci (spec §6.3). Failed spans participate in that
-    /// resolution and are never released.
-    pub fn drain_ready(&mut self) -> impl Iterator<Item = CohortObservation> + '_;
-
-    /// Summed across every region — the number spec §3.3 requires to reach the run summary.
-    pub fn failed_locus_count(&self) -> u64;
-
-    /// How many loci — emitted and failed alike — were dropped because an earlier locus already
-    /// owned the ground they started on (spec §6.1). **Expected to be zero**, and that is the
-    /// point: under `build_region`'s input contract two loci owned by different regions cannot
-    /// overlap, so this is what a run would say if that argument failed on real data.
-    pub fn displaced_locus_count(&self) -> u64;
-
-    /// Nothing outstanding: every region the run handed out released, every released locus
-    /// taken. `regions_handed_out` is how many building regions the run dealt out, their
-    /// indexes being `0..regions_handed_out`.
-    pub fn is_finished(&self, regions_handed_out: u64) -> bool;
-
-    /// End the run: what it did not emit, or a refusal naming what would have been lost.
-    pub fn finish(self, regions_handed_out: u64) -> Result<MergeTally, RunEndedShort>;
-}
-
-/// What a finished run has to say about the loci it did not emit. **Both counts leave with the
-/// organiser**, because `finish` consumes it: a caller that read them afterwards could not, and
-/// one that had to read them first would lose them by taking the obvious order.
-pub struct MergeTally {
-    pub failed_loci: u64,
-    pub displaced_loci: u64,
 }
 ```
 
-**Amended 2026-08-18, after milestone E**, in three places, and each was forced by something
-this sketch was written before knowing:
+The source's error type is the cache's (`E`), because the cache has no failure of its own to
+add; arch §5's requirement that a failure names its sample is the source's to meet. The stream
+also **seals** each round's records once read (`seal_round`, giving a `RoundView`), so that a
+round's regions read the seal while the cache reads the next round.
 
-- **`is_finished` and `finish` take how many regions the run handed out.** Without it the
-  organiser cannot see a gap at the *tail* of a run — indexes that never submitted, with no
-  later index behind them to hold — so a run that lost its last regions was indistinguishable
-  from one that finished. All three of E1's review agents found that independently.
-- **`finish` returns a `MergeTally`** rather than nothing. `displaced_locus_count` exists to be
-  noticed, and a number readable only *before* the consuming call is one the natural call order
-  loses.
-- **`cache()` is gone, and the organiser does not hold the cache.** The cache is generic over
-  its source's error type, because the run's `ObservationSource` and `RunError` do not exist
-  yet; making the organiser generic over the same parameters would push that genericity into a
-  type with no other use for it. Drawing the readers forward is the driver's
-  (`parallel::merge_cohort_in_parallel`), which is also what evicts. **Still owed** when the
-  run's own types land.
+### The frontier
 
-**Contract, `Organiser`.** Where two loci overlap, the one whose first position is earlier stands
-and the other is dropped, whether the earlier one is emitted or failed — one rule, no special case
-(spec §6.1). The drain holds at most one region per builder, since a builder cannot start another
-until its outcome is taken. Submission order does not affect the released sequence; only the
-regions' own order does, which is what spec §9's determinism argument rests on.
+```rust
+/// Spec §6.1's overlap rule for drivers that build regions in parallel: each region's loci and
+/// refused spans, handed over in region order, are interleaved by first base, and a span that
+/// begins on ground an earlier one owns is dropped and counted.
+pub(super) struct Frontier { owned_through: Option<GenomePosition>, pub(super) displaced: u64 }
+
+impl Frontier {
+    /// Hand one region's outcome over: each locus that claims its ground to `take`, each
+    /// refused span that does to `refused`.
+    pub(super) fn hand_over<T>(&mut self, region: CalledRegion<T>, take: &mut impl FnMut(T),
+                               refused: &mut Vec<GenomeRegion>);
+}
+```
+
+**Contract.** Where two spans overlap, the one whose first position is earlier stands and the
+other is dropped, whether the earlier one is a locus or a refused span — one rule, no special
+case (spec §6.1). **It is a safety net**: under the builders' input contract two loci owned by
+different regions cannot overlap, so `displaced` is expected to be zero, and a psp-mode run
+asserts it is.
+
+### The drivers
+
+| driver | file | used by | how it builds |
+|---|---|---|---|
+| `merge_cohort_serially` | `serial.rs` | tests only | the oracle: one builder, no cache, every sample's records held whole |
+| `merge_cohort_through_cache` | `serial.rs` | tests only | one region at a time, through the cache; must equal the oracle byte for byte |
+| `merge_cohort_handing_each_locus_over_covering_samples_in_parallel` | `serial.rs` | direct mode always; psp mode with one region in flight | as above, handing each locus over, each cover's samples drawn concurrently |
+| `merge_and_call_streaming` | `stream.rs` | psp mode, more than one region in flight | rounds of regions built and called on the pool while later rounds are read, handed over through the frontier |
+| `merge_and_call_in_rounds` | `rounds.rs` | tests only | the stream's reference: a round read, then built, then handed over |
+
+A one-region-at-a-time driver needs no frontier: each region is built only after the one before
+it has been handed over and evicted behind, so it sees everything an earlier locus reached into
+and skips that ground as the earlier region's. Every driver opens with the same check on its
+analysed regions (`refuse_malformed_analysed_regions` in `mod.rs`).
+
+**How the regions and the parallelism are shaped** is the calling run's, not this module's:
+`round_shape_for` in `src/cli/calling_run.rs` picks the region width and how many regions are in
+flight from the ground a run may hold, the cohort size and the thread count.
+
+**What the organiser sketch asked for that the code does without.** `RegionOutcome` survives
+only in tests, and there is no `MergeTally`: the refused spans reach the run report through the
+callers, and `displaced` is asserted rather than reported.
 
 ---
 
@@ -530,7 +508,8 @@ pub enum RunError {
 ```
 
 **Amended 2026-08-18: `MissingRegionResults` became `RunEndedShort`, a three-variant enum**, and
-lives in `organise.rs` until `RunError` exists to fold it into.
+lived in `organise.rs`. **Both are gone**, with the organiser (§4): no error in the code reports
+a region that was never handed over.
 
 ```rust
 #[non_exhaustive]
@@ -585,9 +564,9 @@ caught at the end where what was lost can still be named and reported.
 - **The ceiling is read, never set here**: the generator's `max_record_span` in direct mode, the
   header's recorded value in psp mode, maximum across files, no refusal — spec §5.
 - **Regions are short and fixed, about twice `max_cohort_locus_span`; a locus is owned by the region holding
-  its first position, and the organiser drops what overlaps an earlier owner.** A segment cannot
+  its first position, and the frontier drops what overlaps an earlier owner.** A segment cannot
   be the unit — it can be a whole chromosome, and its loci would all wait on it — spec §6.1.
-- **The observation cache is the organiser's, and it is why builders need no reader of their own.**
+- **The observation cache is the driver's, and it is why builders need no reader of their own.**
   Upstream produces in one forward pass; builders want several places at once. One reader per
   sample fills a shared window, builders read it, and nothing seeks — spec §6.4.
 - **`cohort_locus_builder_regions_len` is its own parameter, not twice `max_cohort_locus_span`.**
@@ -597,7 +576,7 @@ caught at the end where what was lost can still be named and reported.
   parallelises with the locus. Which alleles are worth calling, and how they are written out, stay
   with the calling steps — spec §4.2, §13.
 - **A failed locus resolves overlaps exactly like an emitted one**, so `RegionOutcome` carries
-  failed spans and the organiser has one rule rather than two — spec §3.2, §6.1.
+  failed spans and the frontier has one rule rather than two — spec §3.2, §6.1.
 - **Closure is uncapped; `max_cohort_locus_span` is a per-locus verdict after it.** Loci stay disjoint, so
   members are moved, not cloned — spec §4.1, §4.2.
 - **Verdict order is bound, then variability**, so refused reference-only ground is counted —
@@ -620,15 +599,15 @@ Every row read at the cited line.
 
 | this doc | existing code | how they meet |
 |---|---|---|
-| saturating reach | `reach` [`cohort_integration.rs:46-48`](../../../../src/var_calling/cohort_integration.rs) | copied, saturating form and all |
-| `loci_under`'s closure | `derive_is_kept`'s group walk [`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs) | chaining rule unchanged; ng adds `max_cohort_locus_span` verdict per closed locus |
-| the ceiling's source | `max_record_span` [`pileup/generator.rs:93,141`](../../../../src/ng/locus_generation/pileup/generator.rs), ceiling [`:45`](../../../../src/ng/locus_generation/pileup/generator.rs), production default [`walker/mod.rs:67`](../../../../src/pileup/walker/mod.rs) | read and recorded; never re-decided here |
-| the physical assumption's prior home | fixture comment "MGS … ≥ ref spans" [`cohort_integration.rs:1664`](../../../../src/var_calling/cohort_integration.rs) | promoted from a test comment to `ObservationReachCeiling` |
-| assembling survivors (psp path) | `set_variable_rows` [`sample_reader.rs:789`](../../../../src/var_calling/sample_reader.rs) | the psp reader's `observations_at` follows its one-column-at-a-time shape; bytes are the encoding spec's |
-| the ordered drain | `VcfWriter`'s reorder map [`vcf_writer.rs:168-176`](../../../../src/var_calling/vcf_writer.rs), guard [`:152-158`](../../../../src/var_calling/vcf_writer.rs) | carried whole in the callers' skeleton, keyed by region index; `MissingRegionResults` is `MissingChunks` renamed |
-| members | `SampleLocusObservations` [`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs) | moved into `CohortObservation::per_sample` unchanged; `reference_bases` ([`:46`](../../../../src/ng/locus_generation/mod.rs)) is what the caller's projection will pad with |
-| the ground a region covers | `TypedRegion` [`region_typing/mod.rs:144`](../../../../src/ng/region_typing/mod.rs), `RegionKind` [`:168`](../../../../src/ng/region_typing/mod.rs) | regions are cut inside these; a segment boundary is an unconditional cut and needs no check (spec §5) |
-| coordinates | `Position` [`ng/types.rs:34`](../../../../src/ng/types.rs), `GenomeRegion` [`:79`](../../../../src/ng/types.rs) | used as-is; 1-based inclusive, the `+ 1` lives in `GenomeRegion::len` |
+| saturating reach | `reach` `cohort_integration.rs:46-48` | copied, saturating form and all |
+| `loci_under`'s closure | `derive_is_kept`'s group walk `cohort_integration.rs:166-187` | chaining rule unchanged; ng adds `max_cohort_locus_span` verdict per closed locus |
+| the ceiling's source | `max_record_span` [`pileup/generator.rs:93,141`](../../../../src/locus_generation/pileup/generator.rs), ceiling [`:45`](../../../../src/locus_generation/pileup/generator.rs), production default `walker/mod.rs:67` | read and recorded; never re-decided here |
+| the physical assumption's prior home | fixture comment "MGS … ≥ ref spans" `cohort_integration.rs:1664` | promoted from a test comment to `ObservationReachCeiling` |
+| assembling survivors (psp path) | `set_variable_rows` `sample_reader.rs:789` | the psp reader's `observations_at` follows its one-column-at-a-time shape; bytes are the encoding spec's |
+| the ordered drain | `VcfWriter`'s reorder map `vcf_writer.rs:168-176`, guard `:152-158` | carried whole in the callers' skeleton, keyed by region index; `MissingRegionResults` is `MissingChunks` renamed |
+| members | `SampleLocusObservations` [`locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs) | moved into `CohortObservation::per_sample` unchanged; `reference_bases` ([`:46`](../../../../src/locus_generation/mod.rs)) is what the caller's projection will pad with |
+| the ground a region covers | `TypedRegion` [`region_typing/mod.rs:144`](../../../../src/region_typing/mod.rs), `RegionKind` [`:168`](../../../../src/region_typing/mod.rs) | regions are cut inside these; a segment boundary is an unconditional cut and needs no check (spec §5) |
+| coordinates | `Position` [`ng/types.rs:34`](../../../../src/types.rs), `GenomeRegion` [`:79`](../../../../src/types.rs) | used as-is; 1-based inclusive, the `+ 1` lives in `GenomeRegion::len` |
 | k-stream walking during the fold | `MergedRegionReads` ([`sample_reads.md`](sample_reads.md) §4) | the argmin-over-heads, keys-beside-heads layout, item swapped to light-column rows |
 
 ---
@@ -662,14 +641,10 @@ Implementation-time confirmations (nothing to decide, pin when coding):
 
 **Owed after milestone E (2026-08-18):**
 
-- **The organiser should hold the cache**, as §4 originally sketched. It cannot while the cache
-  is generic over its source's error type; when `run_streaming.md` arch §2's `ObservationSource`
-  and §5's `RunError` land, that genericity goes and `cache()` can come back.
-- **`RunEndedShort` should fold into `RunError`** with `ObservationExceedsReachCeiling`, at the
-  same moment.
-- **`ObservationCache::cover` and `evict_before` are `pub(super)`** and should become private to
-  `observation_cache.rs` once the organiser is their only caller — which is the same moment
-  again.
+- *Overtaken:* three items owed here — the organiser holding the cache, `RunEndedShort` folding
+  into `RunError`, and `cover` and `evict_before` narrowing once the organiser was their only
+  caller — lapsed when the organiser and `RunEndedShort` were deleted (§4). The drivers own the
+  cache, and `cover` and `evict_before` stay `pub(super)` because several drivers call them.
 - **The round's tail is unmeasured**, and spec §6.2 gates the two alternatives to it (an
   `RwLock` over the cache, or windows handed out as owned copies) on measuring it first. What
   *is* measured, on a fabricated 2,000-base stretch with a record every four bases and 8
