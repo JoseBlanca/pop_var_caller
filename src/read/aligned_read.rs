@@ -16,8 +16,8 @@
 //! Design: `doc/devel/ng/spec/read_filtering_stages.md` §6,
 //! `doc/devel/ng/arch/read_filtering_stages.md` §1, §3.1.
 //!
-//! **ng-owned, modelled on production's `MappedRead`**
-//! ([`crate::bam::alignment_input::MappedRead`]). ng carried production's type
+//! **ng-owned, modelled on production's `MappedRead`** (deleted 2026-11-27, once
+//! read preparation took this type directly). ng carried production's type
 //! until read groups arrived; the identifier had to ride on the read, and adding
 //! it to production's struct would have made production carry an ng concept for
 //! ng's benefit alone. The difference is exactly one field: production's
@@ -265,61 +265,11 @@ impl RawAlignedRead for NoodlesRawAlignedRead {
     }
 }
 
-impl AlignedRead {
-    /// The same read as production's [`MappedRead`](crate::bam::alignment_input::MappedRead).
-    ///
-    /// **The read group does not survive this conversion**, because production's
-    /// type has nowhere to put it. It exists for one boundary: the generic
-    /// path's read preparation hands the read to production's
-    /// `prepare_passthrough`, which returns a production `PreparedRead`. So on
-    /// that path the identifier stops here — the deferred item in spec §12, and
-    /// the reason an ng-owned prepared read is the next thing this design wants.
-    /// The STR path never calls this: it works on `AlignedRead` directly.
-    ///
-    /// `source_file_index` is `0` and means nothing. Production sets it from a
-    /// sample's file list, ng no longer has one on the read, and the only
-    /// consumer of this conversion ignores it.
-    pub(crate) fn into_mapped_read(self) -> crate::bam::alignment_input::MappedRead {
-        // Destructured, not field-by-field off `self`: a field added to
-        // `AlignedRead` later then fails to compile here instead of being
-        // silently dropped on the way to production's type.
-        let Self {
-            qname,
-            flag,
-            ref_id,
-            pos,
-            mapq,
-            cigar,
-            seq,
-            qual,
-            mate_ref_id,
-            mate_pos,
-            adaptor_boundary,
-            read_group: _,
-        } = self;
-
-        crate::bam::alignment_input::MappedRead {
-            qname,
-            flag,
-            ref_id,
-            pos,
-            mapq,
-            cigar,
-            seq,
-            qual,
-            mate_ref_id,
-            mate_pos,
-            adaptor_boundary,
-            source_file_index: 0,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bam::alignment_input::{
-        FLAG_DUPLICATE, FLAG_MATE_REVERSE_STRAND, FLAG_PAIRED, FLAG_REVERSE_STRAND, MappedRead,
+        FLAG_DUPLICATE, FLAG_MATE_REVERSE_STRAND, FLAG_PAIRED, FLAG_REVERSE_STRAND,
     };
     use crate::read::input::test_fixtures::{read_named, read_named_with_length};
 
@@ -337,8 +287,8 @@ mod tests {
     /// the same fields rather than against itself.
     fn record_buf_to_mapped_read(
         rb: &RecordBuf,
-        source_file_index: usize,
-    ) -> io::Result<MappedRead> {
+        read_group: ReadGroupId,
+    ) -> io::Result<AlignedRead> {
         let qname = rb
             .name()
             .map(|n| AsRef::<[u8]>::as_ref(n).to_vec())
@@ -377,7 +327,7 @@ mod tests {
             mate_pos,
             template_length,
         );
-        Ok(MappedRead {
+        Ok(AlignedRead {
             qname,
             flag,
             ref_id,
@@ -389,7 +339,7 @@ mod tests {
             mate_ref_id,
             mate_pos,
             adaptor_boundary,
-            source_file_index,
+            read_group,
         })
     }
 
@@ -481,7 +431,7 @@ mod tests {
         for (case, record) in records {
             let ours = decode_record(&record, ReadGroupId(3))
                 .unwrap_or_else(|error| panic!("{case} decodes: {error}"));
-            let production = record_buf_to_mapped_read(&record, 0)
+            let production = record_buf_to_mapped_read(&record, ReadGroupId(3))
                 .unwrap_or_else(|error| panic!("{case} decodes in production: {error}"));
 
             assert_eq!(ours.qname, production.qname, "{case}: qname");
@@ -701,32 +651,6 @@ mod tests {
             RawAlignedRead::read_group(&NoodlesRawAlignedRead::default()),
             None,
             "ReadGroupId(0) is a real id, so a fresh buffer must not pretend to one"
-        );
-    }
-
-    /// The conversion to production's type is exhaustive by construction (it
-    /// destructures), but nothing checks that it maps each field to its
-    /// counterpart rather than to a neighbour of the same type.
-    #[test]
-    fn the_conversion_to_productions_read_moves_every_field_to_its_counterpart() {
-        let ours = decode_record(&readthrough_pair(), ReadGroupId(7)).expect("decodes");
-        let expected = ours.clone();
-        let theirs = ours.into_mapped_read();
-
-        assert_eq!(theirs.qname, expected.qname);
-        assert_eq!(theirs.flag, expected.flag);
-        assert_eq!(theirs.ref_id, expected.ref_id);
-        assert_eq!(theirs.pos, expected.pos);
-        assert_eq!(theirs.mapq, expected.mapq);
-        assert_eq!(theirs.cigar, expected.cigar);
-        assert_eq!(theirs.seq, expected.seq);
-        assert_eq!(theirs.qual, expected.qual);
-        assert_eq!(theirs.mate_ref_id, expected.mate_ref_id);
-        assert_eq!(theirs.mate_pos, expected.mate_pos);
-        assert_eq!(theirs.adaptor_boundary, expected.adaptor_boundary);
-        assert_eq!(
-            theirs.source_file_index, 0,
-            "the read group has nowhere to go, and this field means nothing here"
         );
     }
 }

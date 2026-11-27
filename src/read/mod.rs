@@ -184,14 +184,8 @@ mod tests {
     /// Production's `--no-baq` build, minting ng's read type. The wiring is production's;
     /// the read group is what ng adds — see
     /// [`prepare_passthrough`](prepared_read::prepare_passthrough).
-    ///
-    /// `chrom_id` is derived from `ref_id` exactly as the shipping path does
-    /// ([`left_align::into_prepared`]) rather than passed as a literal `0`: a fixture with a
-    /// non-zero `ref_id` would otherwise be silently prepared against contig 0.
     fn prepare_via_passthrough(read: AlignedRead) -> PreparedRead {
-        let read_group = read.read_group;
-        let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
-        prepare_passthrough(read.into_mapped_read(), chrom_id, read_group)
+        prepare_passthrough(read)
     }
 
     /// Prepares every read, by handing the whole build to production's `--no-baq` path.

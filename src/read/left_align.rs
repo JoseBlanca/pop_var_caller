@@ -173,7 +173,11 @@ impl<R: RefSeq + EvictableRefSeq> ReadPreparer for LeftAlignPreparer<R> {
         if cigar_has_indel(&read.cigar) {
             self.canonicalize(&mut read, scratch)?;
         }
-        Ok(Some(into_prepared(read)))
+        // The rest of the build — `alignment_end`, mate role, strand, `mq_log_err`, `qname`, the
+        // raw qualities as `bq_baq` and the read group — is production's `--no-baq` arm, called
+        // rather than re-derived, which is what makes the parity fixture exact on every field this
+        // step does not itself compute (spec §9, §11).
+        Ok(Some(prepare_passthrough(read)))
     }
 
     /// Release the reference bases already left behind — see the trait method.
@@ -184,28 +188,6 @@ impl<R: RefSeq + EvictableRefSeq> ReadPreparer for LeftAlignPreparer<R> {
     fn evict_reference_before(&self, pos: u64) {
         self.reference.evict_before(pos);
     }
-}
-
-/// Build the `PreparedRead` from a record whose CIGAR is final.
-///
-/// The whole field wiring — `alignment_end` from the CIGAR, `mate_role` and strand from the flag,
-/// `mq_log_err` from MAPQ, `qname`, the adaptor boundary, and the raw qualities copied into
-/// `bq_baq` uncapped — is production's `prepare_passthrough`, its `--no-baq` path, called rather
-/// than re-derived. That is what makes the parity fixture exact on every field this step does not
-/// itself compute (spec §9, §11).
-///
-/// **The read group is threaded through here**, because production's type cannot carry it: the
-/// group is read off the `AlignedRead` before the conversion drops it, and re-attached on the way
-/// into ng's own [`PreparedRead`] (`locus_generation_pileup.md` §6). Preparation reads none of it —
-/// it only makes sure the pileup walk downstream still has it.
-fn into_prepared(read: AlignedRead) -> PreparedRead {
-    // `ref_id` indexes the `u32` contig table, so a value that did not fit would be a corrupt
-    // record rather than a legal one — the same conversion, with the same reasoning, that step 1
-    // and production's own passthrough arm make.
-    let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
-    // Read before the conversion, which is where production's type loses it.
-    let read_group = read.read_group;
-    prepare_passthrough(read.into_mapped_read(), chrom_id, read_group)
 }
 
 #[cfg(test)]
