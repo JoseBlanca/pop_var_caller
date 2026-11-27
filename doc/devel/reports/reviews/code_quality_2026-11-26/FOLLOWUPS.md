@@ -15,3 +15,5 @@
 - doc/devel/ng/** links into src/ng/… in ~1,648 places; that tree is gone since 2026-09-13. After phase 5: rewrite src/ng/ → src/ and drop stale line anchors (found by X5).
 - ~250 plan step codes (C3, D2, …) remain in comments of locus_generation/pileup/{open_record,generator}.rs and witness.rs; X5 left them (B21 scope). Optional mechanical package.
 - fasta/fetcher.rs: the OutOfPattern variant is never raised (found by X7); candidate dead code.
+- Docs still naming MappedRead / the old reader as current (found by X6): arch/ng_step_interfaces.md, arch/locus_generation*.md, spec/locus_generation_ssr.md, arch/ssr_repeat_scanner.md, doc/devel/specs/design_principles.md:140. Fold into the src/ng/ pass.
+- psp/record.rs test helper `as_a_decode_can_return_it` is now a plain clone; could be deleted (X6).
