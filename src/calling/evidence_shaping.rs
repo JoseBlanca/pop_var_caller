@@ -434,8 +434,9 @@ pub fn shape_generic_locus<'a>(
 /// `observations_of_each_run_sample` is that list, **one entry per run sample**, empty where the
 /// sample showed nothing. Unlike the SNP/indel path there is no covering-samples list to join
 /// against — the caller holds the run's samples already — and **no sample is set aside at a
-/// tract**: a discovery round there can put back a length the cap cut, so nobody is locked out of
-/// the locus for the rest of its calling (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
+/// tract**: allele discovery, a pre-pass inside candidate selection, can admit a length one
+/// sample's own top-`ploidy` cut left out, so nobody is locked out of the locus
+/// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
 ///
 /// `candidate_repeat_counts` is the one per-locus input a tract needs beyond its candidates, and
 /// it travels because **it is not derivable from the candidates' bases**: an interrupted tract

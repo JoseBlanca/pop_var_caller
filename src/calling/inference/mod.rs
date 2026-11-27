@@ -19,7 +19,7 @@
 //! in one sample to be slippage ([`DiscoveryConfig`]), and it runs as a **pre-pass inside
 //! candidate selection** ([`DiscoveryMode::BeforeTheLoop`], wired in
 //! [`select_ssr`](crate::calling::allele_candidates::ssr::select_ssr)). Building it
-//! (milestone E1) showed the eligible set is a function of the observations and the
+//! showed the eligible set is a function of the observations and the
 //! candidate table alone — no posterior enters it — so a discovery round wrapped around the
 //! frequency loop would admit nothing the pre-pass had not. The two round-wrapped settings
 //! the spec described were therefore examined and removed
@@ -72,9 +72,9 @@ use crate::cohort_observation::{MinAltObs, MinAltReadShare, MinAltReads};
 ///
 /// **Inherited from production and soft.** Production relaxed it from `1e-4` after tomato
 /// records plateaued in the `5e-4 … 1e-3` band and hit the pass cap without crossing it
-/// (`src/var_calling/posterior_engine.rs`). Nothing has measured it on this caller's range —
-/// a thousand samples, or three reads a position — and what would set it is the distribution
-/// of [`LocusInference::passes`] across a real panel (spec §12, question 4).
+/// (`d9e7b076:src/var_calling/posterior_engine.rs`). Nothing has measured it on this caller's
+/// range — a thousand samples, or three reads a position — and what would set it is the
+/// distribution of [`LocusInference::passes`] across a real panel (spec §12, question 4).
 pub const DEFAULT_CONVERGENCE_THRESHOLD: f64 = 1e-3;
 
 /// The largest convergence threshold that is a stopping rule rather than an immediate exit.
@@ -146,7 +146,7 @@ pub const DEFAULT_LEVEL_PULL_BACK_SLIPPED_READS: f64 = 20.0;
 ///
 /// **The value is production's, which uses it twice**: one threshold on the shape
 /// coefficients and one on the level multiplier (`EmCfg::dev_default`,
-/// `src/ssr/cohort/em.rs`). ng holds the two at one number until something measures them
+/// `d9e7b076:src/ssr/cohort/em.rs`). ng holds the two at one number until something measures them
 /// apart.
 pub const DEFAULT_ROUND_CONVERGENCE_THRESHOLD: f64 = 1e-3;
 
@@ -292,7 +292,7 @@ impl Default for SlippageRefitConfig {
 /// **Discovery runs before the frequency loop, inside candidate selection**
 /// ([`BeforeTheLoop`](Self::BeforeTheLoop), wired in
 /// [`select_ssr`](crate::calling::allele_candidates::ssr::select_ssr)). Spec §4.1 had it look
-/// against the converged posteriors, in rounds around the loop. Building it (milestone E1)
+/// against the converged posteriors, in rounds around the loop. Building it
 /// showed that ng's tract locus generator realigns every read before the caller sees it, so
 /// an observation's bases *are* the tract sequence a retrace would imply: the eligible set is
 /// a function of the observations and the candidate table alone, and no posterior enters it.
@@ -568,9 +568,8 @@ pub enum CallingLoopConfigError {
 /// associated type because an associated type does not compile here: an implementation that
 /// works for every model constrains it nowhere, which is `error[E0207]`.
 ///
-/// **`candidates` is taken by value.** The locus's allele table is not a borrow of the
-/// evidence: a discovery round appends to it and the final prune shrinks it, so the loop owns
-/// it and hands it back inside the [`LocusInference`].
+/// **`candidates` is taken by value**, so that the loop can hand the locus's allele table back
+/// inside the [`LocusInference`] without copying it. The loop does not change the table.
 pub trait LocusGenotyper<SsrEmissionScratch> {
     /// Call one locus.
     ///
