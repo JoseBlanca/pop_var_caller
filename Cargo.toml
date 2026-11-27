@@ -75,8 +75,36 @@ debug = true
 # **The cost is compile time on a clean build**, which the container pays more
 # often than a host checkout does. `opt-level = 1` was measured too and is the
 # worse trade: 71 s of execution against 57 s.
+#
+# **Run the tests in this profile: `cargo test --lib --tests`, not `--release`.**
+# `cargo test --release` builds with `[profile.release]`: fat LTO, one codegen
+# unit, no incremental, and every dependency compiled twice, once for the
+# `panic = "abort"` binary and once for the unwinding test harnesses. Its tests run
+# no faster. Measured 2026-11-27 on an M-series laptop, `CARGO_BUILD_JOBS=4`,
+# `--test-threads=4`, all 5,391 tests (seconds):
+#
+#                                          --release   test, full debug   test, line tables
+#   clean build                                376          192                155
+#   rebuild after adding a function [1]      325 / 312      6 / 15             6 / 17
+#   rebuild after editing a body [1]         ~320 [2]      88 / 93            71 / 71
+#   the same edit, `--lib` only                 292           73                 56
+#   run: whole suite / one module [3]        55 / 1.5      56 / 1.5           55 / 1.6
+#
+#   [1] in a leaf module / in `src/types.rs`, which 207 files use
+#   [2] not incremental, so any edit costs the same as adding a function
+#   [3] `calling::parameters_file`, 286 tests
+#
+# `debug = "line-tables-only"` keeps file:line in panic backtraces and drops the
+# variable-level debug information only a debugger reads; at full debug information
+# a one-line body edit rebuilds about a fifth slower. `debug = false` saves another
+# 10 to 15 s an edit, at the cost of the backtrace lines. Measured and rejected:
+# `codegen-units = 16` (no faster to build, slower after a `types.rs` edit) and a
+# release-derived profile without LTO (`lto = false`, 16 units, `panic = "unwind"`:
+# 130 s clean, 50 s to run, but about 90 s after every edit because a release
+# profile is not incremental, and it switches the debug assertions off).
 [profile.test]
 opt-level = 2
+debug = "line-tables-only"
 
 # Symbolised heap/CPU profiling: release-like codegen but with full debug
 # info and without fat-LTO frame collapsing, so dhat backtraces resolve to
