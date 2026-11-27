@@ -15,11 +15,9 @@
 //! public surface — [`SsrGenerator`], the [`LocusGenerator`] that turns one
 //! `SsrSegment` into one locus.
 
-use std::collections::BTreeMap;
-
 use super::{
-    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, SampleLocusObservations,
-    SequenceObservation, SsrDetail,
+    CursorLedger, GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind,
+    SampleLocusObservations, SequenceObservation, SsrDetail,
 };
 use crate::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use crate::alignment::{
@@ -27,9 +25,11 @@ use crate::alignment::{
 };
 use crate::read::aligned_read::AlignedRead;
 use crate::read::filtering::ReadFilterCounts;
-use crate::read::input::cursor::{CursorCounts, CursorError};
+use crate::read::input::SampleReads;
+#[cfg(test)]
+use crate::read::input::cursor::CursorCounts;
+use crate::read::input::cursor::CursorError;
 use crate::read::input::sample_cursor::SampleCursor;
-use crate::read::input::{SampleIdentity, SampleReads};
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqError};
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position, ReadGroupId};
@@ -4008,27 +4008,11 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: Repe
     /// `None` before the first locus. It is *not* cleared per segment: the whole point is that
     /// it outlives them.
     cursor: Option<(ContigId, SampleCursor<R>)>,
-    /// What the cursors of *already-retired* chromosomes did — see
-    /// [`cursor_counts`](Self::cursor_counts).
-    retired_cursor_counts: CursorCounts,
-    /// **Why the retired chromosomes' cursors dropped reads, per read group** — see
-    /// [`read_filter_counts`](Self::read_filter_counts).
-    ///
-    /// One axis finer than [`retired_cursor_counts`](Self::retired_cursor_counts) and kept for
-    /// the same reason: a cursor's tallies die with it, and this generator rebuilds its cursor
-    /// at every chromosome change, so a reader that asked only the live one would report the
-    /// last chromosome's drops as the whole walk's.
-    ///
-    /// Keyed by the read group the reads declared, `None` for reads that named none — the key
-    /// [`SampleCursor::read_group_counts`] already hands back.
-    retired_read_group_counts: BTreeMap<Option<ReadGroupId>, ReadFilterCounts>,
-    /// The sample this generator opened its first cursor for. **One sample per generator** —
-    /// a second one is refused rather than answered out of the first one's files. See
-    /// [`cursor_for`](Self::cursor_for) for what that mistake looks like when it is not caught.
-    ///
-    /// `None` until the first cursor opens, so a generator is unclaimed until it reads
-    /// something.
-    sample: Option<SampleIdentity>,
+    /// **The sample this generator reads, and what its retired chromosomes' cursors did** —
+    /// one sample per generator, refused in [`cursor_for`](Self::cursor_for), and the tallies
+    /// [`cursor_counts`](Self::cursor_counts) and [`read_filter_counts`](Self::read_filter_counts)
+    /// add the live cursor's to.
+    ledger: CursorLedger,
     /// The tract delimiter — the chosen [`RepeatDelimiter`] (algorithm 3 or 4).
     aligner: A,
     /// Reused alignment matrices (the aligner's own scratch type), so it does not reallocate per
@@ -4108,9 +4092,7 @@ where
             reference,
             make_reference: Box::new(make_reference),
             cursor: None,
-            retired_cursor_counts: CursorCounts::default(),
-            retired_read_group_counts: BTreeMap::new(),
-            sample: None,
+            ledger: CursorLedger::default(),
             aligner,
             align_scratch: A::Scratch::default(),
             stutter: StutterModel::hipstr_shipped(),
@@ -4139,11 +4121,8 @@ where
     /// D2 review proved the feature could be switched off with the whole suite green. What
     /// moves is only what the reader avoided (`spec/alignment_cursor.md` §11.5).
     pub fn cursor_counts(&self) -> CursorCounts {
-        let mut total = self.retired_cursor_counts;
-        if let Some((_, cursor)) = &self.cursor {
-            total += cursor.counts();
-        }
-        total
+        self.ledger
+            .cursor_counts(self.cursor.as_ref().map(|(_, cursor)| cursor))
     }
 
     /// **Why this sample's reads were dropped, per read group, over the whole walk** — every
@@ -4162,13 +4141,8 @@ where
     /// **The `None` key is reads that declared no read group**, which is the key the cursor
     /// itself uses; a run whose files all declare one never sees it.
     pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
-        let mut total = self.retired_read_group_counts.clone();
-        if let Some((_, cursor)) = &self.cursor {
-            for (read_group, counts) in cursor.read_group_counts() {
-                total.entry(read_group).or_default().add(&counts);
-            }
-        }
-        total.into_iter().collect()
+        self.ledger
+            .read_filter_counts(self.cursor.as_ref().map(|(_, cursor)| cursor))
     }
 
     /// This sample's cursor for `contig`, minting one if the last locus was on another
@@ -4210,10 +4184,7 @@ where
         reads: &SampleReads,
         region: GenomeRegion,
     ) -> Result<&mut SampleCursor<R>, LocusGenerationError> {
-        let sample = reads.identity();
-        if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
-            return Err(LocusGenerationError::ForeignSample { region });
-        }
+        let sample = self.ledger.check_sample(reads, region)?;
         // Let both readers drop what this walk has gone past. A reference reader is a
         // sliding window over the FASTA that only ever grows unless it is told to shrink, and
         // nobody was telling it: a forward walk of a chromosome ended up holding one byte for
@@ -4240,17 +4211,7 @@ where
             // cursors — and their kept reads — at once. The tallies are taken with it: they
             // die with the cursor, and they are what says whether it did anything.
             if let Some((_, retiring)) = self.cursor.take() {
-                self.retired_cursor_counts += retiring.counts();
-                // **Taken here for the same reason and at the same moment**, one axis finer: a
-                // cursor's per-read-group tallies die with it, and a run that read them only
-                // from the live cursor would report its last chromosome's drops as the whole
-                // walk's.
-                for (read_group, counts) in retiring.read_group_counts() {
-                    self.retired_read_group_counts
-                        .entry(read_group)
-                        .or_default()
-                        .add(&counts);
-                }
+                self.ledger.retire(&retiring);
             }
             let cursor = reads
                 .cursor(contig, &mut self.make_reference)
@@ -4258,7 +4219,7 @@ where
             self.cursor = Some((contig, cursor));
             // Adopted only once a cursor exists, so a failed open leaves the generator
             // unclaimed and a retry with the same sample still works.
-            self.sample = Some(sample);
+            self.ledger.adopt(sample);
         }
         Ok(&mut self.cursor.as_mut().expect("the cursor was just ensured").1)
     }
