@@ -357,7 +357,7 @@ pub enum ParametersFileError {
     /// file's own spelling, which a reader can search for. See [`ParametersFile::validate`].
     #[error("the parameters file cannot be used: {field} {problem}")]
     Meaningless {
-        /// The key's path as the file spells it — `inbreeding.by_sample["TS-1"]`.
+        /// The key's path as the file spells it — `inbreeding.by_sample[sample = "TS-1"]`.
         field: String,
         /// What is wrong with it, naming the offending value.
         problem: String,
@@ -1094,6 +1094,14 @@ pub struct InbreedingRow {
     pub inbreeding_coefficient: WarrantedValue,
 }
 
+impl InbreedingRow {
+    /// The row's path in the file's own spelling, for a refusal that names it —
+    /// `inbreeding.by_sample[sample = "TS-1"]`.
+    pub(super) fn path(&self) -> String {
+        format!("inbreeding.by_sample[sample = {:?}]", self.sample)
+    }
+}
+
 // ---------------------------------------------------------------------
 // §3.6 — the ordinary-site prior's seed
 // ---------------------------------------------------------------------
@@ -1278,6 +1286,16 @@ pub struct MisreadAfterRunRow {
     pub through_reads: u64,
     /// Reads reaching the same positions from the other side.
     pub arriving_first_reads: u64,
+}
+
+impl MisreadAfterRunRow {
+    /// The row's path in the file's own spelling, for a refusal that names it.
+    pub(super) fn path(&self) -> String {
+        format!(
+            "misread_after_runs.entries[read_group = {}, shortest_run = {}, base = {:?}]",
+            self.read_group, self.shortest_run, self.base
+        )
+    }
 }
 
 /// The depth rule's settings as the run used them.
@@ -1504,6 +1522,17 @@ pub struct SlippageRow {
     /// beside it are among these samples, and the own-fit errors describe the subset's own fit,
     /// not its distance from a fit on every sample.
     pub samples_fitted_on: Option<u64>,
+}
+
+impl SlippageRow {
+    /// The row's path in the file's own spelling, for a refusal that names it.
+    pub(super) fn path(&self) -> String {
+        format!(
+            "repeat_tracts.slippage_by_stratum_and_group[period = {}, reference_repeats = {}, \
+             slippage_group = {}]",
+            self.period, self.reference_repeats, self.slippage_group
+        )
+    }
 }
 
 /// Where a stratum's slippage **level** came from — the file's spelling of
@@ -1817,6 +1846,17 @@ pub struct SubstitutionRateRow {
     /// tracts — `table.bases_compared()` (`parameter_estimation/ssr`) — and **not in reads**: a
     /// read spanning a stratum contributes one read and as many bases as it crosses.
     pub rate: WarrantedValue,
+}
+
+impl SubstitutionRateRow {
+    /// The row's path in the file's own spelling, for a refusal that names it.
+    pub(super) fn path(&self) -> String {
+        format!(
+            "repeat_tracts.substitution_rate_by_stratum[read_group = {}, period = {}, \
+             reference_repeats = {}, ploidy = {}]",
+            self.read_group, self.period, self.reference_repeats, self.ploidy
+        )
+    }
 }
 
 /// **One read group's stutter multiplier at one motif length** (`str_library_stutter.md` §7).
