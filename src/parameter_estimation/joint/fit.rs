@@ -5131,9 +5131,8 @@ fn maximise_error_rate(
     let score = |rate: f64| {
         let mut total = 0.0;
         for (j, tally) in tallies.iter().enumerate() {
-            let carried = j as f64 / f64::from(ploidy.get());
-            let on_candidate = carried * (1.0 - rate) + (1.0 - carried) * rate / 3.0;
-            let on_reference = (1.0 - carried) * (1.0 - rate) + carried * rate / 3.0;
+            let on_candidate = candidate_read_probability(j as u8, ploidy, rate);
+            let on_reference = reference_read_probability(j as u8, ploidy, rate);
             total += count_times_ln(tally.candidate, on_candidate)
                 + count_times_ln(tally.neither, rate / 3.0)
                 + count_times_ln(tally.reference, on_reference);
