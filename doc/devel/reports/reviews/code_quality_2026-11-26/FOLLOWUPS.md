@@ -21,3 +21,4 @@
 - Unverified doc claims (X4): observation_cache.rs reference_base_at says a cover's ground spans every record a sample holds (ground_this_cover_holds_on now reads only unseen records); arch/cohort_merge.md step 1 says regions never cut an STR segment (building_regions_of does not show it).
 - Broken rustdoc links in paralog/locus_score.rs:683, paralog/prior.rs:97; walker.rs import order fails rustfmt --check.
 - examples/dhat_ng_joint_fit.rs: 9 dead-code/unused-import warnings under --features bench-fixtures (found by X3).
+- ~40 reconciliation-table rows in doc/devel/ng spec/arch name functions/types no longer in the linked file (collect_windowed, RegionScanner, verdict_pre_decode, agreed_sample_name, Freshness, …); links fixed, symbols left as design history (found by the src/ng/ pass). **src/ng/ pass DONE** (cq-ngpaths).
