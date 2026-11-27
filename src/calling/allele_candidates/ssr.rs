@@ -28,17 +28,13 @@
 //! (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5).
 
 use super::summarise_alleles;
-use super::{
-    AlleleRemap, CandidateSelectionConfig, LocusSelection, MaxCandidateAlleles, SelectionScratch,
-    SelectionVerdict,
-};
-use crate::calling::CandidateAlleles;
+use super::{CandidateSelectionConfig, LocusSelection, MaxCandidateAlleles, SelectionScratch};
 use crate::calling::likelihood::ssr_emission::respelled_over;
 use crate::cohort_observation::MinAltReads;
 use crate::cohort_observation::{CohortObservation, SampleSupport};
 use crate::locus_generation::{FlankDeletion, LocusKind, SsrBundleDetail, SsrDetail};
 use crate::region_typing::run_parse::{RunParse, parse_into_runs};
-use crate::types::{AlleleId, GenomeRegion, Motif, Ploidy};
+use crate::types::{GenomeRegion, Motif, Ploidy};
 
 /// **One locus's observed tract sequences, grouped by how many repeats they carry.**
 ///
@@ -555,9 +551,7 @@ pub(super) fn fill_sample_reads_per_rung(
     sample_reads_per_rung.resize(ladder.rung_count(), 0);
     for rows in super::one_run_per_allele(sample, locus) {
         let rung = ladder.rung_of_table_index(rows[0].allele);
-        let pooled_reads = rows.iter().fold(0_u32, |total, row| {
-            total.saturating_add(row.support.num_reads)
-        });
+        let pooled_reads = super::pooled_reads(rows);
         sample_reads_per_rung[rung] = sample_reads_per_rung[rung].saturating_add(pooled_reads);
     }
     debug_assert_eq!(
@@ -921,9 +915,7 @@ pub(super) fn nominate_discovered_sequences(
             if nominated[allele] {
                 continue;
             }
-            let pooled_reads = rows.iter().fold(0_u32, |total, row| {
-                total.saturating_add(row.support.num_reads)
-            });
+            let pooled_reads = super::pooled_reads(rows);
             if !bar.reached_by(pooled_reads, spanning) {
                 continue;
             }
@@ -1228,68 +1220,18 @@ pub(super) fn admit_promoted_sequences_on(
             })
     });
 
-    let allowed_alternatives = usize::from(config.shared.max_candidate_alleles.alternatives());
-    let verdict = if ranked_table_indices.len() <= allowed_alternatives {
-        SelectionVerdict::Selected
-    } else {
-        let alternative_of = |table_index: u32| super::RankedAlternative {
-            summary: per_allele[table_index as usize],
-            bases: &observation.alleles[table_index as usize],
-        };
-        ranked_table_indices.sort_unstable_by(|&left, &right| {
-            super::compare_best_first(alternative_of(left), alternative_of(right))
-        });
-        let dropped = ranked_table_indices.len() - allowed_alternatives;
-        // Kept, not discarded: on this path an allele is lost three ways — the bar, the
-        // per-sample top-`ploidy` cut, and the cap — and only the third may no-call a sample.
-        cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
-        cap_cut_table_indices.sort_unstable();
-        ranked_table_indices.truncate(allowed_alternatives);
-        SelectionVerdict::Truncated {
-            dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
-        }
-    };
-    // **Admitted in the order of their bases, not the merge table's**, for the generic path's
-    // reason (`generic.rs`): the table's order is the order the samples were given, and two
-    // spellings of one length swapped `ALT` places when the cohort was listed the other way.
-    ranked_table_indices.sort_unstable_by(|&left, &right| {
-        observation.alleles[left as usize].cmp(&observation.alleles[right as usize])
-    });
-
-    let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), ground.locus_kind());
-    let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
-    remap.admit(0, AlleleId::REFERENCE);
-    for &table_index in ranked_table_indices.iter() {
-        let table_index = table_index as usize;
-        let candidate = alleles.admit_with_flank_deletion(
-            observation.alleles[table_index].clone(),
-            observation.flank_deletion_of(table_index),
-        );
-        remap.admit(table_index, candidate);
-    }
-
-    assert_eq!(
-        merge_rows.len(),
-        observation.per_sample.len(),
-        "the merge's rows and the rows selection read cover different samples at {}",
-        observation.region
-    );
-    let covering_samples = observation.per_sample.len();
-    let leftovers = merge_rows
-        .iter()
-        .zip(&observation.per_sample)
-        .map(|(sample, selection_rows)| {
-            super::leftover_of(
-                sample,
-                selection_rows,
-                observation.region,
-                &remap,
-                config.shared.min_allele_support,
-                cap_cut_table_indices,
-            )
-        })
-        .collect();
-    LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
+    // The cap, admission in the order of the alleles' bases, and the leftover. On this path an
+    // allele is lost three ways — the bar, the per-sample top-`ploidy` cut, and the cap — and
+    // only the third may no-call a sample.
+    super::cap_and_admit(
+        observation,
+        merge_rows,
+        ground.locus_kind(),
+        &config.shared,
+        per_allele,
+        ranked_table_indices,
+        cap_cut_table_indices,
+    )
 }
 
 /// **How many of a tract sequence's bases differ from a pure run of the motif**, at whichever
@@ -1382,12 +1324,7 @@ fn a_minority_beside_it_everywhere(
 ) -> bool {
     observation.per_sample.iter().all(|sample| {
         let reads_of = |allele: usize| -> u32 {
-            sample
-                .supported
-                .iter()
-                .filter(|row| row.allele == allele)
-                .map(|row| row.support.num_reads)
-                .sum()
+            super::pooled_reads(sample.supported.iter().filter(|row| row.allele == allele))
         };
         let (minor_reads, major_reads) = (reads_of(minor), reads_of(major));
         minor_reads == 0
@@ -1611,10 +1548,10 @@ pub fn select_ssr_bundle(
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::*;
-    use super::super::summarise_alleles;
+    use super::super::{SelectionVerdict, summarise_alleles};
     use super::*;
     use crate::calling::inference::DEFAULT_DISCOVERY_BAR;
-    use crate::types::ReadGroupId;
+    use crate::types::{AlleleId, ReadGroupId};
 
     /// **The record's `REPCN` and the genotype prior's repeat count are the same integer.**
     ///

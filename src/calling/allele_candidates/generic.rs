@@ -6,14 +6,9 @@
 //! kind rather than by a swappable recipe — see this module's parent for why that is two
 //! functions and not two implementations of one trait.
 
-use super::{
-    AlleleRemap, CandidateSelectionConfig, LocusSelection, RankedAlternative, SelectionScratch,
-    SelectionVerdict, compare_best_first, leftover_of, summarise_alleles,
-};
-use crate::calling::CandidateAlleles;
+use super::{CandidateSelectionConfig, LocusSelection, SelectionScratch, summarise_alleles};
 use crate::cohort_observation::CohortObservation;
 use crate::locus_generation::LocusKind;
-use crate::types::AlleleId;
 
 /// **Narrow one locus's allele table to the sequences worth calling over** (spec §3, §4).
 ///
@@ -129,77 +124,28 @@ pub fn select_generic(
             }),
     );
 
-    // The cap, and the two orders the buffer holds in turn. First the ranking, so that what is
-    // cut is the worst-evidenced; then the alleles' bases, the order the survivors are admitted
-    // in and so the order that reaches the VCF's `ALT` column. The ranking decides *which*
-    // alleles survive and never what order they appear in.
-    let allowed_alternatives = usize::from(config.max_candidate_alleles.alternatives());
-    let verdict = if ranked_table_indices.len() <= allowed_alternatives {
-        SelectionVerdict::Selected
-    } else {
-        let alternative_of = |table_index: u32| RankedAlternative {
-            summary: per_allele[table_index as usize],
-            bases: &observation.alleles[table_index as usize],
-        };
-        ranked_table_indices.sort_unstable_by(|&left, &right| {
-            compare_best_first(alternative_of(left), alternative_of(right))
-        });
-        let dropped = ranked_table_indices.len() - allowed_alternatives;
-        // What the cap removed, kept rather than discarded: the leftover has to be told, because
-        // "this sample earned it and it is gone" is not the same question (see `leftover_of`).
-        cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
-        cap_cut_table_indices.sort_unstable();
-        ranked_table_indices.truncate(allowed_alternatives);
-        SelectionVerdict::Truncated {
-            dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
-        }
-    };
-    // **Admitted in the order of their bases, not the merge table's.** The table numbers its
-    // alleles in the order it first met them, which is the order the samples were given, so
-    // admitting in table order made the `ALT` column — and every tie broken by allele id
-    // downstream — depend on how the cohort was listed. Two entries never have equal bases.
-    ranked_table_indices.sort_unstable_by(|&left, &right| {
-        observation.alleles[left as usize].cmp(&observation.alleles[right as usize])
-    });
-
-    let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), LocusKind::Generic);
-    let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
-    remap.admit(0, AlleleId::REFERENCE);
-    for &table_index in ranked_table_indices.iter() {
-        let table_index = table_index as usize;
-        let candidate = alleles.admit(observation.alleles[table_index].clone());
-        remap.admit(table_index, candidate);
-    }
-
-    // The leftover, last: it is per sample where everything above is per allele, and it reads
-    // the finished remapping to know what was dropped.
-    let covering_samples = observation.per_sample.len();
-    let leftovers = observation
-        .per_sample
-        .iter()
-        .map(|sample| {
-            leftover_of(
-                sample,
-                sample,
-                observation.region,
-                &remap,
-                config.min_allele_support,
-                cap_cut_table_indices,
-            )
-        })
-        .collect();
-    LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
+    // The cap, admission in the order of the alleles' bases, and the leftover. Every sample's
+    // rows are both the rows its leftover counts and the rows its bar is asked over.
+    super::cap_and_admit(
+        observation,
+        &observation.per_sample,
+        LocusKind::Generic,
+        config,
+        per_allele,
+        ranked_table_indices,
+        cap_cut_table_indices,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::MaxCandidateAlleles;
-    use super::super::UnmatchedSupport;
     use super::super::fixtures::*;
+    use super::super::{SelectionVerdict, UnmatchedSupport};
     use super::*;
     use crate::cohort_observation::MinAltReads;
     use crate::cohort_observation::SampleSupport;
-    use crate::types::ReadGroupId;
+    use crate::types::{AlleleId, ReadGroupId};
 
     /// Narrow `observation` under a support rule of `floor` reads or `share`, and the default
     /// cap.
