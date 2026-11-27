@@ -690,7 +690,7 @@ pub fn partition_resident_in(
 /// 100 bases contradicts the very cap that made it one. A generic stretch is the only kind
 /// that is not a finding — *nothing more specific can be said here* stays true of any part
 /// of it.
-fn clips_at_a_bed_edge(kind: &RegionKind) -> bool {
+pub(crate) fn clips_at_a_bed_edge(kind: &RegionKind) -> bool {
     match kind {
         RegionKind::Generic => true,
         RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. } | RegionKind::Satellite => false,

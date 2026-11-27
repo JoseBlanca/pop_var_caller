@@ -13,8 +13,8 @@ use crate::region_typing::segment_criteria::{
     self, RejectionReason, SsrSegment, SsrSegmentCriteria, is_compound, split_bundles,
 };
 use crate::region_typing::{
-    BundleMember, RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps,
-    resolve_features,
+    BundleMember, RegionKind, TypedRegion, TypedRegionConfig, clips_at_a_bed_edge, coverage_runs,
+    fill_generic_gaps, resolve_features,
 };
 use crate::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::repeat_catalog::tally::{CatalogRejectionCounts, ContigTally};
@@ -98,10 +98,7 @@ pub fn segments_of_contig_in(
             if start > end {
                 continue;
             }
-            let whole = matches!(
-                region.kind,
-                RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. } | RegionKind::Satellite
-            );
+            let whole = !clips_at_a_bed_edge(&region.kind);
             out.push(TypedRegion {
                 region: if whole {
                     region.region

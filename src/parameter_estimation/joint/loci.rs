@@ -28,6 +28,7 @@ use xxhash_rust::xxh3::Xxh3;
 
 use crate::reference_info::{ContigInfo, ReferenceBasesObserver, ReferenceInfo};
 use crate::region_typing::RegionKind;
+use crate::repeat_catalog::strata::ContigHasher;
 use crate::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, StratumCounts, StratumSample,
 };
@@ -267,40 +268,14 @@ impl ReferenceBasesObserver for UnambiguousRuns {
 /// a fixed hash rather than a random number generator, so the same reference, region set
 /// and seed keep the identical positions on every machine and in every run.
 ///
-/// **Keyed by the contig's name, and by the same construction the STR sampler uses**
-/// (`repeat_catalog::strata::hash_locus`), so both halves of the selection rest on one
-/// uniformity assumption rather than two. A name rather than an index because an index is
+/// **Keyed by the contig's name, and by the same construction the STR sampler uses** — both
+/// go through [`ContigHasher`] — so both halves of the selection rest on one uniformity
+/// assumption rather than two. A name rather than an index because an index is
 /// a property of the file's contig order: two references that hold the same contigs in a
 /// different order would select different positions, and the reference digest would say
 /// so — but only after the fact.
 pub fn hash_position(contig_name: &str, position: u64, seed: u64) -> u64 {
     ContigHasher::new(contig_name, seed).hash_position(position)
-}
-
-/// `hash_position` with the contig's name already absorbed.
-///
-/// One contig's name is hashed once and the per-position work is a clone and one `u64`.
-/// **The value is identical to `hash_position`'s** — the same bytes reach the same
-/// hasher in the same order — which is what the `hoisting_the_contig_name_changes_no_hash`
-/// test pins, because the whole selection rests on those two agreeing.
-#[derive(Clone)]
-pub struct ContigHasher {
-    base: Xxh3,
-}
-
-impl ContigHasher {
-    pub fn new(contig_name: &str, seed: u64) -> Self {
-        let mut base = Xxh3::with_seed(seed);
-        contig_name.hash(&mut base);
-        Self { base }
-    }
-
-    #[inline]
-    pub fn hash_position(&self, position: u64) -> u64 {
-        let mut hasher = self.base.clone();
-        position.hash(&mut hasher);
-        hasher.finish()
-    }
 }
 
 /// The threshold that yields about `target` positions out of `selectable_length`.

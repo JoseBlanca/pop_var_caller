@@ -182,16 +182,26 @@ impl DepthCode {
     }
 }
 
+// **A code is one byte, so the array is one byte a position.** `PackedDepthCodes` stores and
+// indexes bytes on that ground; a code widened past eight bits is a format version, and this is
+// where it stops compiling until the store is packed again.
+const _: () = assert!(
+    DEPTH_CODE_BITS == u8::BITS,
+    "PackedDepthCodes stores one code per byte; a wider code needs packing again"
+);
+
 /// One depth code per kept position, [`DEPTH_CODE_BITS`] each, in selection order.
 ///
 /// **No coordinates and no index**: the positions are reproducible from the selection rule,
 /// so entry `i` is the `i`-th kept position and nothing says so on the wire. Storing
 /// coordinates would cost about five bytes each — 10 MB at two million positions, before any
 /// data was recorded.
+///
+/// **One byte an entry.** The name is the format's: the codes were packed five bits each until
+/// the census ladder needed eight, and the bytes on the wire are still this array as it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackedDepthCodes {
-    bits: Vec<u8>,
-    len: usize,
+    codes: Vec<u8>,
 }
 
 impl PackedDepthCodes {
@@ -201,23 +211,17 @@ impl PackedDepthCodes {
     /// and a kept position never visited are the same thing, and the sentinel is what says
     /// so after the walk has finished and cannot be asked again.
     pub fn never_walked(len: usize) -> Self {
-        let bytes = len.saturating_mul(DEPTH_CODE_BITS as usize).div_ceil(8);
-        let mut packed = Self {
-            bits: vec![0; bytes],
-            len,
-        };
-        for index in 0..len {
-            packed.set(index, DepthCode::NeverWalked);
+        Self {
+            codes: vec![NEVER_WALKED_CODE; len],
         }
-        packed
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.codes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.codes.is_empty()
     }
 
     /// # Panics
@@ -227,45 +231,26 @@ impl PackedDepthCodes {
     /// absorb.
     pub fn set(&mut self, index: usize, code: DepthCode) {
         assert!(
-            index < self.len,
+            index < self.codes.len(),
             "position {index} is outside the selection"
         );
-        let (byte, offset) = (
-            index * DEPTH_CODE_BITS as usize / 8,
-            index * DEPTH_CODE_BITS as usize % 8,
-        );
-        let value = u32::from(code.to_bits());
-        let mask = u32::from(NEVER_WALKED_CODE) << offset;
-        let mut window = u32::from(self.bits[byte]);
-        if byte + 1 < self.bits.len() {
-            window |= u32::from(self.bits[byte + 1]) << 8;
-        }
-        window = (window & !mask) | (value << offset);
-        self.bits[byte] = (window & 0xff) as u8;
-        if byte + 1 < self.bits.len() {
-            self.bits[byte + 1] = ((window >> 8) & 0xff) as u8;
-        }
+        self.codes[index] = code.to_bits();
     }
 
+    /// # Panics
+    ///
+    /// When `index` is past the end, as for [`Self::set`].
     pub fn get(&self, index: usize) -> DepthCode {
         assert!(
-            index < self.len,
+            index < self.codes.len(),
             "position {index} is outside the selection"
         );
-        let (byte, offset) = (
-            index * DEPTH_CODE_BITS as usize / 8,
-            index * DEPTH_CODE_BITS as usize % 8,
-        );
-        let mut window = u32::from(self.bits[byte]);
-        if byte + 1 < self.bits.len() {
-            window |= u32::from(self.bits[byte + 1]) << 8;
-        }
-        DepthCode::from_bits(((window >> offset) & u32::from(NEVER_WALKED_CODE)) as u8)
+        DepthCode::from_bits(self.codes[index])
     }
 
-    /// The packed bytes — 1.25 MB at two million positions.
+    /// The bytes a census file writes — one a position, 2 MB at two million positions.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bits
+        &self.codes
     }
 
     /// The array a census file wrote down, read back.
@@ -282,11 +267,11 @@ impl PackedDepthCodes {
             "{len} depth codes at {DEPTH_CODE_BITS} bits each are not {} bytes",
             bits.len()
         );
-        Self { bits, len }
+        Self { codes: bits }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = DepthCode> + '_ {
-        (0..self.len).map(|index| self.get(index))
+        self.codes.iter().map(|&code| DepthCode::from_bits(code))
     }
 }
 
@@ -329,7 +314,7 @@ impl GenericEvidence {
     /// non-reference observations, counted by what their vectors reserved. What
     /// `estimate-parameters` reports, so a run can see what one read group costs.
     pub fn heap_bytes(&self) -> usize {
-        self.depth.bits.capacity()
+        self.depth.codes.capacity()
             + self.non_reference.capacity() * std::mem::size_of::<AlleleObservation>()
     }
 
@@ -1330,11 +1315,7 @@ impl Sections {
 
     /// Every read group any of these sections is filed under.
     fn read_groups_used(&self) -> std::collections::BTreeSet<ReadGroupId> {
-        let keys: Box<dyn Iterator<Item = SectionKey> + '_> = match self {
-            Self::Resident(sections) => Box::new(sections.keys().copied()),
-            Self::Backed { directory, .. } => Box::new(directory.keys().copied()),
-        };
-        keys.map(SectionKey::read_group).collect()
+        self.keys().map(SectionKey::read_group).collect()
     }
 
     /// The sections a walk built, checked against their own keys.
@@ -2991,7 +2972,7 @@ mod tests {
     #[test]
     fn a_read_groups_evidence_counts_its_codes_and_its_observations() {
         let depth = PackedDepthCodes::never_walked(1_000);
-        let codes = depth.bits.capacity();
+        let codes = depth.codes.capacity();
         let mut observations = Vec::with_capacity(10);
         observations.push(AlleleObservation {
             index: 3,

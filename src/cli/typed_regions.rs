@@ -32,7 +32,7 @@ use crate::region_typing::{
     BundleMember, DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN, GenomeRegions, RegionKind,
     TypedRegion, TypedRegionConfig,
 };
-use crate::regions::{BedError, ContigBounds};
+use crate::regions::{BedError, ContigBounds, ContigTooLong};
 use crate::repeat_catalog::{
     CatalogRegionCounts, CatalogRejectionCounts, ReadScope, RepeatCatalog, RepeatCatalogError,
     StrRepeatCriteria,
@@ -510,21 +510,18 @@ pub struct WalkInputs {
 /// clamp spans to nonsense. A contig that large is unrepresentable to `RegionSet`
 /// whatever we do, so failing is the honest answer, not a limitation we chose.
 fn contig_bounds(contigs: &ContigList) -> Result<Vec<ContigBounds<'_>>, TypedRegionsCliError> {
-    contigs
-        .entries
-        .iter()
-        .map(|entry| {
-            let length =
-                u32::try_from(entry.length).map_err(|_| TypedRegionsCliError::ContigTooLong {
-                    contig: entry.name.clone(),
-                    len: entry.length,
-                })?;
-            Ok(ContigBounds {
-                name: &entry.name,
-                length,
-            })
-        })
-        .collect()
+    ContigBounds::of_contigs(
+        contigs
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.length)),
+    )
+    .map_err(
+        |ContigTooLong { name, length }| TypedRegionsCliError::ContigTooLong {
+            contig: name,
+            len: length,
+        },
+    )
 }
 
 /// Read the reference and resolve what to emit — the walk's fallible setup.

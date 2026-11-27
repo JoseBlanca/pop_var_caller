@@ -44,7 +44,7 @@
 
 use rayon::prelude::*;
 
-use crate::float;
+use crate::paralog::prior::{logit, sigmoid};
 
 /// The width of a bin: every record in one bin shares one local rate.
 pub const LOCAL_PRIOR_BIN_BASES: u64 = 10_000;
@@ -349,19 +349,6 @@ pub fn windowed_verdicts(
 
 fn clamp_rate(rate: f64) -> f64 {
     rate.clamp(LOCAL_PRIOR_FLOOR, 1.0 - LOCAL_PRIOR_FLOOR)
-}
-
-fn logit(p: f64) -> f64 {
-    float::ln(p / (1.0 - p))
-}
-
-fn sigmoid(x: f64) -> f64 {
-    if x >= 0.0 {
-        1.0 / (1.0 + float::exp(-x))
-    } else {
-        let e = float::exp(x);
-        e / (1.0 + e)
-    }
 }
 
 #[cfg(test)]

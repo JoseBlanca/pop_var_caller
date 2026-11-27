@@ -23,10 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::psp::header::{
-    BrokenRule, ContigIdentity, MAX_TOML_INTEGER, digest_of, hex_of, wire_float_of,
-};
-use crate::reference_info::ContigInfo;
+use crate::psp::header::{BrokenRule, ContigIdentity, MAX_TOML_INTEGER, digest_of, wire_float_of};
+use crate::reference_info::{ContigInfo, format_md5_hex};
 use crate::region_typing::GenomeRegions;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
 use crate::regions::{ContigBounds, Region};
@@ -276,7 +274,7 @@ impl WireCatalog {
             longest_tract_bp,
         } = catalog;
         WireCatalog {
-            reference_md5: hex_of(*reference_md5),
+            reference_md5: format_md5_hex(*reference_md5),
             tool_version: tool_version.clone(),
             scan: WireScan {
                 match_reward: scan.match_reward,
@@ -290,7 +288,7 @@ impl WireCatalog {
                 .map(|(index, contig)| WireCatalogContig {
                     name: contig.name.clone(),
                     length: contig.length,
-                    md5: contig.md5.map(hex_of),
+                    md5: contig.md5.map(format_md5_hex),
                     offset: contig.offset,
                     line_bases: contig.line_bases,
                     line_width: contig.line_width,

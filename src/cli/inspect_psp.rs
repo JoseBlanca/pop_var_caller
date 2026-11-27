@@ -39,7 +39,7 @@ use crate::psp::block::StreamedRecord;
 use crate::psp::header::Header;
 use crate::psp::reader::PspReader;
 use crate::psp::record::RecordHead;
-use crate::regions::{BedError, ContigBounds, RegionSet};
+use crate::regions::{BedError, ContigBounds, ContigTooLong, RegionSet};
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position};
 
 /// The layout of the TSV this writes. **Changes whenever a column is added, removed, renamed or
@@ -192,7 +192,7 @@ pub fn run_inspect_psp(args: &InspectPspArgs) -> Result<(), InspectPspCliError> 
             if at.contig < wanted.contig || at.end < wanted.start {
                 continue;
             }
-            if previous.is_some_and(|before| overlaps(at, before)) {
+            if previous.is_some_and(|before| at.overlaps(before)) {
                 continue;
             }
             write_record(&mut out, &header, &streamed).map_err(InspectPspCliError::Write)?;
@@ -202,28 +202,15 @@ pub fn run_inspect_psp(args: &InspectPspArgs) -> Result<(), InspectPspCliError> 
     out.flush().map_err(InspectPspCliError::Write)
 }
 
-/// Whether two stretches of one genome share a base.
-fn overlaps(a: GenomeRegion, b: GenomeRegion) -> bool {
-    a.contig == b.contig && a.start <= b.end && b.start <= a.end
-}
-
 /// The psp's contigs as the BED reader wants them.
 fn contig_bounds(header: &Header) -> Result<Vec<ContigBounds<'_>>, InspectPspCliError> {
-    header
-        .contigs
-        .iter()
-        .map(|contig| {
-            Ok(ContigBounds {
-                name: &contig.name,
-                length: u32::try_from(contig.length).map_err(|_| {
-                    InspectPspCliError::ContigTooLong {
-                        name: contig.name.clone(),
-                        length: contig.length,
-                    }
-                })?,
-            })
-        })
-        .collect()
+    ContigBounds::of_contigs(
+        header
+            .contigs
+            .iter()
+            .map(|contig| (contig.name.as_str(), contig.length)),
+    )
+    .map_err(|ContigTooLong { name, length }| InspectPspCliError::ContigTooLong { name, length })
 }
 
 /// The `#` lines that say what the file is, then the column names.

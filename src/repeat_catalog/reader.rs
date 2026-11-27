@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::reference_info::{ContigInfo, ReferenceInfo};
+use crate::reference_info::{ContigInfo, ReferenceInfo, format_md5_hex};
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::region_typing::{RegionKind, TypedRegion};
 use crate::repeat_catalog::StrRepeatCriteria;
@@ -609,8 +609,8 @@ fn check_against_reference(
         {
             return Err(RepeatCatalogError::ContigDigestMismatch {
                 contig: stored.name.clone(),
-                found: hex(&actual_md5),
-                expected: hex(&stored_md5),
+                found: format_md5_hex(actual_md5),
+                expected: format_md5_hex(stored_md5),
             });
         }
     }
@@ -622,17 +622,13 @@ fn check_against_reference(
             detail: format!(
                 "every contig matches but the whole-reference digest does not: \
                  {} here, {} in the catalog",
-                hex(&actual),
-                hex(&header.reference_md5)
+                format_md5_hex(actual),
+                format_md5_hex(header.reference_md5)
             ),
         });
     }
 
     Ok(())
-}
-
-fn hex(digest: &[u8; 16]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -821,7 +817,7 @@ mod tests {
 
         let reference = reference();
         let text = encode_header(&header_for(&reference));
-        let damaged = text.replace(&hex(&[7u8; 16]), "not-a-digest-at-all");
+        let damaged = text.replace(&format_md5_hex([7u8; 16]), "not-a-digest-at-all");
         assert_ne!(damaged, text, "the fixture must actually damage a digest");
 
         assert!(matches!(

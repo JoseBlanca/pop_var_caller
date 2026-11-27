@@ -116,6 +116,25 @@ impl GenomeRegion {
     pub fn contains(self, pos: Position) -> bool {
         self.start <= pos && pos <= self.end
     }
+
+    /// Whether the two regions share at least one base: the same contig, and neither ends
+    /// before the other starts. Bounds included, so two regions that meet at one base overlap.
+    #[inline]
+    pub fn overlaps(self, other: GenomeRegion) -> bool {
+        self.contig == other.contig && self.start <= other.end && other.start <= self.end
+    }
+
+    /// The region `[start, end]` on contig number `contig`, 1-based and inclusive like every
+    /// region — shorthand for the struct literal, which names the contig at a glance:
+    /// `GenomeRegion::on(0, 10, 20)`.
+    #[inline]
+    pub const fn on(contig: u32, start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(contig),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
 }
 
 /// `contig 3:940-1100` — the shape an error message wants.
@@ -946,7 +965,11 @@ impl ExpectedAlternativeFrequency {
 pub struct Ploidy(u8);
 
 impl Ploidy {
-    /// The only constructor. Zero copies is rejected: it is not a genome.
+    /// Two copies — the ploidy of most samples and of most tests.
+    pub const DIPLOID: Ploidy = Ploidy(2);
+
+    /// The constructor for a number read at run time. Zero copies is rejected: it is not a
+    /// genome.
     pub fn try_new(copies: u8) -> Result<Self, DomainError> {
         if copies == 0 {
             return Err(DomainError::Ploidy(copies));
@@ -1821,6 +1844,7 @@ mod tests {
         assert_eq!(Ploidy::try_new(0), Err(DomainError::Ploidy(0)));
         assert_eq!(Ploidy::try_new(1).unwrap().get(), 1);
         assert_eq!(Ploidy::try_new(2).unwrap().get(), 2);
+        assert_eq!(Ploidy::try_new(2), Ok(Ploidy::DIPLOID));
         assert_eq!(Ploidy::try_new(4).unwrap().get(), 4);
     }
 
@@ -2086,11 +2110,7 @@ mod tests {
     }
 
     fn region(start: u64, end: u64) -> GenomeRegion {
-        GenomeRegion {
-            contig: ContigId(0),
-            start: Position(start),
-            end: Position(end),
-        }
+        GenomeRegion::on(0, start, end)
     }
 
     /// **Inclusive is the whole point**, so `len` is where the `+ 1` lives — and
@@ -2124,6 +2144,20 @@ mod tests {
         assert!(r.contains(Position(21)), "end is inside — inclusive");
         assert!(!r.contains(Position(5)));
         assert!(!r.contains(Position(22)));
+    }
+
+    /// Two regions overlap when they share a base — meeting at one base is enough, a gap of
+    /// none is not — and never across contigs, whatever their coordinates.
+    #[test]
+    fn regions_overlap_on_a_shared_base_of_one_contig_only() {
+        let r = region(10, 20);
+        assert!(r.overlaps(region(20, 30)), "meeting at the end base");
+        assert!(r.overlaps(region(1, 10)), "meeting at the start base");
+        assert!(r.overlaps(region(12, 15)), "one inside the other");
+        assert!(region(12, 15).overlaps(r), "and the other way round");
+        assert!(!r.overlaps(region(21, 30)), "abutting is not overlapping");
+        assert!(!r.overlaps(region(1, 9)));
+        assert!(!r.overlaps(GenomeRegion::on(1, 10, 20)), "another contig");
     }
 
     /// Position 0 is representable but meaningless, since 1-based coordinates

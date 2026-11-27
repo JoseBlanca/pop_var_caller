@@ -2021,8 +2021,8 @@ pub(crate) mod tests {
             format_version: FORMAT_VERSION,
             ploidy: 2,
             fitted_from: InputsFittedFrom {
-                reference_digest: super::bindings::hex_digest(
-                    &THE_REFERENCE_A_RUN_FITTED_AGAINST.0,
+                reference_digest: crate::reference_info::format_md5_hex(
+                    THE_REFERENCE_A_RUN_FITTED_AGAINST.0,
                 ),
                 samples: vec!["TS-1".into(), AWKWARD_SAMPLE.into()],
                 read_groups: vec![

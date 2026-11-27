@@ -11,7 +11,7 @@
 //! members' motifs missed the spec's own example: at GRCh38 chr1:8,007,443 the typing lists `CT`
 //! and `T` and no `AT`, so the 16-base `AT` run between them came out as fixed sequence.
 
-use crate::region_typing::segment_criteria::MinCopies;
+use crate::region_typing::segment_criteria::{MinCopies, is_compound};
 use crate::types::{MAX_MOTIF_LEN, Motif};
 
 /// One stretch of pure copies of one motif inside an STR bundle's hull: where it starts, how long
@@ -188,13 +188,9 @@ fn periodic_stretches_of(hull: &[u8], period: usize) -> impl Iterator<Item = Ref
 /// Whether `unit` is a motif counted at its own length: every base one of `A`, `C`, `G`, `T`, and
 /// not a repeat of a shorter unit — `AT` and `AAT` are, `AA` and `ATAT` are not.
 fn is_a_motif_of_its_own_period(unit: &[u8]) -> bool {
-    let period = unit.len();
     unit.iter()
         .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
-        && !(1..period).any(|shorter| {
-            period.is_multiple_of(shorter)
-                && (shorter..period).all(|at| unit[at] == unit[at - shorter])
-        })
+        && !is_compound(unit)
 }
 
 /// The parts of `[start, end)` that no run of `chosen` covers, in order.

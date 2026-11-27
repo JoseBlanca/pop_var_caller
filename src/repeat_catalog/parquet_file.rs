@@ -24,6 +24,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
+use crate::reference_info::format_md5_hex;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
 use crate::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::repeat_catalog::{
@@ -253,7 +254,10 @@ pub(crate) fn encode_header(header: &RepeatCatalogHeader) -> String {
     let mut out = String::new();
     out.push_str(&format!("format\t{HEADER_FORMAT_VERSION}\n"));
     out.push_str(&format!("tool_version\t{}\n", header.tool_version));
-    out.push_str(&format!("reference_md5\t{}\n", hex(&header.reference_md5)));
+    out.push_str(&format!(
+        "reference_md5\t{}\n",
+        format_md5_hex(header.reference_md5)
+    ));
     out.push_str(&format!(
         "scan\t{}\t{}\t{}\n",
         header.scan.match_reward, header.scan.mismatch_penalty, header.scan.min_copies
@@ -284,7 +288,7 @@ pub(crate) fn encode_header(header: &RepeatCatalogHeader) -> String {
             contig.length,
             contig
                 .md5
-                .map(|d| hex(&d))
+                .map(format_md5_hex)
                 .unwrap_or_else(|| "-".to_string()),
             contig.offset,
             contig.line_bases,
@@ -439,10 +443,6 @@ pub(crate) fn decode_header(
         scan: scan.ok_or_else(|| malformed("no scan settings"))?,
         tool_version: tool_version.ok_or_else(|| malformed("no tool version"))?,
     })
-}
-
-fn hex(digest: &[u8; 16]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn unhex(text: &str) -> Option<[u8; 16]> {

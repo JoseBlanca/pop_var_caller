@@ -7,6 +7,9 @@
 //! enumerated first (`parameter_prepass_joint_loci.md` §3.2). That enumeration is this file.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
+use xxhash_rust::xxh3::Xxh3;
 
 use crate::region_typing::segment_criteria::SsrSegment;
 
@@ -163,11 +166,42 @@ impl StratumSampler {
 /// draws; and a fixed hash rather than a random number generator, so the same reference,
 /// seed and cap keep the identical loci on every machine and in every run.
 fn hash_locus(chrom: &str, start: u64, seed: u64) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = xxhash_rust::xxh3::Xxh3::with_seed(seed);
-    chrom.hash(&mut hasher);
-    start.hash(&mut hasher);
-    hasher.finish()
+    ContigHasher::new(chrom, seed).into_hash_of(start)
+}
+
+/// **The hash both halves of the census's selection draw from**: a seeded XXH3 over a contig's
+/// name, then one position. The STR sampler above keys a locus by its start; the SNP/indel rule
+/// (`parameter_estimation::joint::loci`) keys a position. One type, so the two rest on one
+/// construction by structure rather than by two copies agreeing.
+///
+/// The name is absorbed once; [`Self::hash_position`] then costs a clone of the hasher and one
+/// `u64`, which is what a walk along one contig wants. **The value does not depend on which
+/// method produced it** — the same bytes reach the same hasher in the same order — which the
+/// `hoisting_the_contig_name_changes_no_hash` test in `loci` pins.
+#[derive(Clone)]
+pub struct ContigHasher {
+    base: Xxh3,
+}
+
+impl ContigHasher {
+    pub fn new(contig_name: &str, seed: u64) -> Self {
+        let mut base = Xxh3::with_seed(seed);
+        contig_name.hash(&mut base);
+        Self { base }
+    }
+
+    /// The hash of `position` on this contig, keeping the hasher for the next position.
+    #[inline]
+    pub fn hash_position(&self, position: u64) -> u64 {
+        self.clone().into_hash_of(position)
+    }
+
+    /// The hash of `position` on this contig, for a one-off lookup that has no next position.
+    #[inline]
+    pub fn into_hash_of(mut self, position: u64) -> u64 {
+        position.hash(&mut self.base);
+        self.base.finish()
+    }
 }
 
 #[cfg(test)]

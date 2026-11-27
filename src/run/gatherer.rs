@@ -54,7 +54,7 @@ use crate::region_typing::GenomeRegions;
 use crate::region_typing::RegionKind;
 use crate::repeat_catalog::{RepeatCatalog, StrRepeatCriteria};
 use crate::run::psp_writer_line::{PspTrailer, PspWriterLine};
-use crate::types::{Bp, ContigId, ReadGroupId};
+use crate::types::{Bp, ReadGroupId};
 
 use super::read_filter_provenance::read_filter_parameters;
 use super::walker::{WalkReference, generic_path_generators};
@@ -307,14 +307,8 @@ impl CensusPlan {
         segmentation: &Segmentation,
         reference: Box<dyn crate::ref_seq::RefSeq + Send>,
     ) -> CensusWriter {
-        let contigs = Arc::clone(&self.contigs);
-        let contig_of = move |name: &str| {
-            contigs
-                .entries
-                .iter()
-                .position(|entry| entry.name == name)
-                .map(|index| ContigId(index as u32))
-        };
+        let contig_ids = self.contigs.ids_by_name();
+        let contig_of = |name: &str| contig_ids.id_of(name);
         let mut writer = CensusWriter::new(
             sample,
             &self.loci,

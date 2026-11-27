@@ -148,17 +148,31 @@ fn mate_role_of(flag: u16) -> MateRole {
     }
 }
 
-/// A Phred mapping quality as the natural log of the probability the placement is wrong:
-/// `ln(10^(-Q/10))`.
+/// A Phred quality as the natural log of the probability it is wrong: `ln(10^(-Q/10))`, that is
+/// `-Q · ln 10 / 10`. **One table for the two qualities a read carries**: its mapping quality,
+/// read here once per read, and each base's quality, read by the pileup once per base
+/// (`locus_generation::pileup::open_record::minted_ln_read_error`).
 ///
-/// `Q = 0` means *no information about the placement*, so the probability is 1 and its log is
-/// 0 — which the general formula gives anyway, and which is written out because the caller
-/// reads it as a special case.
-fn phred_to_ln_perr(q: u8) -> f64 {
-    if q == 0 {
-        return 0.0;
-    }
-    -(q as f64) * std::f64::consts::LN_10 / 10.0
+/// `Q = 0` means *no information*, so the probability is 1 and its log is 0. The table's entry
+/// 0 is left at `+0.0` rather than computed, because the formula would give `-0.0`.
+///
+/// The table is sized at 256 so the `q as usize` index covers `u8`'s whole range and the bounds
+/// check is elided; a Phred score is `0..=93` by SAM's rule. Built at compile time, it is 2 KB
+/// that sits in the first-level cache, and the function compiles to one load. It replaced a
+/// multiply per base that took 2.94% of the walker's own time on `pileup_walker_multi_op/5000`
+/// (`ia/reviews/perf_pileup_2026-05-12.md`, H3).
+#[inline]
+pub(crate) fn phred_to_ln_perr(q: u8) -> f64 {
+    static LN_PERR_TABLE: [f64; 256] = {
+        let mut t = [0.0_f64; 256];
+        let mut q = 1usize;
+        while q < 256 {
+            t[q] = -(q as f64) * std::f64::consts::LN_10 / 10.0;
+            q += 1;
+        }
+        t
+    };
+    LN_PERR_TABLE[q as usize]
 }
 
 // ---------------------------------------------------------------------
@@ -390,6 +404,23 @@ impl PreparedRead {
 mod tests {
     use super::*;
     use crate::read::PLACEHOLDER_READ_GROUP;
+
+    /// **The compile-time table is the formula computed at run time, to the bit**, for every
+    /// byte, and Phred 0 is `+0.0` — the value the mapping quality's own branch returned before
+    /// the two qualities shared the table.
+    #[test]
+    fn the_phred_table_is_the_formula_for_every_byte() {
+        assert_eq!(phred_to_ln_perr(0).to_bits(), 0.0_f64.to_bits());
+        for q in 1..=u8::MAX {
+            let at_run_time =
+                -(f64::from(std::hint::black_box(q))) * std::f64::consts::LN_10 / 10.0;
+            assert_eq!(
+                phred_to_ln_perr(q).to_bits(),
+                at_run_time.to_bits(),
+                "Phred {q}"
+            );
+        }
+    }
 
     /// A read whose three length representations agree: 4 matched bases, 4
     /// qualities, a CIGAR consuming 4.

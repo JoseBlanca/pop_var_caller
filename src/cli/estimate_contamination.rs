@@ -79,7 +79,7 @@ use crate::reference_info::{
     ReferenceInfo, ReferenceInfoError, ReferenceSource, read_reference_info_observing,
 };
 use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
-use crate::regions::{BedError, ContigBounds};
+use crate::regions::{BedError, ContigBounds, ContigTooLong};
 use crate::repeat_catalog::{
     ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
@@ -759,14 +759,8 @@ fn walk_one_sample(
         GeneratorSlot::Unfilled(UnhandledReason::OutOfScope),
     );
 
-    let contig_of = |name: &str| {
-        prepared
-            .contigs
-            .entries
-            .iter()
-            .position(|entry| entry.name == name)
-            .map(|i| ContigId(i as u32))
-    };
+    let contig_ids = prepared.contigs.ids_by_name();
+    let contig_of = |name: &str| contig_ids.id_of(name);
     // **This sample's read groups and who each one is.** The names travel into the census
     // because a cohort of censuses is merged on them rather than on the numbers, which every
     // census mints from zero.
@@ -942,21 +936,18 @@ fn assemble(
 fn contig_bounds(
     contigs: &ContigList,
 ) -> Result<Vec<ContigBounds<'_>>, EstimateContaminationCliError> {
-    contigs
-        .entries
-        .iter()
-        .map(|entry| {
-            u32::try_from(entry.length)
-                .map(|length| ContigBounds {
-                    name: &entry.name,
-                    length,
-                })
-                .map_err(|_| EstimateContaminationCliError::ContigTooLong {
-                    name: entry.name.clone(),
-                    length: entry.length,
-                })
-        })
-        .collect()
+    ContigBounds::of_contigs(
+        contigs
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.length)),
+    )
+    .map_err(
+        |ContigTooLong { name, length }| EstimateContaminationCliError::ContigTooLong {
+            name,
+            length,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------

@@ -954,14 +954,8 @@ pub fn open_the_censuses(
 
 /// **The identifier the records use for a contig's name**, from the run's contig list.
 pub fn contig_id_of(plan: &CensusPlan) -> impl Fn(&str) -> Option<ContigId> + use<> {
-    let contigs = std::sync::Arc::clone(&plan.contigs);
-    move |name: &str| {
-        contigs
-            .entries
-            .iter()
-            .position(|entry| entry.name == name)
-            .map(|index| ContigId(index as u32))
-    }
+    let contig_ids = plan.contigs.ids_by_name();
+    move |name: &str| contig_ids.id_of(name)
 }
 
 /// **The command that rebuilds this run's stale censuses, in the words it was given** — spec

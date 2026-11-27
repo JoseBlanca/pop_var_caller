@@ -807,9 +807,7 @@ fn contig_line(contig: &HeaderContig) -> String {
     let mut line = format!("##contig=<ID={},length={}", contig.name, contig.length);
     if let Some(digest) = contig.md5 {
         line.push_str(",md5=");
-        for byte in digest {
-            line.push_str(&format!("{byte:02x}"));
-        }
+        line.push_str(&crate::reference_info::format_md5_hex(digest));
     }
     line.push('>');
     line

@@ -23,7 +23,11 @@
 
 pub mod fetcher;
 
+use std::collections::HashMap;
+
 pub use fetcher::ChromRefFetchError;
+
+use crate::types::ContigId;
 
 // ---------------------------------------------------------------------
 // ContigList
@@ -95,6 +99,43 @@ impl ContigList {
         }
         Ok(())
     }
+
+    /// A lookup from each contig's name to its [`ContigId`] — its position in this list —
+    /// built once, for a caller that resolves a name per locus.
+    pub fn ids_by_name(&self) -> ContigIdsByName {
+        ContigIdsByName::of(self)
+    }
+}
+
+/// **Contig name → [`ContigId`], built once from a [`ContigList`].** The id is the contig's
+/// position in the list, the number every record carries.
+///
+/// A map rather than a scan because the census asks once per STR locus it keeps, in every
+/// sample: on a scaffold-level assembly of 30,000 contigs a scan averages 15,000 string
+/// comparisons a lookup, about 1.5 billion a sample for 100,000 loci. The map costs about a
+/// megabyte at that contig count, and nothing on a reference of a few chromosomes.
+///
+/// A name the list holds twice resolves to its first position, as a scan from the front would.
+#[derive(Debug, Clone, Default)]
+pub struct ContigIdsByName {
+    by_name: HashMap<String, ContigId>,
+}
+
+impl ContigIdsByName {
+    fn of(contigs: &ContigList) -> Self {
+        let mut by_name = HashMap::with_capacity(contigs.entries.len());
+        for (index, entry) in contigs.entries.iter().enumerate() {
+            by_name
+                .entry(entry.name.clone())
+                .or_insert(ContigId(index as u32));
+        }
+        Self { by_name }
+    }
+
+    /// The id of the contig named `name`, or `None` when the list has no such contig.
+    pub fn id_of(&self, name: &str) -> Option<ContigId> {
+        self.by_name.get(name).copied()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -143,5 +184,33 @@ impl<T: MultiChromRefFetcher + ?Sized> MultiChromRefFetcher for &T {
         length: u32,
     ) -> Result<Vec<u8>, ChromRefFetchError> {
         (**self).fetch(chrom_id, start_1based, length)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str) -> ContigEntry {
+        ContigEntry {
+            name: name.to_owned(),
+            length: 100,
+            md5: None,
+        }
+    }
+
+    /// The id is the position in the list; an absent name has none; a name listed twice
+    /// resolves to its first position, as a scan from the front of the list would.
+    #[test]
+    fn a_name_resolves_to_its_first_position_in_the_list() {
+        let contigs = ContigList {
+            entries: vec![entry("chr1"), entry("chr2"), entry("chr1"), entry("chr3")],
+        };
+        let ids = contigs.ids_by_name();
+        assert_eq!(ids.id_of("chr1"), Some(ContigId(0)));
+        assert_eq!(ids.id_of("chr2"), Some(ContigId(1)));
+        assert_eq!(ids.id_of("chr3"), Some(ContigId(3)));
+        assert_eq!(ids.id_of("chrUn"), None);
+        assert_eq!(ids.id_of(""), None);
     }
 }

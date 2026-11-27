@@ -1908,8 +1908,7 @@ pub fn where_the_numbers_came_from(parameters: Option<&Path>) -> String {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     match std::fs::read(path) {
         Ok(bytes) => {
-            let digest = Md5::digest(&bytes);
-            let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            let hex = crate::reference_info::format_md5_hex(Md5::digest(&bytes).into());
             format!("{name} (md5 {hex})")
         }
         Err(_) => name.into_owned(),

@@ -423,6 +423,10 @@ const MIN_SAMPLES_WITH_DATA: usize = 8;
 /// …and only if the panel-wide frequency is inside this band.
 const MIN_FREQUENCY: f64 = 0.02;
 
+/// The fewest such positions a fit is attempted on; below it the sample is reported as
+/// [`NotIdentifiedReason::TooFewMarkers`].
+const MIN_MARKERS: usize = 100;
+
 /// The fraction of one read group's reads that came from another individual, or the reason
 /// there is no number.
 ///
@@ -631,7 +635,7 @@ pub(super) fn fit_contamination_over(
         units.len(),
         crate::parameter_estimation::progress::size(held as u64),
     ));
-    if markers.len() < 100 {
+    if markers.len() < MIN_MARKERS {
         return refused(NotIdentifiedReason::TooFewMarkers);
     }
 
