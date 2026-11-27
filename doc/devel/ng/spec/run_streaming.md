@@ -680,8 +680,15 @@ gatherer is what a run holds — never two.
 
 **Constructed from:** every sample's psp, the segmentation's ingredients, and the parameters.
 Construction opens every file, reads every header, and runs the checks of §6.2 before any block
-is decoded; the analysed regions come from the headers, not from a flag — the files know what
-ground they cover. **Yields:** variants, in genome order.
+is decoded. The files know what ground they cover, so the analysed regions come from the
+headers; **`--regions` may choose a part of that ground and nothing outside it** (revision
+2026-11-27, `impl_plan/call_from_psps_regions.md`). A BED reaching outside it is refused before
+the reference is read, naming each piece outside; a BED inside it is called as the slice of the
+whole-ground run its regions own — a locus belongs to the run whose regions hold its first base,
+so per-chromosome jobs joined with `bcftools concat` write each locus once. Each file is walked
+from the block that can hold the first wanted record, and records ending before the merge's
+position are dropped unread. The hidden-duplication filter and refinement are fitted per run, so a
+per-chromosome job fits them on its chromosome. **Yields:** variants, in genome order.
 
 **How it parallelises:** the merge on one thread, its cohort loci to a pool of callers (§3.5).
 There is **one source per sample for the whole run**, not one per sample per in-flight unit: a psp
@@ -1177,10 +1184,12 @@ measured yet (§11, questions 2 and 7).
    generic observations, multiplied by the cohort. *Leaning:* do not store it; re-fetch when a
    block is decoded, since the calling stage holds the reference anyway. **Settled by:** measuring
    the file-size difference on one sample and the re-fetch's cost in calling wall time.
-5. **Refuse a cohort analysed over different segments, or call the shared ground?** — OPEN.
-   Refusal is what §6.2 specifies and the safe first behaviour, but the case is legitimate — a
-   panel run and a whole-genome run in one cohort, or calling one chromosome from whole-genome
-   psps. *Leaning:* call the intersection and emit no-call — never homozygous reference — for a
+5. **Refuse a cohort analysed over different segments, or call the shared ground?** — OPEN for
+   a cohort whose files cover different ground; **SETTLED for calling one chromosome (or any
+   part) from whole-genome psps** (2026-11-27): `call-from-psps --regions` calls any part of the
+   ground every file covers, and refuses anything outside it (§5.3). Refusal is still what §6.2
+   specifies for files that disagree with each other, and the remaining case is a panel run and a
+   whole-genome run in one cohort. *Leaning:* call the intersection and emit no-call — never homozygous reference — for a
    sample over ground it did not analyse, the rule the census already applies per position; that
    needs per-sample analysed regions carried into the emission step, so it is not free.
    **Settled by:** deciding when the emission step is specified; until then, refuse and name both

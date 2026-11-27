@@ -153,7 +153,7 @@ by the same sentence everywhere. These are the shared ones.
 | `--log` | all user subcommands | `pvc_<output name>.log` beside the output | Where the log goes | new (§7.3) |
 | `--tmp-dir` | subcommands that write scratch files | the output's directory | Where scratch files go | new (§7.5) |
 | `--quiet` | all user subcommands | off | Terminal shows warnings and errors only | new (§7.1) |
-| `--regions` | direct mode, `generate-psps` | whole genome | BED of the ground to call or store | keep |
+| `--regions` | direct mode, `generate-psps`, `call-from-psps` | whole genome (`call-from-psps`: all the psps cover) | BED of the ground to call or store; in `call-from-psps`, a part of what the psps cover, anything outside refused | keep |
 | `--threads` | direct mode, `call-from-psps`, `repeat-catalog` | 0 = all cores; **1** in `repeat-catalog` | Parallelism; output never depends on it | change (§6) |
 | `--force` | `generate-psps`, `estimate-parameters`, `repeat-catalog` | off | Overwrite an existing output | change (§6) |
 | `--ploidy` | calling commands, `estimate-parameters` | 2 | Copies of each chromosome | keep |
@@ -340,8 +340,9 @@ fitted ones.
 
 `call-from-alignments` and `call-from-psps` could become one `pvc call` that takes either
 `--alignment` or `--psp`. The calling options are the same in both. The ones that differ are
-`--regions`, `--build-index-if-missing` and the repeat settings (alignments only) and
-`--psp-prefetch-bytes` (psps only).
+`--build-index-if-missing` and the repeat settings (alignments only) and
+`--psp-prefetch-bytes` (psps only). `--regions` is on both, with one difference: over psps it may
+only name a part of what the psps cover (2026-11-27).
 
 **Ruled (owner, 2026-10-16): two.** Each help page then lists only options that apply, and the
 documentation can describe each mode on its own page. One subcommand would save a word of typing

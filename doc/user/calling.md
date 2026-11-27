@@ -84,8 +84,9 @@ pvc call-from-psps --reference genome.fa --psp psps/ \
     --parameters cohort.parameters.toml --output calls.vcf.gz
 ```
 
-The regions called, and what counts as a repeat, come from the psp files. `call-from-psps` has
-no `--regions`; to call less of the genome, write the psps over less.
+What counts as a repeat comes from the psp files, and so do the regions called, unless
+`--regions` names part of them: for example one chromosome, to call each chromosome as its own job
+([Splitting a run by region](#splitting-a-run-by-region)).
 
 `--defaults` in place of `--parameters` calls the psps with the built-in values, as in direct
 mode. It is the way to call psps at a ploidy other than 2, which `estimate-parameters` does not
@@ -154,8 +155,14 @@ bcftools index calls.vcf.gz
 - **Cut between chromosomes where you can.** A cut inside a chromosome is an edge for both
   commands: a repeat that crosses it is called by both, so it is written twice, and an indel that
   crosses it in non-repeat sequence is called by neither.
-- **In psp mode**, `call-from-psps` has no `--regions`, so each region needs its own psps, written
-  with `generate-psps --regions`. [Recipes](recipes.md#a-large-cohort-on-a-cluster) shows how.
+- **In psp mode**, `call-from-psps --regions` calls part of what the psps cover, so one psp per
+  sample, written over the whole genome, serves every command.
+  [Recipes](recipes.md#a-large-cohort-on-a-cluster) shows how. A region the psps do not cover
+  is refused before anything is called, and the message lists the regions outside.
+- **A cut inside a chromosome works differently in psp mode.** A locus is written by the command
+  whose regions hold its first base, so a repeat that crosses the cut is written once, by the
+  command before it, and nothing is lost at the cut. A phase set that crosses the cut is split in
+  two. Cutting between chromosomes avoids both.
 
 **Splitting can change some calls.** The genotypes are called locus by locus, so a split does
 not change them, but two later steps look beyond the locus, and a split run sees only its own

@@ -88,6 +88,7 @@ are off by default, and they cannot be given together. A psp records the choice,
 
 | Option | Default | Change it when |
 |---|---|---|
+| `--regions` | everything the psps cover | you want to call part of what the psps cover, for example one chromosome per job on a cluster. A region the psps do not cover is refused. See [Splitting a run by region](calling.md#splitting-a-run-by-region). |
 | `--psp-prefetch-bytes` | 8 GiB | the psps are on a slow disk. It is how much psp data is read ahead into the operating system's file cache; on a spinning disk with thousands of psps, more is faster. `0` turns it off. It changes no call. |
 
 ## Finishing a stopped run (`resume-calling`)

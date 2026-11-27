@@ -1293,3 +1293,44 @@ fn a_run_that_called_satellites_says_how_many_bases_and_one_that_did_not_is_sile
         "{told}"
     );
 }
+
+/// **A run over part of what its psps cover names both**: the regions it called, with the BED it
+/// was given, and what the psps cover — so a per-chromosome job's report says which chromosome it
+/// was and that the files held more.
+#[test]
+fn a_run_over_part_of_its_psps_names_the_regions_and_what_the_psps_cover() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let stored = StoredCohortTallies {
+        window_coverage_histograms: Vec::new(),
+        per_sample: vec![a_stored_sample("zeta", 100, 300, Some(20))],
+    };
+    let contigs = contigs();
+    let ground = ground_of(300);
+    let parameters = a_defaults_runs_parameters(&read_groups);
+    let calling = CohortCallingTallies::default();
+
+    let rendered = RunReport::of_a_stored_cohort(
+        &calling,
+        &stored,
+        &contigs,
+        &read_groups,
+        &parameters,
+        &ground,
+        shipped_bounds(),
+    )
+    .with_regions_asked_for(Some(
+        "the regions of chr1.bed; the psps cover chr1:1-1000 (1.0 kb)".to_owned(),
+    ))
+    .lines()
+    .join("\n");
+
+    assert!(
+        rendered
+            .contains("— 300 bases, the regions of chr1.bed; the psps cover chr1:1-1000 (1.0 kb)"),
+        "and got:\n{rendered}",
+    );
+    assert!(
+        !rendered.contains("as every file's header records them"),
+        "and got:\n{rendered}",
+    );
+}
