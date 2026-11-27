@@ -12,6 +12,18 @@ The tools used in the comparison were:
 - freebayes 1.3.6;
 - DeepVariant 1.10.0, on the human sample only.
 
+## Summary
+
+- **Tomato, 1 to 100 accessions at about 3 reads a position, over 91 Mb of chromosome 1.** With
+  100 samples pvc takes 1 h 25 min to 3 h 5 min, depending on how it is run, GATK 9 h 50 min, and
+  freebayes had not finished after 41 hours. pvc uses 10 to 23 GB, GATK 75 GB. With one sample
+  freebayes, at 1 min 42 s, is a little faster than pvc's direct mode in one command, 1 min 53 s.
+- **The whole tomato collection, 2,176 genomes at about 3 reads a position.** pvc called it in
+  psp mode in 9 days on one 96-core server, using at most 33 GB, with imputation off.
+- **One human genome, HG002, 5× to 50×.** freebayes is 5 to 7 times as fast as pvc's direct
+  mode: 33 minutes against 2 h 56 min at 30×. DeepVariant is faster than pvc from 30× up. pvc
+  uses the least memory, 0.9 to 2.3 GB, against 48 to 50 GB for DeepVariant.
+
 pvc was run in both of its modes (see [Calling](calling.md)):
 
 - **direct mode**: `call-from-alignments`, one command from the alignments to the VCF, with the
@@ -38,7 +50,7 @@ Each tool was given the 30 cores and run as its documentation recommends:
   VCFs joined.
 - **DeepVariant**: `--num_shards 30`.
 
-The numbers are reported are:
+The numbers reported are:
 
 - **wall time**: the time from start to finish;
 - **memory**: the largest total memory of the processes running at once;
@@ -49,7 +61,7 @@ The input files were read once before each run, so the disk cache was used.
 
 ## A tomato cohort, 1 to 100 samples
 
-Tomato accessions over 91 Mb of chromosome 1 (SL4.0).
+Tomato accessions sequenced at about 3 reads a position, over 91 Mb of chromosome 1 (SL4.0).
 
 ![Wall time against the number of tomato samples, from 1 to 100, for pvc in its three ways of running, GATK and freebayes](figures/performance_tomato_samples.svg)
 
@@ -96,8 +108,9 @@ With 100 samples GATK uses about 6 to 12 times as much CPU time as pvc.
 
 ### pvc's three steps in psp mode
 
-pvc called the whole tomato collection, 2,176 genomes of 783 Mb each, in psp mode on one server
-(Intel Xeon 6527P, 96 cores):
+pvc called the whole tomato collection, 2,176 genomes of 783 Mb each at about 3 reads a
+position, in psp mode on one server (Intel Xeon 6527P, 96 cores), with imputation off
+(`--refine-genotypes off`, the default):
 
 | step | wall time | run as |
 |---|---|---|
@@ -135,7 +148,7 @@ Wall time / memory:
 | 30× | 2 h 56 min / 1.3 GB | 3 h 49 min / 1.3 GB | 11 h 29 min / 3.0 GB | 33 min / 15 GB | 3 h 16 min / 49 GB | 1 min 56 s |
 | 50× | 5 h 46 min / 1.8 GB | 6 h 42 min / 2.3 GB | 16 h 3 min / 3.0 GB | 50 min / 18 GB | 3 h 50 min / 50 GB | 3 min 3 s |
 
-- **freebayes is the fastest on one sample, about 6 to 7 times as fast as pvc in direct mode.** It
+- **freebayes is the fastest on one sample, about 5 to 7 times as fast as pvc in direct mode.** It
   keeps about 24 cores busy, where pvc's direct mode keeps 1.3.
 - **pvc uses the least memory, 0.9 to 2.3 GB,** against 3 GB for GATK, 15 to 18 GB for freebayes
   and 48 to 50 GB for DeepVariant.

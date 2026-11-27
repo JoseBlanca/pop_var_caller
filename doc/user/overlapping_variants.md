@@ -12,14 +12,14 @@ Let's imagine a reference `ATT` at positions 1 to 3 of `chrom1`, and three indiv
 | ind2 | `ACT` / `ACT`: both copies carry a SNP, `T` to `C` at position 2 |
 | ind3 | `A` / `ACT`: one copy of each |
 
-Written **as one record**, whose alleles are the whole haplotypes, like freebayes and pvc do:
+Written **as one record**, whose alleles are the whole haplotypes, as freebayes and pvc do:
 
 ```
 #CHROM  POS  REF  ALT     ind1  ind2  ind3
 chrom1  1    ATT  A,ACT   1/1   2/2   1/2
 ```
 
-Written **as separate records**, one per event, each at its own position, like GATK
+Written **as separate records**, one per event, each at its own position, as GATK's
 HaplotypeCaller does. The SNP at position 2 lies inside the deletion, so its record needs the `*`
 allele, which means "this position is deleted on this copy by a deletion that starts upstream":
 
@@ -29,7 +29,7 @@ chrom1  1    ATT  A     1/1   0/0   0/1
 chrom1  2    T    C,*   2/2   1/1   1/2
 ```
 
-Written **as separate records, without `*`**, like DeepVariant does. It calls each sample on its
+Written **as separate records, without `*`**, as DeepVariant does. It calls each sample on its
 own, and its cohorts are usually merged with GLnexus. GLnexus writes a copy that
 carries the deletion as missing, `.`, in the SNP's record, and gives the reason in the FORMAT
 field `RNC` as `-`, "unrepresentable overlapping deletion":
