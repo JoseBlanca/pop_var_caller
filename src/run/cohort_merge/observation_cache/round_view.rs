@@ -127,7 +127,10 @@ impl<E> RoundView<E> {
         )
     }
 
-    /// [`ObservationCache::window_starts_into`], over the sealed round.
+    /// Where each sample's window over `span` starts in its held list, over the sealed round —
+    /// the offset a region's members are built at when the round was evicted once, not per
+    /// region (the cache's own `window_starts_into`, compiled for tests only, does the same over
+    /// the cache).
     pub(in crate::run::cohort_merge) fn window_starts_into(
         &self,
         span: GenomeRegion,

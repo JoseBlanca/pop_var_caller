@@ -24,10 +24,10 @@ pub(super) struct CalledRegion<T> {
 /// reported as refused. **"Earlier" means handed over first**, which under the drivers'
 /// contract is the same as starting first.
 ///
-/// **The rule is a safety net: nothing a healthy run produces reaches the drop.** Under
-/// [`build_region`](super::build::build_region)'s input contract two loci owned by different
-/// regions cannot overlap. A locus's *members* are the per-sample observations it was closed
-/// over; a builder's *window* is the observations it is handed for its own region. The
+/// **The rule is a safety net: nothing a healthy run produces reaches the drop.** Under the
+/// builders' input contract (stated on the test-only `build::build_region`) two loci owned by
+/// different regions cannot overlap. A locus's *members* are the per-sample observations it was
+/// closed over; a builder's *window* is the observations it is handed for its own region. The
 /// argument:
 ///
 /// - a builder is handed every observation overlapping its own ground, including those that

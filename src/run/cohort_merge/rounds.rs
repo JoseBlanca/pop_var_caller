@@ -3,15 +3,14 @@
 //!
 //! **No calling run uses this driver now; it is kept as the stream's reference and compiled for
 //! tests only.** Calling from stored files moved to [`super::stream`] on 2026-11-13, and calling
-//! from alignments merges one region at a time. The stream's tests compare what it hands over, and the error it ends with,
-//! against this driver's, which is simpler to check by reading: a round is read, then built,
-//! then handed over, with nothing overlapping. Both hand their regions over through [`Frontier`].
+//! from alignments merges one region at a time. The stream's tests compare what it hands over,
+//! and the error it ends with, against this driver's, which is simpler to check by reading: a
+//! round is read, then built, then handed over, with nothing overlapping. Both hand their regions
+//! over through [`Frontier`].
 //!
-//! This is `merge_cohort_in_parallel`'s round
-//! structure with one difference, and the difference is what the arrangement is for: the
-//! worker does not stop at a [`CohortObservation`]. It hands
-//! each locus straight to a caller-supplied closure while the observation is still on the
-//! worker's own stack, so the round never materialises a `Vec<CohortObservation>` and the
+//! **Each worker builds a region and calls it**: it does not stop at a [`CohortObservation`],
+//! but hands each locus straight to a caller-supplied closure while the observation is still on
+//! the worker's own stack, so the round never materialises a `Vec<CohortObservation>` and the
 //! **genotyping runs on the pool beside the body decode**. In a calling run the genotyping is
 //! the larger half of the two, and it was the whole reason the calling thread stayed busy
 //! while the pool slept.
@@ -20,12 +19,12 @@
 //! logical cores: the calling pass falls from 74.8 s to 13.5 s and the whole command from
 //! 83.5 s to 23.0 s, with the VCF body identical — 199,641 records.
 //!
-//! **What it costs is the ground a round holds**, which is
-//! `regions_in_flight × cohort_locus_builder_regions_len` bases where the streaming driver
-//! holds one region's worth. So the two knobs are one lever and a caller that wants today's
-//! memory divides today's width by the count it asks for
-//! (`crate::cli::calling_run::round_shape_for`). Sized that way, peak resident rises 4% to
-//! 13% across cohorts of 1, 4, 8, 16, 32 and 63 accessions.
+//! **What it costs is the ground a round holds**, which is `regions_in_flight ×
+//! cohort_locus_builder_regions_len` bases where the one-region-at-a-time drivers in
+//! [`serial`](super::serial) hold one region's worth. So the two knobs are one lever and a caller
+//! that wants today's memory divides today's width by the count it asks for
+//! (`crate::cli::calling_run::round_shape_for`). Sized that way, peak resident rises 4% to 13%
+//! across cohorts of 1, 4, 8, 16, 32 and 63 accessions.
 //!
 //! **Ordering.** `regions_in_round.par_iter()` is indexed, so `collect` gives the round's
 //! outcomes in region order whatever order the workers finished in; rounds are taken in genome

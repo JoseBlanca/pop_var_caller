@@ -1,31 +1,34 @@
-//! The cohort merge — k samples' locus observations into cohort observations, in
-//! parallel.
+//! The cohort merge — k samples' locus observations into cohort observations.
 //!
-//! Every sample's observations arrive in coordinate order. This module groups the
-//! positions the cohort varied at into **cohort loci**, judges each one, and
-//! assembles the survivors into the unit the caller consumes. It is the stage that
-//! ran on a single thread in production and was the wall floor there
-//! (`cohort_integration.rs`); here the genome is dealt out in short regions and the
-//! builders working them share nothing but their results.
+//! Every sample's observations arrive in coordinate order. This module groups the positions the
+//! cohort varied at into **cohort loci**, judges each one, and assembles the survivors into the
+//! unit the caller consumes. The genome is dealt out in short building regions, and the builders
+//! working them share nothing but their results, so several can run at once.
 //!
 //! Design: `doc/devel/ng/spec/cohort_merge.md` (what and why),
 //! `doc/devel/ng/arch/cohort_merge.md` (types and contracts).
 //!
-//! **What has landed:** this file's five parameters; [`close`]'s walk and its two
-//! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
-//! span, unified into one allele table, with each covering sample's support against it;
-//! [`observation_cache`] — the window one builder is handed — and the division of the
-//! analysed ground into the regions single builders own; the frontier rule that resolves the
-//! overlaps between neighbouring builders (`frontier.rs`);
-//! [`serial`]'s **two** single-threaded drivers — the oracle every later milestone must
-//! reproduce and the same merge read through the cache, byte for byte — plus, since the run
-//! driver's E1, a third whose only departure is that each cover sweeps the samples
-//! concurrently; and `parallel`'s
-//! round-by-round arrangement of the builders, whose output is those two byte for byte at any
-//! number of regions in flight and any region width.
+//! **The parts:**
 //!
-//! **Still to come:** the caller objects that will own these parameters and this cache, and
-//! the run summary that reports what the merge refused (spec §13).
+//! - this file: the merge's parameters ([`MaxCohortLocusSpan`],
+//!   [`CohortLocusBuilderRegionsLen`], [`CohortLocusBuilderRegionsInFlight`]) and the check every
+//!   driver runs on the analysed regions it is given;
+//! - [`close`]: the walk that groups the samples' observations into loci, and its two verdicts;
+//! - [`build`]: the assembly of a surviving locus — every member projected onto the locus span,
+//!   unified into one allele table, with each covering sample's support against it;
+//! - [`observation_cache`]: the window of observations one builder is handed, and the division
+//!   of the analysed ground into building regions;
+//! - `frontier`: the rule that settles the loci two neighbouring builders both see;
+//! - [`serial`]: the drivers that build one region at a time — the oracle (compiled for tests
+//!   only), the same merge read through the cache, and the form a calling run drives with one
+//!   region in flight, whose only departure is that each cover sweeps the samples concurrently;
+//! - [`stream`]: the driver a psp-mode run takes with more than one region in flight, which
+//!   builds and calls regions on the pool while later rounds' ground is read;
+//! - `rounds`: the round driver, compiled for tests only as the stream's reference;
+//! - [`recorded_windows`]: an opt-in file of the windows a run read at each written record.
+//!
+//! The drivers are tested to give one answer byte for byte, whatever the region width and however
+//! many regions are in flight.
 //!
 //! **Which submodules are `pub`.** [`close`] and [`observation_cache`] are, because an
 //! integration test (`tests/ng_calling_loop_calls_genotypes.rs`) builds loci by hand from their
@@ -52,9 +55,9 @@ pub(crate) mod stream;
 /// there is exactly what `render`'s destructuring exists to prevent — a field the outcome gains
 /// would have to be answered for twice, and would silently drop out of one.
 ///
-/// **One home, because the copies had started to multiply.** `region` and `region_on` are
-/// written out in all four of this module's files, and D2's review found `SourceFailed`
-/// becoming the fifth such copy. `frontier` and [`serial`] read them from here; [`build`] and
+/// **One home, because the copies had started to multiply.** `region` and `region_on` were
+/// written out in four of this module's files, and `SourceFailed` was becoming the fifth such
+/// copy. `frontier` and [`serial`] read them from here; [`build`] and
 /// [`close`] still carry their own and are the next two to fold in.
 #[cfg(test)]
 pub(super) mod fixtures {
@@ -624,10 +627,11 @@ pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 500;
 /// flight and this module's default width. One region in flight gives the serial driver's
 /// memory and its answer.
 ///
-/// **A command-line parameter, and the only one of this module's four with no constant
-/// default**: what it should be depends on the machine's cores and on how much memory the
-/// cohort's width leaves, neither of which is knowable where the other three defaults are
-/// written. A run given no value takes `one_per_worker_thread`.
+/// **Not a command-line parameter, and with no constant default**: what it should be depends on
+/// the machine's cores and on how much memory the cohort's width leaves, neither of which is
+/// knowable where the other defaults are written. A calling run derives it, with the region
+/// width, from the ground it may hold, the cohort size and the thread count
+/// ([`round_shape_for`](crate::cli::calling_run::round_shape_for)).
 ///
 /// **Owed:** the resolved value belongs in the run's output beside the other three, because
 /// two runs differing only in it differ in memory and in nothing a reader of the output can
@@ -658,21 +662,20 @@ impl CohortLocusBuilderRegionsInFlight {
     }
 }
 
-/// Refuse the analysed regions no driver in this module can merge — see
-/// [`merge_cohort_serially`](serial::merge_cohort_serially), whose doc says what a duplicate
-/// would cost.
+/// Refuse the analysed regions no driver in this module can merge — see the test-only oracle
+/// `serial::merge_cohort_serially`, whose doc says what a duplicate would cost.
 ///
-/// **Two rules, and the second was found by D2's review.** A region must not overlap or precede
-/// the one before it, or the loci in the ground they share are built — and carried — twice. And
-/// a region's own ends must be the right way round: the division orders them
-/// ([`building_regions_of`](observation_cache::building_regions_of)) and
-/// [`build_region`](build::build_region) does not, so on `50-1` the cached driver builds the
-/// whole of 1–50 and the oracle builds nothing. That is the byte-identity this module claims,
-/// broken by an input nothing was checking.
+/// **Two rules.** A region must not overlap or precede the one before it, or the loci in the
+/// ground they share are built — and carried — twice. And a region's own ends must be the right
+/// way round: the division orders them
+/// ([`building_regions_of`](observation_cache::building_regions_of)) and the oracle's
+/// `build::build_region` does not, so on `50-1` the cached driver builds the whole of 1–50 and
+/// the oracle builds nothing. That is the byte-identity this module claims, broken by an input
+/// nothing was checking.
 ///
-/// **Here rather than in one driver's file, because it is the contract all three share.** Every
-/// driver opens by calling it, so a reader of any of them finds the rule where the module's
-/// other shared terms are, not in the file named for a different arrangement.
+/// **Here rather than in one driver's file, because it is the contract every driver shares.**
+/// Every driver opens by calling it, so a reader of any of them finds the rule where the
+/// module's other shared terms are, not in the file named for a different arrangement.
 pub(super) fn refuse_malformed_analysed_regions(analysed: &[GenomeRegion]) {
     for region in analysed {
         assert!(

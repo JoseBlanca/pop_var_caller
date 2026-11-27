@@ -1,4 +1,5 @@
-//! Two serial drivers of the same merge: the oracle, and the same merge read through the cache.
+//! The drivers that build one region at a time: the oracle, the same merge read through the
+//! cache, and the form a calling run drives, whose covers sweep the samples concurrently.
 //!
 //! **Vocabulary, because the whole file turns on it.** An *analysed region* is the run's own
 //! interval — a contig, a `--regions` interval — and they are few and long. A *building region*
@@ -7,17 +8,18 @@
 //!
 //! `merge_cohort_serially` is **the oracle**: the simplest thing that produces the right
 //! answer — one builder, no cache, no frontier, no threads, holding every sample's
-//! observations and walking the analysed regions in order. Everything the later milestones add
-//! is about speed and memory, so anything that changes this output is a defect rather than a
-//! trade (`doc/devel/ng/spec/cohort_merge.md` §15; the plan's C2).
+//! observations and walking the analysed regions in order. Everything the other drivers add is
+//! about speed and memory, so anything that changes this output is a defect rather than a trade
+//! (`doc/devel/ng/spec/cohort_merge.md` §15). It is compiled for tests only.
 //!
 //! `merge_cohort_through_cache` does the same job through **one forward reader per sample**,
-//! and its whole claim is that its output is the oracle's byte for byte (the plan's D2). It is
-//! still one builder on one thread; what changes is the *view* — a window over each builder's
-//! own ground instead of the whole stretch, which is what makes short building regions
-//! affordable. The builders run at the same time as each other in `parallel`,
-//! over this same cache; the loci that differ once builders see different windows are what the
-//! frontier's overlap resolution settles (spec §6.1).
+//! and its whole claim is that its output is the oracle's byte for byte. It is still one
+//! builder on one thread; what changes is the *view* — a window over each builder's own ground
+//! instead of the whole stretch, which is what makes short building regions affordable. Its
+//! handing-over form, with each cover's samples drawn forward on the pool, is what a calling run
+//! with one region in flight drives. Builders that run at the same time as each other are
+//! [`stream`](super::stream)'s; the loci that differ once builders see different windows are
+//! what the frontier's overlap resolution settles (spec §6.1).
 
 use super::build::{LocusReads, build_region_handing_over_windowed};
 #[cfg(test)]
@@ -62,10 +64,9 @@ use crate::types::{GenomePosition, GenomeRegion};
 /// you.** Every call closes the loci from the beginning of the observations it is given and
 /// discards those before its own ground ([`build_region`]), so the same 20,000 observations
 /// cost 5.4 ms in one region and 184 ms in a thousand — 34 times the work for the same
-/// answer, measured in a release build by the C2 review. **Hand it the run's own analysed
-/// regions**, which are few and long; short building regions are what the observation cache
-/// exists to make affordable (milestone D), and that is where the parallel arrangement will
-/// get them.
+/// answer, measured in a release build. **Hand it the run's own analysed regions**, which are
+/// few and long; short building regions are what the observation cache exists to make
+/// affordable.
 pub fn merge_cohort_serially(
     analysed: &[GenomeRegion],
     observations_per_sample: &[&[SampleLocusObservations]],
@@ -95,8 +96,8 @@ pub fn merge_cohort_serially(
 /// Merge the cohort over `analysed`, reading each sample through the observation cache and
 /// building in regions of `cohort_locus_builder_regions_len` bases.
 ///
-/// **The output is [`merge_cohort_serially`]'s, and that is the whole claim of this step**
-/// (the plan's D2). The oracle holds every sample's observations at once and hands the whole
+/// **The output is [`merge_cohort_serially`]'s, and that is the whole claim of this driver.**
+/// The oracle holds every sample's observations at once and hands the whole
 /// stretch to every builder; this holds one forward reader per sample and hands each builder a
 /// window over its own ground. Nothing else differs, and nothing else may: the cache exists to
 /// make the merge affordable, not to change what it answers
@@ -104,23 +105,22 @@ pub fn merge_cohort_serially(
 ///
 /// **What it buys is that the analysed ground can now be divided finely.** Handing a builder
 /// the whole stretch costs it every locus that opened before its own ground, closed in full and
-/// then discarded — about 3.3 µs per prefix base at 63 samples (the C1 review), which is why
-/// the oracle must be given the run's own long analysed regions and this need not. Here the
-/// building regions are as short as the caller asks for, which is what the parallel arrangement
-/// (milestone E) will hand out. **What it costs in exchange is one cover per building region**,
+/// then discarded — about 3.3 µs per prefix base at 63 samples, which is why the oracle must be
+/// given the run's own long analysed regions and this need not. Here the building regions are as
+/// short as the caller asks for. **What it costs in exchange is one cover per building region**,
 /// `sweeps × (samples + held)` work each — 616 µs at 1,000 samples and 2.87 ms at 3,000 on
-/// 20-base regions, measured by the D1 review; [`ObservationCache::cover`] carries the table.
+/// 20-base regions, measured; [`ObservationCache::cover`] carries the table.
 ///
 /// **The cache comes in from the caller rather than being made here**, because it outlives one
-/// merge: it holds one reader per sample *for the whole run* (spec §6.4), and at milestone E it
-/// belongs to the organiser. It also makes what this driver does to memory visible — a test can
+/// merge: it holds one reader per sample *for the whole run* (spec §6.4), and the run's caller
+/// owns it. It also makes what this driver does to memory visible — a test can
 /// ask the cache afterwards how much it still holds
 /// ([`held_observations_len`](ObservationCache::held_observations_len)), which is the only way to tell a
 /// driver that evicts from one that does not: their outputs are identical.
 ///
 /// Its sources are one per sample **in the run's sample order**, each yielding that sample's
-/// observations in coordinate order — the shape `run_streaming.md` arch §2's `ObservationSource`
-/// will have. The analysed regions must be disjoint and ascending, checked as in the oracle.
+/// observations in coordinate order — `run_streaming.md` arch §2's `ObservationSource`. The
+/// analysed regions must be disjoint and ascending, checked as in the oracle.
 ///
 /// **The building regions tile each analysed region exactly, and the last one is clamped to
 /// it.** A locus belongs to the builder whose region holds its first position, so a building
@@ -139,14 +139,16 @@ pub fn merge_cohort_serially(
 /// the readers' position and the window the last cover drew. So **the same cache cannot be used
 /// to try the same ground again**: the ground behind the failure has already been evicted, and a
 /// second merge over it comes back short and says `Ok`. A run that means to retry builds a new
-/// cache over new sources; a run that does not, abandons the stretch. Making that unrepresentable
-/// belongs with the organiser (milestone E), which owns the cache.
+/// cache over new sources; a run that does not, abandons the stretch. Nothing makes that
+/// unrepresentable: a calling run stops at its first failure and never reuses the cache.
 ///
 /// **Not every source-side failure arrives as `Err`.** A source whose observations go backwards
 /// trips the cache's coordinate-order check and panics ([`ObservationCache::cover`]), because the
 /// cache has no error of its own to mint — `E` is the source's type and this driver only passes
-/// it through. That is right while observations come from this crate's generator, where going
-/// backwards is a bug; it stops being right when they are decoded from a psp file.
+/// it through. That is right for both kinds of source: from this crate's generator, going
+/// backwards is a bug, and a psp source refuses a record that goes backwards or overlaps the one
+/// before as damage, with an error of its own, before the cache sees it
+/// ([`PspSourceError`](crate::run::PspSourceError)).
 pub fn merge_cohort_through_cache<S, E>(
     analysed: &[GenomeRegion],
     cache: &mut ObservationCache<S>,
@@ -184,8 +186,8 @@ where
 /// so nothing about the division of the ground, the eviction or the covering differs between
 /// them, and the merge's oracles check both at once.
 ///
-/// **The parallel-cover form below is what a calling run drives since E1; this serial form is
-/// its oracle** — one driver has to keep the schedule the fixtures were reasoned about under.
+/// **The parallel-cover form below is what a calling run drives; this serial form is its
+/// oracle** — one driver has to keep the schedule the fixtures were reasoned about under.
 /// What handing-over buys either way is that the buffer holds what the sink made of each locus
 /// rather than the locus itself: a called locus is one genotype per sample, where a cohort
 /// observation is every covering sample's reads folded onto the locus's alleles, and
@@ -223,33 +225,31 @@ where
 /// [`merge_cohort_handing_each_locus_over`], with each cover's samples drawn forward
 /// **concurrently** instead of one after another.
 ///
-/// **This is where a calling run's parallelism went, and the measurement that put it here is
-/// the plan's own.** On 63 tomato accessions, drawing the readers forward — every sample's
-/// walk, which is the reads being decoded — is **88% of `call_cohort` and runs on one
-/// thread**, while assembling the loci and genotyping them together are 11%
-/// (`doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md`, which extends D3's
-/// 3–24-sample table to the whole cohort). A pool that genotypes several loci at once therefore cannot buy a
-/// run more than a few percent; sweeping the cohort's samples concurrently inside each cover
-/// is the arrangement that reaches the 88%.
+/// **This is where a calling run's parallelism went, because of a measurement.** On 63 tomato
+/// accessions, drawing the readers forward — every sample's walk, which is the reads being decoded
+/// — is **88% of `call_cohort` and runs on one thread**, while assembling the loci and genotyping
+/// them together are 11% (`doc/devel/reports/implementations/ng_run_driver_e1_2026-09-01.md`, which
+/// extends an earlier 3–24-sample table to the whole cohort). A pool that genotypes several loci at
+/// once therefore cannot buy a run more than a few percent; sweeping the cohort's samples
+/// concurrently inside each cover is the arrangement that reaches the 88%.
 ///
 /// **Nothing about the answer changes, and that is the cover's own guarantee, not this
 /// driver's.** [`ObservationCache::cover_in_parallel`] reaches the same fixpoint as the
 /// serial sweep by a different schedule and leaves the same held window (its documentation
-/// carries the argument; the parallel merge's whole oracle battery rests on it). Everything
+/// carries the argument). Everything
 /// downstream of the cover — eviction, the builders, the sink — runs on the calling thread
 /// exactly as in the serial form, in the same order, so the loci handed to `keep` are
 /// byte-identical at every thread count. `the_parallel_cover_gives_the_serial_drivers_answer`
-/// pins it here; the run's own concurrency-invariance oracle (spec §12.2, the plan's E2) is
-/// what will pin it end to end, and is not built yet.
+/// pins it here, and the run's own concurrency-invariance test (spec §12.2,
+/// `the_record_path_is_byte_identical_at_every_thread_count`) pins it end to end.
 ///
-/// **On a pool of one thread it takes the serial sweep**, the same way the parallel merge
-/// asks `rayon::current_num_threads` before handing eviction to workers: the Jacobi schedule
-/// buys nothing with nobody to share the sweep, and can cost one extra sweep per chain link.
+/// **On a pool of one thread it takes the serial sweep**: the Jacobi schedule buys nothing with
+/// nobody to share the sweep, and can cost one extra sweep per chain link.
 ///
-/// **One failure shape is less determined than the serial form's**: when two samples' sources
-/// fail during one sweep, which error comes back depends on the schedule — the serial sweep
-/// always reports the first in the run's sample order. The parallel merge has the same
-/// property. A run stops either way, naming a sample that really failed.
+/// **One failure shape is less determined than the serial form's**: when two samples' sources fail
+/// during one sweep, which error comes back depends on the schedule — the serial sweep always
+/// reports the first in the run's sample order. A run stops either way, naming a sample that really
+/// failed.
 pub fn merge_cohort_handing_each_locus_over_covering_samples_in_parallel<S, E>(
     analysed: &[GenomeRegion],
     cache: &mut ObservationCache<S>,
@@ -1936,7 +1936,7 @@ mod tests {
     }
 
     /// **The parallel cover gives the serial drivers' answer, at every width and every pool
-    /// size** — Milestone E1's claim at the driver, on the fixture the module's byte-identity
+    /// size**, checked at the driver, on the fixture the module's byte-identity
     /// rests on, which carries a locus chaining two samples across region boundaries and a
     /// span the width bound refuses at the narrow widths.
     ///
