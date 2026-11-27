@@ -15,7 +15,7 @@ orders the work.
 
 ## Module home
 
-A new file, `src/ng/locus_generation/witness.rs`, holding **every type that answers "what did this
+A new file, `src/locus_generation/witness.rs`, holding **every type that answers "what did this
 read see"** — `ReadWitness`, `LocusLen`, `WitnessedLocusPositions` — and
 re-exported from `locus_generation` so no consumer's import path changes.
 
@@ -24,7 +24,7 @@ one thing here that fails silently, it spans four types, and private fields need
 boundary to be private *to*. In a 1,700-line `mod.rs` it has no home.
 
 ```
-src/ng/locus_generation/
+src/locus_generation/
   mod.rs      – SampleLocusObservations, SequenceObservation, LocusGenerator, dispatcher, NoLoci
   witness.rs  – ReadWitness, LocusLen, WitnessedLocusPositions   ← new
   ssr.rs      – the STR generator
@@ -194,9 +194,9 @@ the record; every other read now yields a witness, and the drop path narrows to 
 
 **Errors: none new, and the out-of-range case is already unreachable.** A footprint wider than a
 `u16` run can describe is rejected at construction by
-`PileupGeneratorConfig::check` ([generator.rs:123-131](../../../../src/ng/locus_generation/pileup/generator.rs#L123)),
+`PileupGeneratorConfig::check` ([generator.rs](../../../../src/locus_generation/pileup/generator.rs)),
 which returns `PileupGeneratorConfigError::RecordSpanExceedsCoverageRun` when `max_record_span`
-exceeds `MAX_RECORD_SPAN_CEILING` ([:43](../../../../src/ng/locus_generation/pileup/generator.rs#L43)).
+exceeds `MAX_RECORD_SPAN_CEILING` ([`generator.rs`](../../../../src/locus_generation/pileup/generator.rs)).
 So the spec's "must fail loudly rather than clamp" (§3.4, §5) is met by a gate that already exists
 and a `debug_assert` restating the envelope in `witness_of` — not by a new error variant. The
 step still mints no error of its own ([`locus_generation.md`](locus_generation.md) §4).
@@ -228,7 +228,7 @@ step still mints no error of its own ([`locus_generation.md`](locus_generation.m
   impls are correct *and* cheaper than hand-written ones. Same end, one fewer thing to get wrong.
 - **`witness_order` borrows instead of returning `(u8, u16, u16)`** — a total order over a set
   cannot be a fixed-width tuple. `ReadWitness` still gets no `Ord`, unchanged reasoning
-  ([open_record.rs:255-259](../../../../src/ng/locus_generation/pileup/open_record.rs#L255)).
+  ([open_record.rs](../../../../src/locus_generation/pileup/open_record.rs)).
 - **No field for the borrowed base — deferred on the measurement, not on the design** (spec §3.2,
   §6). When it is built: named for what it holds (`UnwitnessedBases`, since "provenance" names a
   topic; `BorrowedBases` was the equally accurate alternative), and **not** an `Option` — the
@@ -242,10 +242,10 @@ step still mints no error of its own ([`locus_generation.md`](locus_generation.m
   does not move. **26 uses across 4 files** (spec §4, which left this decision here).
 - **Two witness types, one per coordinate axis** — public for the locus, `pub(super)` for the
   fold's reference axis. The reasoning that minted `LocusLen`
-  ([mod.rs:241-250](../../../../src/ng/locus_generation/mod.rs#L241)): same-shaped quantities that
+  ([mod.rs](../../../../src/locus_generation/mod.rs)): same-shaped quantities that
   can be transposed get two types so the compiler refuses the mix.
 
-*Boy-scout note.* `RecordWitness` ([open_record.rs:121](../../../../src/ng/locus_generation/pileup/open_record.rs#L121))
+*Boy-scout note.* `RecordWitness` ([open_record.rs](../../../../src/locus_generation/pileup/open_record.rs))
 is a tally of witness outcomes, not a witness, and after this change there are two real `*Witness`
 types to confuse it with. `RecordWitnessCounts` when the file is next touched — `pub(super)`, so
 the rename is local.
@@ -276,20 +276,20 @@ existing types, not new types beside them.
 
 | this doc's name | existing code | action |
 |---|---|---|
-| `ReadWitness` | `ReadCoverage` [mod.rs:213](../../../../src/ng/locus_generation/mod.rs#L213) | **rename** — 193 uses of the type and 91 of the field `read_coverage` across 12 files (§3) |
-| `WitnessedRefPositions` | `RefSpan` [open_record.rs:65](../../../../src/ng/locus_generation/pileup/open_record.rs#L65) | **replace** — same role (the fold's witnessed extent, reference coordinates, never empty), widened from one run to a set. Its "no empty span" invariant carries over verbatim |
-| `WitnessedLocusPositions` | `ReadCoverage::Observed { offset_in_locus, positions_covered }` [mod.rs:216-224](../../../../src/ng/locus_generation/mod.rs#L216) | **replace the payload**, and rename the variant to `Partial` — the two `u16`s are the one-run case of the set |
-| `is_flush_left` / `is_flush_right` | [mod.rs:327-348](../../../../src/ng/locus_generation/mod.rs#L327) | keep signatures; body derives from the first and last run |
-| `num_obs_along_locus`'s clamp | [mod.rs:69-104](../../../../src/ng/locus_generation/mod.rs#L69) | **keep** — the comment there explains why the bound is not expressible on the type, and a set does not change that; the loop iterates runs instead of one range |
-| `complete_observations` | [mod.rs:123](../../../../src/ng/locus_generation/mod.rs#L123) | unchanged — `Complete` is still a variant, still an equality test |
-| the two borrow sites | Insertion [open_record.rs:1217-1224](../../../../src/ng/locus_generation/pileup/open_record.rs#L1217), Deletion [:1228-1238](../../../../src/ng/locus_generation/pileup/open_record.rs#L1228) | **unchanged** — deferred (§1.2). Recorded here because the guard `offset >= consumed_until` is already exactly "no `Match` emitted this position", so the day it is built, this is where |
-| the drop path | [open_record.rs:1335-1345](../../../../src/ng/locus_generation/pileup/open_record.rs#L1335) | **narrows** to "witnessed nothing"; the set-of-read-ids mechanism and the subtract-prior-contribution step survive untouched — a read still becomes non-contiguous when the window widens |
-| `witness_of` | `coverage_of` [open_record.rs:184-212](../../../../src/ng/locus_generation/pileup/open_record.rs#L184) | renamed with its type; resolves a set against the footprint. The both-ends clamp is kept; **the `Complete` short-circuit moved onto the type at D3** — `witness_of` clamps and rebases and then delegates to `ReadWitness::from_witnessed_runs`, per the revised §1.1 and §2 |
-| `witness_order` | `coverage_order` [open_record.rs:261](../../../../src/ng/locus_generation/pileup/open_record.rs#L261) | renamed with its type; signature changes to borrow, and `pub(super)` for the differential stays |
-| the observation identity | `ObservationKey` [open_record.rs:228](../../../../src/ng/locus_generation/pileup/open_record.rs#L228) | **name unchanged**; the witness field inside it grows a set |
-| `KeyedObservation` | `ObservationRow` [open_record.rs:237](../../../../src/ng/locus_generation/pileup/open_record.rs#L237) | **rename** — the fold's accumulator, same fields (§3) |
-| the out-of-range gate | `PileupGeneratorConfig::check` [generator.rs:123-131](../../../../src/ng/locus_generation/pileup/generator.rs#L123), `MAX_RECORD_SPAN_CEILING` [:43](../../../../src/ng/locus_generation/pileup/generator.rs#L43) | **reuse as-is** — already rejects a footprint wider than a run can describe, so §2 needs no new error |
-| the STR generator's mints | [ssr.rs:770](../../../../src/ng/locus_generation/ssr.rs#L770), [:821-822](../../../../src/ng/locus_generation/ssr.rs#L821), [:889](../../../../src/ng/locus_generation/ssr.rs#L889), [:989](../../../../src/ng/locus_generation/ssr.rs#L989) | **call sites unchanged** — `from_left`/`from_right` keep their signatures, which is why they keep them |
+| `ReadWitness` | `ReadCoverage` [mod.rs](../../../../src/locus_generation/mod.rs) | **rename** — 193 uses of the type and 91 of the field `read_coverage` across 12 files (§3) |
+| `WitnessedRefPositions` | `RefSpan` [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs) | **replace** — same role (the fold's witnessed extent, reference coordinates, never empty), widened from one run to a set. Its "no empty span" invariant carries over verbatim |
+| `WitnessedLocusPositions` | `ReadCoverage::Observed { offset_in_locus, positions_covered }` [mod.rs](../../../../src/locus_generation/mod.rs) | **replace the payload**, and rename the variant to `Partial` — the two `u16`s are the one-run case of the set |
+| `is_flush_left` / `is_flush_right` | [mod.rs](../../../../src/locus_generation/mod.rs) | keep signatures; body derives from the first and last run |
+| `num_obs_along_locus`'s clamp | [mod.rs](../../../../src/locus_generation/mod.rs) | **keep** — the comment there explains why the bound is not expressible on the type, and a set does not change that; the loop iterates runs instead of one range |
+| `complete_observations` | [mod.rs](../../../../src/locus_generation/mod.rs) | unchanged — `Complete` is still a variant, still an equality test |
+| the two borrow sites | Insertion [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs), Deletion [`open_record.rs`](../../../../src/locus_generation/pileup/open_record.rs) | **unchanged** — deferred (§1.2). Recorded here because the guard `offset >= consumed_until` is already exactly "no `Match` emitted this position", so the day it is built, this is where |
+| the drop path | [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs) | **narrows** to "witnessed nothing"; the set-of-read-ids mechanism and the subtract-prior-contribution step survive untouched — a read still becomes non-contiguous when the window widens |
+| `witness_of` | `coverage_of` [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs) | renamed with its type; resolves a set against the footprint. The both-ends clamp is kept; **the `Complete` short-circuit moved onto the type at D3** — `witness_of` clamps and rebases and then delegates to `ReadWitness::from_witnessed_runs`, per the revised §1.1 and §2 |
+| `witness_order` | `coverage_order` [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs) | renamed with its type; signature changes to borrow, and `pub(super)` for the differential stays |
+| the observation identity | `ObservationKey` [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs) | **name unchanged**; the witness field inside it grows a set |
+| `KeyedObservation` | `ObservationRow` [open_record.rs](../../../../src/locus_generation/pileup/open_record.rs) | **rename** — the fold's accumulator, same fields (§3) |
+| the out-of-range gate | `PileupGeneratorConfig::check` [generator.rs](../../../../src/locus_generation/pileup/generator.rs), `MAX_RECORD_SPAN_CEILING` [`generator.rs`](../../../../src/locus_generation/pileup/generator.rs) | **reuse as-is** — already rejects a footprint wider than a run can describe, so §2 needs no new error |
+| the STR generator's mints | [ssr.rs](../../../../src/locus_generation/ssr.rs) | **call sites unchanged** — `from_left`/`from_right` keep their signatures, which is why they keep them |
 
 ---
 

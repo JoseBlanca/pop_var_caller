@@ -99,7 +99,7 @@ The two also differ in **shape**, and that is what makes them different design p
 **That third row is the whole of why the small-cohort answers differ**, and it is not obvious: the
 ordinary-site frequency spectrum needs a panel to have a shape at all, while a
 stratum's length spectrum is estimated from every tract of that shape in the genome. Tomato holds
-462,701 kept tracts in 141 strata (`src/ng/parameter_estimation/joint/ssr_fit.rs:18`), so a single
+462,701 kept tracts in 141 strata (`src/parameter_estimation/joint/ssr_fit.rs`), so a single
 genome still puts thousands of tracts behind each stratum.
 
 ---
@@ -109,7 +109,7 @@ genome still puts thousands of tracts behind each stratum.
 ### 3.1 What is measured, and it is fitted today
 
 **The joint fit already produces both numbers**, and this section records where they are rather
-than proposing an estimator. `JointFit` (`src/ng/parameter_estimation/joint/fit.rs:198`) carries:
+than proposing an estimator. `JointFit` (`src/parameter_estimation/joint/fit.rs`) carries:
 
 - **`density: Estimate<FrequencyDensity>`** (`:207`) — the population's allele-frequency
   distribution: a Beta over the positions that segregate, plus two point masses, one for positions
@@ -121,7 +121,7 @@ than proposing an estimator. `JointFit` (`src/ng/parameter_estimation/joint/fit.
   (`:104-108`).
 
 **So the ordinary-site diversity is measured, not missing.** `ExpectedHeterozygosity`'s own
-documentation says so and names its producer (`src/ng/types.rs:685`).
+documentation says so and names its producer (`src/types.rs`).
 
 **⚠ An earlier draft of this section said the opposite**, and the mistake is worth recording
 because it is one anybody repeating this search will make: it looked for a producer of the
@@ -152,7 +152,7 @@ consumer takes.**
    `project_spectrum_seed` takes an `ExpectedHeterozygosity`, whose constructor rejects a value
    outside `[0, 1]`.
 2. **Project the density into allele-count classes.** `FittedSpectrum`
-   (`src/ng/calling/genotype_prior/seed_generic.rs:473`) takes `2N + 1` class weights for `N`
+   (`src/calling/genotype_prior/seed_generic.rs`) takes `2N + 1` class weights for `N`
    diploid individuals, plus two bookkeeping numbers — the regulariser's site weight and the count
    of variable census sites. The fitted density is continuous, so the class weights are that density
    evaluated into allele-count classes at the panel's own size: a Beta-binomial mixture with the two
@@ -164,7 +164,7 @@ the same fit.
 
 ### 3.3 One sample
 
-**The density is fitted at every cohort size down to one** (`src/ng/types.rs:686`), so the
+**The density is fitted at every cohort size down to one** (`src/types.rs`), so the
 heterozygosity comes with it. The class-weight projection is the part that needs a panel — `2N + 1`
 classes at `N = 1` is three — and the ordinary-site ladder already handles that: with no
 frequency spectrum it takes a neutral shape at the fitted diversity.
@@ -231,7 +231,7 @@ alone, the fold belongs in [`parameter_prepass_cohort.md`](parameter_prepass_coh
 ### 4.1 What is already measured, and it is not a scalar
 
 **The joint repeat fit already estimates, per stratum, exactly the object a tract's prior needs**
-(`src/ng/parameter_estimation/joint/ssr_fit.rs:281`):
+(`src/parameter_estimation/joint/ssr_fit.rs`):
 
 - **the length spectrum** — how that stratum's chromosomes are spread over tract lengths, indexed in
   whole repeat units either side of the reference tract length (`:289`);
@@ -253,18 +253,18 @@ mapped onto the locus's candidate lengths.
 **What it replaces.** `calling_priors.md` §5 specifies a shape *constructed* as a geometric decay
 away from the cohort's commonest length at the tract, scaled to reproduce a separately measured
 cohort-wide repeat gene diversity (`fill_ssr_seed`,
-`src/ng/calling/genotype_prior/seed_ssr.rs:200`). Both halves go.
+`src/calling/genotype_prior/seed_ssr.rs`). Both halves go.
 
 **Why the fitted pair wins, and these are facts about the two constructions rather than a
 preference:**
 
 - **The constructed shape has one free parameter and the fitted one has none.** The decay is a
-  single number per group of loci with a coded fallback of 0.5 (`src/ng/types.rs:810`); the fitted
+  single number per group of loci with a coded fallback of 0.5 (`src/types.rs`); the fitted
   length spectrum is a distribution estimated from that stratum's own tracts.
 - **The constructed version has a failure mode the fitted one does not have.** Scaling a shape to
   reproduce a measured diversity is only possible below a ceiling the shape itself sets, and
   `SsrSeedOutcome::DiversityUnreachable` is what happens above it
-  (`src/ng/calling/genotype_prior/seed_ssr.rs:85`). **At one outbred sample that is every tract** —
+  (`src/calling/genotype_prior/seed_ssr.rs`). **At one outbred sample that is every tract** —
   a single diploid shows at most three lengths, whose shape can imply at most 0.625, against the
   ~0.72 repeat diversity HG002 actually has. A fitted Dirichlet asserts no such scaling and cannot
   fail this way.
@@ -286,7 +286,7 @@ fit already produces are sitting in `StratumFit` today.
 
 **The stratum's length spectrum is fitted across tracts**, so cohort size is not what makes it thin. The
 fit's own refusal floor is measured in **tracts, and is 8** of them
-(`src/ng/parameter_estimation/joint/ssr_fit.rs:650`), chosen from draws run deliberately at both
+(`src/parameter_estimation/joint/ssr_fit.rs`), chosen from draws run deliberately at both
 ends of this caller's range: at 8 tracts, 3 fits in 100 collapse on a single deep sample and none on
 a 63-sample cohort.
 
@@ -303,7 +303,7 @@ a rung below the stratum's own fit.
 **The obvious move is the device this project already chose for slippage** — a curve per motif
 period through every stratum, each weighted by how precisely it holds its own answer, with a
 stratum that has nothing taking the curve whole, and three further rungs below that so a curve
-always comes back (`src/ng/parameter_estimation/joint/share_curve.rs:1-37`). **The principle
+always comes back (`src/parameter_estimation/joint/share_curve.rs`). **The principle
 transfers and is adopted: always answer, from data where there is data, and say which rung.** The
 machinery does not, and the reason is a measurement.
 
@@ -355,7 +355,7 @@ behind it. Naming it is what makes it movable.
 
 **Decision: the run-wide bundle the caller already assembles, present or absent as a whole.**
 
-The caller takes one `FrozenParameters` per run (`src/ng/calling/mod.rs:567`), gathered once and
+The caller takes one `FrozenParameters` per run (`src/calling/frozen_parameters.rs`), gathered once and
 handed to every locus. It already carries two run-level repeat-tract parameters — the slippage
 lookup and the substitution-rate map — so this follows a precedent rather than setting one.
 
@@ -386,13 +386,13 @@ documentation is explicit that mixing per-run with per-locus and per-sample valu
 it exists to prevent.
 
 **What has to change at the seam.** `StratumFits` is the one lookup that crosses into calling
-(`src/ng/parameter_estimation/joint/stratum_fits.rs`). It gathers each stratum's slippage numbers
+(`src/parameter_estimation/joint/stratum_fits.rs`). It gathers each stratum's slippage numbers
 and their provenance and **drops the length spectrum and the concentration**, which the
 repeat-tract fit produced (`fit_strata` then; replaced by the penalised fit's `fit_repeat_tracts` on
 2026-10-16). They must be carried, keyed the same way, with the rung recorded beside them.
 
 **The ordinary-site side needs no seam work.** `RunParameters::project_seed`
-(`src/ng/calling/run_parameters.rs:97`) already takes the frequency spectrum and the diversity as arguments;
+(`src/calling/run_parameters.rs`) already takes the frequency spectrum and the diversity as arguments;
 only the producer is missing.
 
 ---

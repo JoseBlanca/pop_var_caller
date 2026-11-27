@@ -3,7 +3,7 @@
 *Status: architecture draft (2026-07-23), companion to the spec
 [`../spec/alignment.md`](../spec/alignment.md) (the design and every "why"), and to the shared arch
 docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary + step traits) and
-[`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
+[`module_layout.md`](module_layout.md) (the module tree). Naming follows
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): domain nouns for types,
 verbs for functions, newtypes for domain scalars, **STR** in prose ↔ `ssr` in code. Signatures are
 illustrative; the **contract** is the deliverable. See the spec for the reasoning behind every
@@ -27,12 +27,12 @@ decision recorded here.*
 > - `emission.rs` and `stutter.rs` are as designed; `delimit_parity.rs` and
 >   `leftmost_property.rs` are the test-only oracles.
 >
-> The module lives at `src/alignment/`, not `src/ng/alignment/` (promotion, 2026-09-13). The rest
+> The module lives at `src/alignment/`, not `src/alignment/` (promotion, 2026-09-13). The rest
 > of this document is the design as written.
 
 ## Module home
 
-`src/ng/alignment/` — a **folder**, because it holds competing implementations that get compared
+`src/alignment/` — a **folder**, because it holds competing implementations that get compared
 ([`module_layout.md`](module_layout.md) principle 1): the trait lives in `mod.rs`, each algorithm in
 its own file beside its siblings.
 
@@ -41,7 +41,7 @@ likelihood), and knows about neither — it takes sequences and returns alignmen
 (spec §1). That is why it sits outside the step-per-module rule rather than breaking it.
 
 ```
-src/ng/alignment/
+src/alignment/
 ├── mod.rs                            – the three traits + the shared types below
 ├── emission.rs                       – the swappable per-base scoring component (§2.3)
 ├── stutter.rs                        – the stutter model: parameters + distribution (§2.4)
@@ -74,7 +74,7 @@ shares its matrix with `affine_best_path.rs` through a private helper rather tha
 ## 1. The domain scalar this module seeds
 
 `LogProb` is **already specified but not yet written**: `ng_step_interfaces.md` §1 declares it in the
-shared vocabulary, and `module_layout.md` already assigns it to `src/ng/types.rs` — but `grep` over
+shared vocabulary, and `module_layout.md` already assigns it to `src/types.rs` — but `grep` over
 `src/` finds nothing. So this module does not introduce it; it is its **first user**, and lands it
 where the vocabulary already put it.
 
@@ -354,26 +354,26 @@ function rather than duplicating it.
 
 | ng name | existing code | action |
 |---|---|---|
-| `LogProb` | declared in [`ng_step_interfaces.md`](ng_step_interfaces.md) §1; assigned to `types.rs` by [`module_layout.md`](module_layout.md) | **specified, not yet written** — `grep` over `src/` finds none. This module is its **first user**, not its author (§1); land it where the vocabulary already put it, beside `Bp` ([types.rs:151](../../../../src/ng/types.rs#L151)) |
-| `Alignment.cigar`, `AlignmentNormalizer::normalize` | `left_align_indels(cigar: &mut Vec<CigarOp>, seq, ref_seq)` ([indel_norm.rs:408](../../../../src/pileup/walker/indel_norm.rs#L408)) | reuse `CigarOp`. The trait takes the whole `Alignment` rather than this function's `Vec<CigarOp>` **deliberately** — `left_align_cigar` ([:254](../../../../src/pileup/walker/indel_norm.rs#L254)) can drop a leading deletion and move the alignment's start, which an ops-only signature could not express (§3) |
-| algorithm 1a (structured pass) | `left_align_indels` ([indel_norm.rs:408](../../../../src/pileup/walker/indel_norm.rs#L408)), `left_align_cigar` ([:254](../../../../src/pileup/walker/indel_norm.rs#L254)), `normalize_alleles` ([norm_seqs.rs:108](../../../../src/norm_seqs.rs#L108)) | port. **Not a naive single pass** — it merges consecutive indels and propagates one across alignment blocks; port those, they are the point |
+| `LogProb` | declared in [`ng_step_interfaces.md`](ng_step_interfaces.md) §1; assigned to `types.rs` by [`module_layout.md`](module_layout.md) | **specified, not yet written** — `grep` over `src/` finds none. This module is its **first user**, not its author (§1); land it where the vocabulary already put it, beside `Bp` ([types.rs](../../../../src/types.rs)) |
+| `Alignment.cigar`, `AlignmentNormalizer::normalize` | `left_align_indels(cigar: &mut Vec<CigarOp>, seq, ref_seq)` (`d9e7b076:src/pileup/walker/indel_norm.rs`) | reuse `CigarOp`. The trait takes the whole `Alignment` rather than this function's `Vec<CigarOp>` **deliberately** — `left_align_cigar` (`d9e7b076:src/pileup/walker/indel_norm.rs`) can drop a leading deletion and move the alignment's start, which an ops-only signature could not express (§3) |
+| algorithm 1a (structured pass) | `left_align_indels` (`d9e7b076:src/pileup/walker/indel_norm.rs`), `left_align_cigar` (`d9e7b076:src/pileup/walker/indel_norm.rs`), `normalize_alleles` (`d9e7b076:src/norm_seqs.rs`) | port. **Not a naive single pass** — it merges consecutive indels and propagates one across alignment blocks; port those, they are the point |
 | algorithm 1b (repeated passes) | freebayes `stablyLeftAlign` (vendored, `freebayes/src/LeftAlign.cpp:385`, cap 20 at `LeftAlign.h:118`) | port the bounded loop. Note freebayes **returns false on exhaustion and its caller ignores it** — do not copy that; 1c exists precisely to fail loudly instead |
 | algorithm 1c (fixpoint) | — | **new**; a loop around 1a, not a third shift implementation |
-| algorithm 3 (two gap regimes) | `delimit_read` ([alignment.rs:171](../../../../src/ssr/pileup/alignment.rs#L171)), `HmmModel` ([:80](../../../../src/ssr/pileup/alignment.rs#L80)), `ViterbiScratch` ([:111](../../../../src/ssr/pileup/alignment.rs#L111)) | port; **the parity anchor**. **Unbanded** — the inner loop runs the full row and `ViterbiScratch` allocates all `(m+1)×(n+1)` backpointer cells. Port it that way, so parity is provable; band later (§4) |
-| `RepeatSpan` | `Delimited` ([alignment.rs:141](../../../../src/ssr/pileup/alignment.rs#L141)) | port and **widen** — `Delimited::BorderOffEnd` does not say which flank held |
-| gap constants | `GAP_OPEN_PROB` 2.9e-5 ([:38](../../../../src/ssr/pileup/alignment.rs#L38)), `GAP_OPEN_PROB_TRACT` 1e-2 ([:50](../../../../src/ssr/pileup/alignment.rs#L50)) | import as named `pub const`s; **provisional calibration**, not findings (spec §4.2) |
-| `Emission` (per-quality impl) | `EMISSION_LN` ([alignment.rs:59](../../../../src/ssr/pileup/alignment.rs#L59)) | port the table, including its quality-zero floor |
-| `Emission` (flat impl) | the flat `eps` arm of `align_subst` ([pair_hmm.rs:52](../../../../src/ssr/cohort/pair_hmm.rs#L52)) | port |
-| algorithm 5 (repeat marginal) | `align_subst` ([pair_hmm.rs:52](../../../../src/ssr/cohort/pair_hmm.rs#L52)) and its `banded_forward` ([:83](../../../../src/ssr/cohort/pair_hmm.rs#L83)) | port **this function only** — not `HipstrModel`, which is the genotyping model that calls it (row below). **Returns a linear probability; this interface returns its logarithm** — convert at the boundary. Its banding differs from algorithm 3's source: the *computation* is band-limited but the full matrix is still allocated — the two ports do not share a banding stance. **Interior gaps are forbidden** (`FLANK_SLOP` = 2, [:28](../../../../src/ssr/cohort/pair_hmm.rs#L28)) and that restriction is load-bearing, not an optimisation (spec §5.1) |
-| **NOT this module:** the stutter half | `HipstrModel::q_r` ([hipstr.rs:85](../../../../src/ssr/cohort/read_model/hipstr.rs#L85)) | the genotyping likelihood (step 7). It resizes the candidate to the observed length, so `align_subst` **always** takes its equal-length early return and `banded_forward` is unreachable from here — a parity test built around this model never exercises the forward pass (spec §5.1) |
-| `StutterModel` / `StutterRates` | `HipstrParams` + `stutter_pmf` ([hipstr.rs:168](../../../../src/ssr/cohort/read_model/hipstr.rs#L168)) | port; hoist from private struct to this module's shared type |
-| `StutterModel` construction | `hipstr_params` ([hipstr.rs:131](../../../../src/ssr/cohort/read_model/hipstr.rs#L131)) from `StutterShape` ([param_estimation.rs:46](../../../../src/ssr/cohort/param_estimation.rs#L46)) | **adapt, do not port straight.** `hipstr_params` reads a *per-candidate* slip level, because stutter rises with allele length — that dimension belongs to the genotyping, which scores against candidates. This module measures, so its model is built from the locus and the **reference** allele length. `OUT_FRAME_REL` = 0.05 ([hipstr.rs:44](../../../../src/ssr/cohort/read_model/hipstr.rs#L44)) is a **placeholder, not an estimate** (spec §5.2) |
-| the per-call context | `ReadScoringContext` ([read_model/mod.rs:45](../../../../src/ssr/cohort/read_model/mod.rs#L45)) | the precedent for `RepeatContext` (§2.2) — production already passes the varying facts per call and keeps the model itself a stateless value |
-| slip cutoff | `MAX_SLIP` = 10 ([param_estimation.rs:21](../../../../src/ssr/cohort/param_estimation.rs#L21)) | import as a named const |
-| placement sum | `reach_variants` ([stutter.rs:140](../../../../src/ssr/cohort/stutter.rs#L140)), `PlacementVariant` ([stutter.rs:21](../../../../src/ssr/cohort/stutter.rs#L21)) | port — the interrupted-repeat placement enumeration (spec §5.2) |
-| scratch shape | `HmmScratch` ([pair_hmm.rs:32](../../../../src/ssr/cohort/pair_hmm.rs#L32)), `ViterbiScratch` ([alignment.rs:111](../../../../src/ssr/pileup/alignment.rs#L111)) | model for each algorithm's `Scratch`; per-algorithm, not one shared buffer |
-| consumer (step 7) | `ReadLikelihoodModel` ([read_model/mod.rs:63](../../../../src/ssr/cohort/read_model/mod.rs#L63)), `ReadScoringContext` ([:45](../../../../src/ssr/cohort/read_model/mod.rs#L45)) | **not** reimplemented here — step 7's trait composes a `MarginalAligner` |
-| consumer (step 2) | `MappedRead` ([alignment_input.rs:78](../../../../src/bam/alignment_input.rs#L78)) | never seen by this module — the preparer unpacks it to slices (spec §7) |
+| algorithm 3 (two gap regimes) | `delimit_read` (`d9e7b076:src/ssr/pileup/alignment.rs`), `HmmModel` (`d9e7b076:src/ssr/pileup/alignment.rs`), `ViterbiScratch` (`d9e7b076:src/ssr/pileup/alignment.rs`) | port; **the parity anchor**. **Unbanded** — the inner loop runs the full row and `ViterbiScratch` allocates all `(m+1)×(n+1)` backpointer cells. Port it that way, so parity is provable; band later (§4) |
+| `RepeatSpan` | `Delimited` (`d9e7b076:src/ssr/pileup/alignment.rs`) | port and **widen** — `Delimited::BorderOffEnd` does not say which flank held |
+| gap constants | `GAP_OPEN_PROB` 2.9e-5 (`d9e7b076:src/ssr/pileup/alignment.rs`), `GAP_OPEN_PROB_TRACT` 1e-2 (`d9e7b076:src/ssr/pileup/alignment.rs`) | import as named `pub const`s; **provisional calibration**, not findings (spec §4.2) |
+| `Emission` (per-quality impl) | `EMISSION_LN` (`d9e7b076:src/ssr/pileup/alignment.rs`) | port the table, including its quality-zero floor |
+| `Emission` (flat impl) | the flat `eps` arm of `align_subst` (`d9e7b076:src/ssr/cohort/pair_hmm.rs`) | port |
+| algorithm 5 (repeat marginal) | `align_subst` (`d9e7b076:src/ssr/cohort/pair_hmm.rs`) and its `banded_forward` (`d9e7b076:src/ssr/cohort/pair_hmm.rs`) | port **this function only** — not `HipstrModel`, which is the genotyping model that calls it (row below). **Returns a linear probability; this interface returns its logarithm** — convert at the boundary. Its banding differs from algorithm 3's source: the *computation* is band-limited but the full matrix is still allocated — the two ports do not share a banding stance. **Interior gaps are forbidden** (`FLANK_SLOP` = 2, `d9e7b076:src/ssr/cohort/pair_hmm.rs`) and that restriction is load-bearing, not an optimisation (spec §5.1) |
+| **NOT this module:** the stutter half | `HipstrModel::q_r` (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`) | the genotyping likelihood (step 7). It resizes the candidate to the observed length, so `align_subst` **always** takes its equal-length early return and `banded_forward` is unreachable from here — a parity test built around this model never exercises the forward pass (spec §5.1) |
+| `StutterModel` / `StutterRates` | `HipstrParams` + `stutter_pmf` (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`) | port; hoist from private struct to this module's shared type |
+| `StutterModel` construction | `hipstr_params` (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`) from `StutterShape` (`d9e7b076:src/ssr/cohort/param_estimation.rs`) | **adapt, do not port straight.** `hipstr_params` reads a *per-candidate* slip level, because stutter rises with allele length — that dimension belongs to the genotyping, which scores against candidates. This module measures, so its model is built from the locus and the **reference** allele length. `OUT_FRAME_REL` = 0.05 (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`) is a **placeholder, not an estimate** (spec §5.2) |
+| the per-call context | `ReadScoringContext` (`d9e7b076:src/ssr/cohort/read_model/mod.rs`) | the precedent for `RepeatContext` (§2.2) — production already passes the varying facts per call and keeps the model itself a stateless value |
+| slip cutoff | `MAX_SLIP` = 10 (`d9e7b076:src/ssr/cohort/param_estimation.rs`) | import as a named const |
+| placement sum | `reach_variants` (`d9e7b076:src/ssr/cohort/stutter.rs`), `PlacementVariant` (`d9e7b076:src/ssr/cohort/stutter.rs`) | port — the interrupted-repeat placement enumeration (spec §5.2) |
+| scratch shape | `HmmScratch` (`d9e7b076:src/ssr/cohort/pair_hmm.rs`), `ViterbiScratch` (`d9e7b076:src/ssr/pileup/alignment.rs`) | model for each algorithm's `Scratch`; per-algorithm, not one shared buffer |
+| consumer (step 7) | `ReadLikelihoodModel` (`d9e7b076:src/ssr/cohort/read_model/mod.rs`), `ReadScoringContext` (`d9e7b076:src/ssr/cohort/read_model/mod.rs`) | **not** reimplemented here — step 7's trait composes a `MarginalAligner` |
+| consumer (step 2) | `MappedRead` ([alignment_input.rs](../../../../src/bam/alignment_input.rs)) | never seen by this module — the preparer unpacks it to slices (spec §7) |
 | algorithms 2, 4, 6 | — | **new**; no production counterpart |
 
 Production is a **read-only oracle**: ng ports from it and never edits it.
@@ -385,7 +385,7 @@ per-call geometry partly on "`Motif` is an allocation", which is not true of ng'
 `Copy` over an inline `[u8; 6]` and allocates nothing. The decision stands on its other ground, that
 the geometry changes at every locus. Two independent reviewers caught the claim.
 
-`Motif` itself has since moved to `src/ng/types.rs` (`module_layout.md` principle 3), because
+`Motif` itself has since moved to `src/types.rs` (`module_layout.md` principle 3), because
 importing it from `region_typing` — ng step 3 — contradicted this module's own statement that it
 knows no steps, on ng's public surface.
 
@@ -397,10 +397,10 @@ knows no steps, on ng's public surface.
   trigger. Blocked behind the same decision that gates algorithm 2 (spec §10.3).
 - **`OPEN:` how much headroom above the band floor.** The floor is the per-read length difference
   and needs no decision; the headroom above it is a real open parameter (spec §9). Production's
-  forward uses `FLANK_SLOP` = 2 ([pair_hmm.rs:28](../../../../src/ssr/cohort/pair_hmm.rs#L28)); whether
+  forward uses `FLANK_SLOP` = 2 (`d9e7b076:src/ssr/cohort/pair_hmm.rs`); whether
   that suits the delimiter is untested. It lands as a named `pub const` with its reasoning, never a
   literal — a too-small value loses long alleles silently. **Do not reach for
-  [`MAX_SLIP`](../../../../src/ssr/cohort/param_estimation.rs#L21)**: it is a scoring cutoff, and an
+  `MAX_SLIP` (`d9e7b076:src/ssr/cohort/param_estimation.rs`)**: it is a scoring cutoff, and an
   earlier draft's band derived from it was both too narrow and a layering violation (spec §3).
 - *Impl-time confirmation, now **resolved** (A1):* the `Emission` signature resolves quality **per
   row**, not per call — `scores_for(quality) -> BaseScores` is the primary method, with `emit_ln` a
@@ -423,7 +423,7 @@ questions — they do not change the shapes above.
   reproduces the published formula term by term, and both conversion traps are pinned by a test that
   fails if the geometric is inverted (spec §5.2).
 - **The regression anchor is algorithm 3 against production.** Its measured repeat must match
-  `delimit_read` ([alignment.rs:171](../../../../src/ssr/pileup/alignment.rs#L171)) byte for byte on
+  `delimit_read` (`d9e7b076:src/ssr/pileup/alignment.rs`) byte for byte on
   a shared fixture. It is the only *aligner* with a parity oracle: algorithms 2, 4, 5 and 6 are
   measured, not verified. (The three normalizers have their own, better oracle — the property test
   below.) The ported version is **unbanded**, matching production (§4) — and the later banding

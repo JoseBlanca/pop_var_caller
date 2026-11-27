@@ -26,7 +26,7 @@ both from one accumulator in one place is what this document exists to arrange.
 **Where it runs is the whole of the design.** The merge's observation cache draws every record of
 every sample in coordinate order, in both modes — direct mode from the alignment files, psp mode
 from stored files — and that draw is the one place every position of every sample passes
-([`draw_next`, `observation_cache.rs:902`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
+([`draw_next`, `observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)).
 The accumulator lives there. Nothing is stored in the psp and nothing is recomputed in a second
 pass over the reads.
 
@@ -71,7 +71,7 @@ pass over the reads.
   Reads that produced no observation (`reads_without_observation`) and reads a depth cap
   discarded are not in it (§3.1). It is below read depth, consistently on both sides.
 - **The head count** — `reads_compared_with_reference`, the fixed field in every psp record's
-  head ([`record.rs:138-144`](../../../../src/ng/psp/record.rs)): reads whose whole sequence over
+  head ([`record.rs`](../../../../src/psp/record.rs)): reads whose whole sequence over
   the locus was compared against the reference.
 
 ---
@@ -82,18 +82,18 @@ pass over the reads.
 has one forward reader for the whole run; the cache draws them ahead to cover a building region,
 holds what it drew for the builders, and drops what nothing can reach
 ([`cohort_merge.md`](cohort_merge.md) §6.4). What a draw yields is a `Drawn`
-([`observation_cache.rs:167`](../../../../src/ng/run/cohort_merge/observation_cache.rs)): in direct
+([`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)): in direct
 mode `Built`, the whole record the walker just minted; in psp mode `Kept`, the head's summary with
 the body left in the source, buildable on demand through `source.build`
-([`observation_cache.rs:710`](../../../../src/ng/run/cohort_merge/observation_cache.rs)). Both
+([`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)). Both
 shapes carry the record's region and the head count; only one carries the body.
 
 **What consumes the result.** A cohort locus assembled by a builder
-([`CohortObservation`, `build.rs:1055`](../../../../src/ng/run/cohort_merge/build.rs)) is called and
+([`CohortObservation`, `build.rs`](../../../../src/run/cohort_merge/build.rs)) is called and
 turned into a record on the merge thread, in genome order
-([`call_cohort_from_sources_handing_each_record_over`, `callers.rs:799`](../../../../src/ng/run/callers.rs)).
+([`call_cohort_from_sources_handing_each_record_over`, `callers.rs`](../../../../src/run/callers.rs)).
 The per-sample pair joins the evidence gathered at that moment
-([`SampleEvidenceForOutput`, `assemble.rs:48`](../../../../src/ng/vcf/assemble.rs)) and travels
+([`SampleEvidenceForOutput`, `assemble.rs`](../../../../src/vcf/assemble.rs)) and travels
 beside the record to the run's sink. The histograms come out of the cache when the merge returns
 its sources.
 
@@ -105,7 +105,7 @@ its sources.
 
 **Per position, the depth is the number of reads whose observation covers that position.**
 Production computes the same thing — the sum of `num_obs` over every allele at a record
-([`pileup_to_psp.rs:101`](../../../../src/pileup/per_sample/pileup_to_psp.rs)) — and the filter
+(`d9e7b076:src/pileup/per_sample/pileup_to_psp.rs`) — and the filter
 was validated on it.
 
 Where the number comes from depends on the record's span, which every `Drawn` carries.
@@ -128,8 +128,8 @@ is the pair this produces.
   repeat tract both have partial witnesses — reads whose evidence ends inside the locus — and the
   head count excludes them by design (its own doc: at such a locus it sits "far below the number
   of reads that covered the ground",
-  [`locus_generation/mod.rs:244`](../../../../src/ng/locus_generation/mod.rs)). So the body is built and
-  [`num_obs_along_locus()`](../../../../src/ng/locus_generation/mod.rs) gives the depth at each
+  [`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)). So the body is built and
+  [`num_obs_along_locus()`](../../../../src/locus_generation/mod.rs) gives the depth at each
   position, spreading a partial witness over exactly the positions it witnessed. In direct mode
   the body is already in hand; in psp mode it is built through the source, which
   [`cohort_merge_psp_path.md`](cohort_merge_psp_path.md) §3.1 says any thread may do from the
@@ -160,7 +160,7 @@ hidden-duplication filter could fit none.
 **What is not in the depth, on both sides alike:** reads that covered a locus and produced no
 observation, and reads a depth cap discarded. Neither counter is ever set on the generic path (no
 assignment outside the STR generator; the per-position cap is 8,000 reads,
-[`walker/mod.rs:83`](../../../../src/pileup/walker/mod.rs)); both are set at tracts. So a tract's
+`d9e7b076:src/pileup/walker/mod.rs`); both are set at tracts. So a tract's
 depth is observation depth, below its read depth by the reads that anchored no border, and the
 shortfall grows with tract length. It is consistent — the same number trains the yardstick and
 makes the measurement — but **a tract window is not directly comparable to a generic one**.
@@ -176,28 +176,28 @@ draft of this paragraph said the filter had no way to tell; it has.
 
 **A window's GC is averaged over the positions that contributed its depth, and no others.**
 Production stores GC per sample rather than one reference GC per position for exactly this reason
-([`types.rs:210`](../../../../src/var_calling/types.rs)): each sample's window spans *its* covered
+(`d9e7b076:src/var_calling/types.rs`): each sample's window spans *its* covered
 positions. A GC over all reference positions in the window would describe ground that contributed
 no depth, and the two would diverge wherever coverage is patchy — which is where the filter is
 being asked its hardest question.
 
 So the accumulator takes the reference base *with* the depth at each position, and the reference
 supplies bases and nothing more. The cache is handed **one reference accessor for the whole run**,
-minted beside the padding accessor the run already holds ([`callers.rs:799`](../../../../src/ng/run/callers.rs)
+minted beside the padding accessor the run already holds ([`callers.rs`](../../../../src/run/callers.rs)
 takes `padding_reference`), and fetches the bases for a cover's ground **once per cover** into a
-scratch buffer every sample reads by offset ([`RefSeq::fetch_into`, `ref_seq.rs:143`](../../../../src/ng/ref_seq.rs);
-[`WindowedRefSeq`, `ref_seq.rs:594`](../../../../src/ng/ref_seq.rs) is the forward-sliding,
+scratch buffer every sample reads by offset ([`RefSeq::fetch_into`, `ref_seq.rs`](../../../../src/ref_seq.rs);
+[`WindowedRefSeq`, `ref_seq.rs`](../../../../src/ref_seq.rs) is the forward-sliding,
 evictable implementation the run already uses). A position whose base is `N` is not covered.
 
 ### 3.3 The window — production's sliding accumulator, copied
 
 **The centred sliding window is production's, transcribed into ng unchanged with its tests**:
-[`SlidingWindowCoverageAccumulator`, `coverage.rs:331`](../../../../src/sample_summary/coverage.rs).
+`SlidingWindowCoverageAccumulator`, `coverage.rs` (`d9e7b076:src/sample_summary/coverage.rs`).
 Fed `(contig, position, reference base, depth)` in coordinate order, it finalises a centre once the
 stream has advanced half a window past it — or the contig changes, or `finish` is called — and
 emits that centre's `(GC fraction, mean depth)`. Memory is one window's worth of positions. The
 rules its tests pin, and which ng inherits by transcribing them
-([`coverage.rs:814-1014`](../../../../src/sample_summary/coverage.rs)): an `N` position advances
+(`d9e7b076:src/sample_summary/coverage.rs`): an `N` position advances
 the frontier without joining any window; a window never spans contigs; a gap wider than half a
 window leaves each side's centres with the positions they have; a single covered position emits a
 window over itself alone.
@@ -228,7 +228,7 @@ windows those runs do have.
 **The look-ahead is a contract the cache has to keep.** A centre at `p` is complete only when the
 stream has passed `p + 250`. A builder handed a region ending at `r` therefore needs every sample
 drawn to `r + 250`, where today `cover` draws to the region's end plus the reach of any observation
-chaining past it ([`observation_cache.rs:761`](../../../../src/ng/run/cohort_merge/observation_cache.rs)).
+chaining past it ([`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)).
 **`cover` draws half a window further.** What that costs is half a window more of retained
 positions per sample — about 250 at one record a base, each a held summary and range at 48 bytes
 plus the window its centre finalised at 24, which §4 prices at 18 kB a sample and so 18 MB at a
@@ -261,7 +261,7 @@ enough to finalise every centre in the region, dropped or not.
 **Emitted values are held per sample until eviction.** The accumulator's ready values go into a
 per-sample deque keyed by position, alongside the held summaries; `evict_before` drains it with
 them; a builder reads it through the cohort window it is already handed
-([`WindowedCohort`, `observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs)),
+([`WindowedCohort`, `observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)),
 as a third parallel view beside summaries and records.
 
 **Truncation at edges needs no rule of its own.** Positions with no record are absent from the
@@ -273,9 +273,9 @@ speaking.
 ### 3.4 The histogram — production's shape, with the depth axis scaled to the sample
 
 **Every finalised window that clears §3.3's floor is folded into a per-sample count matrix
-indexed by GC bin and depth bin**, production's [`CoverageByGcHistogram`, `sample_summary/mod.rs:118`](../../../../src/sample_summary/mod.rs)
+indexed by GC bin and depth bin**, production's `CoverageByGcHistogram`, `sample_summary/mod.rs` (`d9e7b076:src/sample_summary/mod.rs`)
 — the input the filter's model fit reads and the one it was validated on. The accumulator already
-does this fold ([`coverage.rs:445`](../../../../src/sample_summary/coverage.rs), `finish` returns
+does this fold (`d9e7b076:src/sample_summary/coverage.rs`, `finish` returns
 the histogram beside the tail).
 
 **A window under the floor is finalised and is deliberately *not* folded.** Both casts of `NaN`
@@ -347,7 +347,7 @@ still reads uniform bins.
 
 **Determinism holds at any thread count.** Each sample's records arrive in one fixed coordinate
 order whatever the cover's schedule (the parallel cover reaches the same fixpoint by any
-schedule, [`observation_cache.rs:792`](../../../../src/ng/run/cohort_merge/observation_cache.rs)),
+schedule, [`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)),
 so the grid, the median read off it, the width and every count are the same run to run.
 
 ### 3.5 What a locus carries, and how it reaches the filter
@@ -356,7 +356,7 @@ so the grid, the median read off it, the width and every count are the same run 
 is the window centred on that position for that sample; a sample covering the locus with no value
 at that exact position — its coverage begins a base later, or the window was under the floor — is
 absent. Production keys the same way, on the record at the anchor position or `NaN`
-([`variant_caller.rs:338`](../../../../src/var_calling/variant_caller.rs)).
+(`d9e7b076:src/var_calling/variant_caller.rs`).
 
 ```rust
 /// One sample's window at one locus. Both fields `NaN` where the sample has no usable
@@ -379,7 +379,7 @@ from the record.
 
 **The histograms leave the cache when the merge does.** `into_sources` already hands the readers
 back so a mode can report per-sample facts
-([`observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs), `into_sources`);
+([`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs), `into_sources`);
 the histograms come out the same way, one per sample in the run's sample order, each either a
 fitted histogram or the reason there is none.
 
@@ -495,7 +495,7 @@ impl WindowCoverageAccumulator {
    accumulator nothing makes when a window closes depend on where the cover stopped.
 4. **`NaN` by bits.** A codec, a comparison or a test that normalises `NaN` turns *absent* into a
    number. Production's `LocusWindowCoverage` compares by bit pattern for this reason
-   ([`types.rs:233`](../../../../src/var_calling/types.rs)).
+   (`d9e7b076:src/var_calling/types.rs`).
 5. **Windows are counted on the fixed depth grid, not on the histogram's axis** — the axis is
    only known at `finish`. `finish` must handle the zero case, and a median past the grid's top
    must come back as a sample the fit refuses for range, not as a width cut from a guess.
@@ -510,12 +510,12 @@ impl WindowCoverageAccumulator {
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the sliding window and its histogram fold | [`SlidingWindowCoverageAccumulator`, `coverage.rs:331-540`](../../../../src/sample_summary/coverage.rs) and its tests `:780-1050` | transcribed into `src/ng/window_coverage/`, production untouched (the freeze rule); the floor and the per-sample width are the only additions |
-| the histogram type | [`CoverageByGcHistogram`, `sample_summary/mod.rs:118`](../../../../src/sample_summary/mod.rs) | copied; fields the model fit does not read dropped — `callable_positions` (production's own reader is `var_calling::diversity`) and `n_skipped_tiles`, which the sliding model can only ever write as zero; `windows_under_the_floor` added (§3.5) |
-| depth per position from a record | [`num_obs_along_locus`, `locus_generation/mod.rs:67`](../../../../src/ng/locus_generation/mod.rs) | called as-is on bodies spanning more than one base |
-| the head count | [`LocusSummary::reads_compared_with_reference`, `observation_cache.rs`](../../../../src/ng/run/cohort_merge/observation_cache.rs) | read as-is at single-base records |
-| the draw, hold, evict rhythm | [`draw_next`, `evict_before`, `cover`](../../../../src/ng/run/cohort_merge/observation_cache.rs) | the accumulator is observed at the draw, its values held and evicted with the summaries; `cover` gains the look-ahead |
-| the reference | [`RefSeq`, `WindowedRefSeq`, `ref_seq.rs`](../../../../src/ng/ref_seq.rs) | one accessor for the run, one fetch per cover |
+| the sliding window and its histogram fold | `SlidingWindowCoverageAccumulator`, `coverage.rs` (`d9e7b076:src/sample_summary/coverage.rs`) and its tests | transcribed into `src/window_coverage/`, production untouched (the freeze rule); the floor and the per-sample width are the only additions |
+| the histogram type | `CoverageByGcHistogram`, `sample_summary/mod.rs` (`d9e7b076:src/sample_summary/mod.rs`) | copied; fields the model fit does not read dropped — `callable_positions` (production's own reader is `var_calling::diversity`) and `n_skipped_tiles`, which the sliding model can only ever write as zero; `windows_under_the_floor` added (§3.5) |
+| depth per position from a record | [`num_obs_along_locus`, `locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs) | called as-is on bodies spanning more than one base |
+| the head count | [`LocusSummary::reads_compared_with_reference`, `observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs) | read as-is at single-base records |
+| the draw, hold, evict rhythm | [`draw_next`, `evict_before`, `cover`](../../../../src/run/cohort_merge/observation_cache.rs) | the accumulator is observed at the draw, its values held and evicted with the summaries; `cover` gains the look-ahead |
+| the reference | [`RefSeq`, `WindowedRefSeq`, `ref_seq.rs`](../../../../src/ref_seq.rs) | one accessor for the run, one fetch per cover |
 | the window definition's rationale | [`hidden_paralog_pileup_window_coverage.md`](../../architecture/hidden_paralog_pileup_window_coverage.md) §2–3 | the "one computation, two consumers" argument, carried whole |
 
 **The parity oracle** is a whole-store recomputation (§10), not production's stored columns:

@@ -26,9 +26,9 @@ impl, hold the rest fixed, measure the whole pipeline against gold/silver/synthe
    behind the same signature.
 
 Two traits already exist and this design builds on them, not around them:
-`ReadLikelihoodModel` ([`src/ssr/cohort/read_model/`](../../../../src/ssr/cohort/read_model/))
+`ReadLikelihoodModel` (`d9e7b076:src/ssr/cohort/read_model`)
 is step 7 for STR; `GenotypeEmModel`
-([`src/var_calling/posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs))
+(`d9e7b076:src/var_calling/posterior_engine.rs`)
 is step 9. The ng work generalises the rest to the same shape. (The crate-level
 `src/genotype_em/` hoist for that trait is still pending — it lives in
 `posterior_engine.rs` today.)
@@ -268,6 +268,9 @@ step but a fixed prelude, so it gets its own doc rather than a trait sketch here
 *before* decode and #7–#9 after, and a `ReadFilter` iterator yields the surviving
 `MappedRead`s while carrying a running `ReadFilterCounts`. It reuses the
 [`bam/alignment_input.rs`](../../../../src/bam/alignment_input.rs) predicates and constants.
+*(2026-11-27: `MappedRead` was deleted; the surviving reads are `AlignedRead`s
+([`read/aligned_read.rs`](../../../../src/read/aligned_read.rs)), handed out by the sample's read
+cursor.)*
 
 ### Step 2 — read preparation (generic path only)
 ```rust
@@ -287,6 +290,8 @@ pub trait ReadPreparer {
     ) -> Result<Option<PreparedRead>, ReadPrepError>;
 }
 ```
+*(2026-11-27: `prepare_read` now takes an `AlignedRead`; `MappedRead` was deleted.)*
+
 *Impls to bench:* v1 is `LeftAlignPreparer` (pass-through + left-align), and a per-read re-align against
 the reference for reads whose placement is not trusted (gated — the affine aligner and its trigger are
 unbuilt). Every impl yields the same `PreparedRead`. **BAQ is deferred sine die** and **local reassembly
@@ -575,14 +580,14 @@ were not freshly re-read.
 | `GenomeRegion` | `Region` ([regions.rs](../../../../src/regions.rs)), `ContigInterval` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | **done — first real use is step 3** ([`typed_regions.md`](typed_regions.md)): 1-based inclusive, `u64`. Consolidates the coordinate-span types into one |
 | ~~`RefWindow`~~ | — | **retired** (step-3 spec §6): its only consumer was `route_locus`, which is gone. The generator holds its own accessor and fetches for itself; production's `RefSpan` names a sequence-carrying span if one is ever wanted. Closes `LocusWindow` too |
 | `RefSeq` + `RawRefSeq` (traits) | `ChromRefFetcher` + `MultiChromRefFetcher` + `RepositoryRefFetcher` + `StreamingChromRefFetcher` + `ManualEvictChromRefFetcher` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) | **consolidate** into `RefSeq` (universal canonical fetch) + the `RawRefSeq` capability + an inherent `evict_before` (no silent no-ops); reuse the fetcher impls behind them. Spec: [`../spec/ref_seq.md`](../spec/ref_seq.md) |
-| `MappedRead` | `MappedRead` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | reuse as-is (the step-2 input) |
+| ~~`MappedRead`~~ | `MappedRead` (`d9e7b076:src/bam/alignment_input.rs`) | was reused as-is as the step-2 input; **deleted 2026-11-27**, replaced by `AlignedRead` ([read/aligned_read.rs](../../../../src/read/aligned_read.rs)) |
 | `LocusRead` (prepared-read output) | — (name retired) | **generic path only:** read preparation produces production's `PreparedRead`, reused as-is (may want hoisting out of `pileup/walker/`). There is **no STR counterpart** — the STR path has no read preparation; its per-read alignment produces a locus *observation* (`ObservedSequence` in `locus_generation_ssr.md`), not a prepared read. The old `SsrTractObs` path-owned type is gone with the retired STR read-prep spec |
-| `AlleleCandidates` | **renamed 2026-08-21 to `CandidateAlleles`** and homed in `calling/candidate_alleles.rs`, re-exported from `calling/` ([`calling_em_loop.md`](calling_em_loop.md) §2) — the loop takes it by value and hands it back inside the locus's result. (A discovery round inside the loop and a final prune were planned; neither was built.) Production's `CandidateSet` ([`candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs)) is the STR-side reuse target | rename; port the rung ladder when the STR path comes through the merge |
-| `SampleSummary` | ≈ the `.psp` `SampleSummary` ([sample_summary/](../../../../src/sample_summary/)) | reuse / align |
+| `AlleleCandidates` | **renamed 2026-08-21 to `CandidateAlleles`** and homed in `calling/candidate_alleles.rs`, re-exported from `calling/` ([`calling_em_loop.md`](calling_em_loop.md) §2) — the loop takes it by value and hands it back inside the locus's result. (A discovery round inside the loop and a final prune were planned; neither was built.) Production's `CandidateSet` (`d9e7b076:src/ssr/cohort/candidate_set.rs`) is the STR-side reuse target | rename; port the rung ladder when the STR path comes through the merge |
+| `SampleSummary` | ≈ the `.psp` `SampleSummary` (`d9e7b076:src/sample_summary`) | reuse / align |
 | `ModelParams` | **resolved 2026-08-21** — the successor is `FrozenParameters` ([`calling_em_loop.md`](calling_em_loop.md) §2): a borrow gathering the pre-pass's outputs (`ReadGroupCalibration`, `ContaminationView`, per-sample `InbreedingF`, `SpectrumSeed`, the `(read group, stratum)` slippage lookup) | assemble once per run; never written during calling |
-| `Genotype` | **resolved 2026-08-21** — a pair, not one type: `GenotypeIdx` (a row of the shared `GenotypeTable`, the loop's working currency) and the owned `Genotype` multiset, minted only at output ([`calling_em_loop.md`](calling_em_loop.md) §2). The table ports production's `GenotypeShape` ([`posterior_engine/shape.rs:42`](../../../../src/var_calling/posterior_engine/shape.rs)) | port the shape; mint the multiset at the final pass |
-| `ReadLikelihoodModel` | ([ssr/cohort/read_model/](../../../../src/ssr/cohort/read_model/)) | **exists** — build on it (step 7) |
-| `GenotypeEmModel` | ([var_calling/posterior_engine.rs](../../../../src/var_calling/posterior_engine.rs)) | **exists** — build on it (step 9; the crate-level `genotype_em/` hoist is still pending) |
+| `Genotype` | **resolved 2026-08-21** — a pair, not one type: `GenotypeIdx` (a row of the shared `GenotypeTable`, the loop's working currency) and the owned `Genotype` multiset, minted only at output ([`calling_em_loop.md`](calling_em_loop.md) §2). The table ports production's `GenotypeShape` (`d9e7b076:src/var_calling/posterior_engine/shape.rs`) | port the shape; mint the multiset at the final pass |
+| `ReadLikelihoodModel` | (`d9e7b076:src/ssr/cohort/read_model`) | **exists** — build on it (step 7) |
+| `GenotypeEmModel` | (`d9e7b076:src/var_calling/posterior_engine.rs`) | **exists** — build on it (step 9; the crate-level `genotype_em/` hoist is still pending) |
 
 The lesson from this review: the codebase already has ~5 genomic-span types and ~5
 read types, so the real risk when implementing ng is creating a *sixth* of each rather

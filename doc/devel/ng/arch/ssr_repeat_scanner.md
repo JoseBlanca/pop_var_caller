@@ -11,12 +11,12 @@ terms in code. Signatures are illustrative; the **contract** is the deliverable.
 the "why" behind every decision.*
 
 *Doc-vs-code location: this doc lives in `ng/arch/` (its motivating consumer is the ng caller and
-its spec is in `ng/spec/`), and the code lives in the same tree at `src/ng/tandem_repeat.rs`.*
+its spec is in `ng/spec/`), and the code lives in the same tree at `src/tandem_repeat.rs`.*
 
 ## Module home
 
-One file, `src/ng/tandem_repeat.rs`, with its `#[cfg(test)]` block beside it; promoted to a
-`src/ng/tandem_repeat/` directory only if it outgrows one file. It is a **shared sequence
+One file, `src/tandem_repeat.rs`, with its `#[cfg(test)]` block beside it; promoted to a
+`src/tandem_repeat/` directory only if it outgrows one file. It is a **shared sequence
 primitive in the ng tree** — the home of the caller generation that primarily drives it — **not**
 one of the ng pipeline steps and **not** under `src/ssr/` (the STR caller). It has **no
 swappable-trait bake-off**: there is one detection algorithm, so it is plain functions/structs,
@@ -220,7 +220,7 @@ satisfying its sliding-buffer contract by construction.
 
 Distilled from the spec; see it for the reasoning. Open items carry `OPEN:`.
 
-- **Lives in the ng tree (`src/ng/tandem_repeat.rs`), not `src/ssr` — decided.** A policy-free
+- **Lives in the ng tree (`src/tandem_repeat.rs`), not `src/ssr` — decided.** A policy-free
   shared primitive placed in the ng tree (the caller generation that primarily drives it), not
   under the STR caller. Rejected `src/ssr/tandem_repeat.rs` (misrepresents scope). Supersedes an
   earlier top-level `src/tandem_repeat.rs` lean (spec §4).
@@ -248,7 +248,7 @@ Distilled from the spec; see it for the reasoning. Open items carry `OPEN:`.
   (spec §3.6; the memory-efficiency thesis).
 - **Region-seam error model = terminal `Result` item — decided.** `Iterator::Item =
   Result<Region, ScanError>`; a mid-scan reference-read error fuses the iterator. This diverges
-  from read filtering's `Item = MappedRead` (fatal-not-per-item) *because here the fallible
+  from read filtering's `Item = MappedRead` (fatal-not-per-item; `MappedRead` was deleted on 2026-11-27) *because here the fallible
   reference read is the iteration's core*, not a side filter — so an I/O error must reach the
   caller, not be swallowed (spec §8). `find_tandem_repeats` and detection stay infallible; only
   `PeriodRange::new` is construction-fallible.
@@ -280,13 +280,13 @@ Verify against the code when implementing; consolidation points, not new duplica
 
 | name | existing code | action |
 |---|---|---|
-| `RepeatInterval` | `TrfRecord` ([`src/ssr/catalog/trf.rs`](../../../../src/ssr/catalog/trf.rs)) | **replaces** it — same read fields, minus never-read `frac_match`/`pattern`; `trf.rs` deleted (spec §7) |
+| `RepeatInterval` | `TrfRecord` (`d9e7b076:src/ssr/catalog/trf.rs`) | **replaces** it — same read fields, minus never-read `frac_match`/`pattern`; `trf.rs` deleted (spec §7) |
 | `find_tandem_repeats` | `trf::run_on_contig` (subprocess + BED parse) | **new**; slots into `catalog::run` where `run_on_contig` was |
 | `RegionScanner` / `Region` / `RepeatRegion` / `RegionSpan` | — | **new**; the router seam, no prior analogue |
 | `ChromRefFetcher` / `StreamingChromRefFetcher` | [`src/fasta/fetcher.rs`](../../../../src/fasta/fetcher.rs) | **reuse as-is** — the sliding-buffer windowed reader `RegionScanner` streams over |
 | window halo + split-invariance | cohort per-chunk DUST (`src/var_calling/dust_filter.rs` + cohort integration) | **pattern reuse** — halo/attribution + the window-count-invariance gate |
-| `postprocess::build_loci` (+ `drop_bundles`/`is_close`) | [`src/ssr/catalog/postprocess.rs`](../../../../src/ssr/catalog/postprocess.rs) | **retype** input `TrfRecord` → `RepeatInterval`; logic unchanged |
-| `CatalogHeader.detector` | `CatalogHeader.trf_mod_version` ([`src/ssr/catalog/io.rs`](../../../../src/ssr/catalog/io.rs)) | rename/repurpose the header field + its test constructors |
+| `postprocess::build_loci` (+ `drop_bundles`/`is_close`) | `d9e7b076:src/ssr/catalog/postprocess.rs` | **retype** input `TrfRecord` → `RepeatInterval`; logic unchanged |
+| `CatalogHeader.detector` | `CatalogHeader.trf_mod_version` (`d9e7b076:src/ssr/catalog/io.rs`) | rename/repurpose the header field + its test constructors |
 | `CatalogError::Trf*`, `--trf-mod-path`/`--temp-dir`, Containerfile install | `catalog/mod.rs`, `ssr_catalog.rs`, `Containerfile` | **delete** after parity banks (spec §7) |
 | parity-fixture pattern | `src/baq/` + `baq_tests.rs` | template for the golden-catalog parity test |
 

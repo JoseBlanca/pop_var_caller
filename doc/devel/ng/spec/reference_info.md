@@ -11,6 +11,12 @@ Companion to [`ref_seq.md`](ref_seq.md), whose impls all take a `ContigList` the
 *Naming: **STR** in prose, `ssr` in code. This module is marker-agnostic, so `ssr` does not
 appear.*
 
+*Note (2026-11-27): this was written while the caller was built in `src/ng/` beside an older,
+frozen caller ("production"). The older caller was deleted on 2026-09-13 and these modules moved
+to the crate root, `src/`, so the rules below about what may sit outside `src/ng/` describe that
+period. Paths to code are given as they are now; a file that no longer exists is cited as
+`<commit>:<path>`, which `git show` opens.*
+
 ---
 
 ## 1. What it is
@@ -19,22 +25,22 @@ appear.*
 how long are they, where do they sit in the file, and — if we were shown the bases — what are
 their MD5s?** In: one to two paths. Out: a `ReferenceInfo` — a `Vec<ContigInfo>` (name, length,
 geometry, md5 per contig) plus, when a FASTA was read, a whole-reference digest (§2). It projects
-to a production `ContigList` ([`fasta/mod.rs:59-62`](../../../../src/fasta/mod.rs)) for the seams
+to a production `ContigList` ([`fasta/mod.rs`](../../../../src/fasta/mod.rs)) for the seams
 that need one.
 
 Nothing in the tree does this. `extract_header` builds a `ContigList` from a `sam::Header`'s
-`@SQ` records ([`alignment_input.rs:306-313`](../../../../src/bam/alignment_input.rs));
+`@SQ` records ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs));
 `validate_fasta_agreement` reads the `.fai` only to *compare* it against that table
-([`alignment_input.rs:426-484`](../../../../src/bam/alignment_input.rs)) and throws it away.
+([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)) and throws it away.
 So a consumer holding a reference and no alignment file has no table, and ng has two:
 
 1. **`typed-regions`** has no alignment file at all
    ([`typed_regions_cli.md`](typed_regions_cli.md) T1) — `WindowedRefSeq::new` demands a
-   `ContigList` ([`ref_seq.rs:524`](../../../../src/ng/ref_seq.rs)) and there is nowhere to
+   `ContigList` ([`ref_seq.rs`](../../../../src/ref_seq.rs)) and there is nowhere to
    get one.
 2. **Read ingestion**, where the hole has teeth. `ContigId` is documented as an index into
-   the table *in `.fai` order* ([`types.rs:6-8`](../../../../src/ng/types.rs)), and
-   `ReadFilter::new` ([`filtering.rs:602-614`](../../../../src/ng/read/filtering.rs)) assumes
+   the table *in `.fai` order* ([`types.rs`](../../../../src/types.rs)), and
+   `ReadFilter::new` ([`filtering.rs`](../../../../src/read/filtering.rs)) assumes
    `ContigId(i)` is the i-th `@SQ` — but it checks only that each index *resolves*, with a
    zero-length fetch. **A BAM whose `@SQ` list is a permutation of the `.fai` passes, then
    fetches the wrong contig for every read in filter #8.** Only a missing contig is caught
@@ -45,14 +51,14 @@ So a consumer holding a reference and no alignment file has no table, and ng has
 **Once this exists, it is the *only* way ng builds a `ContigList` from a reference file**
 (owner, 2026-07-17). Every ng consumer that has a reference and needs its contig table —
 `typed-regions`, read ingestion, and `WindowedRefSeq::new` / `ResidentRefSeq::new`, which take
-a `ContigList` they cannot build ([`ref_seq.rs:367`, `:524`](../../../../src/ng/ref_seq.rs)) —
+a `ContigList` they cannot build ([`ref_seq.rs`](../../../../src/ref_seq.rs)) —
 calls this module. No consumer hand-rolls `ContigEntry`s from `.fai` records or `@SQ` headers
 again; a second builder is a second place for the order contract (T1), the duplicate check
 (T2) and the M5 rule (§3.4) to drift. The rule has **one exception, and it is not one**:
-`InMemoryRefSeq::from_named_contigs` ([`ref_seq.rs:271`](../../../../src/ng/ref_seq.rs)) builds
+`InMemoryRefSeq::from_named_contigs` ([`ref_seq.rs`](../../../../src/ref_seq.rs)) builds
 its table from bytes it already holds in memory, not from a reference *file*, so it is a
 different operation, not a bypass. The two current hand-rolled sites are **test fixtures**
-(`ref_seq.rs`'s `build_fasta`, [`anchor.rs:79`](../../../../src/ng/region_typing/anchor.rs));
+(`ref_seq.rs`'s `build_fasta`, `8ffb0f84~1:src/ng/region_typing/anchor.rs`);
 migrating them onto this module is optional cleanup that would buy them real coverage, but the
 mandate binds *non-test* consumers, of which the first is not yet built.
 
@@ -62,7 +68,7 @@ mandate binds *non-test* consumers, of which the first is not yet built.
 that geometry is exactly what `ContigInfo` carries (§2). Today they parse the `.fai` themselves,
 redundantly and *repeatedly*: `WindowedRefSeq::new` is handed a contig table (one parse), then
 `RawChromReader::for_contig` re-reads the whole `.fai` on **every contig transition**
-([`raw_chrom_reader.rs:131`](../../../../src/ng/raw_chrom_reader.rs)). The consolidation: this
+([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)). The consolidation: this
 module parses the `.fai` **once** (cached §3.7, validated §3.8, all the geometry guards in one
 place), producing the full `Vec<ContigInfo>`, and the readers take a `&ContigInfo` for geometry
 instead of re-parsing. The split stays clean — **this module owns `.fai` *parsing*;
@@ -300,7 +306,7 @@ compressed reference (§3.8, deferred), and a `.fai`-write failure (from `read_r
 step, §3.11), each carrying the path and enough detail to act on. Nothing
 in a supplied reference may panic — its bytes are attacker-influenced input, which is the reason
 `RawChromReader` validates its own `.fai` fields rather than trusting them
-([`raw_chrom_reader.rs:38-41`](../../../../src/ng/raw_chrom_reader.rs)).
+([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)).
 
 ---
 
@@ -340,7 +346,7 @@ worth more than a check that exists. So the check is not optional *given the inp
 **The cost is legible in the source the caller chose (§3.1).** A caller that cannot afford a
 genome read passes `Fai` and gets names/order/lengths with `md5: None` — which is harmless
 downstream, because an absent MD5 is a wildcard
-([`fasta/mod.rs:43-55`](../../../../src/fasta/mod.rs)). A caller that wants the MD5s and the
+([`fasta/mod.rs`](../../../../src/fasta/mod.rs)). A caller that wants the MD5s and the
 verification passes `Fasta`. Neither is a hidden default: the expense is written at the call
 site, in the variant name.
 
@@ -389,11 +395,11 @@ matches, and every offset and line width is wrong. On a single-contig reference 
 offset matches — the header line is unchanged — and only `line_bases` gives it away. So a
 names-and-lengths check passes a reference whose every fetch will return the wrong bases,
 because **the fetchers do arithmetic on the geometry, not on the lengths**
-([`raw_chrom_reader.rs`](../../../../src/ng/raw_chrom_reader.rs) turns
+([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs) turns
 `(offset, line_bases, line_width)` into a file position for every read). Checking what the
 consumers actually depend on is the only version of this check worth its genome read.
 
-*Rejected: `ContigList::first_disagreement`* ([`fasta/mod.rs:69-100`](../../../../src/fasta/mod.rs)).
+*Rejected: `ContigList::first_disagreement`* ([`fasta/mod.rs`](../../../../src/fasta/mod.rs)).
 It is `pub(crate)`, so ng may call it, and the brief expected it here — but it compares
 name/length/MD5 and **has no notion of offset or line geometry**, which is precisely the half
 that matters (above). It cannot be extended, because `src/fasta/` is frozen. It stays the
@@ -408,7 +414,7 @@ a fraction of the check for a fraction of the cost, and §3.2 already decided th
 
 *Rejected: verify by hashing through the `.fai` (production's `compute_contig_md5_streaming`
 shape — seek to `record.offset()`, hash `length` bases,
-[`common.rs:250-299`](../../../../src/pop_var_caller/common.rs)).* **This is circular and the
+`d9e7b076:src/pop_var_caller/common.rs`).* **This is circular and the
 trap is worth naming**: it reads the bases *the index points at*, so it can only ever confirm
 that the index agrees with itself. Every fai-driven reader in the tree — `RawChromReader`,
 `StreamingChromRefFetcher`, `ManualEvictChromRefFetcher` — has this property. **A `.fai`
@@ -436,7 +442,7 @@ This module computes and hands them over. It does not decide what disagreement m
 caller that has something to compare against does.
 
 - **Per contig** → `ContigEntry::md5`. It has no choice: that field means `@SQ M5`
-  ([`alignment_input.rs:331-354`](../../../../src/bam/alignment_input.rs) decodes it from the
+  ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs) decodes it from the
   header), and M5 is defined on uppercased bases. A file-byte digest there would be a
   different number wearing the same name, and `ContigEntry`'s `PartialEq` would compare it
   against a real M5 and report a mismatch that isn't one.
@@ -503,7 +509,7 @@ then fall out rather than needing their own handling: a `\r\n` file is correct f
 is not a base, and is in `line_width`), and so is any FASTA with trailing spaces.
 
 *Rejected: production's rule* — skip `\n` and `\r`, uppercase everything else
-([`common.rs:285-290`](../../../../src/pop_var_caller/common.rs)). It hashes spaces and tabs,
+(`d9e7b076:src/pop_var_caller/common.rs`). It hashes spaces and tabs,
 which the spec and both producers exclude, so on a FASTA carrying them our M5 would disagree
 with the `@SQ M5` of every BAM aligned to it — a spurious mismatch on somebody's real data
 (T6), and one we would have to explain rather than fix, since `src/` is frozen. **This is a
@@ -515,14 +521,14 @@ sides are its own. It is wrong as a rule for M5.
 **Uppercasing is not `canonicalise`** ([`fetcher.rs`](../../../../src/fasta/fetcher.rs)):
 canonicalisation folds IUPAC codes to `N`, which would change the digest. `R` hashes as `R`.
 
-### 3.5 Decided: home is a new `src/ng/reference_info.rs`
+### 3.5 Decided: home is a new `src/reference_info.rs`
 
 Named for its primary output, `ReferenceInfo` — the `ref_seq.rs` → `RefSeq` convention, a module
 named for the type it exists to produce. The earlier name `contig_list.rs` was retired for the
 same reason `ReferenceContigs` was (§3.9 note): the module produces the contig table *and* the
 digest *and* the reconstructed index, so a contig-only name undersold it. Not `contig_table.rs`
 either, and that near-miss is still worth stating: `ContigTable` is already a trait in
-`ref_seq.rs` ([`ref_seq.rs:212-216`](../../../../src/ng/ref_seq.rs)), and it is a **consumer
+`ref_seq.rs` ([`ref_seq.rs`](../../../../src/ref_seq.rs)), and it is a **consumer
 capability** — "this reference can tell you how long its contigs are", a bound the typed-region
 walk demands. This module is the **producer**; giving the file that name would put two different
 things under one word.
@@ -530,9 +536,9 @@ things under one word.
 *Rejected: fold it into `ref_seq.rs`, beside the trait and the impls that consume its output.*
 That is the strongest argument for the other side — `ResidentRefSeq::new` and
 `WindowedRefSeq::new` both take a `ContigList` they cannot build
-([`ref_seq.rs:367`, `:524`](../../../../src/ng/ref_seq.rs)), so the caller currently has to
+([`ref_seq.rs`](../../../../src/ref_seq.rs)), so the caller currently has to
 hand-roll one, which is why every construction site in the tree is a test fixture
-([`anchor.rs:80-90`](../../../../src/ng/region_typing/anchor.rs) builds `ContigEntry`s by
+(`8ffb0f84~1:src/ng/region_typing/anchor.rs` builds `ContigEntry`s by
 hand). But `ref_seq.rs` is 1280 lines and its own spec says it splits into `ref_seq/` when it
 grows ([`ref_seq.md`](ref_seq.md) §5); and this module's dependencies point nowhere near it
 (§3.6). A file that shares no types with its neighbours does not belong in their file.
@@ -550,9 +556,9 @@ bridge) and `first_disagreement` is reused later (§7). It does **not** import `
 `RefSeq`, `ContigTable`, or any ng *step* type — a consumer needs no ng-step vocabulary to use it.
 
 Read-only reuse across the fence is fine and costs production nothing
-([`ng/mod.rs:11-15`](../../../../src/ng/mod.rs)). Two specific reaches, both `pub(crate)` and
+(`d9e7b076:src/ng/mod.rs`). Two specific reaches, both `pub(crate)` and
 both read-only: `crate::fasta::{ContigEntry, ContigList}`, and — only if a caller wants hex —
-`pop_var_caller::common::format_md5_hex` ([`common.rs:60`](../../../../src/pop_var_caller/common.rs),
+`pop_var_caller::common::format_md5_hex` (`d9e7b076:src/pop_var_caller/common.rs`,
 reachable in-crate, as `ssr/catalog/mod.rs:211` already demonstrates). The B2 guard
 (`rg 'use crate::ng' src/ --glob '!src/ng/**'`) is unaffected: the dependency points from ng
 into production, which is the safe direction.
@@ -891,7 +897,7 @@ for each record:
 ```
 
 Resident memory is one read buffer — production's `compute_contig_md5_streaming` uses 64 KiB
-([`common.rs:35`, `:263-295`](../../../../src/pop_var_caller/common.rs)) and there is no reason
+(`d9e7b076:src/pop_var_caller/common.rs`) and there is no reason
 to differ. The two MD5 states are fed the same bytes, so the reference digest costs one extra
 `update` per window, not a second pass.
 
@@ -908,7 +914,7 @@ readers could plausibly do this, and each is *almost* it. The one to address fir
   low-memory readers, built for exactly the "don't hold a whole contig" goal this pass shares.
   They are nonetheless the **wrong tool**, because they are **`.fai`-driven**: each seeks to the
   byte offset the `.fai` declares and does its line arithmetic from `line_bases`/`line_width`
-  ([`raw_chrom_reader.rs`](../../../../src/ng/raw_chrom_reader.rs) turns
+  ([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs) turns
   `(offset, line_bases, line_width)` into a file position). So they cannot read a FASTA that has
   **no** `.fai` (the `Fasta { None }` case — nothing to drive them), and using them to verify a
   `.fai` is the **circular** check §3.3 forbids: they read the bytes the index points at, so they
@@ -917,7 +923,7 @@ readers could plausibly do this, and each is *almost* it. The one to address fir
   hold the index to account. The memory win is not lost by declining them: the hand-rolled loop
   below is equally one-buffer streaming, and being from-byte-zero it *can* build and verify.
 - **`noodles_fasta::io::Reader::records()`** — what `ssr-catalog` uses
-  ([`catalog/mod.rs:195-210`](../../../../src/ssr/catalog/mod.rs)) and what
+  (`d9e7b076:src/ssr/catalog/mod.rs`) and what
   `anchor.rs:112-120` uses. It materialises **each contig whole** (`rec.sequence()` is the
   entire sequence), which for a 250 Mb chromosome is exactly the allocation the owner's
   streaming requirement forbids, and exactly the shape [`ref_seq.md`](ref_seq.md)'s 14.6 GB
@@ -944,11 +950,11 @@ So the loop above is Indexer's logic with a digest folded into it; it is ~40 lin
 (`indexer.rs`'s `index_record`, plus a byte counter), and copying it is in character —
 `RawChromReader` is the same move, a faithful copy of production's fetcher with one behaviour
 changed, kept diffable against the original on purpose
-([`raw_chrom_reader.rs:36-42`](../../../../src/ng/raw_chrom_reader.rs)). Its geometry
+([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)). Its geometry
 errors come with it: non-uniform `line_bases`, non-uniform `line_width`, an empty sequence.
 
 **`Fai` reads the index and stops**: `noodles_fasta::fai::fs::read`, the same call
-`validate_fasta_agreement` makes ([`alignment_input.rs:437-442`](../../../../src/bam/alignment_input.rs)),
+`validate_fasta_agreement` makes ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)),
 then one `ContigEntry { name, length, md5: None }` per record in order. It never opens the FASTA,
 so there is no line structure to check — the line-consistency guard above is a `Fasta`-arm
 concern only; here the `.fai`'s own numeric validity (`line_bases > 0`, `line_width ≥ line_bases`)
@@ -961,7 +967,7 @@ is what a parse guards, the same fields htslib's `fai_insert_index` checks (`fai
 Every item here came from opening the file it cites.
 
 **T1 — the order *is* the contract, and it is the whole reason this module exists.**
-`ContigId(i)` means "the i-th entry" ([`types.rs:6-8`](../../../../src/ng/types.rs)), so the
+`ContigId(i)` means "the i-th entry" ([`types.rs`](../../../../src/types.rs)), so the
 `Vec` order this returns silently defines every `ContigId` downstream. Both readers preserve
 file order (a `.fai` is written in FASTA order; the pass walks the file), so this is free —
 but it is free *by construction*, not by check, and a future "sort the contigs for tidiness"
@@ -970,7 +976,7 @@ which is the one thing that would catch it. Say so where the order is establishe
 
 **T2 — duplicate contig names resolve to one contig, silently.** `ContigList` does not check
 for them, and `ResidentRefSeq` resolves a fetch by `ContigId → name → Repository::get`
-([`ref_seq.rs:360-435`](../../../../src/ng/ref_seq.rs)) — so if a reference carries `chr1`
+([`ref_seq.rs`](../../../../src/ref_seq.rs)) — so if a reference carries `chr1`
 twice, two distinct `ContigId`s fetch the same bases and no error is ever raised. Nothing in
 the tree rejects this today, because nothing in the tree builds a table from a reference. This
 module is the first place that *can*, and it is the only place with the whole list in hand.
@@ -989,7 +995,7 @@ them by position.
 
 **T3 — the FASTA is user input, so every malformed shape is an error, not a panic.** The
 pass's own arithmetic gives it the same exposure `RawChromReader` documents — a `line_bases`
-of 0 divides by zero downstream ([`raw_chrom_reader.rs:38-41`](../../../../src/ng/raw_chrom_reader.rs)).
+of 0 divides by zero downstream ([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)).
 Bases before the first `>`; a definition with an empty name; a contig with no sequence lines;
 non-uniform line widths in the middle of a contig (htslib errors here too — *"Different line
 length in sequence"*, `faidx.c:291`). A `\r\n` file needs no special case: §4's one predicate
@@ -1005,25 +1011,25 @@ read instead, because `Fai` and `Fasta` cost three orders of magnitude apart (§
 help would turn a typo into a silent ten-minute genome read. Likewise a `Fasta { fai: Some(f) }`
 whose `f` is missing errors on open; it does not quietly degrade to `fai: None` and skip the
 check the caller asked for. Error the way `validate_fasta_agreement` does
-([`alignment_input.rs:432-436`](../../../../src/bam/alignment_input.rs)). The graceful
+([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)). The graceful
 "check the index if it happens to be there, read alone if not" belongs to the caller, who
 expresses it by choosing `fai: Some`/`None` — the module never guesses (§2).
 
 **T5 — the `u64 → u32` narrowing is not this module's problem, and taking it on would be a
-bug.** `ContigEntry::length` is `u64` ([`fasta/mod.rs:37-43`](../../../../src/fasta/mod.rs))
-and `regions::ContigBounds::length` is `u32` ([`regions.rs:57-63`](../../../../src/regions.rs)),
+bug.** `ContigEntry::length` is `u64` ([`fasta/mod.rs`](../../../../src/fasta/mod.rs))
+and `regions::ContigBounds::length` is `u32` ([`regions.rs`](../../../../src/regions.rs)),
 and the brief flags the gap — but it is the **consumer's** gap. This module returns the table
 `ContigList` describes, at `ContigList`'s width; a >4 Gb contig is a fact about the reference,
 and refusing to *describe* one would refuse a reference for a caller that never builds a
 `RegionSet`. The rule when a consumer does narrow is settled and unchanged — **fail rather
 than fold** ([`typed_regions.md`](typed_regions.md) §4), `u32::try_from` and an error, the way
-`narrow_for_fetcher` already does it ([`ref_seq.rs:103-130`](../../../../src/ng/ref_seq.rs)).
+`narrow_for_fetcher` already does it ([`ref_seq.rs`](../../../../src/ref_seq.rs)).
 The one precedent that casts with `as` is a test fixture
-([`anchor.rs:98`](../../../../src/ng/region_typing/anchor.rs)) and is not the model.
+(`8ffb0f84~1:src/ng/region_typing/anchor.rs`) and is not the model.
 
 **T6 — an absent MD5 is a wildcard, so `md5: None` is safe and `md5: Some` is a claim.**
 `ContigEntry`'s `PartialEq` treats `None` as matching anything
-([`fasta/mod.rs:43-55`](../../../../src/fasta/mod.rs)). That is what makes `Fai`'s `md5: None`
+([`fasta/mod.rs`](../../../../src/fasta/mod.rs)). That is what makes `Fai`'s `md5: None`
 harmless. It also means the `Fasta` variant hands a downstream comparison **real teeth for the
 first time** — a table with MD5s compared against an `@SQ` list with M5s will now actually
 compare them, and any deviation in §3.4's folding rule surfaces there as a spurious mismatch
@@ -1057,7 +1063,7 @@ the stat-for-key and the read — and is the same class, accepted on the same gr
 
 The fixture already exists: `ref_seq.rs`'s `build_fasta` writes a multi-contig FASTA and a
 matching `.fai` to a tempdir and returns the `ContigList`
-([`ref_seq.rs:883-915`](../../../../src/ng/ref_seq.rs)) — but it writes **one line per
+([`ref_seq.rs`](../../../../src/ref_seq.rs)) — but it writes **one line per
 contig**, so it cannot exercise line geometry at all. This module needs a builder that wraps
 at a chosen width; that is the first thing to write, and it is what T3 and §3.3's tests stand
 on. Home: the module's own `#[cfg(test)]`, per the in-crate convention.
@@ -1080,7 +1086,7 @@ on. Home: the module's own `#[cfg(test)]`, per the in-crate convention.
   compares against exactly those fields).
   Then the cheap companions: per-contig against `Md5::digest(filtered_uppercase_bases)`
   one-shot (production's own streaming-matches-one-shot shape,
-  [`common.rs:452-489`](../../../../src/pop_var_caller/common.rs), including the soft-mask
+  `d9e7b076:src/pop_var_caller/common.rs`, including the soft-mask
   case), and the reference digest against the golden `.cat` header built from that same FASTA.
 - **`write_fai` is byte-identical to `samtools faidx`** (§3.9). Read the golden FASTA, call
   `write_fai(&result.contigs, out)`, and assert the bytes equal the committed
@@ -1124,7 +1130,7 @@ on. Home: the module's own `#[cfg(test)]`, per the in-crate convention.
   single contig is larger than any buffer the code allocates and assert it completes; or
   express it structurally, by keeping the pass's only owned byte buffer a fixed-size array
   (which `compute_contig_md5_streaming` does — `[u8; FASTA_MD5_BUFFER_SIZE]` on the stack,
-  [`common.rs:263-264`](../../../../src/pop_var_caller/common.rs)) so a contig-sized
+  `d9e7b076:src/pop_var_caller/common.rs`) so a contig-sized
   allocation cannot compile. Prefer the second; note the first as what a reviewer should look
   for.
 
@@ -1194,7 +1200,7 @@ its entire reason to exist:
 
 - **`@SQ` ↔ `.fai` reconciliation, and with it the `ReadFilter::new` permutation hole** (§1)
   → **read ingestion's spec**, where the alignment file lives. It is `ContigList::first_disagreement`
-  ([`fasta/mod.rs:69-100`](../../../../src/fasta/mod.rs) — `pub(crate)`, so ng may call it) over
+  ([`fasta/mod.rs`](../../../../src/fasta/mod.rs) — `pub(crate)`, so ng may call it) over
   this module's output and the `@SQ` table, and the reason it is not here is that this module
   must not know what a BAM is (§3.6). Two notes for whoever picks it up: the check must
   compare **order**, not just membership, since a permutation is the bug; and the `Fai` arm's
@@ -1202,14 +1208,14 @@ its entire reason to exist:
   therefore a genome read — a real decision, not a detail.
 - **The coordinate-sort-order check** that stands on that reconciliation → same home.
   `extract_header` already rejects a non-coordinate-sorted alignment file
-  ([`alignment_input.rs:297-303`](../../../../src/bam/alignment_input.rs)); what is missing is
+  ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)); what is missing is
   the reference-order half.
 - **Consolidating ng's fai-driven readers onto `ContigInfo`** (§1's wider mandate) → a follow-up
   refactor of existing ng code. `RawChromReader` stops calling `open_contig` / `fai::fs::read`
   and takes a `&ContigInfo` (geometry) instead; `WindowedRefSeq::new`, which already receives a
   contig table from this module, receives the full `ReferenceInfo` (geometry included), so the
   `.fai` is parsed once per run rather than once per contig transition
-  ([`raw_chrom_reader.rs:131`](../../../../src/ng/raw_chrom_reader.rs)). This refactor also drops
+  ([`raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)). This refactor also drops
   `WindowedRefSeq`/`RawChromReader` off `ContigList` onto `ContigInfo`, retiring the transitional
   `contig_list()` bridge for them (§2, §3.6). ng-only (production's frozen readers keep their own
   parse). Deferred because it touches built ng code and is not needed to stand this module up — but
@@ -1225,10 +1231,10 @@ its entire reason to exist:
 - ~~**Writing a `.fai`.**~~ **Built (§3.9)** — no longer deferred. `read_reference_info`
   returns `Vec<ContigInfo>` and `write_fai` writes them, so a reference that lacks an index can be
   indexed by ng rather than by a `samtools faidx` prerequisite
-  ([`cli.rs:123-125`](../../../../src/pop_var_caller/cli.rs)).
+  (`d9e7b076:src/pop_var_caller/cli.rs`).
 - **Parallelising a *single* read.** The cache (§3.7) makes *many* reads cheap; it does not
   split *one* — a single genome read is serial. `verify_fasta_matches_psp_chromosomes` fans its
-  per-contig MD5s across rayon ([`common.rs:208-238`](../../../../src/pop_var_caller/common.rs))
+  per-contig MD5s across rayon (`d9e7b076:src/pop_var_caller/common.rs`)
   and gets `max_chrom / threads` instead of the serial sum — but it can only do that
   **because** it seeks by `.fai` offset, which §3.3 rejects as circular. A from-byte-zero pass
   is inherently serial. → whoever measures one read and finds it hurts *even cached* (i.e. the

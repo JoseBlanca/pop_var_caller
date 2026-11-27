@@ -15,6 +15,12 @@ knobs stay out of the production command.*
 *Naming: **STR** in prose, `ssr` in code. **Licensing:** implement from papers, never transliterate
 — TRF-mod is AGPL-3, GangSTR GPL-3, HipSTR GPL-2. Nothing here needs their source.*
 
+*Note (2026-11-27): this was written while the caller was built in `src/ng/` beside an older,
+frozen caller ("production"). The older caller was deleted on 2026-09-13 and these modules moved
+to the crate root, `src/`, so the rules below about what may sit outside `src/ng/` describe that
+period. Paths to code are given as they are now; a file that no longer exists is cited as
+`<commit>:<path>`, which `git show` opens.*
+
 ---
 
 ## Revision — 2026-07-16: ng owns its copies; production is frozen
@@ -471,7 +477,7 @@ nothing (§7).
 
 ## 3. The types
 
-Live in `src/ng/region_typing/` (§6): the walk's types in `mod.rs`, ng's ported `SsrSegment` /
+Live in `src/region_typing/` (§6): the walk's types in `mod.rs`, ng's ported `SsrSegment` /
 `SsrSegmentCriteria` / `classify` in `segment_criteria.rs`. `GenomeRegion` is shared vocabulary and lands in
 `ng::types`.
 
@@ -615,7 +621,7 @@ turned out to be cheaper still, since owning the type costs less than rebasing s
 
 **What ng reuses from `src/ssr/` unchanged: nothing in this step, as it turns out.** `SsrSegment` is
 obviously ng's — coordinates and width are all it is. `Motif`
-([ssr/types.rs:36](../../../../src/ssr/types.rs)) looked like the opposite case, and this spec called
+(`d9e7b076:src/ssr/types.rs`) looked like the opposite case, and this spec called
 it *"the Revision's 'reuse where it costs production nothing' case exactly"* — it is `pub(crate)`,
 and carries no coordinates and no width, so there is nothing to rebase.
 
@@ -682,7 +688,7 @@ the partition is a function of it.
 **We port the catalog's implementation; we do not adopt its policy.** Those are different, and an
 earlier draft of this spec collapsed them into a goal ("reuse the catalog's classification policy"),
 which was backwards. `postprocess::build_loci`
-([postprocess.rs:69](../../../../src/ssr/catalog/postprocess.rs)) is a working, tested
+(`d9e7b076:src/ssr/catalog/postprocess.rs`) is a working, tested
 implementation of the whole rule set — period scope, score gate, compound-motif drop, bundle drop,
 minimal trim, copy floor, purity floor, contig-edge drop — and **re-deriving that rule set from
 scratch would be daft**. So ng takes the code. **v1 starts at its settings for one reason only:
@@ -795,7 +801,7 @@ to prove the original claim disproved it.)*
 ### 5.1 Where the pre-filter lives
 
 It exists only in a test file (`catalog_prefilter`,
-[scanner_parity.rs](../../../../src/ng/scanner_parity.rs) — which B2 moved into ng, see §9), and
+[scanner_parity.rs](../../../../src/scanner_parity.rs) — which B2 moved into ng, see §9), and
 `ssr_repeat_scanner.md` §6 says it "belongs in `catalog::run`" — written when the catalog swap was
 the only consumer.
 
@@ -872,7 +878,7 @@ classified set equal to the catalog's.
 > mean what it said, which is the whole of the bug. That is why an over-1 kb poly-A became a
 > `Satellite`: not by decision, but because its aliases were counted as tandem repeats.
 >
-> **The fix** ([`segment_criteria::prefilter`](../../../../src/ng/region_typing/segment_criteria.rs)) splits the one
+> **The fix** ([`segment_criteria::prefilter`](../../../../src/region_typing/segment_criteria.rs)) splits the one
 > filter in two and puts the period floor **last**: copy floor → redundancy elimination → period floor.
 > Period 1 now survives long enough to eliminate its own aliases and is dropped afterwards, so a
 > homopolymer contributes **nothing** at 2..=6 and is classified as a period-1 tract under its own motif
@@ -926,7 +932,7 @@ here — period range, satellite cap, classification strictness — are **config
 swept by changing a number, not a `Box<dyn _>`. **`bench/` is deferred**, same reasoning as read
 filtering: no competitors, no frontier to plot.
 
-**Module: `src/ng/region_typing/`** — a folder, and the Revision is why. A step with no bake-off is a
+**Module: `src/region_typing/`** — a folder, and the Revision is why. A step with no bake-off is a
 file, not a folder (`module_layout.md` principle 1), and step 3 has no bake-off — but it now also
 carries a ~500-line port of the classification policy (§5), which is a *different* concern from the walk
 and has its own dense test suite. So: `region_typing/mod.rs` for the types and the walk,
@@ -970,7 +976,7 @@ and classifies satellite before any policy can run** (§2.4's ordering), on raw 
 and there is no way to inject the pre-filter between its detection and its merge.
 
 **The layer below it fits exactly.** `collect_windowed`
-([tandem_repeat.rs:530](../../../../src/ng/tandem_repeat.rs)) already does §2.6's hard part — core +
+([tandem_repeat.rs](../../../../src/tandem_repeat.rs)) already does §2.6's hard part — core +
 margin, coverage clipped to cores, intervals attributed by start — and its doc already carries the
 reasoning this depends on (*"the `max_str_len` margins are load-bearing: Ruzzo–Tompa segmentation
 is context-dependent"*). It is invariance-tested. **We should not reimplement it.** But it is
@@ -1148,17 +1154,17 @@ contig's end abutting one at the next's start (transition arithmetic).
 
 | what | existing code | how |
 |---|---|---|
-| the windowed scan (core + margin, coverage clipped, intervals by start) | `collect_windowed` ([tandem_repeat.rs:530](../../../../src/ng/tandem_repeat.rs)) | **the primitive this is built on** — must be promoted and streamed (§6.1) |
-| repeat detection | `find_tandem_repeats` ([tandem_repeat.rs:354](../../../../src/ng/tandem_repeat.rs)) | called per window by the above |
-| the region tiling | `RegionScanner` ([tandem_repeat.rs:586](../../../../src/ng/tandem_repeat.rs)) | **not reused** — merges before policy (§6.1) |
-| the classification policy | `build_loci` ([postprocess.rs:69](../../../../src/ssr/catalog/postprocess.rs)) | **copied into ng** — every decision transcribed unchanged; windowed, `RepeatInterval`-taking, 1-based/`u64`, all-knobs, returns `Classified` (§5a), and **without the flank embed** (§1.2). Production's stays as it is |
-| the bundle selection | `drop_bundles`/`is_close` ([postprocess.rs:274](../../../../src/ssr/catalog/postprocess.rs)) | **copied with it** — selection kept, disposal not; re-associated to stream (§2.4, §2.6) |
-| the pre-filter | `catalog_prefilter` ([ng/scanner_parity.rs](../../../../src/ng/scanner_parity.rs)) | **copied into ng**, beside ng's `classify` (§5.1); the parity test keeps its own frozen copy, and B2 moved that test out of `src/ssr/` too (§9) |
-| classification knobs | `CatalogParams` ([catalog/mod.rs:42](../../../../src/ssr/catalog/mod.rs)) | **ng's own `SsrSegmentCriteria`** — same defaults, plus the hardcoded period scope + copy floors as real knobs; no separate `bundle_threshold` (§2.4) |
-| the STR locus | `ssr::types::Locus` ([types.rs:136](../../../../src/ssr/types.rs)) | **copied into ng**, born 1-based/`u64` (§4) and **without `ref_bytes`** (§1.2). Production's keeps them, 0-based/`u32` |
-| the motif | `ssr::types::Motif` ([types.rs:36](../../../../src/ssr/types.rs)) | **copied into ng** — reuse looked free (no coordinates, no width) but production's is `pub(crate)` and would leak through ng's `pub` `SsrSegment` (§4, corrected at the A1 review) |
+| the windowed scan (core + margin, coverage clipped, intervals by start) | `collect_windowed` ([tandem_repeat.rs](../../../../src/tandem_repeat.rs)) | **the primitive this is built on** — must be promoted and streamed (§6.1) |
+| repeat detection | `find_tandem_repeats` ([tandem_repeat.rs](../../../../src/tandem_repeat.rs)) | called per window by the above |
+| the region tiling | `RegionScanner` ([tandem_repeat.rs](../../../../src/tandem_repeat.rs)) | **not reused** — merges before policy (§6.1) |
+| the classification policy | `build_loci` (`d9e7b076:src/ssr/catalog/postprocess.rs`) | **copied into ng** — every decision transcribed unchanged; windowed, `RepeatInterval`-taking, 1-based/`u64`, all-knobs, returns `Classified` (§5a), and **without the flank embed** (§1.2). Production's stays as it is |
+| the bundle selection | `drop_bundles`/`is_close` (`d9e7b076:src/ssr/catalog/postprocess.rs`) | **copied with it** — selection kept, disposal not; re-associated to stream (§2.4, §2.6) |
+| the pre-filter | `catalog_prefilter` ([scanner_parity.rs](../../../../src/scanner_parity.rs)) | **copied into ng**, beside ng's `classify` (§5.1); the parity test keeps its own frozen copy, and B2 moved that test out of `src/ssr/` too (§9) |
+| classification knobs | `CatalogParams` (`d9e7b076:src/ssr/catalog/mod.rs`) | **ng's own `SsrSegmentCriteria`** — same defaults, plus the hardcoded period scope + copy floors as real knobs; no separate `bundle_threshold` (§2.4) |
+| the STR locus | `ssr::types::Locus` (`d9e7b076:src/ssr/types.rs`) | **copied into ng**, born 1-based/`u64` (§4) and **without `ref_bytes`** (§1.2). Production's keeps them, 0-based/`u32` |
+| the motif | `ssr::types::Motif` (`d9e7b076:src/ssr/types.rs`) | **copied into ng** — reuse looked free (no coordinates, no width) but production's is `pub(crate)` and would leak through ng's `pub` `SsrSegment` (§4, corrected at the A1 review) |
 | what to walk | `RegionSet`/`Region`/`ContigBounds` ([regions.rs](../../../../src/regions.rs)) | **wrapped, read-only**, by `GenomeRegions` (§2.5); it already parses/coalesces/clamps BED. `regions.rs` does not move |
-| reference bases | `WindowedRefSeq` ([ng/ref_seq.rs](../../../../src/ng/ref_seq.rs)) | + a raw path (§6) and a `contigs()` accessor |
+| reference bases | `WindowedRefSeq` ([ref_seq.rs](../../../../src/ref_seq.rs)) | + a raw path (§6) and a `contigs()` accessor |
 | the iterator seam | `ReadFilter` ([read_filtering.md](read_filtering.md) §5) | the shape to match |
 | **the parity oracle** | an `ssr-catalog` `.cat` on the same reference | §8 |
 
@@ -1176,7 +1182,7 @@ measure-first.
 **What this step changes elsewhere: one test move, and nothing else (Revision 2026-07-16).**
 
 > **The one exception, owner-approved 2026-07-16 at B2.** `src/ssr/catalog/scanner_parity.rs` moved to
-> [`src/ng/scanner_parity.rs`](../../../../src/ng/scanner_parity.rs). It was **the only place in the
+> [`src/scanner_parity.rs`](../../../../src/scanner_parity.rs). It was **the only place in the
 > whole tree where production `use`d `crate::ng`** — and that dependency pointed the wrong way: the
 > file is *ng's* test (its subject is ng's scanner; production is only the yardstick), living in
 > `src/ssr/` for the historical reason that the golden path was there.

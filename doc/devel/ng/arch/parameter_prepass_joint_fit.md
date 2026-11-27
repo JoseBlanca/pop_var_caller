@@ -3,7 +3,7 @@
 *Status: architecture draft (2026-08-12), companion to the spec
 [`../spec/parameter_prepass_joint_fit.md`](../spec/parameter_prepass_joint_fit.md) (the design and its
 rationale) and to the shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary)
-and [`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
+and [`module_layout.md`](module_layout.md) (the module tree). Naming follows
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): nouns for types, verbs
 for functions, **STR** in prose ↔ `ssr` in code. Signatures are illustrative; the **contract** is the
 deliverable. Every "why" lives in the spec — this doc does not re-argue one.*
@@ -14,7 +14,7 @@ else.*
 
 ## Module home
 
-`src/ng/parameter_estimation/joint/fit.rs`, with the machinery it shares taken from `fitting/`
+`src/parameter_estimation/joint/fit.rs`, with the machinery it shares taken from `fitting/`
 (`module_layout.md`: *parameter_estimation/* owns `fitting/`, `generic/`, `ssr/` — this route is a
 fourth sub-unit and not a top-level split).
 
@@ -64,7 +64,7 @@ pub struct JointFit {
 
 **Contract.** Every entry carries `Estimate<T>`'s provenance and observation count, as the per-sample
 route's do — a parameter that fell back rather than being fitted here says so
-([`parameter_estimation/mod.rs:48,72`](../../../../src/parameter_estimation/mod.rs)).
+([`parameter_estimation/mod.rs,72`](../../../../src/parameter_estimation/mod.rs)).
 
 ### 1.2 `SiteClassNoise` — three classes, not two
 
@@ -195,7 +195,7 @@ impl HomozygoteExcess {
 ```
 
 **Decided — a new newtype, and `InbreedingF` is left alone.** `InbreedingF`
-([`src/types.rs:355`](../../../../src/types.rs)) is already the autozygosity coefficient
+([`src/types.rs`](../../../../src/types.rs)) is already the autozygosity coefficient
 everywhere it is used, and the per-sample route is built on it; renaming it would touch shipped code
 for a documentation gain. **What the compiler must refuse is the mix**, and two types do that (spec
 §5.1). *Its doc comment carries the mapping to the literature: `F_ROH` for `InbreedingF`, `F_IS` for
@@ -613,10 +613,10 @@ pub enum JointFitError {
 | the two site classes | `SiteNoise` (`generic/mod.rs:90` (file since removed)) | `SiteClassNoise` **holds** one rather than restating its two fields, so the pair keeps one home |
 | the climb over mixture weights | `climb_mixture_weights` + `MAX_CLIMB_PASSES`, `CLIMB_STILLNESS` (`fitting/mixture_weights.rs:50,66` (file since removed)) | the density's two masses are mixture weights and reuse it. **The Beta's `a` and `b` are not**, and reaching for this function for them is the mistake this row exists to head off |
 | the alternation's shape and its termination | `CoupledFit` (`generic/mod.rs:474` (file since removed)) | same loop shape and same rule that running out of passes is not convergence, with four blocks instead of two |
-| provenance and evidence count | `Provenance`, `Estimate<T>` ([`parameter_estimation/mod.rs:48,72`](../../../../src/parameter_estimation/mod.rs)) | used as-is on every emitted parameter |
+| provenance and evidence count | `Provenance`, `Estimate<T>` ([`parameter_estimation/mod.rs,72`](../../../../src/parameter_estimation/mod.rs)) | used as-is on every emitted parameter |
 | the per-sample rates | `SampleRates` (`generic/mod.rs:342` (file since removed)) | reused so the two routes' `Hobs`/`π_hom_alt` are the same type and directly comparable — the comparison is the point |
-| the autozygosity coefficient | `InbreedingF` ([`src/types.rs:355`](../../../../src/types.rs)) | **not reused and not renamed**; this route emits `HomozygoteExcess` and never writes to a field of that type |
-| `ErrorRate`, `Ploidy`, `GenotypeFrequency`, `ReadGroupId` | [`src/types.rs:311,386,333,199`](../../../../src/types.rs) | used as-is |
+| the autozygosity coefficient | `InbreedingF` ([`src/types.rs`](../../../../src/types.rs)) | **not reused and not renamed**; this route emits `HomozygoteExcess` and never writes to a field of that type |
+| `ErrorRate`, `Ploidy`, `GenotypeFrequency`, `ReadGroupId` | [`src/types.rs,386,333,199`](../../../../src/types.rs) | used as-is |
 | the ladder scan | `fit_by_profile_scan`, `fit_by_fixed_frequency_scan` (`fitting/ladder_scan.rs:131,248` (file since removed)) | **not used** — a rung here is a pass over the data (§2.3). Recorded so an implementer does not reach for them by analogy |
 
 ---
@@ -635,7 +635,7 @@ pub enum JointFitError {
 - **`OPEN:`** whether the short-tract STR strata contribute to contamination — spec §11 question 5.
   Until it is settled, `fit_jointly` reads contamination from the generic records only.
 - **Impl-time:** `Stratum` as a key type. The catalog keys strata by `(u8, u64)`
-  ([`repeat_catalog/strata.rs:21`](../../../../src/repeat_catalog/strata.rs)); pin whether this
+  ([`repeat_catalog/strata.rs`](../../../../src/repeat_catalog/strata.rs)); pin whether this
   route takes that tuple or a newtype over it, and do not mint a second stratum notion.
 - **Impl-time:** whether `SiteClassPosteriors` is materialised for every locus or streamed. Two
   million floats per class is small; the contract is only that a consumer can ask about a named locus.

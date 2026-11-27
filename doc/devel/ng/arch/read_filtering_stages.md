@@ -323,7 +323,7 @@ variant at Checkpoint C (owner, 2026-08-03) — see the correction below.
 - **The verdict carries the drop reason**, so an `Option` return is ruled out: the tally is keyed
   on reason and read group.
 - **The read group is read off the raw aligned read** — it is already stamped there for exactly
-  this ([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
+  this ([`filtering.rs`](../../../../src/read/filtering.rs)).
 - **The second filter's #7 → #9 → #8 order is kept**, not the numbering order — spec §4.
 - **`FilterState` is deleted for a `failed` flag** — spec §5.
 - **The source trait is deleted and the in-memory reader gains a scripted error** — spec §6.
@@ -342,20 +342,20 @@ Every row read at the cited line, 2026-08-03.
 
 | what | existing code | action |
 |---|---|---|
-| the six flag/MAPQ filters | `verdict_pre_decode` [`filtering.rs:215`](../../../../src/ng/read/filtering.rs#L215) | **rename** to `verdict_on_raw_read`; body unchanged |
-| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:274`](../../../../src/ng/read/filtering.rs#L274) | **rename** to `verdict_on_aligned_read`; body unchanged |
-| the conversion | `RawAlignedRead::decode` [`aligned_read.rs:71`](../../../../src/ng/read/aligned_read.rs#L71) → `decode_record` [`aligned_read.rs:118`](../../../../src/ng/read/aligned_read.rs#L118) | **reuse as-is** |
-| the loop | `ReadFilter::next` [`filtering.rs:776`](../../../../src/ng/read/filtering.rs#L776) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
-| the up-front contig check | `ReadFilter::new`'s per-contig fetch loop | ✅ **done at B1** — replaced by **two** checks in `AlignmentFile::cursor`: `self.contigs.first_disagreement(reference.contigs())`, the same comparison the open gate makes [`open_bam.rs:206`](../../../../src/ng/read/input/open_bam.rs#L206), **plus one zero-length fetch on this cursor's own contig**. The comparison alone loses a guarantee — `ResidentRefSeq`/`WindowedRefSeq` take their `ContigList` as a constructor argument unrelated to the bytes, so a matching table can front a FASTA that cannot serve the contig. Spec §9 Q2 |
-| the tally and its fold | `ReadFilterCounts` [`filtering.rs:127`](../../../../src/ng/read/filtering.rs#L127), `ReadGroupCounts` [`:564`](../../../../src/ng/read/filtering.rs#L564), `tally_for_current_record` [`:727`](../../../../src/ng/read/filtering.rs#L727), `counts` [`:749`](../../../../src/ng/read/filtering.rs#L749) | **move** to the cursor, including the `other_sample` rider on the first entry |
-| the errors | `ReadFilterError` [`filtering.rs:477`](../../../../src/ng/read/filtering.rs#L477) | **reuse as-is** |
-| the raw read | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs:56`](../../../../src/ng/read/aligned_read.rs#L56), `NoodlesRawAlignedRead` [`:206`](../../../../src/ng/read/aligned_read.rs#L206) | **renamed and moved** to `aligned_read.rs` |
-| the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; trait impl → inherent methods at C3 |
-| the per-format readers | `RecordReader` and arms, [now `aligned_reads_reader/mod.rs`](../../../../src/ng/read/input/aligned_reads_reader/mod.rs) | **renamed at A2**; `InMemory` arm gains a scripted error at C1 |
-| the three-way stop | `FilterState` [`filtering.rs:549`](../../../../src/ng/read/filtering.rs#L549), `restart_after_end_of_input` [`:659`](../../../../src/ng/read/filtering.rs#L659), `has_failed` [`:675`](../../../../src/ng/read/filtering.rs#L675), `source_mut` [`:697`](../../../../src/ng/read/filtering.rs#L697) | **delete**, all four |
-| the source trait and its doubles | `RecordSource` [`filtering.rs:338`](../../../../src/ng/read/filtering.rs#L338), `FakeSource`, `ErroringSource` | **delete**. Note: `RecordSource::header` **already went at B1** — the contig probe was its only caller — so `RegionRawAlignedReads` has no `header()` today. §3.3 lists one; re-add it at C3 only if a caller appears |
-| the probe-free constructor and lent buffers | `with_validated_contigs` [`filtering.rs:627`](../../../../src/ng/read/filtering.rs#L627), `ReadFilterBuffers` | **delete** — no caller once the cursor owns the loop. Both are down to **one** caller each since B1 deleted `ReadFilter::new` |
-| the cursor's existing filter field and its call sites | [`input/cursor.rs:245`](../../../../src/ng/read/input/cursor.rs#L245), `:355`, `:410`, `:468`, `:471` | **replace** with the fields in §3.4 |
+| the six flag/MAPQ filters | `verdict_pre_decode` [`filtering.rs`](../../../../src/read/filtering.rs) | **rename** to `verdict_on_raw_read`; body unchanged |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs`](../../../../src/read/filtering.rs) | **rename** to `verdict_on_aligned_read`; body unchanged |
+| the conversion | `RawAlignedRead::decode` [`aligned_read.rs`](../../../../src/read/aligned_read.rs) → `decode_record` [`aligned_read.rs`](../../../../src/read/aligned_read.rs) | **reuse as-is** |
+| the loop | `ReadFilter::next` [`filtering.rs`](../../../../src/read/filtering.rs) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
+| the up-front contig check | `ReadFilter::new`'s per-contig fetch loop | ✅ **done at B1** — replaced by **two** checks in `AlignmentFile::cursor`: `self.contigs.first_disagreement(reference.contigs())`, the same comparison the open gate makes [`open_bam.rs`](../../../../src/read/input/open_bam.rs), **plus one zero-length fetch on this cursor's own contig**. The comparison alone loses a guarantee — `ResidentRefSeq`/`WindowedRefSeq` take their `ContigList` as a constructor argument unrelated to the bytes, so a matching table can front a FASTA that cannot serve the contig. Spec §9 Q2 |
+| the tally and its fold | `ReadFilterCounts` [`filtering.rs`](../../../../src/read/filtering.rs), `ReadGroupCounts` [`filtering.rs`](../../../../src/read/filtering.rs), `tally_for_current_record` [`filtering.rs`](../../../../src/read/filtering.rs), `counts` [`filtering.rs`](../../../../src/read/filtering.rs) | **move** to the cursor, including the `other_sample` rider on the first entry |
+| the errors | `ReadFilterError` [`filtering.rs`](../../../../src/read/filtering.rs) | **reuse as-is** |
+| the raw read | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs`](../../../../src/read/aligned_read.rs), `NoodlesRawAlignedRead` [`aligned_read.rs`](../../../../src/read/aligned_read.rs) | **renamed and moved** to `aligned_read.rs` |
+| the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; trait impl → inherent methods at C3 |
+| the per-format readers | `RecordReader` and arms, [now `aligned_reads_reader/mod.rs`](../../../../src/read/input/aligned_reads_reader/mod.rs) | **renamed at A2**; `InMemory` arm gains a scripted error at C1 |
+| the three-way stop | `FilterState` [`filtering.rs`](../../../../src/read/filtering.rs), `restart_after_end_of_input` [`filtering.rs`](../../../../src/read/filtering.rs), `has_failed` [`filtering.rs`](../../../../src/read/filtering.rs), `source_mut` [`filtering.rs`](../../../../src/read/filtering.rs) | **delete**, all four |
+| the source trait and its doubles | `RecordSource` [`filtering.rs`](../../../../src/read/filtering.rs), `FakeSource`, `ErroringSource` | **delete**. Note: `RecordSource::header` **already went at B1** — the contig probe was its only caller — so `RegionRawAlignedReads` has no `header()` today. §3.3 lists one; re-add it at C3 only if a caller appears |
+| the probe-free constructor and lent buffers | `with_validated_contigs` [`filtering.rs`](../../../../src/read/filtering.rs), `ReadFilterBuffers` | **delete** — no caller once the cursor owns the loop. Both are down to **one** caller each since B1 deleted `ReadFilter::new` |
+| the cursor's existing filter field and its call sites | [`input/cursor.rs`](../../../../src/read/input/cursor.rs) | **replace** with the fields in §3.4 |
 
 *Line citations refreshed at Checkpoint B (2026-08-03), after Milestones A and B moved them by
 up to 120 lines. **Milestone C executes against this table**, so check them before trusting one.*

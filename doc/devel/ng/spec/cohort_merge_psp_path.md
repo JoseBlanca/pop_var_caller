@@ -7,7 +7,7 @@ and its VCF equals direct mode's byte for byte (that plan's Milestone F). **This
 byte of output** — it changes what a psp-mode run decodes, holds and allocates to produce the
 same bytes. Two of its citations land with the `ng-psp-mode` branch:
 [`psp_head_compared_reads.md`](psp_head_compared_reads.md) (the head field this design cannot
-run without) and `src/ng/run/psp_source.rs` (the source it upgrades); line numbers to that
+run without) and `src/run/psp_source.rs` (the source it upgrades); line numbers to that
 branch are as of `d2c7113e`. Parents:
 [`cohort_merge.md`](cohort_merge.md) (the merge, path-agnostic),
 [`run_streaming.md`](run_streaming.md) §3.3 and §10 (the three-step read and the deferred
@@ -19,7 +19,7 @@ branch are as of `d2c7113e`. Parents:
 
 **Today a psp-mode run builds every stored observation into a full record before the merge looks
 at it, and about 99 in 100 of those records are then discarded unread.** The first psp source
-([`psp_source.rs:31-38`](../../../../src/run/psp_source.rs)) is an adapter over the
+([`psp_source.rs`](../../../../src/run/psp_source.rs)) is an adapter over the
 build-everything walk, deliberately: the merge's source interface has one method and it returns
 a whole built observation
 ([`ObservationSource::next_observation`,
@@ -88,8 +88,8 @@ step 2, after decompression).
 **The head's numbers are the verdict's inputs, not an approximation of them.** The merge's keep
 verdict calls, per member record, `non_reference_and_compared_reads()` and feeds the pair to
 `MinAltReads::reached_by`
-([`close.rs:665,713`](../../../../src/run/cohort_merge/close.rs);
-[`mod.rs:526`](../../../../src/run/cohort_merge/mod.rs)). The head's two count fields are
+([`close.rs,713`](../../../../src/run/cohort_merge/close.rs);
+[`mod.rs`](../../../../src/run/cohort_merge/mod.rs)). The head's two count fields are
 defined as that function's two return values, derived by the writer at encode time and checked
 against the rebuilt body at decode time
 ([`psp_head_compared_reads.md`](psp_head_compared_reads.md) §3). So a fold over summaries and a
@@ -104,7 +104,7 @@ kind before anything is assembled", which reads as though every observation must
 kind. Neither does. `max_cohort_locus_span` governs generic loci and not repeat tracts, whose
 span the reference fixes — but that verdict is passed **once on the closed locus**, from the
 kind the opening observation carried
-([`close.rs:114-124`](../../../../src/run/cohort_merge/close.rs)), not once per member. The
+([`close.rs`](../../../../src/run/cohort_merge/close.rs)), not once per member. The
 only per-member read is a release assertion that a locus never mixes the two, guarding
 something segments already guarantee. So a summary is three facts and a region, and carrying a
 kind in it would have cost every observation a field to serve a check that cannot fire.
@@ -128,7 +128,7 @@ two-state item:
 
 - **summary available, evidence built** — direct mode's only state: the walker minted the whole
   record, and its summary is read off it (the same derivation call the verdict makes today,
-  [`close.rs:665`](../../../../src/run/cohort_merge/close.rs));
+  [`close.rs`](../../../../src/run/cohort_merge/close.rs));
 - **summary available, evidence stored** — the psp state: the summary came from the head, and
   the evidence is raw bytes the source still holds. Asking for the evidence builds it, once,
   and the item moves to the first state.
@@ -150,12 +150,12 @@ reader:
 
 - **The summary cursor** walks record heads, applying each record's chain-id changes to its
   live set as every reader must
-  ([`record.rs:1881-1902`](../../../../src/psp/record.rs)), and hands each record's summary
+  ([`record.rs`](../../../../src/psp/record.rs)), and hands each record's summary
   plus its raw bytes — head and unbuilt body — into the retained window. It never builds a
   body. This is the measured 0.141 s walk.
 - **The retained window** is the raw bytes of every record between the two cursors, per
   sample — a FIFO the cover advances and eviction drains, the same rhythm the cache already
-  has ([`observation_cache.rs:113-118`](../../../../src/run/cohort_merge/observation_cache.rs)).
+  has ([`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)).
 - **Building a body needs its own bytes *and* the live set as of its own record**, and the
   second half is what an earlier draft of this section got wrong.
 
@@ -166,7 +166,7 @@ question. **Measured, it does not.** One observation in a record has its read li
 rather than stored: the residual is the live set minus every other observation's listed reads,
 and the body declares how many reads that should come to. Built against an empty live set, a
 real cohort refused with *"a derived list of 0 reads where the record says 10; the live set and
-the lists stored beside it do not agree"* ([`record.rs:694-706`](../../../../src/psp/record.rs)).
+the lists stored beside it do not agree"* ([`record.rs`](../../../../src/psp/record.rs)).
 
 **Why the earlier reasoning looked sound and was not.** The encoder does drop chain ids from the
 *body* — that much is true and is why an isolated fixture builds fine against an empty set. But
@@ -183,12 +183,12 @@ the snapshot is bounded by the window rather than the file, and the replay is bo
 block, which is far larger.
 
 **What this replaces:** the adapter's refusal of head-only records
-(`ObservationBodyNotBuilt`, [`psp_source.rs:95-112`](../../../../src/run/psp_source.rs))
+(`ObservationBodyNotBuilt`, [`psp_source.rs`](../../../../src/run/psp_source.rs))
 exists because the current interface cannot carry a deferred body; in this design a head-only
 record is the normal case and that variant goes, its job taken by the build-order refusal
 above. The reader-side machinery both cursors need exists: the head-only walk and the
 build-some walk are `RecordIter` and `building_only_where`
-([`walk.rs:215`](../../../../src/psp/walk.rs)).
+([`walk.rs`](../../../../src/psp/walk.rs)).
 
 ### 3.3 What is retained, and when it goes
 
@@ -257,8 +257,8 @@ two-phase read needs them:
   every reader one shared list.
 - **The spare offer, taken.** The merge hands every source a spent record for reuse and the
   psp adapter currently drops the offer
-  ([`psp_source.rs:23-29`](../../../../src/run/psp_source.rs);
-  [`observation_cache.rs:58-69`](../../../../src/run/cohort_merge/observation_cache.rs)
+  ([`psp_source.rs`](../../../../src/run/psp_source.rs);
+  [`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)
   names a decoder as the hook's best customer). With builds now rare, the offer matters most
   exactly where records are large: at depth, a built record's buffers are refilled instead of
   reallocated. Adopted only if measured — the merge's 39% Linux allocator share is the number
@@ -360,11 +360,11 @@ gated cover-parallelism work (§5), if it comes, parallelises *across* samples.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the head walk and the skip | `RecordIter`, `building_only_where` ([`walk.rs:168,215`](../../../../src/psp/walk.rs)) | the summary cursor is the head walk, which also keeps the live set; a body is built from its own retained bytes and needs no second walk |
-| the bounded body build | `decode_the_body_of` ([`record.rs:1984`](../../../../src/psp/record.rs)) | called once per built record, unchanged |
-| the verdict's numbers | `non_reference_and_compared_reads` → `reached_by` ([`close.rs:665,713`](../../../../src/run/cohort_merge/close.rs)) | the summary carries the same pair; the verdict code does not change |
+| the head walk and the skip | `RecordIter`, `building_only_where` ([`walk.rs,215`](../../../../src/psp/walk.rs)) | the summary cursor is the head walk, which also keeps the live set; a body is built from its own retained bytes and needs no second walk |
+| the bounded body build | `decode_the_body_of` ([`record.rs`](../../../../src/psp/record.rs)) | called once per built record, unchanged |
+| the verdict's numbers | `non_reference_and_compared_reads` → `reached_by` ([`close.rs,713`](../../../../src/run/cohort_merge/close.rs)) | the summary carries the same pair; the verdict code does not change |
 | the source seam and its errors | `PspObservationSource`, `PspSourceError` ([`psp_source.rs`](../../../../src/run/psp_source.rs)) | upgraded in place; the decode-everything form survives as the record-equality oracle |
-| cover / evict rhythm | `ObservationCache` ([`observation_cache.rs:113`](../../../../src/run/cohort_merge/observation_cache.rs)) | the retained window advances and drains on the same calls |
+| cover / evict rhythm | `ObservationCache` ([`observation_cache.rs`](../../../../src/run/cohort_merge/observation_cache.rs)) | the retained window advances and drains on the same calls |
 | the mode-equivalence oracle | `run_driver_psp_mode.md` F2 | rerun green after every milestone — the definition of "moves no byte" |
 
 ## 9. Deferred, with a recommended home

@@ -5,7 +5,7 @@
 Inherits the locus type, the contract, the dispatch and the error model from
 [locus_generation.md](locus_generation.md); read that first. Drives the STR read aligner
 ([read_preparation_ssr.md](read_preparation_ssr.md)). Grounded in production
-[src/ssr/pileup/](src/ssr/pileup/). Naming: **STR** in prose, `ssr` in code — and the per-read
+`d9e7b076:src/ssr/pileup`. Naming: **STR** in prose, `ssr` in code — and the per-read
 operation is **`align_read`**: on the STR path it is a pair-HMM alignment, not the left-align+BAQ
 "preparation" the generic path does. `read_preparation_ssr.md` still specs it as the `ReadPreparer`
 trait's `prepare_read`; that name should be reconciled to `align_read` for the STR path.
@@ -50,9 +50,9 @@ the second returns `None`. All four steps happen inside that first call — a tr
 into partial results, so there is nothing to stream within it.
 
 **1. Build the locus the aligner needs.** `SsrSegment` carries motif, borders and purity but **no
-bases** ([src/ng/region_typing/segment_criteria.rs:240](src/ng/region_typing/segment_criteria.rs#L240)),
+bases** ([src/region_typing/segment_criteria.rs](../../../../src/region_typing/segment_criteria.rs)),
 while production's `Locus` embedded `ref_bytes` and every downstream function reads them off it
-([src/ssr/types.rs:136](src/ssr/types.rs#L136)). So this generator fetches the flanks itself, through
+(`d9e7b076:src/ssr/types.rs`). So this generator fetches the flanks itself, through
 its own `RefSeq` accessor — consistent with the "a generator holds its own accessors" rule
 (`locus_generation.md` §4), but it makes the port an **adaptation, not a lift**, and it is the most
 likely place for the port to go subtly wrong.
@@ -75,7 +75,7 @@ pub struct SsrLocus {
 
 **2. Fetch the reads.** The query span is **the tract plus the margin — not the tract** — matching
 production, which queries the full `ref_bytes` span
-([src/ssr/pileup/fetch_reads.rs:175](src/ssr/pileup/fetch_reads.rs#L175)). A read reaching only into
+(`d9e7b076:src/ssr/pileup/fetch_reads.rs`). A read reaching only into
 the margin still carries a border anchor, and the aligner needs it.
 
 **Jargon, once — the aligner.** The pair-HMM that `align_read` runs to find where a read's repeat
@@ -83,7 +83,7 @@ starts and ends (it *delimits* the tract), by aligning the read against flank + 
 (`read_preparation_ssr.md` §2).
 
 The admission gate is **relevance, not spanning**. Production's `reaches_locus`
-([src/ssr/pileup/footprint.rs:223](src/ssr/pileup/footprint.rs#L223)) drops a non-soft-clipped read
+(`d9e7b076:src/ssr/pileup/footprint.rs`) drops a non-soft-clipped read
 that does not bracket both tract ends by 5 bp (soft-clipped reads it admits anyway) — and a read that
 runs off mid-tract is exactly what a partial observation is made of. Porting the gate would make
 partial observations unreachable (`read_preparation_ssr.md` §4). So the gate here is overlap with the
@@ -130,7 +130,7 @@ mid-tract proves the tract is *at least* that long and no more: a *partial* obse
 that is a **censored** observation — you know the value exceeds a threshold, not what it is, like a
 trial patient still alive when the study ends. Production keeps only the complete ones, counting the
 rest as `BorderOffEnd` and discarding them
-([src/ssr/pileup/locus_tally.rs:91](src/ssr/pileup/locus_tally.rs#L91)); keeping them is the one place
+(`d9e7b076:src/ssr/pileup/locus_tally.rs`); keeping them is the one place
 this path is new rather than a port.
 
 | `SampleLocusObservations` field | what the STR generator puts there |
@@ -279,10 +279,10 @@ an interior substitution — an interrupted repeat — and a count cannot tell t
 
 **Support: the shared type carries the moments, so STR fills what it already holds.** `SequenceObservation`
 carries strand, base-quality and MAPQ moments beside the read count. The STR generator holds the
-`MappedRead`s, so filling them is a free by-product — no second pass, and few distinct observations per
+reads (`MappedRead`s when written; `AlignedRead`s since 2026-11-27), so filling them is a free by-product — no second pass, and few distinct observations per
 tract, so the bytes are negligible here (unlike the generic path's per-position scale). **Nothing
 STR-side consumes them today** — production's SSR model gates quality per sample rather than carrying
-it ([src/ssr/cohort/types.rs:60](src/ssr/cohort/types.rs#L60)) — and it is *not* established that a
+it (`d9e7b076:src/ssr/cohort/types.rs`) — and it is *not* established that a
 downstream STR filter is the mechanism this caller wants; they are filled on the chance that it is,
 not on a plan. **Soft:** unconsumed, and the parity oracle (§6) checks only bytes and counts. Read-position-bias
 fields are not among them — those are anchor-relative and degenerate on a tract, so they are the
@@ -304,12 +304,12 @@ TRF-mod (AGPL). freebayes (MIT) and htslib are freely portable.
 ## 4. Depth cap, and where it sits
 
 Production reservoir-samples at most 1000 reads per locus, seeded from the locus so the kept set is
-independent of thread count ([src/ssr/pileup/fetch_reads.rs:57](src/ssr/pileup/fetch_reads.rs#L57)).
+independent of thread count (`d9e7b076:src/ssr/pileup/fetch_reads.rs`).
 `SampleReads` does no capping and says so, and `locus_generation.md` §4 leaves it to the generator.
 **Adopt the reservoir mechanism — decided; the value is ng's own, and experimental.** The reservoir
 bounds the read buffer and, more importantly, the per-locus pair-HMM bill (§5); production's own note
 calls its value a calibration placeholder, there only to stop one locus making a worker's task huge
-([src/ssr/pileup/fetch_reads.rs:26](src/ssr/pileup/fetch_reads.rs#L26)). ng gives the cap a **separate
+(`d9e7b076:src/ssr/pileup/fetch_reads.rs`). ng gives the cap a **separate
 constant** from production's, starting at 1000 but free to diverge — this and the other caps are to be
 set by experiment, not inherited. The mechanism is on from the start because it changes calls at deep
 loci, and switching it on after fixtures exist would rebaseline them.
@@ -371,7 +371,7 @@ pub struct SsrGeneratorCounts {
 ```
 
 *One granularity difference from production.* Production carries the no-observation reasons **per
-locus** into the cohort ([src/ssr/cohort/types.rs:39](src/ssr/cohort/types.rs#L39)); ng keeps the
+locus** into the cohort (`d9e7b076:src/ssr/cohort/types.rs`); ng keeps the
 per-locus *total* (`reads_without_observation` on the locus) but breaks it down by reason only at run
 level. Per-locus counts answer "is *this* locus untrustworthy?", a genotyping input; if a model wants
 that, the reasons go back on the locus as fields of their own. **Soft, and cheap to reverse.**
@@ -382,14 +382,14 @@ them as partial observations on the locus, which is more, not less.)
 the tract, for the aligner's anchor and the read query (§2). It must not exceed the width the
 typed-region generator guarantees clean: that generator drops a segment unless its flanks are
 repeat-free out to `bundle_threshold`, the radius within which a neighbouring repeat clusters it into
-a bundle ([src/ng/region_typing/segment_criteria.rs:560](src/ng/region_typing/segment_criteria.rs#L560)).
+a bundle ([src/region_typing/segment_criteria.rs](../../../../src/region_typing/segment_criteria.rs)).
 So **`flank_bp ≤ bundle_threshold`, equal by default** — fetch a wider flank and the query may hit a
 neighbouring repeat, leaving the aligner's anchor no longer guaranteed repeat-free. (Region typing
 currently calls that radius `flank_bp` too; it is being renamed `bundle_threshold` to free the name
 for this genuinely-flank use — see below.)
 
 `DEFAULT_SSR_MAX_READS_PER_LOCUS` is ng's own constant — **not** production's `MAX_READS_PER_LOCUS`
-([src/ssr/pileup/fetch_reads.rs:30](src/ssr/pileup/fetch_reads.rs#L30)), so the two can diverge. It
+(`d9e7b076:src/ssr/pileup/fetch_reads.rs`), so the two can diverge. It
 starts at 1000, matching production, but that value is **never measured and soft**: to be set by
 experiment.
 
@@ -411,10 +411,10 @@ both are pinned: the seed derives only from the locus, and both tables are sorte
 | what | existing code | ng reuse |
 |---|---|---|
 | read fetch | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. One cursor per sample per chromosome, re-pointed at each repeat, and **one generator per sample**. Still **do not** port `fetch_locus_reads`' spanning gate (§2) |
-| depth cap | [src/ssr/pileup/fetch_reads.rs:80](src/ssr/pileup/fetch_reads.rs#L80) | port `Reservoir` + `locus_seed` directly, with the seed trap (§4) |
-| margin fetch | [src/ng/ref_seq.rs:142](src/ng/ref_seq.rs#L142) | reuse as-is; replaces `Locus.ref_bytes` |
+| depth cap | `d9e7b076:src/ssr/pileup/fetch_reads.rs` | port `Reservoir` + `locus_seed` directly, with the seed trap (§4) |
+| margin fetch | [src/ref_seq.rs](../../../../src/ref_seq.rs) | reuse as-is; replaces `Locus.ref_bytes` |
 | read alignment | `align_read` per `read_preparation_ssr.md` | call, do not reimplement |
-| tally | [src/ssr/pileup/locus_tally.rs:77](src/ssr/pileup/locus_tally.rs#L77) | model for filling `observations`; **extended** with partial observations and the support moments (§3) |
+| tally | `d9e7b076:src/ssr/pileup/locus_tally.rs` | model for filling `observations`; **extended** with partial observations and the support moments (§3) |
 
 **Parity oracle:** production's `SsrLocusObs.observed`, on a shared fixture — every **complete**
 observation must match byte for byte, in bases and count. It covers only the complete class, only
@@ -429,7 +429,7 @@ observations are new behaviour with no oracle: they are measured, not verified.
   consumption (§3).
 - **A second STR generator.** The contract exists so alternatives can sit side by side
   (`locus_generation.md` §4); GangSTR-style realignment of every read against a synthetic repeat
-  reference is the recorded candidate (`read_preparation_ssr.md` §6). **Home: `src/ng/locus_generation/`**,
+  reference is the recorded candidate (`read_preparation_ssr.md` §6). **Home: `src/locus_generation/`**,
   beside this one.
 - **Widening policy for long alleles** — inherited from production; whether it stays fixed or becomes
   a knob is the aligner's call (`read_preparation_ssr.md` §8).
@@ -437,11 +437,11 @@ observations are new behaviour with no oracle: they are measured, not verified.
   Region typing calls its bundle-clustering radius `flank_bp`; this generator uses `flank_bp` for the
   flanks it fetches, a different thing. Renaming the region-typing field to `bundle_threshold` (its
   production name, before ng collapsed the two,
-  [segment_criteria.rs:483](src/ng/region_typing/segment_criteria.rs#L483)) frees the name and makes
+  [segment_criteria.rs](../../../../src/region_typing/segment_criteria.rs)) frees the name and makes
   the relation `flank_bp ≤ bundle_threshold` legible. **A code change to a built module** (~88 sites,
   tests, the CLI arg, and `typed_regions.md` / `typed_regions_cli.md`), and it reverses that documented
   collapse — so it is its own cargo-verified pass, done first so this generator is written against the
-  freed name. **Home: `src/ng/region_typing/`.**
+  freed name. **Home: `src/region_typing/`.**
 
 ---
 

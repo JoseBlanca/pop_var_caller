@@ -3,7 +3,7 @@
 *Status: architecture draft (2026-07-20), companion to the spec
 [`../spec/alignment_file.md`](../spec/alignment_file.md) (the design and its rationale) and to the
 shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary + step traits) and
-[`module_layout.md`](module_layout.md) (the `src/ng/` tree). Sits directly under
+[`module_layout.md`](module_layout.md) (the module tree). Sits directly under
 [`read_filtering.md`](read_filtering.md) — this module builds the `RecordSource` that step 1's
 `ReadFilter` consumes. Naming follows
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): domain nouns for types,
@@ -16,7 +16,7 @@ the deliverable. See the spec for the "why" behind every decision here.*
 > `readers_opened`, §4 ("Serving a region") in its entirety, and the region-query
 > `RecordSource` impls **no longer exist**. They were replaced by
 > [`alignment_cursor.md`](alignment_cursor.md) and deleted at its Milestone F, along with
-> `src/ng/read/input/region_query.rs`.
+> `dae88900~1:src/ng/read/input/region_query.rs`.
 >
 > `AlignmentFile` itself is live, and so is everything about opening and validating it. What it
 > hands out now is `cursor(contig, reference) -> AlignmentCursor` — see
@@ -36,12 +36,12 @@ the deliverable. See the spec for the "why" behind every decision here.*
 
 ## Module home
 
-`src/ng/read/input/`, a folder beside `read/filtering.rs` (spec §6). A folder rather than a file
+`src/read/input/`, a folder beside `read/filtering.rs` (spec §6). A folder rather than a file
 because it holds two independent concerns with their own tests, and it shares `read/` with steps 1+2
 per `module_layout.md` principle 1b — this is step 1's input edge, not a new step.
 
 ```
-src/ng/read/input/
+src/read/input/
 ├── mod.rs          – re-exports; AlignmentFileError; check_assembly (§4)
 ├── open_bam.rs     – AlignmentFile::open — the validate-on-open gate (§3)
 └── region_query.rs – BamRegionSource / CramRegionSource + OrderVerified (§4)
@@ -58,11 +58,11 @@ is one region reader per container format, not competing implementations of one 
 The module introduces **no scalar newtypes**, and one shared type it consumes rather than owns:
 `GenomePosition` (`{ contig, position }`, §2), seeded in `ng::types` — see
 [`sample_reads.md`](sample_reads.md) §1.1. Region queries speak `GenomeRegion`
-([`types.rs:55`](../../../../src/ng/types.rs)) — contig + 1-based inclusive range, already the ng
+([`types.rs`](../../../../src/types.rs)) — contig + 1-based inclusive range, already the ng
 region currency — and reads come back as `MappedRead`
-([`alignment_input.rs:78`](../../../../src/bam/alignment_input.rs)) unchanged. Per-contig digests are
+([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)) unchanged. Per-contig digests are
 `Option<[u8; 16]>`, matching `ContigInfo::md5`
-([`reference_info.rs:66`](../../../../src/ng/reference_info.rs)); ng has no `Md5` newtype today and
+([`reference_info.rs`](../../../../src/reference_info.rs)); ng has no `Md5` newtype today and
 this module does not invent one.
 
 ### 1.2 Local types
@@ -175,10 +175,10 @@ impl AlignmentFile {
 **Contract.** `open` performs all I/O it will ever need for validation; after it returns `Ok`, the
 invariant `ref_id == ContigId` holds for every record the file can yield, and no later code re-checks
 it. The `@SQ` comparison delegates to `ContigList::first_disagreement`
-([`fasta/mod.rs:69`](../../../../src/fasta/mod.rs)) against `reference.contig_list()`
-([`reference_info.rs:91`](../../../../src/ng/reference_info.rs)), so the MD5 arm is automatically a
+([`fasta/mod.rs`](../../../../src/fasta/mod.rs)) against `reference.contig_list()`
+([`reference_info.rs`](../../../../src/reference_info.rs)), so the MD5 arm is automatically a
 wildcard when either side lacks a digest (`ContigEntry`'s `PartialEq`,
-[`fasta/mod.rs:43-55`](../../../../src/fasta/mod.rs)) — which is exactly the `.fai`-only behaviour
+[`fasta/mod.rs`](../../../../src/fasta/mod.rs)) — which is exactly the `.fai`-only behaviour
 the spec wants, with no extra branch here.
 
 ```rust
@@ -251,7 +251,7 @@ impl AlignmentFile {
 query. Records the index over-returns are dropped **uncounted** (reader concern, not a filter drop);
 every read the filter drops is charged to exactly one `DropReason`, per `read_filtering.md` §1. A
 fatal error is yielded once as `Some(Err(_))` and then `None` — the `ReadFilter` convention
-([`filtering.rs:550`](../../../../src/ng/read/filtering.rs)) carried outward. The pooled handle is
+([`filtering.rs`](../../../../src/read/filtering.rs)) carried outward. The pooled handle is
 returned on `Drop`, including on the error path.
 
 ## 5. Design decisions — decided
@@ -260,13 +260,13 @@ The spec argued each of these; the record carries the code shape plus the cross-
 
 - **The reference accessor is a per-query parameter, not a field — decided.** The spec left this
   open (§3.4). `RawRefSeq` impls are *stateful readers* — `WindowedRefSeq`
-  ([`ref_seq.rs:500`](../../../../src/ng/ref_seq.rs)) holds an open per-contig reader — so a single
+  ([`ref_seq.rs`](../../../../src/ref_seq.rs)) holds an open per-contig reader — so a single
   accessor stored on `AlignmentFile` would need a mutex on the hot path the moment queries run
   concurrently, and `&self` queries would fight over one file cursor. Passing it per query gives each
   caller (and later, each worker) its own, which is the same shape production uses for its per-worker
   CRAM cache. Cost: the caller constructs one; that is a line at the call site, not a design burden.
 - **No probe in the per-query `ReadFilter` — decided.** `ReadFilter::new`
-  ([`filtering.rs:596`](../../../../src/ng/read/filtering.rs)) validates that every `@SQ` contig
+  ([`filtering.rs`](../../../../src/read/filtering.rs)) validates that every `@SQ` contig
   resolves, by fetching each one. That is correct for a whole-file pass but is **O(contigs) reference
   fetches per region query**, i.e. ~10⁶ × 24 on the STR path. The open gate (§3) already proves a
   strictly stronger property, so the probe is redundant here, exactly as spec §3.1 anticipated. Add a
@@ -284,7 +284,7 @@ The spec argued each of these; the record carries the code shape plus the cross-
   wrong shape and an `AlignmentFileError` variant would be unreachable in the stream (spec §3.1, §4).
 - **ng extracts the header fields itself — decided (corrects the spec's reuse map).** The spec §5
   listed `alignment_input::extract_single_sample_name` as reusable. It is **module-private**
-  ([`alignment_input.rs:378`](../../../../src/bam/alignment_input.rs); `extract_header` likewise at
+  ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs); `extract_header` likewise at
   `:292`), so ng cannot call it, and making it `pub(crate)` would be a production edit the freeze
   forbids. ng reads `@HD SO`, `@SQ` and `@RG SM` off the noodles `sam::Header` directly — a few lines,
   and it lets the errors be ng's own rather than `AlignmentInputError`'s.
@@ -295,25 +295,25 @@ Every row read at the cited line.
 
 | ng name | existing code | action |
 |---|---|---|
-| `GenomeRegion` (query type) | [`ng/types.rs:55`](../../../../src/ng/types.rs) | reuse as-is — contig + 1-based inclusive range |
-| `ContigId`, `Position` | [`ng/types.rs:11`, `:32`](../../../../src/ng/types.rs) | reuse as-is |
+| `GenomeRegion` (query type) | [`types.rs`](../../../../src/types.rs) | reuse as-is — contig + 1-based inclusive range |
+| `ContigId`, `Position` | [`types.rs`](../../../../src/types.rs) | reuse as-is |
 | `GenomePosition` | does not exist yet | **new, in `ng::types`** — introduced by [`sample_reads.md`](sample_reads.md) §1.1; used here by the order guard |
 | `MappedRead` (item) | production's `bam/alignment_input.rs` at design time; replaced by ng's `AlignedRead` ([`read/aligned_read.rs`](../../../../src/read/aligned_read.rs)) and deleted on 2026-11-27 | reuse as-is (at design time) |
-| index load | `load_alignment_index` [`bam/index_preflight.rs:120`](../../../../src/bam/index_preflight.rs) → `AlignmentIndex` (`:95`, `Crai`/`BamCsi`/`BamBai`, each `Arc`-wrapped) | call as-is; store the result on `AlignmentFile` |
-| index policy | `preflight_alignment_indexes` [`bam/index_preflight.rs:199`](../../../../src/bam/index_preflight.rs) (takes `build_if_missing`) | call as-is. (It also rejected mixed BAM+CRAM lists; ng passes one file at a time, so that check could not fire and was removed on 2026-11-26.) |
-| `@SQ` comparison | `ContigList::first_disagreement` [`fasta/mod.rs:69`](../../../../src/fasta/mod.rs) — `pub(crate)`, returns `Result<(), String>` | call as-is; the `String` becomes `ContigReconcile.detail` |
-| MD5 wildcard rule | `ContigEntry`'s `PartialEq` [`fasta/mod.rs:43-55`](../../../../src/fasta/mod.rs) — absent MD5 matches anything | rely on it; no extra branch |
-| canonical contig table | `ReferenceInfo::contig_list()` [`ng/reference_info.rs:91`](../../../../src/ng/reference_info.rs) | call per open |
-| verified digests | `ContigInfo::md5` [`ng/reference_info.rs:66`](../../../../src/ng/reference_info.rs) — `Option<[u8; 16]>` | read in `check_assembly` |
-| the join point | `VerificationHandle::join` [`ng/reference_info.rs:931`](../../../../src/ng/reference_info.rs), from `read_reference_verifying_or_creating_fai` (`:1011`) | the caller's, not ours — we only supply `check_assembly` |
-| `RecordSource` | [`ng/read/filtering.rs`](../../../../src/ng/read/filtering.rs) | implement; do **not** redefine |
-| `RawAlignedRead` | [`ng/read/aligned_read.rs`](../../../../src/ng/read/aligned_read.rs) | implement; do **not** redefine |
-| reused record buffer | `NoodlesRawAlignedRead` [`ng/read/aligned_read.rs`](../../../../src/ng/read/aligned_read.rs) | reuse as the pooled `record_buf` |
-| whole-file siblings | `BamRecordSource` [`:379`](../../../../src/ng/read/filtering.rs), `CramRecordSource` [`:429`](../../../../src/ng/read/filtering.rs) | **model, not reuse** — the region impls are index-driven siblings |
-| the filter | `ReadFilter` [`ng/read/filtering.rs:581`](../../../../src/ng/read/filtering.rs) + `ReadFilterConfig` (`:47`), `ReadFilterCounts` (`:117`), `ReadFilterError` (`:550`) | compose per region; **extend** with a probe-free constructor (§5) |
-| reference access | `RawRefSeq` [`ng/ref_seq.rs:180`](../../../../src/ng/ref_seq.rs), `RefSeqError` (`:39`) | reuse; passed per query (§5) |
+| index load | `load_alignment_index` [`bam/index_preflight.rs`](../../../../src/bam/index_preflight.rs) → `AlignmentIndex` (`Crai`/`BamCsi`/`BamBai`, each `Arc`-wrapped) | call as-is; store the result on `AlignmentFile` |
+| index policy | `preflight_alignment_indexes` [`bam/index_preflight.rs`](../../../../src/bam/index_preflight.rs) (takes `build_if_missing`) | call as-is. (It also rejected mixed BAM+CRAM lists; ng passes one file at a time, so that check could not fire and was removed on 2026-11-26.) |
+| `@SQ` comparison | `ContigList::first_disagreement` [`fasta/mod.rs`](../../../../src/fasta/mod.rs) — `pub(crate)`, returns `Result<(), String>` | call as-is; the `String` becomes `ContigReconcile.detail` |
+| MD5 wildcard rule | `ContigEntry`'s `PartialEq` [`fasta/mod.rs`](../../../../src/fasta/mod.rs) — absent MD5 matches anything | rely on it; no extra branch |
+| canonical contig table | `ReferenceInfo::contig_list()` [`reference_info.rs`](../../../../src/reference_info.rs) | call per open |
+| verified digests | `ContigInfo::md5` [`reference_info.rs`](../../../../src/reference_info.rs) — `Option<[u8; 16]>` | read in `check_assembly` |
+| the join point | `VerificationHandle::join` [`reference_info.rs`](../../../../src/reference_info.rs), from `read_reference_verifying_or_creating_fai` | the caller's, not ours — we only supply `check_assembly` |
+| `RecordSource` | [`read/filtering.rs`](../../../../src/read/filtering.rs) | implement; do **not** redefine |
+| `RawAlignedRead` | [`read/aligned_read.rs`](../../../../src/read/aligned_read.rs) | implement; do **not** redefine |
+| reused record buffer | `NoodlesRawAlignedRead` [`read/aligned_read.rs`](../../../../src/read/aligned_read.rs) | reuse as the pooled `record_buf` |
+| whole-file siblings | `BamRecordSource` [`filtering.rs`](../../../../src/read/filtering.rs), `CramRecordSource` [`filtering.rs`](../../../../src/read/filtering.rs) | **model, not reuse** — the region impls are index-driven siblings |
+| the filter | `ReadFilter` [`read/filtering.rs`](../../../../src/read/filtering.rs) + `ReadFilterConfig`, `ReadFilterCounts`, `ReadFilterError` | compose per region; **extend** with a probe-free constructor (§5) |
+| reference access | `RawRefSeq` [`ref_seq.rs`](../../../../src/ref_seq.rs), `RefSeqError` | reuse; passed per query (§5) |
 | region-read mechanics | `BamFile`/`CramFile` in `bam/segment_reader.rs`; `BinningIndex::query`; `borrow_handle` — deleted on 2026-11-26 with the rest of that reader stack (`segment_merge`, `bam_input`, `cram_input`), which had no caller once `read/input/` was built; see git history before that date | **model, not reuse** (spec §5, O3-file → rebuild) |
-| `@HD SO` / `@SQ` / `@RG SM` extraction | `extract_header` [`bam/alignment_input.rs:292`](../../../../src/bam/alignment_input.rs), `extract_single_sample_name` (`:378`) — both **module-private** | **cannot reuse**; ng reads the `sam::Header` itself (§5) |
+| `@HD SO` / `@SQ` / `@RG SM` extraction | `extract_header` [`bam/alignment_input.rs`](../../../../src/bam/alignment_input.rs), `extract_single_sample_name` — both **module-private** | **cannot reuse**; ng reads the `sam::Header` itself (§5) |
 
 ## 7. Open items
 

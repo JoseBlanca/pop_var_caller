@@ -12,7 +12,7 @@ illustrative; the **contract** is the deliverable. See the spec for every "why".
 >
 > This document's `SampleRegionReads`, `MergedRegionReads` and `RegionReads` were deleted at
 > [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. Their successors live in
-> `src/ng/read/input/sample_cursor.rs` and keep every rule specified here:
+> `src/read/input/sample_cursor.rs` and keep every rule specified here:
 >
 > | here | as built |
 > |---|---|
@@ -34,10 +34,10 @@ illustrative; the **contract** is the deliverable. See the spec for every "why".
 
 ## Module home
 
-`src/ng/read/input/`, shared with `alignment_file.md`. This doc owns:
+`src/read/input/`, shared with `alignment_file.md`. This doc owns:
 
 ```
-src/ng/read/input/
+src/read/input/
 ├── mod.rs    – SampleReads, SampleRegionReads, IngestError
 └── merge.rs  – MergedRegionReads: the argmin k-way merge + the same-file-twice check
 ```
@@ -59,7 +59,7 @@ The merge's sort key is *a position in the genome*. That is a general value, not
 one, so it belongs in `ng::types` beside `GenomeRegion` — **not** as a local `ReadKey`, which would
 name the value after one of its uses and guarantee the next consumer mints a duplicate. The same
 pair is already threaded as two parameters through a dozen `ref_seq.rs` signatures
-([`ref_seq.rs:43`](../../../../src/ng/ref_seq.rs) onward), and every later consumer that says "where
+([`ref_seq.rs`](../../../../src/ref_seq.rs) onward), and every later consumer that says "where
 along the reference" wants it.
 
 ```rust
@@ -202,7 +202,7 @@ pub struct MergedRegionReads<'a> {
 
 **Per read: O(k) `GenomePosition` comparisons, one `MappedRead` move, zero allocations, and no `clone()`.**
 A `clone()` in this loop is a defect, not a slow path — `MappedRead` owns its sequence, qualities and
-CIGAR ([`alignment_input.rs:78`](../../../../src/bam/alignment_input.rs)). Deliberately **not** built
+CIGAR ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)). Deliberately **not** built
 on `Peekable`: `peek()` hands out a `&Result<MappedRead, _>` and the emit path then moves out of the
 peek slot, which is easy to write and quietly doubles the work.
 
@@ -242,12 +242,12 @@ Every row read at the cited line.
 | ng name | existing code | action |
 |---|---|---|
 | `AlignmentFile`, `RegionReads`, `AlignmentFileError` | [`alignment_file.md`](alignment_file.md) §1–§4 | consume; this module adds no reader logic |
-| `GenomePosition` | no such type exists — `ContigId` [`ng/types.rs:11`](../../../../src/ng/types.rs) and `Position` (`:32`) are separate, and `ref_seq.rs` threads them as two parameters ([`:43`](../../../../src/ng/ref_seq.rs) onward) | **new, in `ng::types`** beside `GenomeRegion` (`:55`); built per head-refill from `MappedRead.ref_id`/`.pos` [`bam/alignment_input.rs:82-84`](../../../../src/bam/alignment_input.rs) |
-| `ContigId`, `Position` | [`ng/types.rs:11`, `:32`](../../../../src/ng/types.rs) | reuse as-is |
-| `MappedRead` | [`bam/alignment_input.rs:78`](../../../../src/bam/alignment_input.rs) — `qname:79`, `flag:80`, `source_file_index:102` | reuse as-is; the same-file-twice check reads `qname`/`flag` |
-| `ReadFilterCounts` | [`ng/read/filtering.rs:117`](../../../../src/ng/read/filtering.rs) | reuse as-is, one per file |
-| `ReferenceInfo` | [`ng/reference_info.rs:71`](../../../../src/ng/reference_info.rs) | pass through to `AlignmentFile::open` |
-| `MergedRegionReads` | `SegmentMergedReads` [`bam/segment_merge.rs`](../../../../src/bam/segment_merge.rs) | **model, not reuse** (§5) |
+| `GenomePosition` | no such type exists — `ContigId` [`types.rs`](../../../../src/types.rs) and `Position` are separate, and `ref_seq.rs` threads them as two parameters ([`ref_seq.rs`](../../../../src/ref_seq.rs) onward) | **new, in `ng::types`** beside `GenomeRegion`; built per head-refill from `MappedRead.ref_id`/`.pos` [`bam/alignment_input.rs`](../../../../src/bam/alignment_input.rs) |
+| `ContigId`, `Position` | [`types.rs`](../../../../src/types.rs) | reuse as-is |
+| `MappedRead` | [`bam/alignment_input.rs`](../../../../src/bam/alignment_input.rs) — `qname:79`, `flag:80`, `source_file_index:102` | reuse as-is; the same-file-twice check reads `qname`/`flag` |
+| `ReadFilterCounts` | [`read/filtering.rs`](../../../../src/read/filtering.rs) | reuse as-is, one per file |
+| `ReferenceInfo` | [`reference_info.rs`](../../../../src/reference_info.rs) | pass through to `AlignmentFile::open` |
+| `MergedRegionReads` | `SegmentMergedReads` `d9e7b076:src/bam/segment_merge.rs` | **model, not reuse** (§5) |
 
 ## 7. Open items
 

@@ -2,7 +2,7 @@
 
 *Status: architecture draft (2026-07-18), companion to the spec
 [`../spec/reference_info.md`](../spec/reference_info.md) (the design and every *why*) and to the
-shared arch docs [`module_layout.md`](module_layout.md) (the `src/ng/` tree) and
+shared arch docs [`module_layout.md`](module_layout.md) (the module tree) and
 [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary). This module is **foundational
 infra, not a pipeline step**, so `ng_step_interfaces.md` does not sketch it — this doc is its
 interface. Naming follows [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md):
@@ -12,7 +12,7 @@ reasoning behind every decision here.*
 
 ## Module home
 
-One file, `src/ng/reference_info.rs`, with its `#[cfg(test)]` block beside it. It is
+One file, `src/reference_info.rs`, with its `#[cfg(test)]` block beside it. It is
 **non-step infrastructure** — like `ref_seq.rs` and `pileup/`, shared by many consumers and owned
 by none — so it carries **no trait and no bake-off**: it is a set of functions over plain data
 types, not a swappable interface (`module_layout.md` principle 1a: a unit with no competing
@@ -279,16 +279,16 @@ Convergence points, not new types to invent alongside the old. Vendored oracles
 |---|---|---|
 | `ContigInfo` | — (supersets `ContigEntry` + a `.fai` row) | **new** ng type |
 | `ReferenceInfo`, `ReferenceSource`, `ReferenceInfoError`, `VerificationHandle`, `ReferenceInfoCache` | — | **new** |
-| `ContigList` / `ContigEntry` (+ wildcard-md5 `PartialEq`) | [`src/fasta/mod.rs:37-62`](../../../../src/fasta/mod.rs) (`:43-55`) | **reuse read-only** — `contig_list()` builds them |
-| `first_disagreement` | [`src/fasta/mod.rs:69-100`](../../../../src/fasta/mod.rs) (`pub(crate)`) | reuse later for `@SQ` reconciliation (§4 deferred), not here |
+| `ContigList` / `ContigEntry` (+ wildcard-md5 `PartialEq`) | [`src/fasta/mod.rs`](../../../../src/fasta/mod.rs) | **reuse read-only** — `contig_list()` builds them |
+| `first_disagreement` | [`src/fasta/mod.rs`](../../../../src/fasta/mod.rs) (`pub(crate)`) | reuse later for `@SQ` reconciliation (§4 deferred), not here |
 | `.fai` parse (`Fai` arm) | `noodles_fasta::fai::fs::read` ([`Cargo.toml:93`](../../../../Cargo.toml)) | call as-is |
 | FASTA-pass loop (§3) | `noodles_fasta::io::Indexer::index_record` | **copy the logic + fold MD5**; do *not* call it (it hides the bases) |
-| `.fai` field guards (`line_bases>0`, `line_width≥line_bases`) | `ContigFai::validate` ([`src/ng/raw_chrom_reader.rs:77`](../../../../src/ng/raw_chrom_reader.rs)) | copy the guards |
-| streaming MD5 (64 KiB buffer) | `compute_contig_md5_streaming` ([`src/pop_var_caller/common.rs:250`](../../../../src/pop_var_caller/common.rs)) | copy the streaming shape — but predicate is `isgraph`, not skip-`\n\r` (§3.4) |
-| MD5 → hex | `format_md5_hex` ([`src/pop_var_caller/common.rs:60`](../../../../src/pop_var_caller/common.rs), `pub(crate)`) | reuse |
+| `.fai` field guards (`line_bases>0`, `line_width≥line_bases`) | `ContigFai::validate` ([`src/raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)) | copy the guards |
+| streaming MD5 (64 KiB buffer) | `compute_contig_md5_streaming` (`d9e7b076:src/pop_var_caller/common.rs`) | copy the streaming shape — but predicate is `isgraph`, not skip-`\n\r` (§3.4) |
+| MD5 → hex | `format_md5_hex` (`d9e7b076:src/pop_var_caller/common.rs`, `pub(crate)`) | reuse |
 | M5 / `.fai` oracle | `samtools/dict.c:78-86`, `htslib/faidx.c:48-50`, `htslib/faidx.5` (vendored) | match byte-for-byte; test via `samtools dict`/`faidx` |
-| readers to consolidate onto `ContigInfo` | `open_contig`/`ContigFai` ([`src/ng/raw_chrom_reader.rs:58`,`:111`](../../../../src/ng/raw_chrom_reader.rs)) | consolidation target (§4 deferred) |
-| consumers migrating off `ContigList` | `ContigTable` / `WindowedRefSeq::new` ([`src/ng/ref_seq.rs:212`,`:524`](../../../../src/ng/ref_seq.rs)) | `contig_list()` bridges until they take `ContigInfo` |
+| readers to consolidate onto `ContigInfo` | `open_contig`/`ContigFai` ([`src/raw_chrom_reader.rs`](../../../../src/raw_chrom_reader.rs)) | consolidation target (§4 deferred) |
+| consumers migrating off `ContigList` | `ContigTable` / `WindowedRefSeq::new` ([`src/ref_seq.rs`](../../../../src/ref_seq.rs)) | `contig_list()` bridges until they take `ContigInfo` |
 | deps | `md-5 = "0.11"` ([`Cargo.toml:81`](../../../../Cargo.toml)), `noodles-fasta = "0.61.0"` (`:93`) | in tree already |
 
 ## 6. Open items

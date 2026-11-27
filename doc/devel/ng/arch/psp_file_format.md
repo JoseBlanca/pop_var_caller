@@ -15,7 +15,7 @@ touched.*
 ## 1. Module home
 
 ```
-src/ng/psp/
+src/psp/
 ├── mod.rs        – the free functions, the error enums, re-exports
 ├── header.rs     – Header, Manifest, FieldEncoding: build, encode, parse, validate
 ├── block.rs      – the psp block: cutting it, compressing it, streaming it back
@@ -59,7 +59,7 @@ its own, it holds state across records within a block, and it is where the silen
 ## 2. The record, and what differs from the prototype
 
 **⚠ The measuring prototype encodes production's `PileupRecord`. ng's record is
-`SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)),
+`SampleLocusObservations` ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)),
 and it is not the same shape.** Every byte figure in the specs was taken on the first; the second
 carries three things the first has no equivalent of, so **expect the measured bytes-a-record numbers
 to move, and do not treat them as predictions of ng's file.**
@@ -72,7 +72,7 @@ to move, and do not treat them as predictions of ng's file.**
 | reads that showed nothing | absent | `reads_without_observation`, `reads_discarded_by_cap` |
 
 **`read_witness` is the one that bites.** It is `Complete`, or a set of runs
-([`src/ng/locus_generation/witness.rs:259`](../../../../src/ng/locus_generation/witness.rs)) — so an
+([`src/locus_generation/witness.rs`](../../../../src/locus_generation/witness.rs)) — so an
 observation's identity carries a variable-length field the prototype never encoded, and it must be in
 the record body.
 
@@ -122,7 +122,7 @@ the typed region the locus falls in, and the run has that partition already. The
 record body, where the body decoder needs it to know whether the tract's motif and flanks follow.
 
 **`GenomeRegion` rather than a position and a span** — the newtype exists
-([`src/ng/types.rs:79`](../../../../src/ng/types.rs)) and holds exactly this pair, so a head that
+([`src/types.rs`](../../../../src/types.rs)) and holds exactly this pair, so a head that
 carried two integers would be minting a duplicate.
 
 ### 3.2 The header and its manifest
@@ -165,7 +165,7 @@ pub struct FieldSpec {
 }
 ```
 
-**`Bp` and `ContigId` are ng's existing newtypes** ([`src/ng/types.rs:185,13`](../../../../src/ng/types.rs));
+**`Bp` and `ContigId` are ng's existing newtypes** ([`src/types.rs,13`](../../../../src/types.rs));
 this doc mints neither.
 
 ### 3.3 Field encodings — a closed set
@@ -368,7 +368,7 @@ reader, raise a limit, the data is damaged. Collapsing them into one loses that.
 
 ## 5. Design decisions — decided
 
-- **The module is `src/ng/psp/`, a folder, not a pipeline step.** No trait, no bake-off: there is
+- **The module is `src/psp/`, a folder, not a pipeline step.** No trait, no bake-off: there is
   one implementation. §1.
 - **`RecordHead` carries `GenomeRegion`, not a position and a span** — the newtype exists and holds
   that pair. §3.1.
@@ -397,18 +397,18 @@ Every row read before it was written down.
 
 | what this doc names | existing code | how it is used |
 |---|---|---|
-| the header's framing | [`HEAD_MAGIC`, `src/psp/header.rs:53`](../../../../src/psp/header.rs) | **the pattern, re-implemented**: magic, `u64` length, TOML body, sentinel — so `head` still works on an ng file |
-| `Header` / `Manifest` | `WriterHeader` / `ParsedHeader`, [`src/psp/header.rs:88,151`](../../../../src/psp/header.rs) | the build-side / parse-side split, kept. ng's adds `Manifest`; production's `[[column]]` array is the ancestor |
-| `FieldEncoding` | [`src/psp/registry.rs`](../../../../src/psp/registry.rs)'s `Cardinality` and element types | **the idea, widened.** Production's registry names a type; this names a type *and its parameters* |
-| `Footer` | `TRAILER_BYTES = 32`, `TRAILER_MAGIC = PSPE`, [`src/psp/trailer.rs:28,33`](../../../../src/psp/trailer.rs) | the layout and the magic-last trick. **Wider than 32**: ng's needs the trailer's offset and length too |
-| `BlockIndexEntry` | [`src/psp/index.rs:42`](../../../../src/psp/index.rs) | same shape, same flat vector decoded at open. ng's drops nothing and adds nothing |
-| varints | `encode_u64_leb128` / `decode_u64_leb128` / `encode_i64_svarint`, [`src/psp/varint.rs:46,83,119`](../../../../src/psp/varint.rs) | **called as-is.** Specified and tested; ng mints no second implementation |
-| the compression seam | `ZSTD_COMPRESSION_LEVEL = 9`, [`src/psp/block.rs:709`](../../../../src/psp/block.rs) | the level and the long-lived-compressor shape. **The window cap is new** — production never set one |
-| `ng::psp::PspReadError` / `PspWriteError` | production's same-named pair, [`src/psp/errors.rs:204,596`](../../../../src/psp/errors.rs) | the `#[non_exhaustive]` `thiserror` shape and the per-variant doc comment. **Same names, different types, different modules** — ng's surface is its own, and the two must not be confused at a `use` site |
-| the record | `SampleLocusObservations`, [`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs) | **what is written and what must come back.** Not production's `PileupRecord` — §2 |
-| `ReadWitness` | [`src/ng/locus_generation/witness.rs:259`](../../../../src/ng/locus_generation/witness.rs) | encoded as-is; the variable-length field the prototype never carried |
-| `GenomeRegion`, `ContigId`, `Bp`, `ReadGroupId` | [`src/ng/types.rs:79,13,185,210`](../../../../src/ng/types.rs) | used, not re-minted |
-| `ChainId` | `pub type ChainId = u64`, [`src/pileup_record.rs:30`](../../../../src/pileup_record.rs) | **an alias, not a newtype, and it is production's.** OPEN below |
+| the header's framing | `HEAD_MAGIC`, `src/psp/header.rs` (`d9e7b076:src/psp/header.rs`) | **the pattern, re-implemented**: magic, `u64` length, TOML body, sentinel — so `head` still works on an ng file |
+| `Header` / `Manifest` | `WriterHeader` / `ParsedHeader`, `d9e7b076:src/psp/header.rs` | the build-side / parse-side split, kept. ng's adds `Manifest`; production's `[[column]]` array is the ancestor |
+| `FieldEncoding` | `d9e7b076:src/psp/registry.rs`'s `Cardinality` and element types | **the idea, widened.** Production's registry names a type; this names a type *and its parameters* |
+| `Footer` | `TRAILER_BYTES = 32`, `TRAILER_MAGIC = PSPE`, `d9e7b076:src/psp/trailer.rs` | the layout and the magic-last trick. **Wider than 32**: ng's needs the trailer's offset and length too |
+| `BlockIndexEntry` | `d9e7b076:src/psp/index.rs` | same shape, same flat vector decoded at open. ng's drops nothing and adds nothing |
+| varints | `encode_u64_leb128` / `decode_u64_leb128` / `encode_i64_svarint`, `d9e7b076:src/psp/varint.rs` | **called as-is.** Specified and tested; ng mints no second implementation |
+| the compression seam | `ZSTD_COMPRESSION_LEVEL = 9`, `d9e7b076:src/psp/block.rs` | the level and the long-lived-compressor shape. **The window cap is new** — production never set one |
+| `ng::psp::PspReadError` / `PspWriteError` | production's same-named pair, `d9e7b076:src/psp/errors.rs` | the `#[non_exhaustive]` `thiserror` shape and the per-variant doc comment. **Same names, different types, different modules** — ng's surface is its own, and the two must not be confused at a `use` site |
+| the record | `SampleLocusObservations`, [`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs) | **what is written and what must come back.** Not production's `PileupRecord` — §2 |
+| `ReadWitness` | [`src/locus_generation/witness.rs`](../../../../src/locus_generation/witness.rs) | encoded as-is; the variable-length field the prototype never carried |
+| `GenomeRegion`, `ContigId`, `Bp`, `ReadGroupId` | [`src/types.rs,13,185,210`](../../../../src/types.rs) | used, not re-minted |
+| `ChainId` | `pub type ChainId = u64`, `d9e7b076:src/pileup_record.rs` | **an alias, not a newtype, and it is production's.** OPEN below |
 | the working prototype | `examples/psp_row_stream_roundtrip.rs` | the parity oracle (§8) and the source of every measurement the specs quote |
 
 ---
@@ -416,7 +416,7 @@ Every row read before it was written down.
 ## 7. Open items
 
 - **`OPEN:` should `ChainId` become an ng newtype?** It is `pub type ChainId = u64` in production
-  ([`src/pileup_record.rs:30`](../../../../src/pileup_record.rs)), so it is an alias with no type
+  (`d9e7b076:src/pileup_record.rs`), so it is an alias with no type
   safety, and ng imports it. The store's chain-id path mixes ids with *positions in the live set*
   (spec [`psp_chain_id_encoding.md`](../spec/psp_chain_id_encoding.md) §4) — two `u64`s that must not
   be transposed, which is precisely the case for a newtype. **Not this module's to decide**: it

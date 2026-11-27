@@ -1,7 +1,7 @@
 # ng — the alignment file: a validated handle and its ordered region reads
 
 *Status: design spec, 2026-07-20. **All open questions resolved** (owner, 2026-07-20): O1 MD5 handling,
-O3-file → rebuild ng-owned, O5 → `src/ng/read/input/`, missing `M5` → not an error, reader pooling →
+O3-file → rebuild ng-owned, O5 → `src/read/input/`, missing `M5` → not an error, reader pooling →
 built now. Ready for its arch doc. Split out of the former `read_ingestion.md` (owner, 2026-07-20)
 together with [`sample_reads.md`](sample_reads.md): this document owns everything whose subject is
 **one alignment file**, that one owns everything whose subject is **the sample**. It opens and
@@ -29,7 +29,7 @@ reader pool with a per-worker cursor; the rest of this document stands.***
 > its `readers_opened` accounting included. They were replaced by
 > [`alignment_cursor.md`](alignment_cursor.md), a per-file reader that stays positioned in one
 > chromosome and keeps the reads it has already decoded and filtered, and deleted at that
-> plan's Milestone F together with `src/ng/read/input/region_query.rs`.
+> plan's Milestone F together with `dae88900~1:src/ng/read/input/region_query.rs`.
 >
 > **What replaced each idea, so a reader is not left guessing.** The per-region query becomes
 > `AlignmentFile::cursor(contig, reference)` → `AlignmentCursor`. Pooling becomes *one cursor
@@ -140,7 +140,7 @@ lives.
 ### 3.1 Open and validate (the permutation-hole fix)
 
 `ContigId(i)` means "the i-th contig of the reference, in `.fai`/`ReferenceInfo` order"
-([`types.rs`](../../../../src/ng/types.rs)). A read's `ref_id` is the i-th `@SQ` of *its* file. Every
+([`types.rs`](../../../../src/types.rs)). A read's `ref_id` is the i-th `@SQ` of *its* file. Every
 reference fetch (`ReadFilter` #8) — and, one layer up, the merge — assumes these two `i`s coincide.
 Today `ReadFilter::new` checks only that each `@SQ` index *resolves* against the reference, so **a file
 whose `@SQ` list is a permutation of the reference passes, then fetches the wrong contig for every
@@ -256,8 +256,8 @@ region source ══(fills one reused RawAlignedRead buffer)══▶ ReadFilter
 
 - **The reader→filter seam passes an undecoded buffer, not a product.** `RecordSource::read_next` fills
   a caller-owned `RawAlignedRead` in place, reusing its allocations
-  ([`filtering.rs`](../../../../src/ng/read/filtering.rs) `RecordSource`; the read itself is
-  [`aligned_read.rs`](../../../../src/ng/read/aligned_read.rs)'s); `RawAlignedRead::flag`/`mapq` are
+  ([`filtering.rs`](../../../../src/read/filtering.rs) `RecordSource`; the read itself is
+  [`aligned_read.rs`](../../../../src/read/aligned_read.rs)'s); `RawAlignedRead::flag`/`mapq` are
   cheap field reads on that undecoded record, and `RawAlignedRead::decode` — the call that actually builds a
   `MappedRead` — is invoked by the filter **only for reads that survive the cheap cascade**. So the
   whole pass allocates one record buffer, and a dropped read is never materialised. This is also why
@@ -274,7 +274,7 @@ This chain is deliberately the *complete* product of this module: the sample lay
 ng's existing `RecordSource`/`RawAlignedRead` seam so ng's **`ReadFilter`** (unchanged, all nine filters
 including the reference-dependent #8) does the filtering and decode. Concretely: two new region-query
 `RecordSource` implementations — the index-driven siblings of the whole-file `BamRecordSource` /
-`CramRecordSource` that already live in [`read/filtering.rs`](../../../../src/ng/read/filtering.rs) —
+`CramRecordSource` that already live in [`read/filtering.rs`](../../../../src/read/filtering.rs) —
 each doing only the seek + overlap + early-stop, then `ReadFilter` wraps one and yields
 `Result<MappedRead, _>` in region order. So the region reader is *reader logic only*; the *policy*
 (what to drop) stays in step 1, one place, as `read_filtering.md` §2.5 requires.
@@ -554,7 +554,7 @@ Home (owner, 2026-07-20): a `read/input/` submodule beside `read/filtering.rs`, 
 `RecordSource`/`RawAlignedRead` seam. This spec owns:
 
 ```
-src/ng/read/input/
+src/read/input/
 ├── open_bam.rs     – the open-and-validate gate (SO, @SQ, index load, @RG SM) (§3.1)
 └── region_query.rs – the BAM/CRAM region-query RecordSource impls (§3.2), incl. the .crai cursor
 ```
@@ -660,7 +660,7 @@ and error shapes, `open_bam.rs` vs `open_alignment_file.rs` — §6).*
 - **O3-file — rebuild vs reuse the region reader** → **(B) rebuild ng-owned** (§5), for
   one-place-for-policy, ng's own contig authority, and extending the `RecordSource` seam ng already
   owns. Independent of `sample_reads.md`'s O3-merge.
-- **O5 — module home** → `src/ng/read/input/`, with `open_bam.rs` and `region_query.rs` (§6). Same
+- **O5 — module home** → `src/read/input/`, with `open_bam.rs` and `region_query.rs` (§6). Same
   answer applies to `sample_reads.md`.
 - **Missing `@SQ M5` → not an error, not a warning** (§3.1). The check does not apply; the run
   proceeds normally.

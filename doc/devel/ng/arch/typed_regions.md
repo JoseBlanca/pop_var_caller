@@ -8,6 +8,12 @@ supersedes the step-3 sketch (`LocusRouter`/`LocusSource`) in the shared
 [`module_layout.md`](module_layout.md); the edits to those two docs land alongside this one.
 Naming: **STR** in prose, `ssr` in code.*
 
+*Note (2026-11-27): this was written while the caller was built in `src/ng/` beside an older,
+frozen caller ("production"). The older caller was deleted on 2026-09-13 and these modules moved
+to the crate root, `src/`, so the rules below about what may sit outside `src/ng/` describe that
+period. Paths to code are given as they are now; a file that no longer exists is cited as
+`<commit>:<path>`, which `git show` opens.*
+
 ---
 
 ## Revision — 2026-07-16: ng owns its copies
@@ -22,7 +28,7 @@ them are unaffected — none of them ever depended on where the code lived.
 
 ## Module home
 
-`src/ng/region_typing/` — a folder, though **not** because of a bake-off (there is none; spec §6):
+`src/region_typing/` — a folder, though **not** because of a bake-off (there is none; spec §6):
 it carries the ~500-line port of the classification policy alongside the walk, and those are two concerns
 with two test suites.
 
@@ -32,7 +38,7 @@ with two test suites.
   `Classified`, the pre-filter, `classify`, and the differential test against production's `build_loci`
   (spec §8.0).
 
-It is a **step** module, so it sits in the step layer of the `src/ng/` tree, replacing the
+It is a **step** module, so it sits in the step layer of the module tree, replacing the
 `locus_router/` folder the layout doc reserved. `GenomeRegion` and `Position` are shared vocabulary
 and land in `ng::types`, not here.
 
@@ -186,16 +192,16 @@ Every row read at the cited line (2026-07-16). Convergence, not new types.
 
 | ng name | existing code | action |
 |---|---|---|
-| `GenomeRegion` | `regions::Region` ([regions.rs:38](../../../../src/regions.rs)), `ContigInterval` ([bam/alignment_input.rs:544](../../../../src/bam/alignment_input.rs)) | the consolidation `ng_step_interfaces.md` §6 reserved — this step is its first use (1-based, `u64`) |
-| `GenomeRegions` | `RegionSet` ([regions.rs:74](../../../../src/regions.rs)) | **wrap read-only**, not reimplement — it already sorts/coalesces/clamps/converts-BED; wrapper adds ng's width + base + name. `regions.rs` does not move |
-| `SsrSegment`'s payload | `ssr::types::Locus` ([ssr/types.rs:136](../../../../src/ssr/types.rs)) | **copy into ng**, born 1-based/`u64` (spec §4, §5); production's untouched |
-| ng `SsrSegment`'s motif | `ssr::types::Motif` ([ssr/types.rs:36](../../../../src/ssr/types.rs)) | **copy into ng** — no coordinates/width to rebase, but production's is `pub(crate)` and leaks through ng's `pub` `SsrSegment` (spec §4, corrected at the A1 review) |
-| `RegionKind::SsrBundle` tracts | `RepeatInterval` ([ng/tandem_repeat.rs:186](../../../../src/ng/tandem_repeat.rs)) | reuse; widened to `u64` (ng's own code, spec §4) |
-| `TypedRegionConfig.criteria` | `CatalogParams` ([ssr/catalog/mod.rs:42](../../../../src/ssr/catalog/mod.rs)) | **copy into ng** as `SsrSegmentCriteria`: same defaults, no `bundle_threshold`, gains the hardcoded period/floor knobs (spec §5) |
-| `segment_criteria::classify` | `build_loci` ([ssr/catalog/postprocess.rs:69](../../../../src/ssr/catalog/postprocess.rs)) | **copy into ng** — logic transcribed unchanged; takes `RepeatInterval`, windowed, returns `Classified { loci, bundled }` (spec §5a). Production's `build_loci` and `TrfRecord` stay |
-| the pre-filter | `catalog_prefilter` ([ng/scanner_parity.rs](../../../../src/ng/scanner_parity.rs), moved out of `src/ssr/` at B2) | **copy into ng**, beside `classify` (spec §5.1) |
-| the windowed scan | `collect_windowed` ([ng/tandem_repeat.rs:530](../../../../src/ng/tandem_repeat.rs)) | promote (private → crate) and stream (spec §6.1) |
-| reference access | `WindowedRefSeq` ([ng/ref_seq.rs](../../../../src/ng/ref_seq.rs)) | + a raw-bytes path (`ref_seq.md` YAGNI now spent) + a `contigs()` accessor |
+| `GenomeRegion` | `regions::Region` ([regions.rs](../../../../src/regions.rs)), `ContigInterval` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | the consolidation `ng_step_interfaces.md` §6 reserved — this step is its first use (1-based, `u64`) |
+| `GenomeRegions` | `RegionSet` ([regions.rs](../../../../src/regions.rs)) | **wrap read-only**, not reimplement — it already sorts/coalesces/clamps/converts-BED; wrapper adds ng's width + base + name. `regions.rs` does not move |
+| `SsrSegment`'s payload | `ssr::types::Locus` (`d9e7b076:src/ssr/types.rs`) | **copy into ng**, born 1-based/`u64` (spec §4, §5); production's untouched |
+| ng `SsrSegment`'s motif | `ssr::types::Motif` (`d9e7b076:src/ssr/types.rs`) | **copy into ng** — no coordinates/width to rebase, but production's is `pub(crate)` and leaks through ng's `pub` `SsrSegment` (spec §4, corrected at the A1 review) |
+| `RegionKind::SsrBundle` tracts | `RepeatInterval` ([tandem_repeat.rs](../../../../src/tandem_repeat.rs)) | reuse; widened to `u64` (ng's own code, spec §4) |
+| `TypedRegionConfig.criteria` | `CatalogParams` (`d9e7b076:src/ssr/catalog/mod.rs`) | **copy into ng** as `SsrSegmentCriteria`: same defaults, no `bundle_threshold`, gains the hardcoded period/floor knobs (spec §5) |
+| `segment_criteria::classify` | `build_loci` (`d9e7b076:src/ssr/catalog/postprocess.rs`) | **copy into ng** — logic transcribed unchanged; takes `RepeatInterval`, windowed, returns `Classified { loci, bundled }` (spec §5a). Production's `build_loci` and `TrfRecord` stay |
+| the pre-filter | `catalog_prefilter` ([scanner_parity.rs](../../../../src/scanner_parity.rs), moved out of `src/ssr/` at B2) | **copy into ng**, beside `classify` (spec §5.1) |
+| the windowed scan | `collect_windowed` ([tandem_repeat.rs](../../../../src/tandem_repeat.rs)) | promote (private → crate) and stream (spec §6.1) |
+| reference access | `WindowedRefSeq` ([ref_seq.rs](../../../../src/ref_seq.rs)) | + a raw-bytes path (`ref_seq.md` YAGNI now spent) + a `contigs()` accessor |
 | `TypedRegionError` | new (`thiserror`, `#[non_exhaustive]`) | one variant; mirrors `ReadFilterError`'s in-stream-fatal shape |
 
 **Two oracles, both in spec §8:**

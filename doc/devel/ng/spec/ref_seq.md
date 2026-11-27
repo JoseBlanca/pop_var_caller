@@ -101,7 +101,7 @@ reader whose buffer is already uppercased). The streaming impl serves canonical 
 the forward walk; a consumer needing raw bytes (the mismatch filter) uses the resident
 impl. (Raw from the streaming/windowed impl is YAGNI — see *Decisions & deferrals*.)
 
-### 5. Home — `src/ng/ref_seq.rs`
+### 5. Home — `src/ref_seq.rs`
 
 A single file to start; it splits into `ref_seq/` (trait in `mod.rs`, one file per impl)
 when the three implementations grow enough to warrant it — the same file-vs-folder
@@ -290,7 +290,7 @@ concrete type (`WindowedRefSeq` for eviction).
 | ng piece | production code | reuse |
 |---|---|---|
 | resident `RefSeq` impl | `RepositoryRefFetcher` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) + `build_fasta_repository` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | wrap / lift — it already does chrom_id → name → `Repository::get` → slice → canonicalise |
-| raw resident access | `RawContigRefCache` ([pileup/per_sample/read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs)) | the `fetch_raw` model |
+| raw resident access | `RawContigRefCache` (`d9e7b076:src/pileup/per_sample/read_processor.rs`) | the `fetch_raw` model |
 | streaming `RefSeq` impl | `StreamingChromRefFetcher` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) | the sliding-buffer / both-direction-extend logic |
 | caller-driven eviction | `ManualEvictChromRefFetcher::evict_before` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) | the windowed impl's `evict_before` (drain `[.., pos)`, keep capacity) — Decision 6 |
 | coordinate / contig contract | `ContigList`, `ContigEntry` ([fasta/mod.rs](../../../../src/fasta/mod.rs)); the `(chrom_id, 1-based, length)` signature | reuse as-is |

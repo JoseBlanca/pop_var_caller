@@ -5,7 +5,7 @@
 [`LocusGenerator`](locus_generation.md), consuming `SsrSegment` and producing one locus per
 tract. It **inherits** the locus type, the contract, the dispatch and the error model from
 [`locus_generation.md`](locus_generation.md) (arch) — read that first; this doc adds only what is
-STR-specific. Grounded in production [`src/ssr/pileup/`](../../../../src/ssr/pileup/). Naming:
+STR-specific. Grounded in production `d9e7b076:src/ssr/pileup`. Naming:
 **STR** in prose, `ssr` in code. The per-read operation is **`align_read`** — on the STR path it
 is a pair-HMM alignment, not the left-align+BAQ "preparation" the generic path does;
 `read_preparation_ssr.md` still specs it as `ReadPreparer::prepare_read`, a name to reconcile to
@@ -14,7 +14,7 @@ is a pair-HMM alignment, not the left-align+BAQ "preparation" the generic path d
 
 ## Module home
 
-`src/ng/locus_generation/ssr.rs` — beside `locus_generation/mod.rs`. It **starts** as one file; if it
+`src/locus_generation/ssr.rs` — beside `locus_generation/mod.rs`. It **starts** as one file; if it
 grows past a comfortable single-file size it splits into an `ssr/` **folder** (as the generic
 generator is already `locus_generation/pileup/`) — the file-grows-into-a-folder rhythm
 `module_layout.md` principle 3 sets, an internal change that touches nothing outside it. Either
@@ -140,7 +140,7 @@ arrival order.
   traps the spec details: seed from the contig **name** + **0-based** start (`start - 1`, not the
   `ContigId` / 1-based ng speaks), and run parity with the cap **disabled** (it defeats the oracle
   at deep loci) (spec §4).
-- **Support moments filled though unconsumed** — the generator holds the `MappedRead`s, so filling
+- **Support moments filled though unconsumed** — the generator holds the reads (`MappedRead`s when written; `AlignedRead`s since 2026-11-27), so filling
   strand/BQ/MAPQ moments is free; nothing STR-side consumes them today and it is not established
   one will. **Soft** — the parity oracle checks only bytes and counts (spec §3).
 - **No-observation *total* on the locus; reasons only at run level** — per-locus reason breakdowns
@@ -175,17 +175,17 @@ Every row read at the cited line (2026-07-22). Convergence, not new types.
 
 | what | existing code | ng action |
 |---|---|---|
-| `SsrSegment` (input) | [region_typing/segment_criteria.rs:240](../../../../src/ng/region_typing/segment_criteria.rs#L240) | consume as-is — **coordinates, no bases** ([RegionKind note, mod.rs:171](../../../../src/ng/region_typing/mod.rs#L171)), which is why step 1 fetches |
-| `Motif` | [segment_criteria.rs:148](../../../../src/ng/region_typing/segment_criteria.rs#L148) | reuse (ng's own port); the `SsrDetail.motif` value |
-| `SsrLocus` ← production `Locus` | [ssr/types.rs:136](../../../../src/ssr/types.rs#L136) (embeds `ref_bytes`, `ref_bytes_start`) | **adapt** — split: coordinates from `SsrSegment`, bases fetched into `tract_with_margin_bases` |
-| read fetch | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** [read/input/mod.rs](../../../../src/ng/read/input/mod.rs) | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](../spec/alignment_cursor.md)'s Milestone F. **One cursor per sample per chromosome**, re-pointed at each repeat — and a generator refuses a sample it was not opened for, because the `LocusGenerator` trait lends `&SampleReads` per call and keying the reader on the chromosome alone made one plant answer for all of them. Still **do not** port `fetch_locus_reads`' spanning gate (read on `main`) |
-| the spanning gate NOT to port | `reaches_locus` [ssr/pileup/footprint.rs:223](../../../../src/ssr/pileup/footprint.rs#L223) | **omit** — porting it makes partials unreachable (§3; spec §2) |
-| depth cap | `Reservoir` [ssr/pileup/fetch_reads.rs:80](../../../../src/ssr/pileup/fetch_reads.rs#L80) + `locus_seed` [:57](../../../../src/ssr/pileup/fetch_reads.rs#L57) | **port** directly, with the seed trap (§3); `DEFAULT_SSR_MAX_READS_PER_LOCUS` is ng's own, **not** `MAX_READS_PER_LOCUS` [:30](../../../../src/ssr/pileup/fetch_reads.rs#L30) |
-| margin fetch | `RefSeq::fetch_into` [ng/ref_seq.rs:142](../../../../src/ng/ref_seq.rs#L142) | reuse as-is; replaces `Locus.ref_bytes` |
-| read alignment | `delimit_read` [ssr/pileup/alignment.rs:171](../../../../src/ssr/pileup/alignment.rs#L171) → `Delimited` [:141](../../../../src/ssr/pileup/alignment.rs#L141) | **call** via `align_read` (`read_preparation_ssr.md`), do not reimplement |
-| tally | `tally` [ssr/pileup/locus_tally.rs:77](../../../../src/ssr/pileup/locus_tally.rs#L77) → `SsrLocusObs.observed` [:70](../../../../src/ssr/pileup/locus_tally.rs#L70) | **model** for `observed_sequences`; **extended** with partial observations and the support moments (§3) |
-| border-off-end reads | `BorderOffEnd` [locus_tally.rs:41](../../../../src/ssr/pileup/locus_tally.rs#L41), counted+dropped [:91](../../../../src/ssr/pileup/locus_tally.rs#L91) | **keep** as partial observations, not drop — the one place this path is new |
-| bundle radius (the `<=` bound) | `SsrSegmentCriteria.flank_bp` [segment_criteria.rs:560](../../../../src/ng/region_typing/segment_criteria.rs#L560) | reference as **`bundle_threshold`** (rename pending, §4) — `flank_bp <= bundle_threshold` |
+| `SsrSegment` (input) | [region_typing/segment_criteria.rs](../../../../src/region_typing/segment_criteria.rs) | consume as-is — **coordinates, no bases** ([RegionKind note, mod.rs](../../../../src/region_typing/mod.rs)), which is why step 1 fetches |
+| `Motif` | [segment_criteria.rs](../../../../src/region_typing/segment_criteria.rs) | reuse (ng's own port); the `SsrDetail.motif` value |
+| `SsrLocus` ← production `Locus` | `d9e7b076:src/ssr/types.rs` (embeds `ref_bytes`, `ref_bytes_start`) | **adapt** — split: coordinates from `SsrSegment`, bases fetched into `tract_with_margin_bases` |
+| read fetch | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** [read/input/mod.rs](../../../../src/read/input/mod.rs) | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](../spec/alignment_cursor.md)'s Milestone F. **One cursor per sample per chromosome**, re-pointed at each repeat — and a generator refuses a sample it was not opened for, because the `LocusGenerator` trait lends `&SampleReads` per call and keying the reader on the chromosome alone made one plant answer for all of them. Still **do not** port `fetch_locus_reads`' spanning gate (read on `main`) |
+| the spanning gate NOT to port | `reaches_locus` `d9e7b076:src/ssr/pileup/footprint.rs` | **omit** — porting it makes partials unreachable (§3; spec §2) |
+| depth cap | `Reservoir` `d9e7b076:src/ssr/pileup/fetch_reads.rs` + `locus_seed` `d9e7b076:src/ssr/pileup/fetch_reads.rs` | **port** directly, with the seed trap (§3); `DEFAULT_SSR_MAX_READS_PER_LOCUS` is ng's own, **not** `MAX_READS_PER_LOCUS` `d9e7b076:src/ssr/pileup/fetch_reads.rs` |
+| margin fetch | `RefSeq::fetch_into` [ref_seq.rs](../../../../src/ref_seq.rs) | reuse as-is; replaces `Locus.ref_bytes` |
+| read alignment | `delimit_read` `d9e7b076:src/ssr/pileup/alignment.rs` → `Delimited` `d9e7b076:src/ssr/pileup/alignment.rs` | **call** via `align_read` (`read_preparation_ssr.md`), do not reimplement |
+| tally | `tally` `d9e7b076:src/ssr/pileup/locus_tally.rs` → `SsrLocusObs.observed` `d9e7b076:src/ssr/pileup/locus_tally.rs` | **model** for `observed_sequences`; **extended** with partial observations and the support moments (§3) |
+| border-off-end reads | `BorderOffEnd` `d9e7b076:src/ssr/pileup/locus_tally.rs`, counted+dropped `d9e7b076:src/ssr/pileup/locus_tally.rs` | **keep** as partial observations, not drop — the one place this path is new |
+| bundle radius (the `<=` bound) | `SsrSegmentCriteria.flank_bp` [segment_criteria.rs](../../../../src/region_typing/segment_criteria.rs) | reference as **`bundle_threshold`** (rename pending, §4) — `flank_bp <= bundle_threshold` |
 | `SampleLocusObservations` / `ObservedSequence` / `SsrDetail` | [locus_generation.md](locus_generation.md) §1, ng_step_interfaces.md §2 | fill — the shared types |
 
 ## Test & bench shape

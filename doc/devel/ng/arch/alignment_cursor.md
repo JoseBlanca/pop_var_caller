@@ -17,11 +17,11 @@ Naming: **STR** in prose, `ssr` in code.*
 
 ## Module home
 
-`src/ng/read/input/`, the module that already owns everything whose subject is one alignment
+`src/read/input/`, the module that already owns everything whose subject is one alignment
 file. Two new files and one folder:
 
 ```
-src/ng/read/input/
+src/read/input/
     open_bam.rs           AlignmentFile — loses the pool, gains cursor() and contigs()
     cursor.rs             AlignmentCursor, CursorError
     aligned_reads_reader/

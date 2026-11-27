@@ -1,7 +1,7 @@
 # ng — the sample's reads: several files, one ordered stream
 
 *Status: design spec, 2026-07-20. **All open questions resolved** (owner, 2026-07-20): O2 duplicate =
-error, O3-merge → rebuild ng-owned, O4 sample-name agreement, O5 → `src/ng/read/input/`, arms unified
+error, O3-merge → rebuild ng-owned, O4 sample-name agreement, O5 → `src/read/input/`, arms unified
 by an enum. Ready for its arch doc. Split out of the former `read_ingestion.md` (owner, 2026-07-20)
 together with [`alignment_file.md`](alignment_file.md): that document owns everything whose subject is
 **one alignment file**, this one owns everything whose subject is **the sample**. It is the layer the
@@ -295,7 +295,7 @@ Home (owner, 2026-07-20): the `read/input/` submodule (shared with `alignment_fi
 `open_bam.rs` and `region_query.rs`). This spec owns:
 
 ```
-src/ng/read/input/
+src/read/input/
 ├── mod.rs    – SampleReads::{open, reads_in_region, counts, sq_md5s}; SampleRegionReads
 │               (Single|Merged); the cross-file sample-name check; the IngestError enum; re-exports
 └── merge.rs  – the argmin k-way merge + the same-file-twice check (§3.2)
@@ -383,7 +383,7 @@ whether `IngestError` wraps or flattens `AlignmentFileError`).*
 - **O3-merge — rebuild vs reuse the merge** → **rebuild ng-owned** (§6): production's merge re-checks
   order redundantly, has no single-file arm, reports counts in the wrong shape, and is unaudited
   against the per-read budget.
-- **O5 — module home** → `src/ng/read/input/`, shared with `alignment_file.md` (§6).
+- **O5 — module home** → `src/read/input/`, shared with `alignment_file.md` (§6).
 - **The two arms are unified by an enum, not `Box<dyn Iterator>`** (§3.4).
 - **O2 — cross-file identical read** → hard error, not a dedup; checked only on an argmin tie (§3.2).
 - **O4 — sample-name check at `open`** → yes, extended to cross-file agreement (§3.1).
