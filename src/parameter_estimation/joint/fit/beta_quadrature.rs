@@ -144,7 +144,7 @@ fn symmetric_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 
 /// `ψ(x)`, the derivative of `ln Γ(x)`, by recurrence up to eight and then an asymptotic
 /// series. Only the tests read it: the shapes' update steps on the rule's own slope instead of
-/// solving the digamma form ([`step_beta_shapes`]).
+/// solving the digamma form ([`step_beta_shapes`](super::maximisation::step_beta_shapes)).
 #[cfg(test)]
 pub(super) fn digamma(x: f64) -> f64 {
     let mut x = x;
