@@ -33,10 +33,15 @@ worktrees. Do not merge into `code-quality` — the manager does that.
 
 - Native cargo, your own target dir: `CARGO_TARGET_DIR=<your worktree>/target-host`,
   `CARGO_BUILD_JOBS=4`.
-- Light dev loop: run the tests of the modules you touched (`cargo test --release --lib <module path>`
-  and any integration test that covers them), plus `cargo clippy --all-targets` and
-  `cargo fmt --check` *on the files you touched only* (rustfmt those files, never
-  `cargo fmt` on the whole crate).
+- Light dev loop: run the tests of the modules you touched (`cargo test --lib <module path>`
+  and any integration test that covers them, `cargo test --test <name>`), plus
+  `cargo clippy --all-targets` and `cargo fmt --check` *on the files you touched only*
+  (rustfmt those files, never `cargo fmt` on the whole crate). The full suite is
+  `cargo test --lib --tests` (about 1 minute to run).
+- **Do not add `--release` to `cargo test`.** It builds with the shipping profile's fat LTO,
+  which costs about 5 minutes after every edit, against 1 minute or less without it, and the
+  tests run no faster (`Cargo.toml`, `[profile.test]`). The one exception is checking an
+  `assert!` that must hold in release: `cargo test --release --lib <module path>`.
 - **Bug fix commits**: one bug per commit; the commit adds a test that fails before the fix
   (show that it failed — run it on the unfixed code first) and passes after.
 - **Every commit's output is checked** with the gate in identity mode:
