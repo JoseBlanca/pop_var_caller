@@ -5298,6 +5298,13 @@ mod tests {
                 record.observations[0].num_obs = live.len() as u32;
                 record.observations[0].num_fwd = 0;
                 record.observations[0].chain_ids = live;
+                // The other observations name no reads, so they show none: a generic record
+                // with reads live and an observation naming none of them is refused as damage.
+                for other in &mut record.observations[1..] {
+                    other.num_obs = 0;
+                    other.num_fwd = 0;
+                    other.placed_left = 0;
+                }
                 record
             })
             .collect();

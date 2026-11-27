@@ -843,6 +843,9 @@ mod tests {
         let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
         for (at, ids) in [(1u64, vec![5u64, 9]), (101, vec![9, 12]), (201, vec![12])] {
             let mut record = a_record(0, at, 1);
+            // One read behind each id, so the stored list agrees with the count.
+            record.observations[0].num_obs = ids.len() as u32;
+            record.observations[0].num_fwd = 0;
             record.observations[0].chain_ids = ids;
             writer.push(&record).expect("in order");
         }
@@ -1783,6 +1786,9 @@ mod tests {
         let mut writer = PspWriter::create(&path, a_header(1_000_000)).expect("a header");
         for (at, ids) in [(1u64, vec![5u64, 9]), (101, vec![9, 12]), (201, vec![12])] {
             let mut record = a_record(0, at, 1);
+            // One read behind each id, so the stored list agrees with the count.
+            record.observations[0].num_obs = ids.len() as u32;
+            record.observations[0].num_fwd = 0;
             record.observations[0].chain_ids = ids;
             writer.push(&record).expect("in order");
         }

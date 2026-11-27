@@ -1617,7 +1617,7 @@ mod tests {
     use crate::calling::inference::summarise_condition::SummariseConditionLoop;
     use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
     use crate::calling::parameters_file::DeclaredInbreeding;
-    use crate::locus_generation::SampleLocusObservations;
+    use crate::locus_generation::{SampleLocusObservations, SequenceObservation};
     use crate::psp::writer::tests_support::a_header;
     use crate::psp::writer::tests_support::a_record;
     use crate::psp::{PspWriter, ReadGroupIdentity};
@@ -2792,6 +2792,75 @@ mod tests {
         assert!(
             handed.windows(2).all(|pair| pair[0].start <= pair[1].start),
             "records leave in genome order: {handed:?}",
+        );
+    }
+
+    /// **A psp whose stored read list disagrees with its read count is refused as damage,
+    /// naming the sample and the record, and the run does not panic.**
+    ///
+    /// Sample alpha's record at 22 has an observation showing three reads and naming none,
+    /// while read 7 and read 9 are live there — a file the walk never writes, made here by
+    /// handing the writer that record. Beta's deletion over 20–24 chains alpha's two records
+    /// into one locus, which is where the cohort merge needs every read named. Until the psp
+    /// reader checked the lists it stores, this decoded cleanly and the run aborted on the
+    /// merge's release assertion, "carries 3 reads and no chain id".
+    #[test]
+    fn a_psp_whose_stored_read_list_disagrees_with_its_count_is_refused_not_a_panic() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let segmentation = a_segmentation(ground(false));
+        let showing = |bases: &[u8], ids: &[u64], reads: u32| SequenceObservation {
+            bases: Box::from(bases),
+            num_obs: reads,
+            num_fwd: 0,
+            placed_left: 0,
+            chain_ids: ids.to_vec(),
+            ..a_record(0, 20, 1).observations[0].clone()
+        };
+        let mut first = a_record(0, 20, 1);
+        first.observations = vec![showing(b"T", &[7, 9], 2)];
+        let mut damaged = a_record(0, 22, 1);
+        damaged.observations = vec![showing(b"T", &[7, 9], 2), showing(b"C", &[], 3)];
+        let mut deletion = a_record(0, 20, 5);
+        let anchor = deletion.reference_bases[..1].to_vec();
+        deletion.observations = vec![showing(&anchor, &[1, 2], 2)];
+        let paths = vec![
+            a_psp_holding(&dir, "alpha", &segmentation, &[first, damaged]),
+            a_psp_holding(&dir, "beta", &segmentation, &[deletion]),
+        ];
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let cohort = OpenPspCohort::open(&paths).expect("the two files' headers agree");
+        let parameters = parameters_for(cohort.read_groups());
+        let caller = open_the_caller(
+            cohort,
+            &reference,
+            Arc::try_unwrap(a_segmentation(ground(false))).expect("one handle"),
+            parameters,
+        )
+        .expect("the cohort matches the run");
+
+        let refused = caller
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |_: &VcfRecord, _: &[WindowCoverage], _| Ok::<(), std::io::Error>(()),
+            )
+            .expect_err("a damaged psp is refused");
+        let chain = std::iter::successors(
+            Some(&refused as &(dyn std::error::Error + 'static)),
+            |error| error.source(),
+        )
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+        // **The sample and the record's position, not the file's path**: the merge builds a
+        // body from bytes its source holds rather than through the reader's walk, and its
+        // refusal names the sample, as every damaged body it meets does.
+        assert!(
+            chain.starts_with("sample alpha:") && chain.contains("contig 0 position 22"),
+            "names the sample and where: {chain}"
+        );
+        assert!(
+            chain.contains("observation 1 stores a list of 0 reads and shows 3"),
+            "names the observation and what disagrees: {chain}"
         );
     }
 

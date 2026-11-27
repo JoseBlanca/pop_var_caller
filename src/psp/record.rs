@@ -830,6 +830,60 @@ fn check_a_derived_read_list(
     Ok(())
 }
 
+/// **The same guard on every list the record stores**, which until 2026-11-27 had none.
+///
+/// The derived list is checked by [`check_a_derived_read_list`]; the stored ones were taken as
+/// written, so a damaged file whose stored list disagreed with its count decoded cleanly. Where
+/// that reached the cohort merge it was refused by a release assertion in
+/// `run/cohort_merge/build.rs` — a panic, not a damage error naming the file and the block.
+///
+/// **A list that names reads** is held to the inequality the derived one meets: at most
+/// `num_obs` identifiers, at least half of it.
+///
+/// **An empty list** under a non-zero count is refused on a generic record whose live set names
+/// reads — the file says reads cover this record and the observation names none of them, which
+/// the walk never writes (it names every read it folds; `parity.rs`'s
+/// `every_emitted_observation_carries_a_read`). It is accepted in two cases:
+///
+/// - **an STR or bundle record**, whose path does not name reads (`ssr/tally.rs`) and whose
+///   every observation carries an empty list;
+/// - **a record with an empty live set**, which is a file naming no reads at that position at
+///   all. The walk does not write one with reads behind it, but this module's fixtures and the
+///   other modules' do, by the hundred, and the check cannot tell them from damage that emptied
+///   the heads' read changes as well as the list. That is the gap this leaves.
+///
+/// One comparison per stored list, once per record decoded: nothing per base or per read.
+fn check_the_stored_read_lists(
+    body: &FieldReader<'_>,
+    observations: &[SequenceObservation],
+    residual_at: u64,
+    kind: &LocusKind,
+    live_reads: &[ChainId],
+) -> Result<(), RecordDecodeError> {
+    let every_read_is_named = matches!(kind, LocusKind::Generic) && !live_reads.is_empty();
+    for (at, observation) in observations.iter().enumerate() {
+        if at as u64 == residual_at {
+            continue;
+        }
+        let names = observation.chain_ids.len();
+        if (names > 0 || every_read_is_named)
+            && !check_a_read_list_against_its_read_count(names, observation.num_obs)
+        {
+            let reads = u64::from(observation.num_obs);
+            return Err(body.malformed(
+                OBSERVATION_READS,
+                format!(
+                    "observation {at} stores a list of {names} reads and shows {reads}; an \
+                     identifier names one read or two, so the list has to hold between {} and \
+                     {reads}",
+                    reads.div_ceil(2)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// **Which observation's reads this record derives rather than stores**, or `observations.len()`
 /// for none of them.
 ///
@@ -1334,6 +1388,7 @@ pub fn decode_record_body(
     let reads_without_observation = body.read_u32(READS_WITHOUT_OBSERVATION)?;
     let reads_discarded_by_cap = body.read_u32(READS_DISCARDED_BY_THE_DEPTH_CAP)?;
     let mut kind = body.read_locus_kind()?;
+    check_the_stored_read_lists(&body, &observations, residual_at, &kind, live_reads)?;
     let triples = body.read_length_prefixed(OBSERVATION_FLANK_DELETIONS)?;
     let mut list = FieldReader::new(triples);
     while list.bytes_left() > 0 {
@@ -3762,6 +3817,89 @@ mod tests {
         }
     }
 
+    /// **A stored read list that disagrees with its observation's count is refused as damage**,
+    /// as the derived one always was. Three damaged shapes against the rich record, every one of
+    /// which decoded before 2026-11-27: reads named under a count of zero, a list too short for
+    /// its count, and an empty list under a count while reads are live. Then the two shapes an
+    /// empty list is accepted in: an STR record, and a generic record with no read live.
+    #[test]
+    fn a_stored_read_list_that_disagrees_with_its_count_is_refused() {
+        let decoded = |record: &SampleLocusObservations| {
+            let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(record));
+            decode_a_record(
+                &mut a_live_set_reader(),
+                &bytes,
+                record.region.contig,
+                OffsetBase::at_block_start(block_starts_at),
+                &RecordLayout::as_this_build_writes_it(),
+            )
+        };
+        let named = |lists: [&[ChainId]; 3], reads: [u32; 3]| {
+            let mut record = a_rich_record();
+            for ((observation, ids), reads) in record.observations.iter_mut().zip(lists).zip(reads)
+            {
+                observation.chain_ids = ids.to_vec();
+                observation.num_obs = reads;
+                observation.num_fwd = 0;
+                observation.placed_left = 0;
+            }
+            record
+        };
+        let sound = named([&[10, 17], &[12, 30], &[21]], [2, 2, 1]);
+        assert_eq!(decoded(&sound).expect("a sound record").record, sound);
+
+        for (damage, record, observation, names, reads) in [
+            (
+                "reads named under a count of zero",
+                named([&[10, 17], &[12, 30], &[21]], [2, 2, 0]),
+                2,
+                1,
+                0,
+            ),
+            (
+                "a list too short for its count",
+                named([&[10, 17], &[12, 30], &[21]], [2, 2, 3]),
+                2,
+                1,
+                3,
+            ),
+            (
+                "an empty list under a count, with reads live",
+                named([&[10, 17], &[12, 30], &[]], [2, 2, 3]),
+                2,
+                0,
+                3,
+            ),
+        ] {
+            match decoded(&record) {
+                Err(RecordDecodeError::Malformed { field, reason, .. }) => {
+                    assert_eq!(field, OBSERVATION_READS, "{damage}");
+                    assert!(
+                        reason.starts_with(&format!(
+                            "observation {observation} stores a list of {names} reads and shows \
+                             {reads}"
+                        )),
+                        "{damage}: {reason}"
+                    );
+                }
+                other => panic!("{damage} was not refused as damage: {other:?}"),
+            }
+        }
+
+        // An STR record names no reads, live set or not.
+        let mut tract = named([&[10, 17], &[12, 30], &[]], [2, 2, 3]);
+        tract.kind = LocusKind::Ssr(SsrDetail {
+            motif: Motif::new(b"AT").expect("a dinucleotide is a motif"),
+            left_flank: b"GG".to_vec().into_boxed_slice(),
+            right_flank: b"CC".to_vec().into_boxed_slice(),
+        });
+        assert_eq!(decoded(&tract).expect("an STR record").record, tract);
+        // A generic record with nothing live: no list names a read, so no read is known to be
+        // missing from one.
+        let unnamed = named([&[], &[], &[]], [2, 2, 3]);
+        assert_eq!(decoded(&unnamed).expect("no read live").record, unnamed);
+    }
+
     /// **A damaged chain-id base change is refused when it lifts the base above a read the record
     /// names** (review of 2026-11-03, Mi3). One byte is any valid change, so before this check the
     /// damaged record decoded, and so did every later record of its block, all with a wrong base.
@@ -3770,10 +3908,14 @@ mod tests {
     #[test]
     fn a_damaged_chain_id_base_above_the_records_reads_is_refused() {
         let mut record = a_rich_record();
-        for (observation, ids) in record.observations.iter_mut().zip([[10, 17], [12, 30]]) {
+        // Every observation names its reads, as the walk's do: a generic record with reads live
+        // and an observation naming none of them is refused as damage.
+        let lists: [&[ChainId]; 3] = [&[10, 17], &[12, 30], &[21]];
+        assert_eq!(record.observations.len(), lists.len());
+        for (observation, ids) in record.observations.iter_mut().zip(lists) {
             observation.chain_ids = ids.to_vec();
-            observation.num_obs = 2;
-            observation.num_fwd = observation.num_fwd.min(2);
+            observation.num_obs = ids.len() as u32;
+            observation.num_fwd = observation.num_fwd.min(observation.num_obs);
         }
         record.chain_id_base = 10;
         let (mut bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&record));
