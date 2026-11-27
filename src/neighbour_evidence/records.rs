@@ -82,6 +82,8 @@ impl SiteRecord {
         let mut rows = Vec::with_capacity(samples.len());
         let mut likelihoods = vec![0_u16; samples.len() * genotype_count];
         let mut shares = vec![0.0_f32; samples.len() * allele_count];
+        // One sample's shares before rescaling, reused rather than allocated for each sample.
+        let mut sample_shares = Vec::with_capacity(allele_count);
         for (sample, columns) in samples.iter().enumerate() {
             let Some(columns) = columns else {
                 rows.push(SampleRow::Absent);
@@ -112,7 +114,8 @@ impl SiteRecord {
                 *out = u16::try_from(phred - lowest).unwrap_or(u16::MAX);
             }
             // q(a) = Σ_g GP_g · copies_a(g) / 2, rescaled because GP is written rounded.
-            let mut sample_shares = vec![0.0_f64; allele_count];
+            sample_shares.clear();
+            sample_shares.resize(allele_count, 0.0_f64);
             for (genotype, &posterior) in columns.genotype_posteriors.iter().enumerate() {
                 let copies = &copies_of[genotype * allele_count..(genotype + 1) * allele_count];
                 for (share, &count) in sample_shares.iter_mut().zip(copies) {
