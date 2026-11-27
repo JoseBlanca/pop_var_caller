@@ -49,7 +49,7 @@ use super::PLACEHOLDER_READ_GROUP;
 use super::ReadPreparer;
 use super::left_align::LeftAlignPreparer;
 use crate::bam::alignment_input::CigarOp;
-use crate::bam::alignment_input::{MappedRead, cigar_ref_span, read_exceeds_mismatch_fraction};
+use crate::bam::alignment_input::{cigar_ref_span, read_exceeds_mismatch_fraction};
 use crate::fasta::{ContigEntry, ContigList};
 use crate::read::aligned_read::AlignedRead;
 use crate::read::prepared_read::{MateRole, PreparedRead};
@@ -229,41 +229,15 @@ fn production_prepared(reference: &str, qname: &[u8]) -> FrozenPreparedRead {
     }
 }
 
-/// ng's answer.
-///
-/// The fixture is built as a `MappedRead`, because that is the record production's answers were
-/// recorded from and both sides must start from one record. Converting here is the whole of the
-/// difference: ng's read is that read plus its read group, and read preparation reads none of it.
-fn ng_prepared(read: MappedRead, fasta_path: &Path, contigs: &ContigList) -> PreparedRead {
+/// ng's answer for one fixture read.
+fn ng_prepared(read: AlignedRead, fasta_path: &Path, contigs: &ContigList) -> PreparedRead {
     let reference = ResidentRefSeq::new(repository(fasta_path), contigs.clone());
-    let preparer = LeftAlignPreparer::with_default_normalizer(reference);
+    let preparer = LeftAlignPreparer::new(reference);
     let mut scratch = <LeftAlignPreparer<ResidentRefSeq> as ReadPreparer>::Scratch::default();
     preparer
-        .prepare_read(to_aligned_read(read), &mut scratch)
+        .prepare_read(read, &mut scratch)
         .expect("the fixture windows are all in range")
         .expect("v1 never declines a read")
-}
-
-/// The same record as ng's read type, carrying a placeholder read group.
-///
-/// Preparation never *reads* the group — it only carries it through to ng's prepared read, which
-/// is checked in `left_align.rs`. Production has no counterpart for it, so it plays no part in
-/// the comparison below.
-fn to_aligned_read(read: MappedRead) -> AlignedRead {
-    AlignedRead {
-        qname: read.qname,
-        flag: read.flag,
-        ref_id: read.ref_id,
-        pos: read.pos,
-        mapq: read.mapq,
-        cigar: read.cigar,
-        seq: read.seq,
-        qual: read.qual,
-        mate_ref_id: read.mate_ref_id,
-        mate_pos: read.mate_pos,
-        adaptor_boundary: read.adaptor_boundary,
-        read_group: PLACEHOLDER_READ_GROUP,
-    }
 }
 
 /// Compare every field of a `PreparedRead`, naming the one that moved.
@@ -342,8 +316,11 @@ fn assert_same_prepared_read(ours: &PreparedRead, production: &FrozenPreparedRea
 }
 
 /// A read at 1-based `pos` on contig 0.
-fn read_at(qname: &str, pos: u64, cigar: Vec<CigarOp>, seq: &[u8]) -> MappedRead {
-    MappedRead {
+///
+/// It carries a placeholder read group: preparation never *reads* the group, only carries it
+/// through (checked in `left_align.rs`), and production has no counterpart for it.
+fn read_at(qname: &str, pos: u64, cigar: Vec<CigarOp>, seq: &[u8]) -> AlignedRead {
+    AlignedRead {
         qname: qname.as_bytes().to_vec(),
         flag: 0,
         ref_id: 0,
@@ -355,7 +332,7 @@ fn read_at(qname: &str, pos: u64, cigar: Vec<CigarOp>, seq: &[u8]) -> MappedRead
         mate_ref_id: None,
         mate_pos: None,
         adaptor_boundary: None,
-        source_file_index: 0,
+        read_group: PLACEHOLDER_READ_GROUP,
     }
 }
 
@@ -380,7 +357,7 @@ const REFERENCE: &[FixtureContig] = &[FixtureContig {
 
 /// Every read the parity fixture runs, with the case each one covers and, where it shifts, the
 /// spelling it should end up with.
-fn fixture_reads() -> Vec<(&'static str, MappedRead)> {
+fn fixture_reads() -> Vec<(&'static str, AlignedRead)> {
     vec![
         (
             "no indel — the pass-through path, where nothing may move",

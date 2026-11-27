@@ -1,21 +1,19 @@
-//! **The leftmost property checker — the normalizers' oracle.**
+//! **The leftmost property checker — the left-aligner's oracle.**
 //!
-//! This module's normalizers (algorithms 1a/1b/1c, Milestones B–C) are graded against a
-//! *definition*, not against each other. "Leftmost" is one: for any output, take each indel,
-//! shift it one base to the left, and ask whether the result still represents the same read
+//! [`left_align_indels`](super::indel_norm::left_align_indels) is graded against a *definition*,
+//! not against another implementation. "Leftmost" is one: for any output, take each indel, shift
+//! it one base to the left, and ask whether the result still represents the same read
 //! against the same reference without introducing a mismatch. If it does, the output was **not**
 //! leftmost. This is the only comparison in the whole alignment module that has ground truth
-//! without a rival implementation, which is why the plan builds it **first**, before any
-//! normalizer exists, and lets it **outrank agreement** between the three (spec §6, arch §Test &
-//! bench shape; plan step A2).
+//! without a rival implementation (spec §6).
 //!
 //! # Why this is not a call into `normalize_alleles`
 //!
-//! Production's [`normalize_alleles`](crate::alignment::norm_seqs::normalize_alleles) *is* a left-aligner,
-//! and algorithm 1a will port it. If this checker were built on it, it would grade 1a against
-//! itself — an oracle has to be independent of the thing it grades. So the shift test here is
-//! written straight from the definition: it looks at each indel and the aligned column
-//! immediately to its left, and applies the one-base-left shift condition directly.
+//! Production's [`normalize_alleles`](crate::alignment::norm_seqs::normalize_alleles) *is* a
+//! left-aligner, and `left_align_indels` drives it. If this checker were built on it, it would
+//! grade the left-aligner against itself — an oracle has to be independent of the thing it grades.
+//! So the shift test here is written straight from the definition: it looks at each indel and the
+//! aligned column immediately to its left, and applies the one-base-left shift condition directly.
 //!
 //! # The shift condition, exactly
 //!
@@ -39,14 +37,24 @@
 //! a **mismatch** is already leftmost, because the mismatch cannot be crossed — normalization is
 //! placement within a fixed match/mismatch structure, not re-alignment. The tests pin that case.
 //!
-//! `#[cfg(test)]`: this is test support for the normalizers. It ships no production code.
+//! `#[cfg(test)]`: this is test support for the left-aligner's tests. It ships no production code.
 
-use super::Alignment;
 use crate::bam::alignment_input::CigarOp;
 
-/// Which kind of indel can slide left. A closed set of two, so the sibling normalizer test
-/// modules that match on a witness get an exhaustive `match` and the compiler catches a
-/// mistyped or unhandled kind — where a `&'static str` `"insertion"`/`"deletion"` would not.
+/// A read placed against a reference stretch: where the placement starts in the stretch, and the
+/// CIGAR from there. The shape the checker grades; a non-zero offset lets a test place the read
+/// partway into a longer stretch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Alignment {
+    /// Where the placement starts, in bases from the start of the reference stretch.
+    pub(crate) reference_offset: u64,
+    /// The operations from `reference_offset` onward, in read order.
+    pub(crate) cigar: Vec<CigarOp>,
+}
+
+/// Which kind of indel can slide left. A closed set of two, so a test that matches on a witness
+/// gets an exhaustive `match` and the compiler catches a mistyped or unhandled kind — where a
+/// `&'static str` `"insertion"`/`"deletion"` would not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IndelKind {
     Insertion,

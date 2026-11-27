@@ -27,9 +27,8 @@
 
 use std::sync::Arc;
 
-use crate::bam::alignment_input::{
-    FLAG_FIRST_OF_PAIR, FLAG_PAIRED, FLAG_REVERSE_STRAND, MappedRead,
-};
+use crate::bam::alignment_input::{FLAG_FIRST_OF_PAIR, FLAG_PAIRED, FLAG_REVERSE_STRAND};
+use crate::read::aligned_read::AlignedRead;
 use crate::types::ReadGroupId;
 // The decoder's, which is where a CIGAR run is built and read back. It sat in
 // `pileup::walker` until 2026-09-12, and the old path was the misleading one: this is
@@ -57,14 +56,15 @@ use crate::bam::alignment_input::CigarOp;
 /// Copied on 2026-09-12 with its four helpers, so that ng mints its own read rather than
 /// minting production's and converting. The arithmetic is production's: the same reference
 /// span, the same flag tests, the same `ln` of the same Phred. What it does differently is
-/// take `read_group` and return ng's [`PreparedRead`] — which is the one field production's
-/// type has nowhere to put, and the reason ng owns this type at all.
-pub(crate) fn prepare_passthrough(
-    read: MappedRead,
-    chrom_id: u32,
-    read_group: ReadGroupId,
-) -> PreparedRead {
-    let bq_baq = read.qual.clone();
+/// take ng's [`AlignedRead`] and return ng's [`PreparedRead`], carrying the read group across —
+/// the one field production's type has nowhere to put, and the reason ng owns this type at all.
+///
+/// The qualities are moved, not copied: the decoded read is consumed here, so nothing else
+/// reads them.
+pub(crate) fn prepare_passthrough(read: AlignedRead) -> PreparedRead {
+    // `ref_id` indexes the `u32` contig table, so a value that did not fit would be a corrupt
+    // record rather than a legal one.
+    let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
     // BAM and CRAM 3 store a position as a 32-bit signed integer, so a decoded one always fits;
     // checked rather than cast so a decoder that one day widens it cannot wrap it silently.
     let alignment_start = u32::try_from(read.pos).unwrap_or_else(|_| {
@@ -85,14 +85,14 @@ pub(crate) fn prepare_passthrough(
         alignment_end,
         cigar: read.cigar,
         seq: read.seq,
-        bq_baq,
+        bq_baq: read.qual,
         mq_log_err,
         mapq,
         is_reverse_strand,
         qname,
         mate_role,
         adaptor_boundary: read.adaptor_boundary,
-        read_group,
+        read_group: read.read_group,
     }
 }
 
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "does not fit")]
     fn a_position_past_the_32_bit_range_is_refused_not_wrapped() {
-        let read = MappedRead {
+        let read = AlignedRead {
             qname: b"r".to_vec(),
             flag: 0,
             ref_id: 0,
@@ -430,9 +430,9 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            source_file_index: 0,
+            read_group: PLACEHOLDER_READ_GROUP,
         };
-        let prepared = prepare_passthrough(read, 0, PLACEHOLDER_READ_GROUP);
+        let prepared = prepare_passthrough(read);
         panic!("prepared at {} without complaint", prepared.alignment_start);
     }
 

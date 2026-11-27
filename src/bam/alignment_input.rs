@@ -1,5 +1,5 @@
 //! The vocabulary every decoded read is spelled in: [`CigarOp`], the SAM
-//! `FLAG_*` bits, the read filters' `DEFAULT_*` thresholds, [`MappedRead`],
+//! `FLAG_*` bits, the read filters' `DEFAULT_*` thresholds,
 //! and the per-read helpers the filters and the decoder share
 //! ([`cigar_to_ops`], [`cigar_ref_span`], [`cigar_is_bad`],
 //! [`read_exceeds_mismatch_fraction`], [`compute_adaptor_boundary`]).
@@ -24,8 +24,8 @@ use noodles_sam as sam;
 /// else. `SeqMatch` and `SeqMismatch` are SAM's `=` and `X`, which do distinguish the two.
 ///
 /// **It lives here because this module is where a CIGAR becomes one**: [`cigar_to_ops`] builds
-/// the run from a record, [`MappedRead::cigar`] holds it, and [`cigar_ref_span`] and
-/// [`cigar_is_bad`] read it back. Consumers downstream — the pileup walk, the left-aligner,
+/// the run from a record, [`AlignedRead::cigar`](crate::read::AlignedRead::cigar) holds it, and
+/// [`cigar_ref_span`] and [`cigar_is_bad`] read it back. Consumers downstream — the pileup walk, the left-aligner,
 /// ng's read filters and alignment algorithms — all name the type this decoder produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CigarOp {
@@ -83,51 +83,6 @@ pub const DEFAULT_MISMATCH_BQ_FLOOR: u8 = 10;
 /// rarely contribute reliable alignments at the project's coverage
 /// targets.
 pub const DEFAULT_MIN_READ_LENGTH: u32 = 30;
-
-// ---------------------------------------------------------------------
-// MappedRead
-// ---------------------------------------------------------------------
-
-/// A read decoded out of an alignment file (CRAM or BAM). Every
-/// byte (qname, sequence, qualities, CIGAR) is owned by the
-/// `MappedRead` itself rather than borrowed from the noodles
-/// record it was decoded from. That lets downstream stages hold
-/// onto reads without being tied to the source reader's lifetime.
-///
-/// Every field is public — downstream stages (BAQ, the pileup walker)
-/// need to read them directly.
-///
-/// A borrowing design would save one allocation per read at decode
-/// time, but each downstream stage would then have to copy the bytes
-/// for itself before using them, which costs more in total than
-/// allocating once upfront and handing the read along.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MappedRead {
-    pub qname: Vec<u8>,
-    pub flag: u16,
-    /// Index into the canonical `ContigList`.
-    pub ref_id: usize,
-    /// 1-based leftmost mapped position.
-    pub pos: u64,
-    pub mapq: u8,
-    pub cigar: Vec<CigarOp>,
-    /// Uppercase ACGTN.
-    pub seq: Vec<u8>,
-    /// Phred 0-93, raw BQ before BAQ capping.
-    pub qual: Vec<u8>,
-    pub mate_ref_id: Option<usize>,
-    pub mate_pos: Option<u64>,
-    /// Reference position of the first base on this read that lies
-    /// inside the mate-pair adaptor (1-based, inclusive on the read's
-    /// 3′ side; for reverse-strand reads, inclusive on the 5′ side).
-    /// `None` when the boundary cannot be reliably computed (single-end,
-    /// mate unmapped, mates on different contigs, TLEN=0, mates on the
-    /// same strand, geometry inconsistent, or the molecule is at least
-    /// as long as the read so no readthrough is possible). See finding
-    /// `G1` in `ia/reviews/pileup_gatk_comparison_2026-05-08.md`.
-    pub adaptor_boundary: Option<u32>,
-    pub source_file_index: usize,
-}
 
 // SAM/BAM flag bit constants — used both inside this module and by
 // tests building synthetic records.

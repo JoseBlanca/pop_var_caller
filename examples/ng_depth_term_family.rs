@@ -290,7 +290,7 @@ fn main() {
         true,
     )
     .expect("the alignment file opens against this reference");
-    let preparer = LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::with_shared_index(
+    let preparer = LeftAlignPreparer::new(WindowedRefSeq::with_shared_index(
         fasta.clone(),
         contigs.clone(),
         index.clone(),

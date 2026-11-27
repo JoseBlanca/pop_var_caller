@@ -647,9 +647,11 @@ fn main() -> ExitCode {
                 let contigs = Arc::new(info.contig_list());
                 match WindowedRefSeq::read_index(&fasta) {
                     Ok(index) => {
-                        let preparer = LeftAlignPreparer::with_default_normalizer(
-                            WindowedRefSeq::with_shared_index(fasta.clone(), contigs, index),
-                        );
+                        let preparer = LeftAlignPreparer::new(WindowedRefSeq::with_shared_index(
+                            fasta.clone(),
+                            contigs,
+                            index,
+                        ));
                         let walked = run_dump(
                             &fasta,
                             &[bam],
@@ -806,7 +808,7 @@ mod tests {
         let contigs = Arc::new(info.contig_list());
         let index = WindowedRefSeq::read_index(fasta).unwrap();
         MaskingPreparer {
-            inner: LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::with_shared_index(
+            inner: LeftAlignPreparer::new(WindowedRefSeq::with_shared_index(
                 fasta.to_path_buf(),
                 contigs,
                 index,

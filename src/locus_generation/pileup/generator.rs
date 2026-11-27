@@ -1507,13 +1507,7 @@ mod tests {
             read: AlignedRead,
             _scratch: &mut Self::Scratch,
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
-            let read_group = read.read_group;
-            let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
-            Ok(Some(crate::read::prepared_read::prepare_passthrough(
-                read.into_mapped_read(),
-                chrom_id,
-                read_group,
-            )))
+            Ok(Some(crate::read::prepared_read::prepare_passthrough(read)))
         }
     }
 
