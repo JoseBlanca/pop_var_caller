@@ -17,3 +17,6 @@
 - fasta/fetcher.rs: the OutOfPattern variant is never raised (found by X7); candidate dead code.
 - Docs still naming MappedRead / the old reader as current (found by X6): arch/ng_step_interfaces.md, arch/locus_generation*.md, spec/locus_generation_ssr.md, arch/ssr_repeat_scanner.md, doc/devel/specs/design_principles.md:140. Fold into the src/ng/ pass.
 - psp/record.rs test helper `as_a_decode_can_return_it` is now a plain clone; could be deleted (X6).
+- BUG (invalid input, autonomous): a damaged psp whose stored read list disagrees with its read count reaches release assertions in cohort_merge/build.rs (num_obs > 0, chain-id checks) and aborts instead of being refused as damage (found by X4). Fix with a test: refuse with a damage error.
+- Unverified doc claims (X4): observation_cache.rs reference_base_at says a cover's ground spans every record a sample holds (ground_this_cover_holds_on now reads only unseen records); arch/cohort_merge.md step 1 says regions never cut an STR segment (building_regions_of does not show it).
+- Broken rustdoc links in paralog/locus_score.rs:683, paralog/prior.rs:97; walker.rs import order fails rustfmt --check.
