@@ -16,7 +16,9 @@
 
 pub mod pileup;
 pub mod ssr;
-pub mod ssr_bundle;
+// The STR bundle generator is the STR generator run over a hull, so it lives under `ssr/`; this
+// keeps its old path.
+pub use ssr::bundle as ssr_bundle;
 mod witness;
 
 /// The witness vocabulary, re-exported so no consumer's import path names the file it

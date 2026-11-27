@@ -34,6 +34,8 @@ use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqErro
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position, ReadGroupId};
 
+pub mod bundle;
+
 /// The repeat ground one STR locus measures, as reading a read across it needs it: where it
 /// lies, the motif the delimiter is handed, the period of the reference run reaching each of
 /// its edges, and whether a read that ends inside it is kept.
@@ -4321,7 +4323,7 @@ impl SsrLocus {
 }
 
 /// The steps of one locus that an STR segment and an STR bundle share — the bundle generator
-/// ([`super::ssr_bundle`]) is this generator run over a hull (`str_bundle_loci.md` §6.1), and
+/// ([`bundle`]) is this generator run over a hull (`str_bundle_loci.md` §6.1), and
 /// these are what it runs.
 impl<R, A> SsrGenerator<R, A>
 where
