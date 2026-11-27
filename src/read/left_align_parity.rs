@@ -1,21 +1,22 @@
 //! **Byte-parity of ng's prepared read against production's — the port anchor.**
 //!
-//! **Production's side is frozen since promotion step C9.** Until then the test ran production's
-//! `process_read` on each fixture read. Production is being deleted, so what it returned for the
+//! **Production's side is frozen.** The test once ran production's `process_read` on each
+//! fixture read. Before production was deleted, what it returned for the
 //! eight fixture reads on both references was recorded at commit `d9e7b076` into
 //! `testdata/left_align_production_prepared.tsv`, and the tests compare ng against that file. The
 //! prose below describes the oracle as it was built; what is asserted is unchanged.
 //!
 //! `LeftAlignPreparer` is a port of production's `process_read` fold, minus the stages ng moved
-//! elsewhere: `G2`/`F1` are step-1 filters and BAQ is deferred sine die, so what remains is `F3`,
-//! the left-alignment. This test is what makes that claim checkable.
+//! elsewhere: the bad-CIGAR and mismatch-fraction filters run in step 1 and BAQ is deferred sine
+//! die, so what remains is the left-alignment. This test is what makes that claim checkable.
 //!
 //! # What parity means here, exactly
 //!
-//! The oracle is production's `process_read(read, None, …)` — its `--no-baq` arm — run in-process
-//! until promotion step C9, recorded since, with **`max_read_mismatch_fraction: None`**. That setting is not cosmetic: ng moved `F1` to step
-//! 1, so leaving it on would make production *drop* reads ng keeps, and the two keep-sets would
-//! diverge for reasons that have nothing to do with preparation.
+//! The oracle is production's `process_read(read, None, …)` — its `--no-baq` arm — once run
+//! in-process and now recorded, with **`max_read_mismatch_fraction: None`**. That setting is not
+//! cosmetic: ng moved the mismatch-fraction filter to step 1, so leaving it on would make
+//! production *drop* reads ng keeps, and the two keep-sets would diverge for reasons that have
+//! nothing to do with preparation.
 //!
 //! Parity is asserted **field by field** rather than with `assert_eq!`, because `PreparedRead`
 //! derives no `PartialEq` — and because a field-by-field failure names the field that moved, which
@@ -25,17 +26,17 @@
 //!
 //! - On an **all-uppercase** reference the two must be byte-identical. That is the port anchor.
 //! - On a **soft-masked** (lowercase) reference they must **differ**, and the count of differing
-//!   reads is the measurement this whole divergence was argued for. Production hands `F3` raw
-//!   reference bytes while read bases were uppercased at decode, so its shift loop compares `A`
-//!   against `a`, finds them unequal, and never advances: **production's left-alignment does
-//!   nothing at all inside a soft-masked region** — which is to say, inside repeats, which is where
-//!   indels are ambiguous and left-alignment is the entire point. ng fetches the uppercased view
-//!   and shifts normally (spec §6, §9).
+//!   reads is the measurement this whole divergence was argued for. Production's left-alignment
+//!   is handed raw reference bytes while read bases were uppercased at decode, so its shift loop
+//!   compares `A` against `a`, finds them unequal, and never advances: **production's
+//!   left-alignment does nothing at all inside a soft-masked region** — which is to say, inside
+//!   repeats, which is where indels are ambiguous and left-alignment is the entire point. ng
+//!   fetches the uppercased view and shifts normally (spec §6, §9).
 //!
 //! # Why this lives beside ng's code, not in production's tree
 //!
-//! It is **ng's test**: its subject is ng's preparer and production is only the yardstick — since
-//! promotion step C9 a recorded one, so the test reads a file and depends on nothing in production.
+//! It is **ng's test**: its subject is ng's preparer and production is only the yardstick — now
+//! a recorded one, so the test reads a file and depends on nothing in production.
 
 use std::fs::File;
 use std::io::Write;
@@ -166,13 +167,14 @@ fn parse_cigar(cigar: &str) -> Vec<CigarOp> {
     ops
 }
 
-/// **Production's answer: the `--no-baq` arm of `process_read`, with `F1` disabled**, for the
+/// **Production's answer: the `--no-baq` arm of `process_read`, mismatch filter disabled**, for the
 /// fixture read named `qname` on the `reference` named — `uppercase` or `soft_masked` — read from
 /// the frozen file.
 ///
-/// `F1` was disabled deliberately: ng runs the mismatch-fraction filter in step 1, so leaving it on
-/// would have dropped reads ng keeps and the keep-sets would have differed for unrelated reasons.
-/// Production kept every fixture read under that setting, which is why every read has a row.
+/// The filter was disabled deliberately: ng runs the mismatch-fraction filter in step 1, so leaving
+/// it on would have dropped reads ng keeps and the keep-sets would have differed for unrelated
+/// reasons. Production kept every fixture read under that setting, which is why every read has a
+/// row.
 fn production_prepared(reference: &str, qname: &[u8]) -> FrozenPreparedRead {
     let qname = std::str::from_utf8(qname).expect("fixture qnames are ASCII");
     let matching: Vec<&str> = include_str!("testdata/left_align_production_prepared.tsv")
@@ -252,7 +254,7 @@ fn ng_prepared(read: AlignedRead, fasta_path: &Path, contigs: &ContigList) -> Pr
 /// version read the fields off `ours.<field>` / `production.<field>` and claimed in this very
 /// comment that "a field added to production forces this to be updated" — it did not: a thirteenth
 /// field would have left this compiling and passing, uncompared. The destructure is what makes the
-/// claim true. Since promotion step C9 production's side is [`FrozenPreparedRead`], destructured
+/// claim true. Production's side is now [`FrozenPreparedRead`], destructured
 /// the same way.
 ///
 /// `read_group` is bound and ignored by name: it is the one field with no production counterpart,
@@ -511,10 +513,11 @@ const SOFT_MASKED_REFERENCE: &[FixtureContig] = &[FixtureContig {
 
 /// **The divergence, measured — and the production defect, demonstrated.**
 ///
-/// Production hands `F3` *raw* reference bytes, while read bases were uppercased at decode. So on a
-/// soft-masked reference its shift loop compares `A` against `a`, finds them unequal, and never
-/// advances: left-alignment silently does nothing, in exactly the sequence — repeats and
-/// low-complexity — where indel placement is ambiguous and left-alignment is the whole point.
+/// Production's left-alignment gets *raw* reference bytes, while read bases were uppercased at
+/// decode. So on a soft-masked reference its shift loop compares `A` against `a`, finds them
+/// unequal, and never advances: left-alignment silently does nothing, in exactly the sequence —
+/// repeats and low-complexity — where indel placement is ambiguous and left-alignment is the whole
+/// point.
 ///
 /// ng fetches the uppercased view, so it shifts here exactly as it does on unmasked sequence.
 ///
@@ -573,15 +576,15 @@ fn production_left_alignment_does_nothing_on_a_soft_masked_reference() {
 
 /// **Discharges the spec's step-1/step-2 ordering argument (§5).**
 ///
-/// Production runs the mismatch-fraction filter `F1` *after* left-alignment; ng runs it in step 1,
+/// Production runs the mismatch-fraction filter *after* left-alignment; ng runs it in step 1,
 /// *before*. The spec argues the verdict cannot move, because a gap only shifts across bases the
-/// read and the reference share, so the match/mismatch tally is unchanged — but that is an argument,
-/// and the invariant production carries is a `debug_assert` that compiles out of release *and*
-/// counts a different quantity than `F1` does (raw, case-sensitive mismatches, versus `F1`'s
-/// BQ-floored count over ATGC-comparable columns).
+/// read and the reference share, so the match/mismatch tally is unchanged — but that is an
+/// argument, and the invariant production carries is a `debug_assert` that compiles out of release
+/// *and* counts a different quantity than the filter does (raw, case-sensitive mismatches, versus
+/// its BQ-floored count over ATGC-comparable columns).
 ///
-/// So this checks the thing itself: for every fixture read, at every threshold, `F1`'s verdict is
-/// the same before and after left-alignment.
+/// So this checks the thing itself: for every fixture read, at every threshold, the filter's
+/// verdict is the same before and after left-alignment.
 #[test]
 fn left_alignment_cannot_change_the_mismatch_fraction_verdict() {
     let (_dir, fasta_path) = write_fasta(REFERENCE);

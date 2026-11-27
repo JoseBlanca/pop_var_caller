@@ -29,9 +29,8 @@
 //! decoding, about 9 kb on a real coordinate-sorted CRAM, and it now reads that
 //! span from **a reference reader of its own**, minted by the same factory
 //! every other consumer of bases in this project is served by
-//! ([`alignment_cursor.md`](../../../../../doc/devel/ng/spec/alignment_cursor.md)
-//! §10). So the repository, the one-contig bound and the escape hatch from it
-//! are all gone, and what is left here is a description plus a proof.
+//! (`doc/devel/ng/spec/alignment_cursor.md` §10). So the repository, the one-contig bound and the
+//! escape hatch from it are all gone, and what is left here is a description plus a proof.
 //!
 //! ## The proof, and what it does not cover
 //!

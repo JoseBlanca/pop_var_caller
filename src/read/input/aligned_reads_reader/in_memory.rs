@@ -42,7 +42,7 @@ use crate::types::GenomeRegion;
 ///
 /// [`with_failure_at_read`](Self::with_failure_at_read) marks a read at which this reader hands
 /// back an `Err` instead of a record — a truncated block, a read cut off part-way, whatever a
-/// real file does when it breaks. [`with_failing_seek`](Self::with_failing_seek) breaks the
+/// real file does when it breaks. [`with_failing_seek_at`](Self::with_failing_seek_at) breaks the
 /// *reposition* instead, which is the other way a reader can fail and a different fatal route
 /// above.
 ///

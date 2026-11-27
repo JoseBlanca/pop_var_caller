@@ -11,10 +11,9 @@
 //! (`doc/devel/ng/spec/sample_reads.md`). Both layers' error types live here,
 //! where the arch docs put them.
 //!
-//! **There is exactly one way to read a BAM or a CRAM here**, and that is
-//! Milestone F's whole result: the per-region query, its reader pool and its
-//! order-guard wrapper are gone, and a caller holds a cursor for a chromosome
-//! and points it at each region.
+//! **There is exactly one way to read a BAM or a CRAM here**: the per-region query, its
+//! reader pool and its order-guard wrapper are gone, and a caller holds a cursor for a
+//! chromosome and points it at each region.
 //!
 //! The layering is strict: the sample layer consumes what the file layer
 //! produces and contains no reader logic of its own. It is also where the
@@ -161,7 +160,7 @@ pub enum AlignmentFileError {
     //
     // `OutOfOrderRead` and `Filter` are gone too, and they left with the reader
     // that raised them. Both were yielded *in the item stream* by the per-region
-    // query's order guard, which Milestone F deleted; the rules they carried did
+    // query's order guard, which is deleted; the rules they carried did
     // not go with it — a cursor raises `CursorError::OutOfOrderRead` for the
     // first and `CursorError::ReadRecord` for the second, each naming the file
     // it came from, which the per-region pair could only do because a fresh
@@ -236,7 +235,7 @@ pub enum AlignmentFileError {
     ///
     /// Surfaced here rather than at the first read for the reason the open gate exists: a
     /// mismatched reference is a fault in what the run was given, not in the region a caller
-    /// happened to ask for first. **Scoped to this cursor's own contig** since B1 — the check
+    /// happened to ask for first. **Scoped to this cursor's own contig** — the check
     /// that used to ask it of every contig in the header cost ~2,580 opens per cursor for a
     /// property that matters only for the one about to be read.
     #[error("the {reader} reference reader cannot serve alignment file '{path}'")]
@@ -443,7 +442,7 @@ pub struct SampleReads {
     /// borrow of this `SampleReads` that made it: a generator is lent `&SampleReads`
     /// per `next_locus` call while holding its reader across many of them (arch
     /// `locus_generation_pileup.md` §2.2). That is a region stream for the STR
-    /// generator, which hands its pooled reader back on `Drop`, and since D1 a
+    /// generator, which hands its pooled reader back on `Drop`, and a
     /// **chromosome-lived cursor** for the generic one, which has no pool to hand
     /// anything back to. One pool per file either way — the `Arc` is shared, not
     /// cloned deeply.
@@ -625,7 +624,7 @@ impl SampleReads {
     }
 
     /// One cursor for this sample over one chromosome — **the layer a caller holds, and
-    /// since Milestone F the only way to read a file here.**
+    /// the only way to read a file here.**
     ///
     /// Made **once per chromosome**, it answers every region on that chromosome from readers
     /// that stay where they are. What it replaced returned a fresh stream per region and
@@ -841,9 +840,8 @@ pub enum IngestError {
     #[error("a sample must have at least one alignment file")]
     NoFiles,
 
-    // The top-level `DuplicateReadAcrossFiles` is gone, and Milestone F is where its doc
-    // said it would go. It was raised by the per-region merge, which no longer exists; the
-    // live version of the rule is
+    // The top-level `DuplicateReadAcrossFiles` is gone. It was raised by the per-region
+    // merge, which no longer exists; the live version of the rule is
     // [`CursorError::DuplicateReadAcrossFiles`](CursorError::DuplicateReadAcrossFiles),
     // reached through [`Cursor`](Self::Cursor). Two variants for one condition was the
     // transitional state, not the destination.
@@ -865,7 +863,7 @@ pub enum IngestError {
     /// **The exception is
     /// [`DuplicateReadAcrossFiles`](CursorError::DuplicateReadAcrossFiles)**, which names two
     /// cursor *indexes* and no path. It used to have a twin at this level, raised by the
-    /// per-region merge; Milestone F deleted that path, so there is now exactly one variant
+    /// per-region merge; that path is deleted, so there is now exactly one variant
     /// for the condition and a caller matching on it cannot miss half the cases.
     #[error("this sample's cursor failed")]
     Cursor(#[from] CursorError),
@@ -880,7 +878,7 @@ mod tests {
     use crate::types::{ContigId, Position};
 
     // -----------------------------------------------------------------
-    // SampleReads::open (E1) — T12b
+    // SampleReads::open
     // -----------------------------------------------------------------
 
     use tempfile::TempDir;
@@ -926,10 +924,10 @@ mod tests {
         (dir, path)
     }
 
-    /// **T12b — two files naming different samples, rejected at `open`, before
+    /// **Two files naming different samples, rejected at `open`, before
     /// any read.**
     ///
-    /// The single-file half is `alignment_file`'s T12a. This is the check that
+    /// The single-file half is the `@RG SM` check in `open_bam.rs`. This is the check that
     /// cannot live one layer down, because agreement is not a property of any
     /// one file — and it is the one that catches the realistic mistake:
     /// gathering a sample's experiments by hand from different projects and
@@ -1017,7 +1015,7 @@ mod tests {
     /// Counts stay **per read group**, never summed: a bad run shows up as one library
     /// with an anomalous drop rate, and summing erases exactly that signal.
     ///
-    /// Read off the sample's cursor since Milestone F. The rule is unchanged; what moved is
+    /// Read off the sample's cursor. The rule is unchanged; what moved is
     /// where the number lives — the per-region streams folded theirs back into the file as
     /// each one ended, and a filter that lasts as long as a cursor simply has it.
     ///
@@ -1149,7 +1147,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // SampleCursor — T11 and the resumable shape
+    // SampleCursor — one file or many, and the resumable shape
     // -----------------------------------------------------------------
 
     use crate::read::input::test_fixtures::{
@@ -1207,7 +1205,7 @@ mod tests {
         collect_reads(&mut cursor_over_first_contig(sample))
     }
 
-    /// **T11 — the caller cannot tell the arms apart.**
+    /// **The caller cannot tell the arms apart.**
     ///
     /// A one-file sample yields exactly what the same file yields as one of two inputs whose
     /// other file is empty over the region — asserted through the same [`SampleCursor`] type,
@@ -2204,7 +2202,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // check_assembly (D1) — T2b
+    // check_assembly
     // -----------------------------------------------------------------
     use crate::reference_info::ContigInfo;
 
@@ -2234,7 +2232,7 @@ mod tests {
     const A: [u8; 16] = [0xaa; 16];
     const B: [u8; 16] = [0xbb; 16];
 
-    /// **T2b, the fault it exists to catch.** A file aligned to a different
+    /// **The fault it exists to catch.** A file aligned to a different
     /// assembly with the same contig names and lengths passes every check at
     /// open — that is exactly why this check is worth having, and why
     /// production, which trusts the `@SQ M5`, cannot make it.
@@ -2266,7 +2264,7 @@ mod tests {
         );
     }
 
-    /// **T2b, the ordinary case.** A file with no `M5` tags at all is not a
+    /// **The ordinary case.** A file with no `M5` tags at all is not a
     /// fault — it simply cannot be checked. `compared == 0` says so plainly
     /// rather than implying a guarantee that was never obtained.
     #[test]
@@ -2287,7 +2285,7 @@ mod tests {
         );
     }
 
-    /// **T2b, the partial case.** `compared` counts exactly the contigs that
+    /// **The partial case.** `compared` counts exactly the contigs that
     /// could be checked — so "verified 2 of 3" is a statement a caller can make
     /// truthfully.
     #[test]

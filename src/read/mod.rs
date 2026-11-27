@@ -31,7 +31,7 @@ pub mod left_align;
 #[cfg(test)]
 mod left_align_parity;
 pub mod prepared_read;
-/// Spec §5's capability, tested at the layer its callers would live at — plan D1. A sibling of
+/// Spec §5's capability, tested at the layer its callers would live at. A sibling of
 /// `filtering` rather than a module inside it, because half of what it pins is that the first
 /// filter and the tally are reachable from `crate::read` at all.
 #[cfg(test)]
@@ -71,9 +71,8 @@ pub(crate) const PLACEHOLDER_READ_GROUP: crate::types::ReadGroupId = crate::type
 /// In v1 there is exactly one source — the reference fetch that left-alignment needs, which
 /// only indel-bearing reads reach at all. A failed fetch means a malformed record or a
 /// mis-built reference, so it ends the run rather than silently leaving one read
-/// un-normalised, which is what production does
-/// ([read_processor.rs](../../../pileup/per_sample/read_processor.rs)) and what ng
-/// deliberately diverges from (spec §7, §9). Step 1 made the same call for the same reason
+/// un-normalised, which is what the old caller did and what this one deliberately diverges
+/// from (spec §7, §9). Step 1 made the same call for the same reason
 /// ([`ReadFilterError::Reference`](input::cursor::ReadFilterError)).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]

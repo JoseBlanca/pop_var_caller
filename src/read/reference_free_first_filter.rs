@@ -1,23 +1,23 @@
 //! **Filtering on flag and mapping quality, with no reference anywhere in the scope** — spec §5's
-//! capability, and the first of Milestone D's two tests output identity cannot see (plan D1).
+//! capability, and a property that comparing outputs cannot see.
 //!
 //! Nothing in ng needs it today. It is a capability the shape used to foreclose: filtering meant
-//! building a `ReadFilter`, which until B1 cost a zero-length probe fetch for every contig in the
-//! header, and until C2 still required a `RawRefSeq` to construct. Spec §5 names three callers
+//! building a `ReadFilter`, which once cost a zero-length probe fetch for every contig in the
+//! header and required a `RawRefSeq` to construct. Spec §5 names three callers
 //! that would want it — a coverage histogram, an insert-size pass, a read-group pre-pass — and
 //! what they would write is this file: a reader, the narrowing, the first filter, a tally.
 //!
 //! # What is actually pinned here, measured rather than argued
 //!
-//! **The property is over-determined, and D1's first draft added nothing.** That draft called
-//! `verdict_on_raw_read` twice inside `filtering.rs` and asserted the verdicts. Review measured its
-//! unique detection power at zero, and re-measuring confirms it: the checkpoint's mutation — a
-//! reference parameter on the first filter — already fails at `cursor.rs:706`, which is *not a
-//! test*, so `cargo build` breaks with none of this present. Narrowing the filter's visibility back
-//! to its own module fails there too. Every layer this file drives already has a reference-free
-//! test somewhere, written for other reasons: `region_raw_aligned_reads.rs`'s tests build the
-//! reader and the narrowing without a reference, and `filtering.rs`'s own tests call the filter
-//! without one.
+//! **The property is over-determined, and this file's first draft added nothing.** That draft
+//! called `verdict_on_raw_read` twice inside `filtering.rs` and asserted the verdicts. Review
+//! measured its unique detection power at zero, and re-measuring confirms it: the checkpoint's
+//! mutation — a reference parameter on the first filter — already fails at `cursor.rs:728`, which
+//! is *not a test*, so `cargo build` breaks with none of this present. Narrowing the filter's
+//! visibility back to its own module fails there too. Every layer this file drives already has a
+//! reference-free test somewhere, written for other reasons: `region_raw_aligned_reads.rs`'s tests
+//! build the reader and the narrowing without a reference, and `filtering.rs`'s own tests call the
+//! filter without one.
 //!
 //! **So there is exactly one thing here that nothing else in the tree catches, and it is the
 //! config.** Review broke spec §5's property outright with an earlier draft of this file green:
@@ -82,9 +82,9 @@ use noodles_sam::alignment::record::Flags;
 /// tree's ordinary call sites too, with `E0061` — this line is not the alarm, it is the statement,
 /// and it is the only one that says the *whole* signature rather than its arity.
 ///
-/// `#[cfg(test)]`-only, like this whole file, because Milestone D adds no shipping code. Beside
+/// `#[cfg(test)]`-only, like this whole file, because this file adds no shipping code. Beside
 /// `verdict_on_raw_read` it would make `cargo build` carry the check as well; that is a change to a
-/// non-test file and belongs to whoever wants it, not to a step scoped as tests.
+/// non-test file and belongs to whoever wants it, not to a file scoped as tests.
 const _FIRST_FILTER_TAKES_NO_REFERENCE: fn(u16, MapQual, &ReadFilterConfig) -> FilterVerdict =
     verdict_on_raw_read;
 

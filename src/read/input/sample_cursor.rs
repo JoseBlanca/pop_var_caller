@@ -436,7 +436,7 @@ mod tests {
     /// which reads as a sample sequenced less deeply, not as a fault.
     ///
     /// Inherited from the per-region merge, whose own version of this test carried the same
-    /// sentence. Milestone F replaced that merge and this was the one rule of it left without
+    /// sentence. This merge replaced that one, and this was the one rule of it left without
     /// a successor: mutating [`MergedCursors::argmin`]'s scan to `.take(2)` left the whole
     /// suite green.
     ///

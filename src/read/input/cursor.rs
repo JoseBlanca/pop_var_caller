@@ -1,6 +1,5 @@
-//! **The alignment cursor — a reader that stays where it is.** So far only its errors:
-//! [`CursorError`]. The cursor itself lands in Milestone B, and the aligned-reads readers beneath it
-//! in the next step; the rest of this module doc is the problem being built for.
+//! **The alignment cursor — a reader that stays where it is**: [`AlignmentCursor`], its counts
+//! and its errors ([`CursorError`]). The problem it solves:
 //!
 //! Reading a sorted alignment file today opens a fresh query per region: the index is
 //! consulted, the reader seeks, and the block it lands in is decompressed and decoded — and
@@ -20,16 +19,14 @@
 //! `doc/devel/ng/arch/alignment_cursor.md` (types and interfaces). Build order in
 //! `doc/devel/ng/impl_plan/alignment_cursor.md`.
 //!
-//! # What is here so far
+//! The cursor reads through an [`AlignedReadsReader`] — BAM, CRAM, or a scripted list of
+//! records for tests ([`AlignedReadsReader::InMemory`]). Callers hold the sample-level merge
+//! above it, [`SampleCursor`](crate::read::input::sample_cursor::SampleCursor).
 //!
-//! The cursor, over a scripted list of records — [`AlignedReadsReader::InMemory`]. The BAM arm
-//! lands at Milestone C and CRAM at E; the sample-level merge that callers actually hold at
-//! C4.
-//!
-//! # Two hazards this step found, for the step that adds the forget rule
+//! # Two hazards found while building the forget rule
 //!
 //! Both were reached by experiment during review, and both are invisible until kept reads
-//! start surviving a reposition — which is exactly what B2 does.
+//! start surviving a reposition.
 //!
 //! - **The overlap test must not be written twice.** A read whose CIGAR consumes no reference
 //!   — all soft-clip — clears every step-1 filter and reaches this layer. noodles maps its
@@ -39,12 +36,12 @@
 //!   so it would be yielded when read fresh and dropped when replayed, which is a read lost
 //!   with nothing failing. Whatever tests a kept read for overlap must apply the rule
 //!   `RegionRawAlignedReads` applies, not a second one that looks equivalent.
-//! - **Reuse needs more than a comparison.** `RegionRawAlignedReads::move_to` repositions the
-//!   reader unconditionally, and the filter arm below does not check `kept` before pushing. So
-//!   simply *not clearing* `kept` does not give reuse — it gives the same read twice. Spec §4's
-//!   "partly held — hand over the kept reads, then carry on reading, no jump" has no code path
-//!   yet; it needs the layers to agree on where reading resumes, not just a rule about what to
-//!   keep.
+//! - **Reuse needs more than a comparison.** Had the layer below always repositioned the
+//!   reader, simply *not clearing* `kept` would give the same read twice rather than reuse.
+//!   Spec §4's "partly held — hand over the kept reads, then carry on reading, no jump" needs
+//!   the layers to agree on where reading resumes, which is why the layer below has two ways
+//!   to move: [`RegionRawAlignedReads::jump_to`] repositions, and
+//!   [`RegionRawAlignedReads::continue_into`] carries on from where reading stopped.
 //!
 //! # The forget rule, which is the whole point and one comparison
 //!
@@ -85,9 +82,9 @@ use crate::types::{ContigId, GenomeRegion, ReadGroupId};
 /// What can go wrong once a cursor exists.
 ///
 /// Two conditions, and they are not peers. [`ReadRecord`](Self::ReadRecord) is the file
-/// failing under a read that was asked for correctly; [`WrongChromosome`](Self::WrongChromosome) is a **caller bug** — a
-/// guard, not a step in normal control flow. Correct code compares against the cursor's own
-/// chromosome first and never sees it.
+/// failing under a read that was asked for correctly; [`WrongChromosome`](Self::WrongChromosome) is
+/// a **caller bug** — a guard, not a step in normal control flow. Correct code compares against the
+/// cursor's own chromosome first and never sees it.
 ///
 /// There is deliberately **no ordering variant**. Within its chromosome a cursor answers any
 /// region in any order and the answer is always right; only the *speed* depends on how close
@@ -130,7 +127,7 @@ pub enum CursorError {
     /// shape is dangerous on its own — an inverted region overlaps nothing, and a `0` start
     /// behaves like `1` — but "answered emptily" and "refused" are different things to a
     /// caller, and before this the answer depended on which arm and which path it reached. The
-    /// per-region query rejected both in its planners; when Milestone F deleted those, the
+    /// per-region query rejected both in its planners; when those were deleted, the
     /// only survivor was a copy inside the **BAM** reader, so a BAM refused on a jump, a CRAM
     /// never checked, and a *forward* region reached neither because it is served without
     /// repositioning at all.
@@ -248,7 +245,7 @@ pub(crate) enum ReadFilterError {
     ReadGroup(#[source] io::Error),
     /// A record that cleared the first filter failed to convert.
     ///
-    /// **No input can reach this, and that is measured rather than assumed** (C1, 2026-08-03;
+    /// **No input can reach this, and that is measured rather than assumed** (2026-08-03;
     /// confirmed independently by three reviewers). The conversion refuses exactly three things
     /// — a record with no reference sequence id, one with no alignment start, and a buffer with
     /// no read group stamped — and [`RegionRawAlignedReads::read_next`] guarantees all three
@@ -259,7 +256,7 @@ pub(crate) enum ReadFilterError {
     ///
     /// So the variant is **defence in depth against the narrowing regressing**, not a response
     /// to any input — and it is untestable through the chain that makes it unreachable. Its two
-    /// remaining constructions went with the test doubles at C2/C3, so rewriting this arm as a
+    /// remaining constructions went with the deleted test doubles, so rewriting this arm as a
     /// silent `continue` now survives the whole suite. Kept, and recorded, because "this cannot
     /// happen" is a claim that rots: if the narrowing ever stops guaranteeing one of the three,
     /// this note is what says a test became possible.
@@ -268,7 +265,7 @@ pub(crate) enum ReadFilterError {
     /// Filter #8's reference fetch failed — corrupt input, or a read reaching past a contig's
     /// end.
     ///
-    /// **Narrow since B1.** `AlignmentFile::cursor` compares the two contig tables *and* proves
+    /// **Narrow.** `AlignmentFile::cursor` compares the two contig tables *and* proves
     /// the accessor can serve this cursor's own contig before building anything, so what is
     /// left to fail here is a read whose footprint runs off the end of the contig.
     #[error("reference access failed during filtering")]
@@ -330,8 +327,7 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// is a reading a caller has to know to distrust.
     read_group_tally: Vec<ReadGroupCounts>,
     /// What the layer below had already skipped as another sample's when the current tally
-    /// window opened — `0` until [`reset_read_group_counts`](Self::reset_read_group_counts) is
-    /// first called.
+    /// window opened — `0` until the test-only `reset_read_group_counts` is first called.
     ///
     /// **A window that reset the drops but not this would not start empty**, which is the one
     /// thing `reset_read_group_counts` promises. The skipped-record count lives on the narrowing
@@ -361,11 +357,13 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// Where the last region served began. **This one number is the entire forget rule**
     /// (spec §6). `None` before the first region.
     last_region_start: Option<u64>,
-    /// The region being served, or `None` before the first [`move_to_region`](Self::move_to_region).
+    /// The region being served, or `None` before the first
+    /// [`move_to_region`](Self::move_to_region).
     region: Option<GenomeRegion>,
     contig: ContigId,
     /// The position of the last read handed to the caller **for the region being served**,
-    /// or `None` before the first. The order guard, per region — see [`next_read`](Self::next_read).
+    /// or `None` before the first. The order guard, per region — see
+    /// [`next_read`](Self::next_read).
     last_emitted: Option<u64>,
     /// Named in errors, so two bare contig numbers mean something in a run holding hundreds
     /// of cursors over many files.
@@ -396,7 +394,7 @@ pub struct CursorCounts {
     /// or not the conversion or the second filter then rejected them. Counted inside
     /// [`AlignmentCursor::convert_buffered_read`], which is what makes it say what it says.
     ///
-    /// **This is the one observable of spec §2's ordering**, and the reason it exists (plan D2).
+    /// **This is the one observable of spec §2's ordering**, and the reason it exists.
     /// A read the first filter drops must never pay for a conversion, and moving the conversion
     /// above the flag checks changes nothing else — same reads kept, same drops charged to the
     /// same reasons, same four dumps, same tally. `reads_converted` is the only number that
@@ -461,8 +459,8 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// on every contig of the header to prove each one resolved in `reference`. Nothing else
     /// about constructing a cursor can fail. The caller now proves the same thing — and more —
     /// by comparing the two contig tables before it ever gets here
-    /// ([`AlignmentFile::cursor`](crate::read::input::AlignmentFile::cursor)), and since
-    /// C2 there is no separate filter to build at all.
+    /// ([`AlignmentFile::cursor`](crate::read::input::AlignmentFile::cursor)), and there is
+    /// no separate filter to build at all.
     ///
     /// **The precondition is the caller's, and it is not a formality.**
     /// `with_validated_contigs` assumes the file's `@SQ` list has been proved *equal* to the
@@ -601,7 +599,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         //
         // A failed reposition also **stops the cursor for good**: the reader's position is
         // unknown afterwards, so no later region can be served from it, the reuse path included.
-        // Found by mutation at C1 — swallowing the failure entirely left all 2,845 tests green
+        // Found by mutation in review — swallowing the failure entirely left all 2,845 tests green
         // — and widened to the `failed` flag on the owner's ruling.
         //
         // **The two halves are independent, and only one of them used to be pinned.** The flag
@@ -763,7 +761,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// conversion above the flag checks keeps the same reads, charges the same drops to the same
     /// reasons, and leaves the four acceptance dumps byte-identical. Before this counter existed,
     /// the entire suite passed with the conversion hoisted. So it is measured as work, and
-    /// counting work means having somewhere to count it (plan D2).
+    /// counting work means having somewhere to count it.
     ///
     /// **The count lives in here rather than beside the call, and that placement is the mechanism
     /// — for a quieter reason than it first appears.** Write the increment as its own statement
@@ -771,7 +769,8 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// moves the call leaves it behind. It does not then report an obviously wrong number: the
     /// reads the first filter drops `continue` *before* reaching the abandoned increment, so it
     /// counts the survivors and reports **exactly what the test expects** — the test goes on
-    /// passing while every read is being converted. Measured, 2026-08-04: both D2 tests pass
+    /// passing while every read is being converted. Measured, 2026-08-04: both conversion-count
+    /// tests pass
     /// under that arrangement.
     ///
     /// A hoist that carried the increment along would still be caught, so the hazard is not every
@@ -1138,7 +1137,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The walk (B1)
+    // The walk
     // -----------------------------------------------------------------
 
     /// **The oracle, one region at a time.** Every region's answer is compared against a
@@ -1304,7 +1303,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Which fatal condition a fault is charged to (C1)
+    // Which fatal condition a fault is charged to
     // -----------------------------------------------------------------
     //
     // `filtering.rs` pinned these against two test doubles — `ErroringSource`, whose every read
@@ -1325,7 +1324,7 @@ mod tests {
     // leaves the whole suite green. These two tests pin the charge, and each is the only test in
     // the tree that fails when its own variant is swapped. That is their whole job, and it is
     // why a *scripted* fault is worth the mechanism: the script chose the kind, so the test can
-    // assert it. C3 deleted the doubles, and this is what had to exist first.
+    // assert it. The doubles are deleted, and this is what had to exist first.
 
     /// **A failure reading off the file is fatal, charged to `Source`, and the cursor never
     /// recovers from it.**
@@ -1497,13 +1496,13 @@ mod tests {
     /// left — not empty, which might be noticed, but *wrong*, which would not be. It is the same
     /// condition `CursorError::AfterFailure` exists to make loud one layer later.
     ///
-    /// Found by mutation during C1's review: replacing the whole arm with
+    /// Found by mutation in review: replacing the whole arm with
     /// `let _ = self.filter.source_mut().jump_to(region); Ok(())` passed all 2,845 tests. Every
     /// other test that touches that line asserts the move *succeeds*.
     ///
-    /// # And it stops the cursor, which is the half C2 added
+    /// # And it stops the cursor
     ///
-    /// Writing this test at C1 showed the defect was bigger than a missing assertion:
+    /// Writing this test showed the defect was bigger than a missing assertion:
     /// `move_to_region` set `region` and `last_region_start` **before** the fallible `jump_to`,
     /// so a failed reposition left the cursor pointed at a region it never reached, serving from
     /// wherever the seek abandoned the reader — and because `last_region_start` had moved too,
@@ -1511,7 +1510,7 @@ mod tests {
     /// `AfterFailure` guard missed it because it asked the filter, and a failed reposition never
     /// reached the filter.
     ///
-    /// C2 repairs both halves on the owner's ruling: the reposition happens before any of the
+    /// Both halves are repaired, on the owner's ruling: the reposition happens before any of the
     /// region's state is committed, and it sets the cursor's own `failed` flag — which covers
     /// **both** routes into a stopped cursor, not only the one that replaced `FilterState`.
     ///
@@ -1712,7 +1711,7 @@ mod tests {
         assert_eq!(cursor.kept_reads(), 0, "and then nothing does");
     }
 
-    /// **The oracle the plan asks for, over the five shapes it names** (B2): ascending,
+    /// **The oracle the plan asks for, over the five shapes it names**: ascending,
     /// backward, overlapping, adjacent and far-apart regions, driven through *one* cursor and
     /// compared against a linear scan of the same script at every step.
     ///
@@ -1880,7 +1879,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // What the cursor did, as opposed to what it returned (B3)
+    // What the cursor did, as opposed to what it returned
     // -----------------------------------------------------------------
 
     /// **The claim the whole feature rests on: a forward walk decodes each read once.**
@@ -2042,7 +2041,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The order guard (F5) — inherited from the per-region query's T4a..T4d
+    // The order guard — inherited from the per-region query's four tests
     // -----------------------------------------------------------------
     //
     // The per-region query wrapped every stream in an `OrderVerified` iterator and pinned it
@@ -2054,7 +2053,7 @@ mod tests {
     // `move_to_region` refuses a foreign chromosome before anything moves
     // (`a_region_on_another_chromosome_is_refused_and_the_cursor_survives`).
 
-    /// **T4a — a read going backwards within one region is fatal**, and the message says
+    /// **A read going backwards within one region is fatal**, and the message says
     /// where.
     ///
     /// The open gate proved the file *claims* `SO:coordinate`; this is the file that claims it
@@ -2101,7 +2100,7 @@ mod tests {
         }
     }
 
-    /// **T4c — equal positions are ordinary, not a fault.** Several reads may start at the
+    /// **Equal positions are ordinary, not a fault.** Several reads may start at the
     /// same base, and a guard written with `<=` would reject every pile-up in every real file.
     #[test]
     fn reads_sharing_a_start_position_are_not_out_of_order() {
@@ -2119,7 +2118,7 @@ mod tests {
         );
     }
 
-    /// **T4d — the guard is scoped to the region, not to the cursor.** A caller is entitled to
+    /// **The guard is scoped to the region, not to the cursor.** A caller is entitled to
     /// ask for a later region and then an earlier one; the second is a new walk over what is
     /// kept, not a regression. The old query got this for free by building a fresh guard per
     /// query — a cursor has to reset `last_emitted` on every move, and forgetting to would
@@ -2162,8 +2161,8 @@ mod tests {
 
     /// **An inverted or zero-start region is refused, and the cursor survives it.**
     ///
-    /// Both shapes were rejected by the per-region query's planners. Milestone F deleted those
-    /// and left the rule with one home — a copy inside the *BAM* reader — so a BAM refused on
+    /// Both shapes were rejected by the per-region query's planners. Deleting those
+    /// left the rule with one home — a copy inside the *BAM* reader — so a BAM refused on
     /// a jump, a CRAM never checked, and a **forward** region reached neither, because a
     /// forward region is served without repositioning at all. Disabling the survivor left the
     /// whole suite green.
@@ -2422,10 +2421,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The tally's remaining properties, re-homed from `filtering.rs` (C2)
+    // The tally's remaining properties, re-homed from `filtering.rs`
     // -----------------------------------------------------------------
     //
-    // Ten tests died with `ReadFilter`, and C2's first account of where their properties went
+    // Ten tests died with `ReadFilter`, and the first account of where their properties went
     // was wrong on two rows. The review corrected both by experiment; this is the version that
     // survived it.
     //
@@ -2435,7 +2434,7 @@ mod tests {
     //   reading stopped.
     // - **Two covered the fatal stop**, and the cursor's own fatal-path tests cover it — but
     //   only for `Source` and `Reference`. One of them drove the **`Decode`** arm, which no
-    //   test now reaches: C1 established no input can, so the arm is unreachable rather than
+    //   test now reaches: review established no input can, so the arm is unreachable rather than
     //   untested, which is a better disposition than the one first written but not the same one.
     // - **One was the tally surviving a reposition**, and it was *not* covered by
     //   `the_step_one_tally_accumulates_across_regions` as first claimed: that test's second
@@ -2455,7 +2454,7 @@ mod tests {
     ///
     /// It needs a placed unmapped read — a contig and a position — because one without them has
     /// no footprint and the region narrowing drops it below the filters, uncounted. That is the
-    /// same measurement C1 recorded against the plan's D2.
+    /// same measurement recorded on [`ReadFilterError::Decode`].
     #[test]
     fn an_unmapped_read_that_clears_the_mapping_quality_filter_is_charged_to_unmapped() {
         let unmapped = record_with_seq(
@@ -2604,8 +2603,8 @@ mod tests {
     /// **The tally survives a reposition that drops everything and jumps.**
     ///
     /// The half of the deleted `repositioning_the_source_does_not_reset_the_running_tally` that
-    /// `the_step_one_tally_accumulates_across_regions` does **not** reach, and C2's accounting
-    /// first mis-filed as covered by it. That test's second region begins at or after its first,
+    /// `the_step_one_tally_accumulates_across_regions` does **not** reach, and the first accounting
+    /// mis-filed as covered by it. That test's second region begins at or after its first,
     /// so it takes the *reuse* path and never repositions — instrumented, it reports
     /// `jumping=1 reusing=1 replayed=3`. Nothing in the tree drove the tally across a jump.
     ///
@@ -2614,9 +2613,8 @@ mod tests {
     /// `self.read_group_tally.clear()` to the jump branch of the forget rule left all 2,855
     /// tests green.
     ///
-    /// This is the surface the plan singles C2 out for, and **C4 is about to add
-    /// `reset_counts`** — the first legitimate caller of "clear the tally" — into a file where
-    /// clearing it on the wrong edge is invisible.
+    /// It matters more because `reset_read_group_counts` — the one legitimate caller of "clear
+    /// the tally" — lives in this file, where clearing it on the wrong edge is invisible.
     #[test]
     fn the_tally_survives_a_reposition_that_drops_everything_and_jumps() {
         let mut cursor = cursor_over(script());
@@ -2814,7 +2812,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Choosing the tally window (C4)
+    // Choosing the tally window
     // -----------------------------------------------------------------
 
     /// **A fresh window starts empty, and nothing else on the cursor moves.**
@@ -2992,8 +2990,8 @@ mod tests {
     /// the walk met read groups of its own, and into a fabricated entry when it met none. The
     /// test below exercises the *empty* arm, because its fixture consumes the whole contig before
     /// the reset. The `first_mut` arm — the one every real cohort walk takes — was reverted to
-    /// its pre-C4 body and **all 2,860 tests stayed green**: the single line the window field
-    /// exists to protect was the untested one.
+    /// its body from before the window field and **all 2,860 tests stayed green**: the single line
+    /// the window field exists to protect was the untested one.
     #[test]
     fn read_group_counts_scopes_the_other_sample_rider_when_the_new_window_met_its_own_reads() {
         use crate::read::input::read_groups::RecordOwner;
@@ -3201,7 +3199,7 @@ mod tests {
     /// diagnosis, and the cursor indices have to read as *files* rather than as another
     /// coordinate pair sitting beside `contig 0 position 99`.
     ///
-    /// Moved from `IngestError::DuplicateReadAcrossFiles` at Milestone F, which the
+    /// Moved from `IngestError::DuplicateReadAcrossFiles`, which the deleted
     /// per-region merge raised and which is now the same condition under one name.
     #[test]
     fn the_duplicate_read_message_names_the_read_and_both_files() {
@@ -3241,7 +3239,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The conversion is paid for exactly the reads that reach the second filter (D2)
+    // The conversion is paid for exactly the reads that reach the second filter
     // -----------------------------------------------------------------
     //
     // **Spec §2's ordering, and before these two tests nothing in the tree could see it.** Why
@@ -3250,11 +3248,11 @@ mod tests {
     // here.
     //
     // **The plan's own fixture for this could not be built**, which is why the shape below looks
-    // nothing like it. Plan D2 asked for a read that fails the first filter *and* would fail to
+    // nothing like it. The plan asked for a read that fails the first filter *and* would fail to
     // convert — unmapped, with no alignment start — so that a hoist would turn a clean drop into
     // a fatal decode error. No such record reaches a filter, and that is already recorded where
     // it belongs: [`ReadFilterError::Decode`] traces the narrowing's guarantees onto `decode`'s
-    // three refusals (C1, 2026-08-03). A record without a footprint never reaches the first
+    // three refusals (2026-08-03). A record without a footprint never reaches the first
     // filter at all — the narrowing discards it uncounted — so it is not charged to `unmapped`
     // either, and the plan's assertion has nothing to assert.
     // (`an_unmapped_read_that_clears_the_mapping_quality_filter_is_charged_to_unmapped` pins the
@@ -3343,7 +3341,7 @@ mod tests {
     /// into the first filter really would save conversions.
     ///
     /// So the reason it stays put is not that it cannot move. It is that **which side of the
-    /// conversion each filter runs on is [`read_filtering.md`](../../../../doc/devel/ng/spec/read_filtering.md)'s
+    /// conversion each filter runs on is `doc/devel/ng/spec/read_filtering.md`'s
     /// to decide**, and this plan changes none of it. A hoist would be a design change disguised
     /// as an optimisation — and it changes no output whatsoever, so this count is the only thing
     /// in the project that would notice it happening.

@@ -5,8 +5,8 @@
 //! record can be looked at. So this is the unit the CRAM arm reads in, and
 //! [`decode_container_at`] is how one becomes records.
 //!
-//! It lived in `region_query.rs` until Milestone F deleted that module. Nothing about it was
-//! the per-region query's: a container is a container whoever is walking them.
+//! It lived in `region_query.rs`, the per-region query, until that module was deleted. Nothing
+//! about it was the per-region query's: a container is a container whoever is walking them.
 //!
 //! ## Why it is stored packed rather than as records
 //!
@@ -164,7 +164,7 @@ impl DecodedContainer {
         self.index.len()
     }
 
-    // `read_group(i)` was here and went with B2. It existed for exactly one caller — the CRAM
+    // `read_group(i)` was here and is gone. It existed for exactly one caller — the CRAM
     // arm stamping the buffer on the line after `fill_raw_read` — and `fill_raw_read` sets both
     // halves itself now, so nothing outside this file needs to ask which group an entry has.
 
@@ -1182,8 +1182,8 @@ mod tests {
     /// That is this module's own failure mode one field further along: a read reporting another
     /// read's position, mate, mapping quality or template length, silently and without a panic.
     /// One `let entry = &self.index[i]` binding feeds all seven today, so no single-line slip
-    /// produces it — the exposure is to the refactor C2 performs, which is why this module was
-    /// asked for before it.
+    /// produces it — the exposure is to a refactor that splits that binding, which is what this
+    /// test guards against.
     #[test]
     fn every_scalar_is_read_from_the_entry_asked_for() {
         let first = full_record("first", b"ACGTACGTAC");

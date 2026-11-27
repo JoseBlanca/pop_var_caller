@@ -16,20 +16,17 @@
 //! Design: `doc/devel/ng/spec/read_filtering_stages.md` §6,
 //! `doc/devel/ng/arch/read_filtering_stages.md` §1, §3.1.
 //!
-//! **ng-owned, modelled on production's `MappedRead`** (deleted 2026-11-27, once
-//! read preparation took this type directly). ng carried production's type
-//! until read groups arrived; the identifier had to ride on the read, and adding
-//! it to production's struct would have made production carry an ng concept for
-//! ng's benefit alone. The difference is exactly one field: production's
-//! `source_file_index` (which file, positionally, within one sample) is replaced
-//! by `read_group` (which `@RG`, run-wide) — a strictly better answer to the
-//! same question, since a read group knows its own file.
+//! **Modelled on the old caller's `MappedRead`**, which read preparation took until
+//! 2026-11-27 and which is now deleted. The difference is exactly one field: `MappedRead`'s
+//! `source_file_index` (which file, positionally, within one sample) is replaced by
+//! `read_group` (which `@RG`, run-wide) — a strictly better answer to the same question,
+//! since a read group knows its own file.
 //!
-//! The decode is a copy of production's assembly, **not** of its logic:
-//! `compute_adaptor_boundary` and `cigar_to_ops` stay production's and are
-//! called from here. Production's decode itself (`record_buf_to_mapped_read`)
-//! was deleted with the reader stack it served; this module's tests keep it as
-//! the reference that [`decode_record`] is compared against field by field.
+//! The decode copies the old caller's assembly of the fields, **not** its logic:
+//! `compute_adaptor_boundary` and `cigar_to_ops` live in `crate::bam` and are called from
+//! here. The old decode (`record_buf_to_mapped_read`) was deleted with the reader stack it
+//! served; this module's tests keep a copy as the reference that [`decode_record`] is
+//! compared against field by field.
 //!
 //! Design: `doc/devel/ng/spec/read_groups.md` §8,
 //! `doc/devel/ng/arch/read_groups.md` §1.4.
@@ -243,7 +240,7 @@ impl RawAlignedRead for NoodlesRawAlignedRead {
 
     fn mapq(&self) -> MapQual {
         // `map(u8::from).unwrap_or(0)`: SAM `0xFF` (unavailable) decodes to `None`
-        // → treated as MAPQ 0, matching production `classify_pre_decode`.
+        // → treated as MAPQ 0, as the old caller's flag/MAPQ filter did.
         MapQual(self.record.mapping_quality().map(u8::from).unwrap_or(0))
     }
 
