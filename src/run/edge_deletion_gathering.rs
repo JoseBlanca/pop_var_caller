@@ -99,8 +99,7 @@ impl WidenedTract {
     }
 
     fn overlaps(&self, region: GenomeRegion) -> bool {
-        let own = self.record.region();
-        region.contig == own.contig && region.start <= own.end && region.end >= own.start
+        region.overlaps(self.record.region())
     }
 
     /// Whether STR allele `allele` changes a base of `region` where the generic path looks:
