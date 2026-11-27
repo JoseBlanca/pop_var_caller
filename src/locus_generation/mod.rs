@@ -650,6 +650,36 @@ impl FlankDeletion {
     }
 }
 
+/// **`bases`, read as the sequence over `extent`, respelled over the wider `target` extent**:
+/// the reference flank bases between the two are added on each side. `None` when `target` does
+/// not contain `extent` or reaches past the flanks the locus holds.
+///
+/// Read by the STR read likelihood, which compares a read and an allele whose extents differ over
+/// the wider of the two, and by STR candidate selection, which asks whether two alleles so
+/// respelled are one misread base apart.
+pub(crate) fn respelled_over(
+    bases: &[u8],
+    extent: FlankDeletion,
+    target: FlankDeletion,
+    (left_flank, right_flank): (&[u8], &[u8]),
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    let (left, right) = (usize::from(extent.left), usize::from(extent.right));
+    let (to_left, to_right) = (usize::from(target.left), usize::from(target.right));
+    if to_left < left
+        || to_right < right
+        || to_left > left_flank.len()
+        || to_right > right_flank.len()
+    {
+        return None;
+    }
+    out.clear();
+    out.extend_from_slice(&left_flank[left_flank.len() - to_left..left_flank.len() - left]);
+    out.extend_from_slice(bases);
+    out.extend_from_slice(&right_flank[right..to_right]);
+    Some(())
+}
+
 impl SequenceObservation {
     /// Whether these reads showed the reference's own bases over `reference_bases`.
     ///

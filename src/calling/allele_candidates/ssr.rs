@@ -29,10 +29,11 @@
 
 use super::summarise_alleles;
 use super::{CandidateSelectionConfig, LocusSelection, MaxCandidateAlleles, SelectionScratch};
-use crate::calling::likelihood::ssr_emission::respelled_over;
 use crate::cohort_observation::MinAltReads;
 use crate::cohort_observation::{CohortObservation, SampleSupport};
-use crate::locus_generation::{FlankDeletion, LocusKind, SsrBundleDetail, SsrDetail};
+use crate::locus_generation::{
+    FlankDeletion, LocusKind, SsrBundleDetail, SsrDetail, respelled_over,
+};
 use crate::region_typing::run_parse::{RunParse, parse_into_runs};
 use crate::types::{GenomeRegion, Motif, Ploidy};
 
