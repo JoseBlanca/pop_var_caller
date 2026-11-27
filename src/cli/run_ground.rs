@@ -25,7 +25,7 @@ use crate::fasta::ContigList;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
 use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
-use crate::regions::{BedError, ContigBounds};
+use crate::regions::{BedError, ContigBounds, ContigTooLong};
 use crate::repeat_catalog::{
     CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
     sibling_catalog_path,
@@ -216,23 +216,21 @@ pub fn analysed_regions(
     request: &GroundRequest<'_>,
     contigs: &ContigList,
 ) -> Result<GenomeRegions, GroundError> {
-    // **The narrowing is refused, not taken.** `ContigBounds` carries a `u32`, and a contig
-    // past that would have its ground resolved against a wrong length with nothing to notice —
-    // the rule `typed_regions.rs`'s `ContigTooLong` records, and the reason the one precedent
-    // in this tree that casts is a test.
-    let mut bounds: Vec<ContigBounds<'_>> = Vec::with_capacity(contigs.entries.len());
-    for entry in &contigs.entries {
-        let length = u32::try_from(entry.length).map_err(|_| GroundError::ContigTooLong {
+    // **The narrowing is refused, not taken** (`ContigBounds::narrowed` says why).
+    let bounds = ContigBounds::of_contigs(
+        contigs
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.length)),
+    )
+    .map_err(
+        |ContigTooLong { name, length }| GroundError::ContigTooLong {
             reference: request.reference.to_path_buf(),
-            name: entry.name.clone(),
-            length: entry.length,
-            limit: u64::from(u32::MAX),
-        })?;
-        bounds.push(ContigBounds {
-            name: &entry.name,
+            name,
             length,
-        });
-    }
+            limit: u64::from(u32::MAX),
+        },
+    )?;
     match request.regions {
         Some(bed) => {
             GenomeRegions::from_bed_path(bed, &bounds).map_err(|source| GroundError::Bed {

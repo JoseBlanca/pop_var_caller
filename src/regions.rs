@@ -59,6 +59,54 @@ pub struct ContigBounds<'a> {
     pub length: u32,
 }
 
+/// A contig too long for the 32-bit coordinates a [`ContigBounds`] holds: more than
+/// 4,294,967,295 bases. Each command turns it into its own refusal, which names the contig and
+/// its length so the user knows which one to look at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContigTooLong {
+    /// The contig's name.
+    pub name: String,
+    /// Its length in bases.
+    pub length: u64,
+}
+
+impl<'a> ContigBounds<'a> {
+    /// The bounds of one contig, **refusing rather than narrowing** a length that does not fit
+    /// a `u32`. A silent narrowing would give a contig over 4 Gb a wrong length, and every span
+    /// resolved against it would be clamped to that wrong length with nothing to notice.
+    ///
+    /// # Errors
+    ///
+    /// [`ContigTooLong`] when `length` exceeds `u32::MAX`.
+    pub fn narrowed(name: &'a str, length: u64) -> Result<Self, ContigTooLong> {
+        let length = u32::try_from(length).map_err(|_| ContigTooLong {
+            name: name.to_owned(),
+            length,
+        })?;
+        Ok(Self { name, length })
+    }
+
+    /// Every contig of a list, given as `(name, length)` pairs in the list's order, each
+    /// through [`Self::narrowed`]. Pairs rather than a `fasta::ContigList`, so this module stays
+    /// free of its callers' contig types (module doc) and a psp header's contigs come through
+    /// the same door as a reference's.
+    ///
+    /// Two callers clamp instead of refusing — `run::explain` and the psp's segmentation
+    /// section — and say why at their own sites; they do not come through here.
+    ///
+    /// # Errors
+    ///
+    /// The first contig, in list order, that is too long.
+    pub fn of_contigs(
+        contigs: impl IntoIterator<Item = (&'a str, u64)>,
+    ) -> Result<Vec<Self>, ContigTooLong> {
+        contigs
+            .into_iter()
+            .map(|(name, length)| Self::narrowed(name, length))
+            .collect()
+    }
+}
+
 /// A sorted, non-overlapping set of [`Region`]s to analyze.
 ///
 /// The internal `Vec<Region>` is ordered by `(chrom_id, start)` and
@@ -402,6 +450,39 @@ mod tests {
 
     fn parse(bed: &str) -> Result<RegionSet, BedError> {
         RegionSet::from_bed_reader(bed.as_bytes(), &contigs())
+    }
+
+    // --- of_contigs -----------------------------------------------------
+
+    /// A contig at the 32-bit ceiling is kept at its length; one base more is refused, by name
+    /// and length, and it is the first such contig in list order that is named.
+    #[test]
+    fn of_contigs_keeps_the_ceiling_and_refuses_the_first_contig_past_it() {
+        let ceiling = u64::from(u32::MAX);
+        assert_eq!(
+            ContigBounds::of_contigs([("chr1", 1000), ("chr2", ceiling)]),
+            Ok(vec![
+                ContigBounds {
+                    name: "chr1",
+                    length: 1000,
+                },
+                ContigBounds {
+                    name: "chr2",
+                    length: u32::MAX,
+                },
+            ])
+        );
+        assert_eq!(
+            ContigBounds::of_contigs([
+                ("chr1", 1000),
+                ("big1", ceiling + 1),
+                ("big2", 5_000_000_000),
+            ]),
+            Err(ContigTooLong {
+                name: "big1".to_owned(),
+                length: ceiling + 1,
+            })
+        );
     }
 
     // --- whole_contigs --------------------------------------------------
