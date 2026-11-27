@@ -11,3 +11,4 @@
 - examples/ng_joint_duplicated_drifting.rs:213 calls DepthBinEdges::new(), which no longer exists (D3 removed it); `cargo clippy --all-targets` fails. Fix or delete the example (found by S3).
 - fit/expectation.rs ~39 links crate::parameter_estimation::generic::noise_model (gone); `cargo doc -D warnings` also fails on calling/allele_candidates/generic.rs links (leftover_of, compare_best_first) (X1/X3).
 - S3 commit 3bc7f264 (one_position cut into inline(always) phases) is speed-gated: time it against its parent; revert alone if estimate-parameters moves.
+- calling/mod.rs doc: "Of the four sub-modules … three are here" and "three nested loops, two of which ship switched off" may be stale (X1). rustfmt --check flags calling/quality_parity.rs:344 (pre-existing).
