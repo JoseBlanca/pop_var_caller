@@ -13,13 +13,13 @@
 //! group. The bar, the cap, the leftover and the remapping are the parent module's and are
 //! called, not rewritten.
 //!
-//! **Built in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` set.**
-//! This file holds the ladder (its step B1), the path's configuration and the per-sample length
-//! histogram (B2), nomination — each sample's own repeat counts, the `±1` rescue and the cohort's
-//! union (C1, C2) — the admission of the sequences on a promoted rung (D1), the entry point
-//! [`select_ssr`] (D2, whose periodicity verdict was removed on 2026-10-22, spec §7), and the
-//! repeat counts that entry point hands the genotype prior (D3). **`select_ssr` is complete** and the run driver dispatches to it
-//! (`src/run/callers.rs`). The STR loop plan's Milestone E added one more pass to it: the
+//! **What this file holds** (`doc/devel/ng/impl_plan/candidate_alleles_ssr.md` is the plan it
+//! was built from): the ladder, the path's configuration and the per-sample length histogram,
+//! nomination — each sample's own repeat counts, the `±1` rescue and the cohort's union — the
+//! admission of the sequences on a promoted rung, the entry point [`select_ssr`] (whose
+//! periodicity verdict was removed on 2026-10-22, spec §7), and the repeat counts that entry
+//! point hands the genotype prior. The run driver dispatches to `select_ssr`
+//! (`src/run/callers.rs`). One more pass runs inside it: the
 //! **discovery pre-pass** ([`nominate_discovered_sequences`]), on in every run (the calling loop's
 //! default hands selection its bar; this module's own constructor leaves it off), which admits the
 //! tract sequences one sample showed too often for the model to book as slippage — wired here
@@ -42,7 +42,8 @@ use crate::types::{GenomeRegion, Motif, Ploidy};
 /// The key is `bases.len() / motif.period()`, floored — **the same integer the genotype prior
 /// indexes its allele length variation by** (`doc/devel/ng/spec/candidate_alleles_ssr.md` §3), which is
 /// the reason the grouping exists at all and the reason both must compute it one way. Production
-/// keys its own ladder exactly so (`src/ssr/cohort/rung_ladder.rs:291-320`) and ng keeps that.
+/// keys its own ladder exactly so (`d9e7b076:src/ssr/cohort/rung_ladder.rs:291-320`, the caller
+/// deleted on 2026-09-13) and ng keeps that.
 ///
 /// **Sequences inside a rung stay distinct.** The grouping is for nomination and for the prior,
 /// never a merge of evidence: two tract sequences of one length differing by an interior base are
@@ -179,7 +180,7 @@ impl RepeatLadder {
     ///
     /// **This is not quite production's `occupied` test and the difference is one rung.** That
     /// test asks whether the cohort's reads reached a length — `cohort_support(length) > 0`
-    /// (`src/ssr/cohort/candidate_set.rs:221`) — and the `±1` rescue asks it so that nothing
+    /// (`d9e7b076:src/ssr/cohort/candidate_set.rs:221`) — and the `±1` rescue asks it so that nothing
     /// invents a length (spec §4). Every rung here holds a sequence some sample's reads showed,
     /// with **one exception**: the merge interns the reference tract at index 0 whether or not a
     /// read landed on it, so the reference's rung can exist carrying zero reads. A caller that
@@ -267,7 +268,7 @@ impl RepeatLadder {
 /// **Group one repeat tract's alleles by repeat count, and find the cohort's modal count**
 /// (spec §3; arch §2.1) — the ladder every later step of this path reads.
 ///
-/// **Run it after [`summarise_alleles`](super::summarise_alleles) on the same locus**, which is
+/// **Run it after [`summarise_alleles`] on the same locus**, which is
 /// what fills the per-allele read totals a rung's own total is summed from and what sizes the
 /// scratch. Doing the grouping here rather than in a walk of its own is the reuse the parent
 /// module's shape asks for: the fold already visits every sample's rows once, and a rung's reads
@@ -457,8 +458,8 @@ pub struct SsrSelectionConfig {
     /// [`nominate_discovered_sequences`] never runs and the selection is byte-identical to what
     /// it was before discovery existed.
     ///
-    /// When set, [`select_ssr`] runs the discovery decision of
-    /// `inference::discovery` as a pre-pass over the
+    /// When set, [`select_ssr`] runs the discovery decision
+    /// ([`nominate_discovered_sequences`]) as a pre-pass over the
     /// merge's rows: a sequence one sample showed with reads clearing this bar is admitted as a
     /// candidate even where nomination's top-`ploidy` cut left its length behind. The bar's
     /// numbers are discovery's own ([`DEFAULT_DISCOVERY_BAR`](crate::calling::inference::DEFAULT_DISCOVERY_BAR),
@@ -466,7 +467,7 @@ pub struct SsrSelectionConfig {
     /// [`DiscoveryConfig`](crate::calling::inference::DiscoveryConfig) by the driver —
     /// never a constant here, so a sweep of discovery's bar cannot fork into two spellings.
     ///
-    /// **A pre-pass and not a round around the loop**, which is the E1 finding
+    /// **A pre-pass and not a round around the loop**, which is what building discovery found
     /// (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5): the tract locus
     /// generator realigns every read before the caller sees it, so the eligible set is a
     /// function of the observations and the candidate table alone, and a second look with the
@@ -495,8 +496,8 @@ impl SsrSelectionConfig {
     /// tracts in a thousand, and fewer candidates.** At 30× and below the two rules are the same
     /// rule, because the floor of two reads decides.
     ///
-    /// **This shifts the numbers Milestone E of the plan checks against** — 85.8% and 1.22 where
-    /// the plan quotes 86.1% and 1.26 — and it is recorded so that the difference is read as this
+    /// **This shifts the numbers the STR calling-loop plan's discovery milestone checks
+    /// against** — 85.8% and 1.22 where the plan quotes 86.1% and 1.26 — and it is recorded so that the difference is read as this
     /// decision rather than as the defect that plan asks to be traced.
     pub fn at_ploidy(ploidy: Ploidy) -> Self {
         Self {
@@ -515,15 +516,15 @@ impl SsrSelectionConfig {
 
 /// **Count one sample's spanning reads onto the ladder's rungs** — the per-sample length histogram
 /// nomination reads (arch §3.1; production's `sample_histogram`,
-/// [`rung_ladder.rs:262`](../../../../src/ssr/cohort/rung_ladder.rs), over the merge's rows
-/// instead of its own sequence counts).
+/// `d9e7b076:src/ssr/cohort/rung_ladder.rs:262` in the caller deleted on 2026-09-13, over the
+/// merge's rows instead of its own sequence counts).
 ///
 /// `sample_reads_per_rung` comes back one entry per rung of `ladder`, in the ladder's own
 /// shortest-first order, holding that sample's reads at each. It is emptied and refilled here, so
 /// one buffer serves every sample of every locus.
 ///
-/// **The read-group rows are pooled**, through the same [`one_run_per_allele`] the ordinary path's
-/// fold uses. A read is a read whichever lane produced it, and asking the rule of each row
+/// **The read-group rows are pooled**, through the same
+/// [`one_run_per_allele`](super::one_run_per_allele) the generic path's fold uses. A read is a read whichever lane produced it, and asking the rule of each row
 /// separately would be a stricter rule applied to exactly the samples carrying more than one
 /// library — 157 of 1,707 in a surveyed tomato archive (`doc/devel/ng/spec/read_groups.md` §1).
 /// Sharing the grouping with the ordinary path is what stops the two from coming to disagree.
@@ -586,7 +587,7 @@ pub(super) fn fill_sample_reads_per_rung(
 /// A diploid sample carries two copies, so at most two lengths are real and the rest are stutter
 /// and error; `ploidy` comes from the run's parameters, so a triploid region promotes three. Ties
 /// break toward the **shorter** repeat count, which is production's rule
-/// ([`candidate_set.rs:231-238`](../../../../src/ssr/cohort/candidate_set.rs)) and is kept for
+/// (`d9e7b076:src/ssr/cohort/candidate_set.rs:231-238`) and is kept for
 /// determinism rather than for a measured reason: at a heterozygote whose two lengths carry
 /// exactly equal reads the answer must not depend on the order the rungs were walked, since the
 /// run's output has to be byte-identical at any worker count.
@@ -594,7 +595,7 @@ pub(super) fn fill_sample_reads_per_rung(
 /// # What is not ported: production's clear-peak test
 ///
 /// Production nominates a length only if its reads exceed **both** neighbouring lengths by more
-/// than three (`is_clear_peak`, [`rung_ladder.rs:274`](../../../../src/ssr/cohort/rung_ladder.rs)).
+/// than three (`is_clear_peak`, `d9e7b076:src/ssr/cohort/rung_ladder.rs:274`).
 /// A heterozygote whose two copies differ by one repeat is then invisible: neither length is a
 /// peak, because each has the other beside it. Spec §4.1 measures what that costs — both alleles
 /// offered at 33–78% of such tracts against 97–100% for this rule, and with **fewer** candidates,
@@ -647,7 +648,7 @@ pub(super) fn promote_rungs_for_sample(
 
 /// **When a sample resolved fewer lengths than it has copies, put forward the neighbours of what
 /// it did resolve — but only lengths some sample's reads actually reached** (spec §4; production's
-/// `occupied` test, [`candidate_set.rs:239-258`](../../../../src/ssr/cohort/candidate_set.rs)).
+/// `occupied` test, `d9e7b076:src/ssr/cohort/candidate_set.rs:239-258`).
 ///
 /// A diploid sample that resolved one length has a copy unaccounted for, and what it most likely
 /// carries there is a neighbour of what it did resolve — a second allele one repeat away, hidden
@@ -848,8 +849,7 @@ pub(super) fn promote_rungs_for_cohort_by(
 }
 
 /// **Which of the merge's sequences one sample showed too often for slippage to explain** — the
-/// discovery decision of [`inference::discovery`](crate::calling::inference::discovery), run
-/// as a pre-pass of selection over the merge's own rows.
+/// discovery decision, run as a pre-pass of selection over the merge's own rows.
 ///
 /// `nominated` comes back one flag per allele of the merge's table, true where **some** sample's
 /// reads on that sequence cleared `bar` against that sample's own spanning reads. Admission ORs
@@ -858,16 +858,17 @@ pub(super) fn promote_rungs_for_cohort_by(
 /// third length, invisible to nomination by construction because
 /// [`promote_rungs_for_sample`] truncates to `ploidy`.
 ///
-/// # This is the E1 decision, on selection's data
+/// # The discovery decision, on selection's data
 ///
-/// [`discover_tract_alleles`](crate::calling::inference::discovery::discover_tract_alleles)
-/// walks a sample's realigned observations; at selection those same spellings **are** the
+/// Discovery was first written as a round inside the calling loop, walking a sample's realigned
+/// observations (a function since removed); at selection those same spellings **are** the
 /// merge's alleles, and a sample's complete observations are its support rows (a partial names
 /// no length and has no row — spec §8). So the decision's three clauses carry over unchanged,
 /// and each is asked through the one producer this crate has for it:
 ///
 /// - **the bar**: [`MinAltReads::reached_by`], reads pooled across read groups by
-///   [`one_run_per_allele`] against the denominator [`compared_reads_of`] — the sample's
+///   [`one_run_per_allele`](super::one_run_per_allele) against the denominator
+///   [`compared_reads_of`](super::compared_reads_of) — the sample's
 ///   support rows, so a read that ran out inside the STR segment counts in both halves if it
 ///   singles out one sequence (spec §8.1) and in neither otherwise;
 /// - **whole repeats**: a sequence shorter than one copy of the unit
@@ -878,13 +879,12 @@ pub(super) fn promote_rungs_for_cohort_by(
 /// - **not already a candidate**: not asked, deliberately. The decision's third clause exists
 ///   so a round cannot re-admit what the table holds; here admission is a union, so flagging a
 ///   sequence the ordinary filter admits anyway changes nothing — and it is *why* a second
-///   pre-pass over the same evidence admits nothing, the E1 property the tests hold through
+///   pre-pass over the same evidence admits nothing, the property the tests hold through
 ///   this wiring.
 ///
 /// **Per sample, never summed across the cohort**: one sample must clear the bar alone, so
-/// three samples showing a sequence once each nominate nothing (E1's
-/// `a_cohort_sum_does_not_clear_a_bar_no_single_sample_clears`, held here by
-/// `discovery_does_not_pool_samples_against_the_bar`).
+/// three samples showing a sequence once each nominate nothing
+/// (`discovery_does_not_pool_samples_against_the_bar`).
 ///
 /// # Panics
 ///
@@ -940,20 +940,21 @@ pub(super) fn nominate_discovered_sequences(
 /// A promoted rung says *this length is worth calling over*; it does not say which sequences at
 /// that length are. Each one faces the shared support rule asked of the **sequence** — the same
 /// `max(2 reads, share × a sample's spanning reads)` the ordinary path asks, already folded into
-/// the per-allele summaries by [`summarise_alleles`](super::summarise_alleles).
+/// the per-allele summaries by [`summarise_alleles`].
 ///
 /// **A sequence the discovery pre-pass nominated enters on discovery's bar instead**, promoted
 /// rung or none — that is the pre-pass's whole point, since the length it finds is exactly the
 /// one the top-`ploidy` cut left behind ([`nominate_discovered_sequences`]). Past this filter it
 /// is an alternative like any other: ranked by [`compare_best_first`](super::compare_best_first),
 /// cut by the cap when it ranks last, and booked in the leftover like the rest when it is. With
-/// discovery off — the flags empty, the shipped default — this clause is dead and the filter is
+/// discovery off — the flags empty, this module's own default; the run turns it on — this
+/// clause is dead and the filter is
 /// byte-identical to what it was before discovery existed.
 ///
 /// **No representative is privileged and no recurrence term applies.** Production promotes the
 /// rung's best-supported sequence unconditionally and makes any sibling clear three further
 /// gates — 8 reads, **3 distinct samples**, and a tenth of the rung's reads
-/// ([`candidate_set.rs:169-191`](../../../../src/ssr/cohort/candidate_set.rs)). The three-sample
+/// (`d9e7b076:src/ssr/cohort/candidate_set.rs:169-191`). The three-sample
 /// term has no cohort-size clamp, so **below three samples no second spelling can ever be
 /// promoted** and the mechanism is simply absent. Spec §5 measures what that costs at the class
 /// it matters for: at a heterozygote whose two copies are the same length spelled differently —
@@ -1269,9 +1270,8 @@ fn bases_off_the_motif(bases: &[u8], motif: &Motif) -> usize {
 /// The period is at least one base — [`Motif::new`] refuses an empty unit — so this cannot divide
 /// by zero.
 ///
-/// **`pub(crate)` for the discovery round**, which asks the same question of a sequence no
-/// candidate holds ([`inference::discovery`](crate::calling::inference::discovery)) and must
-/// get the ladder's answer rather than a second floor division.
+/// **The discovery pre-pass asks it too** ([`nominate_discovered_sequences`]), of a sequence no
+/// candidate holds, and must get the ladder's answer rather than a second floor division.
 #[inline]
 pub(crate) fn repeat_count_of_bases(bases: &[u8], motif: &Motif) -> u32 {
     (bases.len() / motif.period()) as u32
@@ -1293,8 +1293,8 @@ pub(crate) fn repeat_count_of_bases(bases: &[u8], motif: &Motif) -> u32 {
 /// **The ladder's modal repeat count is not returned.** Arch §2.3 lists it, and arch §4 and §5
 /// then retract its reason: on 2026-08-27 the prior's seed was re-indexed by offset from the
 /// **reference** tract length, which every locus already knows, so the cohort's commonest length
-/// stopped being an input to it — *"nothing consumes it now"*. **This step's own D2 removed the
-/// last remaining consumer inside this module**, by anchoring the periodicity grid on the
+/// stopped being an input to it — *"nothing consumes it now"*. **The entry point's own build
+/// removed the last remaining consumer inside this module**, by anchoring the periodicity grid on the
 /// reference length too (the grid itself went on 2026-10-22, spec §7). Returning it would be a
 /// field with no reader, and the architecture's own
 /// open question — whether selection should carry the mode at all — is left where it is rather
@@ -1376,11 +1376,13 @@ fn one_base_apart(
 /// too often for slippage to explain, and admission ORs them in — so their reads land in the
 /// record's `AD` through the remap rather than in the "no written allele explains these"
 /// leftover, and the cap and the verdict treat them like any other alternative. It is a
-/// pre-pass and not a round around the calling loop, which is the E1 finding
+/// pre-pass and not a round around the calling loop, which is what building discovery found
 /// (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5): the eligible set is a
 /// function of the observations and the candidate table alone, so a second look after these
-/// admissions finds nothing. Off — [`SsrSelectionConfig::discovery`] `None`, the shipped
-/// default — nothing of it executes.
+/// admissions finds nothing. Off — [`SsrSelectionConfig::discovery`] `None`, this module's own
+/// default; the run turns it on — nothing of it executes.
+///
+/// **Public because the run driver calls it** (`src/run/callers.rs`), its one caller.
 ///
 /// # Panics
 ///
@@ -1388,10 +1390,6 @@ fn one_base_apart(
 /// kind at the driver's dispatch, so reaching here with a `Generic` or bundle locus is a routing
 /// bug, and the alternative — scoring a SNP against a stutter model — is a confident wrong answer
 /// rather than a crash.
-/// **Public because the measurement calls it.** `examples/ng_candidate_selection_probe.rs`'s
-/// repeat-tract arm runs the shipped selector over real reads, so a number it prints is a number
-/// the caller itself would produce rather than a re-derivation of one (spec §10). The run
-/// driver's dispatch will be the second caller.
 pub fn select_ssr(
     observation: &CohortObservation,
     config: &SsrSelectionConfig,
@@ -1936,7 +1934,7 @@ mod tests {
         build_ladder(&other, &dinucleotide(), &mut scratch);
     }
 
-    // ---- B2: the configuration, and the per-sample length histogram ----
+    // ---- the configuration, and the per-sample length histogram ----
 
     /// The two caps, side by side. **The whole of the tract path's departure from the ordinary
     /// path's cap is this number**, and stating both in one assertion is what stops a later edit
@@ -2201,7 +2199,7 @@ mod tests {
         fill_sample_reads_per_rung(&stray, observation.region, &scratch.ladder, &mut histogram);
     }
 
-    // ---- C1: which repeat counts one sample puts forward ----
+    // ---- which repeat counts one sample puts forward ----
 
     /// Nominate for one sample of `observation`, at `ploidy` copies and a bar of `floor` reads or
     /// `share` of that sample's own spanning reads.
@@ -2426,7 +2424,7 @@ mod tests {
     ///
     /// The first sample here promotes two rungs and the second promotes one, so a buffer that was
     /// appended to rather than emptied would hand the second sample a length it never showed —
-    /// and the union C2 builds would then carry it for the whole cohort.
+    /// and the cohort's union would then carry it for the whole cohort.
     #[test]
     fn nominating_for_a_second_sample_leaves_none_of_the_firsts_rungs() {
         let observation = locus_of(
@@ -2480,7 +2478,7 @@ mod tests {
         scratch.ladder.clear();
     }
 
-    // ---- C2: the ±1 rescue, and the cohort's union ----
+    // ---- the ±1 rescue, and the cohort's union ----
 
     /// Nominate for one sample **with the rescue applied**, at `ploidy` copies.
     fn promoted_with_rescue(
@@ -2713,7 +2711,7 @@ mod tests {
         );
     }
 
-    // ---- D1: which sequences on a promoted rung are admitted ----
+    // ---- which sequences on a promoted rung are admitted ----
 
     /// A tract detail with `motif` and short flanks — everything `LocusKind::Ssr` needs.
     fn detail_of(motif: &[u8]) -> SsrDetail {
@@ -2958,7 +2956,7 @@ mod tests {
         );
     }
 
-    // ---- D2: the entry point ----
+    // ---- the entry point ----
 
     /// A tract locus of `alleles` covered by `per_sample`, carrying `motif`.
     fn tract_of(
@@ -3153,7 +3151,7 @@ mod tests {
         );
     }
 
-    // ---- D3: the repeat counts the genotype prior takes ----
+    // ---- the repeat counts the genotype prior takes ----
 
     /// **The repeat counts run parallel to the surviving candidates, reference at index 0.**
     ///
@@ -3318,7 +3316,7 @@ mod tests {
         );
     }
 
-    // ---- the discovery pre-pass (STR loop plan Milestone E; research doc §6.5) ----
+    // ---- the discovery pre-pass (research doc §6.5) ----
 
     /// `n` whole copies of the `AT` unit.
     fn at_repeats(n: usize) -> Vec<u8> {
@@ -3340,7 +3338,7 @@ mod tests {
         }
     }
 
-    /// **E1's flagship shape, as one merge locus**: a diploid sample showing 12 reads at the
+    /// **The shape discovery was built for, as one merge locus**: a diploid sample showing 12 reads at the
     /// reference's 8 repeats, 10 at 7 — its contraction slip — and 8 at 5. Nomination's two
     /// peaks are 8 and 7, so the 5 is invisible to selection by construction, however many
     /// reads carry it.
@@ -3532,8 +3530,8 @@ mod tests {
         );
     }
 
-    /// **A second pass over the same evidence admits nothing — the E1 property, held through
-    /// the wiring.** The eligible set is a function of the observations and the candidate table
+    /// **A second pass over the same evidence admits nothing — the reason discovery is a
+    /// pre-pass, held through the wiring.** The eligible set is a function of the observations and the candidate table
     /// alone: after one `select_ssr` with discovery on, every sequence the decision nominates
     /// already holds a candidate id, so a second round would have nothing left to add — which
     /// is why discovery is a pre-pass here and not a loop around the caller.
@@ -3566,7 +3564,7 @@ mod tests {
         assert!(
             eligible_for_a_second_round.is_empty(),
             "every nominated sequence is already a candidate, so a round after the pre-pass \
-             finds nothing: merge indices {eligible_for_a_second_round:?} would contradict E1"
+             finds nothing: merge indices {eligible_for_a_second_round:?} would contradict that"
         );
     }
 

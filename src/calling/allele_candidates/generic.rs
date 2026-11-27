@@ -24,16 +24,18 @@ use crate::locus_generation::LocusKind;
 /// applies the cap, and fills the leftover"; the cap has to run *before* admission, because
 /// admission needs to know which alleles survived it, and the leftover has to run *after*,
 /// because it is per sample where admission is per allele and it reads the finished remapping.
-/// So the shape is: fold the rows, cap the survivor list (step C2), admit, then walk the rows
-/// again for the leftover — which is what [`leftover_of`] does, per sample.
+/// So the shape is: fold the rows, cap the survivor list, admit, then walk the rows
+/// again for the leftover — which is what [`leftover_of`](super::leftover_of) does, per sample.
 ///
 /// **Above the cap the list is cut and the locus is still called; it is never refused**
-/// (spec §4.1). What is cut is the worst-evidenced by [`compare_best_first`], and the count is
-/// reported as [`SelectionVerdict::Truncated`] — not how many alleles were dropped in total,
+/// (spec §4.1). What is cut is the worst-evidenced by
+/// [`compare_best_first`](super::compare_best_first), and the count is
+/// reported as [`SelectionVerdict::Truncated`](super::SelectionVerdict::Truncated) — not how
+/// many alleles were dropped in total,
 /// since an alternative that failed the admission rule was never a candidate for the cap.
 /// **Refusing the whole locus was the alternative and it loses more**: it is what HipSTR does
-/// above 1,000 haplotypes and what production's repeat-tract path does above 24 candidates
-/// (`src/ssr/cohort/candidate_set.rs`),
+/// above 1,000 haplotypes and what the deleted caller's repeat-tract path did above 24
+/// candidates (`d9e7b076:src/ssr/cohort/candidate_set.rs`),
 /// and at 63 accessions it costs 62 samples a locus they were called at perfectly well because
 /// one accession carried something rare.
 ///
@@ -70,9 +72,10 @@ use crate::locus_generation::LocusKind;
 ///
 /// **What can no longer panic is a wide locus.** The cap holds the candidate table at
 /// [`MaxCandidateAlleles`](super::MaxCandidateAlleles), six by default, so
-/// [`CandidateAlleles::admit`]'s refusal at 65,536 alleles is unreachable however many
-/// alternatives the merge interned — and the count of cut alternatives is a `u32`, which is why
-/// [`SelectionVerdict::Truncated`] carries one.
+/// [`CandidateAlleles::admit`](crate::calling::CandidateAlleles::admit)'s refusal at 65,536
+/// alleles is unreachable however many alternatives the merge interned — and the count of cut
+/// alternatives is a `u32`, which is why
+/// [`SelectionVerdict::Truncated`](super::SelectionVerdict::Truncated) carries one.
 pub fn select_generic(
     observation: &CohortObservation,
     config: &CandidateSelectionConfig,
@@ -114,7 +117,7 @@ pub fn select_generic(
         discovery_nominated: _,
     } = scratch;
     cap_cut_table_indices.clear();
-    // Every alternative some sample's reads earned, in the merge table's own order. Step C2's
+    // Every alternative some sample's reads earned, in the merge table's own order. The
     // cap reorders this buffer by rank, and admission below by bases.
     ranked_table_indices.extend(
         (1..observation.alleles.len())
@@ -379,7 +382,8 @@ mod tests {
     /// 59 zeroed rows between them — indistinguishable from a covering sample that dropped
     /// nothing.
     ///
-    /// Step C3 fills these; C1 only has to get the length and the order right.
+    /// Nothing is cut here, so every leftover is empty; what this pins is the length and the
+    /// order.
     #[test]
     fn the_leftover_has_one_entry_per_covering_sample() {
         let covering: Vec<SampleSupport> = [3_usize, 17, 40]
@@ -393,9 +397,10 @@ mod tests {
                 .unmatched()
                 .iter()
                 .all(|leftover| *leftover == UnmatchedSupport::default()),
-            "C1 drops nothing, so every leftover is zeroed — and a non-zero \
+            "nothing is dropped, so every leftover is zeroed — and a non-zero \
              `earned_reads_cut_by_the_cap` on this line would emit every covering sample at \
-             every locus as a missing genotype, which is the slip C3 is in a position to make"
+             every locus as a missing genotype, which is the slip the leftover is in a \
+             position to make"
         );
     }
 
@@ -407,7 +412,7 @@ mod tests {
     /// rows: a length that counted only the samples with rows passes it and fails here. The
     /// cost of getting it wrong is not a short vector but a **shifted** one — the leftover is
     /// parallel to `per_sample` by position, so every later sample's leftover slides onto its
-    /// neighbour, and once C3 fills these that is a missing genotype for a sample that lost
+    /// neighbour, and once a leftover is non-zero that is a missing genotype for a sample that lost
     /// nothing and an invented one for the sample that did.
     #[test]
     fn the_leftover_counts_a_covering_sample_whose_reads_all_stopped_inside_the_locus() {
@@ -600,7 +605,7 @@ mod tests {
         );
     }
 
-    // ---- the cap (step C2) --------------------------------------------------------------
+    // ---- the cap ------------------------------------------------------------------------
 
     /// Narrow `observation` under a support rule of 2 reads and a cap of `cap` alleles
     /// **counting the reference**.
@@ -657,7 +662,7 @@ mod tests {
     ///
     /// **The cut count is two, not three**: the 1-read alternative was dropped by the admission
     /// rule and was never a candidate for the cap, and spec §4.1 makes that distinction because
-    /// it is what step C3's second count keys on.
+    /// it is what the leftover's second count keys on.
     #[test]
     fn above_the_cap_the_worst_evidenced_alternatives_are_cut_and_the_locus_is_still_called() {
         let observation = locus_of(
@@ -904,7 +909,7 @@ mod tests {
     /// total are the same number over a constant and no fixture can separate the two rankings —
     /// so without this test the whole first key could be replaced by production's and nothing
     /// would fail. That is the key spec §4.1 spends four paragraphs defending, and getting it
-    /// wrong cuts the real allele, which step C3 then turns into a missing genotype for the one
+    /// wrong cuts the real allele, which the leftover then turns into a missing genotype for the one
     /// sample that carries it.
     #[test]
     fn the_cap_ranks_by_the_within_sample_share_and_not_the_cohort_total() {
@@ -1019,7 +1024,7 @@ mod tests {
         assert_eq!(second.remap().table_len(), 2);
     }
 
-    // ---- the leftover (step C3) ----------------------------------------------------------
+    // ---- the leftover -------------------------------------------------------------------
 
     /// **The plan's first oracle: the pool is the sum of the dropped rows' own `q_sum`, to the
     /// bit** — never re-derived from a count and a rate, which is why the assertion is an
@@ -1323,7 +1328,7 @@ mod tests {
 
     /// **A quality mass that is not a number is refused** — the third of the three caller bugs
     /// spec §8 names as assertions this step holds in release, and the one that only becomes
-    /// reachable here, because nothing before C3 read `q_sum` at all.
+    /// reachable here, because nothing before the leftover reads `q_sum` at all.
     ///
     /// It is not a crash waiting to happen, which is why it has to be caught rather than left:
     /// the mass flows into the pool, the pool into every genotype's data likelihood, and a
@@ -1346,7 +1351,7 @@ mod tests {
 
     /// **Adding a sample that shows only reference reads changes no other sample's leftover** —
     /// the second half of the plan's standing scale-freedom property, which only became
-    /// checkable at C3. The first half, that it changes neither the surviving list nor the
+    /// checkable once the leftover existed. The first half, that it changes neither the surviving list nor the
     /// remapping, is asserted at
     /// [`a_sample_showing_only_reference_reads_changes_neither_the_list_nor_the_remapping`].
     ///

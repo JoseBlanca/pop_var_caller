@@ -181,7 +181,8 @@ pub const DEFAULT_MIN_ALLELE_SUPPORT: MinAltReads = MinAltReads {
 };
 
 /// **Six alleles including the reference** — production's `DEFAULT_MAX_ALLELES_PER_RECORD`
-/// (`src/var_calling/per_group_merger.rs`), inherited and declared inherited.
+/// (`d9e7b076:src/var_calling/per_group_merger.rs`, the caller deleted on 2026-09-13),
+/// inherited and declared inherited.
 ///
 /// **It is not GATK's number, though production's comment says it is.** GATK's
 /// `--max-alternate-alleles` defaults to 6 *alternates*
@@ -596,11 +597,11 @@ impl LocusSelection {
 /// output: the surviving table, and the [`AlleleRemap`] over the merge's table (arch §1,
 /// and §6's open item on whether that remapping should be a bitset plus a prefix sum).
 ///
-/// **It stands alone here and becomes a field of `CallingScratch` when that type exists**
-/// (`doc/devel/ng/impl_plan/calling_loop.md` A1, which builds it). The same worker runs
-/// selection and then the calling loop on the same locus, so a second per-worker
-/// allocation would buy nothing; arch §2.4 records the reasoning. Nothing about the shape
-/// changes when it moves.
+/// **A worker holds it as a field of [`CallingScratch`](crate::calling::CallingScratch)**,
+/// reached through
+/// [`candidate_selection_mut`](crate::calling::CallingScratch::candidate_selection_mut). The
+/// same worker runs selection and then the calling loop on the same locus, so a second
+/// per-worker allocation would buy nothing; arch §2.4 records the reasoning.
 ///
 /// **Not `Clone`.** Two workers sharing one set of buffers by copy would each pay the
 /// allocation this type exists to avoid, and a cloned scratch carrying the previous
@@ -734,14 +735,8 @@ impl SelectionScratch {
 /// **One allele's fold across every covering sample** — what the bar and the cap read.
 ///
 /// Private to the module: it is the shape of a computation, not part of what selection
-/// hands back. The fold that fills it is step B1 and the ranking that reads it is B2.
-///
-/// **Two of its three fields are readable from outside, one scalar at a time** —
-/// [`SelectionScratch::best_within_sample_share_of`] and
-/// [`SelectionScratch::cohort_reads_of`], which exist for
-/// `examples/ng_candidate_selection_probe.rs` (step D1) and are the reason the measurement
-/// no longer carries its own copy of the ranking's keys. **The type itself stays private**,
-/// so nothing outside can hold, build or match on a summary.
+/// hands back. [`summarise_alleles`] fills it, and the bar and the cap's ranking
+/// ([`compare_best_first`]) read it.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct AlleleSummary {
     /// **The largest share of one sample's compared reads this allele took, over the samples
@@ -781,7 +776,7 @@ impl AlleleSummary {
     /// and the only thing it can do is disagree with the first.
     ///
     /// **The reference is not asked this question.** It is admitted before any sample's
-    /// evidence is read and is exempt from both the bar and the cap (spec §6.1), so C1
+    /// evidence is read and is exempt from both the bar and the cap (spec §6.1), so admission
     /// seeds it structurally rather than reading a flag that says it passed.
     #[inline]
     fn cleared_the_bar(self) -> bool {
@@ -886,7 +881,7 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// On a dropped allele whose quality mass is not finite, and on a sample's rows out of ascending
 /// allele order (see [`one_run_per_allele`]). Both are caller bugs held in release, which spec §8
 /// names — **this is the third of the three it lists, and this step is where it becomes
-/// reachable**, because nothing before C3 read `q_sum` at all. A non-finite mass is not a crash
+/// reachable**, because nothing before the leftover reads `q_sum` at all. A non-finite mass is not a crash
 /// waiting to happen: it flows into the pool, the pool into every genotype's data likelihood, and
 /// a non-finite likelihood prefers no genotype over any other, so the locus comes out called with
 /// nothing chosen and nothing failed.
@@ -1020,8 +1015,8 @@ fn one_run_per_allele(
 /// and 2 from another would then be asked to reach a bar of 5 twice over, and would fail it
 /// with the 5 reads that clear it.
 ///
-/// **Pooled here rather than through [`SampleSupport::pooled_support_for`]**, which arch §3.1
-/// nominates. That method answers one allele, so reaching a sample's distinct alleles through
+/// **Pooled here rather than through `SampleSupport::pooled_support_for`**, which arch §3.1
+/// nominates and which is now test-only. That method answers one allele, so reaching a sample's distinct alleles through
 /// it means scanning the whole locus table per sample — rows the sample never showed
 /// included — where grouping the rows walks each sample's own rows once. It also rebuilds all
 /// six of the merge's quality moments where the bar reads one of them.
@@ -1029,7 +1024,7 @@ fn one_run_per_allele(
 /// **The reference is folded like every other allele, the bar included.** Its read total, its
 /// within-sample share and its count of samples reaching the bar are all filled, because they
 /// are honest facts about it and cost nothing to keep. **Nothing downstream reads that last
-/// one**: the reference is exempt from the bar, and step C1 seeds it into the candidate table
+/// one**: the reference is exempt from the bar, and admission seeds it into the candidate table
 /// structurally, before any sample's evidence is read (spec §6.1). It is recorded rather than
 /// suppressed so that no reader has to wonder which of the three fields is missing for
 /// allele 0.
@@ -1113,7 +1108,7 @@ fn summarise_alleles(
 /// two slices at a call site: it compiled, `clippy` was silent, and the test still passed,
 /// because the bases only decide when all three numeric keys tie. The mis-pairing is
 /// therefore invisible at exactly the loci where the ranking does its work, and the caller
-/// this is built for is worse than the test — step C2 sorts a buffer of table indices, so
+/// this is built for is worse than the test — the cap sorts a buffer of table indices, so
 /// every argument is an index expression.
 #[derive(Clone, Copy, Debug)]
 struct RankedAlternative<'bases> {
@@ -1138,7 +1133,7 @@ struct RankedAlternative<'bases> {
 ///
 /// **The first key is a share of one sample's reads, not of the cohort's, and that is the
 /// design.** Production ranks by the cohort's raw read total
-/// (`enforce_max_alleles`, `src/var_calling/per_group_merger.rs`, a stable sort on
+/// (`enforce_max_alleles`, `d9e7b076:src/var_calling/per_group_merger.rs`, a stable sort on
 /// `Reverse(cohort_count)`), and at scale that truncates the *private* alleles first: an
 /// allele one sample really carries, heterozygous at 30×, scores 15 reads, where a systematic
 /// mismapping artefact at 1 read in 100 across 800 samples at 30× scores 240. As
@@ -1325,9 +1320,8 @@ pub(super) mod fixtures {
     /// One allele's row from the sample's **first** read group — the shape of every sample
     /// that carries one library, which is most samples of most runs.
     ///
-    /// `q_sum` is carried although no assertion in this step reads it: it is the field
-    /// step C3 sums into the leftover, so the fixtures hold a plausible error mass from
-    /// the start rather than gaining one when C3 arrives.
+    /// `q_sum` is carried although most assertions never read it: it is the field the
+    /// leftover sums, so every fixture holds a plausible error mass.
     pub(super) fn row(allele: usize, num_reads: u32, q_sum: f64) -> SupportedAllele {
         row_from_group(allele, ReadGroupId(0), num_reads, q_sum)
     }
@@ -1540,7 +1534,7 @@ mod tests {
         );
     }
 
-    // ---- the output vocabulary (A2) ----
+    // ---- the output vocabulary ----
 
     /// A remapping over five merge alleles with the middle one dropped — the shape the
     /// evidence hand-off of arch §3.2 walks. Reference, then alternatives 1, 3 and 4
@@ -2154,9 +2148,9 @@ mod tests {
     /// the doc comment. It is folded like every other allele: its reads are totalled, its
     /// within-sample share is kept, and the rule is asked of it too.
     ///
-    /// **Nothing downstream reads that last answer** — step C1 seeds the reference into the
+    /// **Nothing downstream reads that last answer** — admission seeds the reference into the
     /// candidate table structurally, before any sample's evidence is read (spec §6.1) — so
-    /// this test exists to stop a C1 that loops `cleared_the_bar()` over the whole table
+    /// this test exists to stop an admission that loops `cleared_the_bar()` over the whole table
     /// from either double-seeding the reference or dropping it, neither of which any other
     /// test here would notice.
     #[test]
@@ -2170,7 +2164,7 @@ mod tests {
         assert_eq!(summaries[0].best_within_sample_share, 0.75);
         assert_eq!(
             summaries[0].samples_clearing_the_bar, 1,
-            "the rule is asked of the reference too; C1 does not read the answer"
+            "the rule is asked of the reference too; admission does not read the answer"
         );
     }
 
@@ -2273,7 +2267,7 @@ mod tests {
     /// A locus whose table is the reference alone gets one summary, not none and not two.
     /// **It is a first-class outcome rather than a corner** — selection reaches it at more
     /// than one built locus in four on both benchmarks (spec §6.2) — and the fold has to
-    /// size its buffers for it before C1 can return it.
+    /// size its buffers for it before admission can return it.
     #[test]
     fn a_reference_only_table_gets_one_summary() {
         let observation = locus_of(&[b"A"], vec![sample_showing(0, vec![row(0, 3, -3.0)])]);
@@ -2334,7 +2328,7 @@ mod tests {
         assert_eq!(scratch.per_allele[1].samples_clearing_the_bar, 1);
     }
 
-    // ---- the cap's ranking (step B2) ---------------------------------------------------
+    // ---- the cap's ranking -------------------------------------------------------------
 
     /// One alternative for the ranking: its three folded numbers, spelled in the order the
     /// ranking reads them, and its bases.
@@ -2565,7 +2559,7 @@ mod tests {
     /// **A table wider than the cap**, which every other fixture here is not: the largest is
     /// exactly six rows and the default cap is six *counting the reference*, so the cap first
     /// bites at seven. What the cap will keep is the first five of this list, and what it
-    /// cuts is the last two — the ordering C2 will `truncate` on.
+    /// cuts is the last two — the ordering the cap `truncate`s on.
     #[test]
     fn a_table_above_the_cap_ranks_its_survivors_into_the_front() {
         let table = [

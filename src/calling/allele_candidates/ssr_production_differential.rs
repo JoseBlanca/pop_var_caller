@@ -8,8 +8,8 @@
 //! bar, driving ng's own fold and ng's own ladder — and require the result to be production's
 //! candidate set on real reads.
 //!
-//! **Production's own answer is frozen since promotion step C8.** Until then each test also ran
-//! production's selector — `ssr::cohort::rung_ladder::build_rungs` then
+//! **Production's own answer is frozen, since production was deleted on 2026-09-13.** Until then
+//! each test also ran production's selector — `ssr::cohort::rung_ladder::build_rungs` then
 //! `ssr::cohort::candidate_set::assemble_candidates`, at ploidy 2 with both configurations'
 //! `dev_default()` — on the same tract. What it returned on every tract the tests build was
 //! recorded at commit `d9e7b076` into `testdata/tomato_tract_production_candidates.csv`, keyed by
