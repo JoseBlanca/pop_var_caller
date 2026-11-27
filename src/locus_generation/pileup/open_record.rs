@@ -18,6 +18,7 @@
 
 use smallvec::SmallVec;
 
+use crate::read::prepared_read::phred_to_ln_perr;
 use crate::ref_seq::{RefSeq, RefSeqError};
 use crate::types::ChainId;
 use crate::types::{ContigId, GenomeRegion, Position, ReadGroupId};
@@ -3615,32 +3616,6 @@ fn min_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> u8 {
 /// nothing here does.
 pub(crate) fn minted_ln_read_error(base_quality: u8, mq_log_err: f64) -> f64 {
     phred_to_ln_perr(base_quality).max(mq_log_err)
-}
-
-/// `Q -> ln(P_err)` where `P_err = 10^(-Q/10)`.
-///
-/// `q` is a Phred score constrained to `0..=93` by the
-/// [`PreparedRead`] spec, but the table is sized at 256 so the
-/// `q as usize` index covers `u8`'s full domain — bounds-check
-/// elision is unconditional. Built at compile time; the 2 KB
-/// table sits in L1 and the function compiles to one load.
-/// `q == 0` is pinned to `+0.0` to match the prior branch's
-/// `return 0.0;` exactly.
-///
-/// H3 in `ia/reviews/perf_pileup_2026-05-12.md`. Replaces the
-/// per-call FP multiply that round-2 perf attributed at 2.94 %
-/// of walker self-time on `pileup_walker_multi_op/5000`.
-pub(super) fn phred_to_ln_perr(q: u8) -> f64 {
-    static LN_PERR_TABLE: [f64; 256] = {
-        let mut t = [0.0_f64; 256];
-        let mut q = 1usize;
-        while q < 256 {
-            t[q] = -(q as f64) * std::f64::consts::LN_10 / 10.0;
-            q += 1;
-        }
-        t
-    };
-    LN_PERR_TABLE[q as usize]
 }
 
 /// One read's contribution to the current walker position. The
