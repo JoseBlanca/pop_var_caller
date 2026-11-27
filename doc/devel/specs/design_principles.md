@@ -137,7 +137,8 @@ ambiguous.
    actually used. Internal modules can talk to each other in
    dependency-native types if it's cheaper that way; the rule is
    about what we expose outward.
-   - *Example:* the CRAM reader yields our own `MappedRead`, not
+   - *Example:* the CRAM reader yields our own `AlignedRead`
+     (`src/read/aligned_read.rs`; `MappedRead` until 2026-11-27), not
      noodles' `RecordBuf`. The conversion happens in one place, in
      the per-record decoding helper. If we ever swap noodles for
      another CRAM library — or noodles changes its record type
