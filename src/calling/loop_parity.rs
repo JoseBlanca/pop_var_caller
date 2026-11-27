@@ -1,96 +1,36 @@
-//! **ng's frequency loop against the shipping caller's, genotype for genotype.**
-//!
-//! **Production's side is frozen since promotion step C6.** Until then every fixture here ran
-//! production's `run_em_columnar` on the same table. Production is being deleted, so what its
-//! loop returned on each of the nine tables below — the genotype it called for every sample, its
-//! iteration count and whether it converged — was recorded at commit `d9e7b076` and is written in
-//! [`PRODUCTION_ANSWERS`], keyed by a digest of everything production was handed. A fixture whose
-//! table, sample count, allele count, diversity or coefficients change has no frozen answer and
-//! fails rather than comparing against the wrong one. The prose below describes the comparison as
-//! it was built, with production running; what it asserts is unchanged.
+//! **The frequency loop against answers recorded from the caller it was ported from.**
 //!
 //! The loop in [`inference::summarise_condition`](super::inference::summarise_condition) is a
-//! port of `src/var_calling/posterior_engine.rs`'s — the same expectation-maximization over the
-//! same Dirichlet-multinomial prior with the same leave-one-out sharing — and what a port has to
-//! prove is not that it is self-consistent but that it agrees with what it was ported from
-//! (`doc/devel/ng/spec/calling_em_loop.md` §10, §13 test 8).
+//! port of the deleted caller's (`d9e7b076:src/var_calling/posterior_engine.rs`,
+//! `run_em_columnar`): the same expectation-maximization over the same Dirichlet-multinomial
+//! prior with the same leave-one-out sharing (`doc/devel/ng/spec/calling_em_loop.md` §10, §13
+//! test 8).
 //!
-//! **What is held identical.** Both sides are handed the same genotype log-likelihood table, in
-//! the same genotype order — an order [`genotype_table_parity`](super::genotype_table_parity)
-//! already pins value for value — the same prior concentration, the same inbreeding coefficient
-//! and the same allele count. Neither side is given the other's output, and **neither side
-//! computes the table**: it is the fixture's, so a difference between the two emissions cannot be
-//! mistaken for a difference between the two loops.
+//! **What is pinned.** Nine fixtures, each a genotype log-likelihood table with a sample count,
+//! allele count, diversity and inbreeding coefficients. For each, [`PRODUCTION_ANSWERS`] holds
+//! what the old loop returned — every sample's genotype, its iteration count and whether it
+//! converged — recorded at commit `d9e7b076` and keyed by a digest of the inputs, so a fixture
+//! whose inputs change has no answer and fails rather than comparing against the wrong one. The
+//! tables are the fixtures' own, so neither loop's emissions enter the comparison. The fixtures
+//! include a single sample, because the old caller ran a different E-step there.
 //!
-//! **Three things both loops read are not tied together here, and saying so is the point.** The
-//! convergence threshold and the pass cap are two *independent* constant pairs, `1e-3` and `50` on
-//! each side, equal today because two edits agree rather than because anything holds them
-//! together — so [`tests::the_two_loops_run_under_the_same_threshold_and_the_same_cap`] asserts
-//! the four values, and a fixture that set one side's would be hiding the other's. **The
-//! transcendental backend is genuinely different and is left that way**: production interpolated
-//! `ln` and `exp` from a table and ng calls libm's through [`crate::float`], a difference far below
-//! the nat-scale margins every fixture here is built on, and not something a parity oracle should
-//! paper over by making ng use production's approximation.
+//! **Two differences are expected, and each is asserted in the direction its record predicts:**
 //!
-//! **The concentrations are the same construction rather than two numbers that happen to
-//! agree.** Production derives `α = [ALPHA_REF, θ/k, …]` from `nucleotide_diversity`
-//! ([`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs), `run_em_columnar`'s
-//! prologue); ng derives it from a [`SpectrumSeed`](super::genotype_prior::SpectrumSeed)'s
-//! reference concentration and alternative total, floored the same way. Seeding ng at
-//! `(ALPHA_REF, θ)` therefore makes the two arrays equal entry for entry. Production read
-//! `ALPHA_REF` out of `crate::genetics`; ng reads its copy in [`crate::genetics`], and
-//! `the_two_loops_run_under_the_same_threshold_and_the_same_cap` pins that copy to production's
-//! value, 1.0, since promotion step C6 — without that the two would be two transcriptions of one
-//! number with nothing holding them together.
+//! - **The inbreeding mixture.** The old prior mixed its random-mating and identical-by-descent
+//!   branches on two different scales, so the coefficient did only part of its work; ng adds the
+//!   missing term (`doc/devel/ng/spec/calling_priors.md` §3.2, owner 2026-08-22). At `F = 0` the
+//!   two agree exactly; at `F = 0.9` they call a thin sample differently, and
+//!   `the_two_loops_part_at_an_inbred_panel_and_ng_is_the_corrected_one` fixes which way.
+//! - **The pass count.** Both loops begin with one E-step on the reads alone; the old loop
+//!   counted it as an iteration and ng's `passes` does not, so the old count is ng's plus one.
 //!
-//! # Where the two are expected to differ, and both places are pinned rather than excused
+//! **The answers were recorded under the shipped convergence threshold, pass cap and reference
+//! concentration**, which [`tests::the_frozen_answers_hold_only_under_the_shipped_loop_defaults`]
+//! pins.
 //!
-//! Spec §10 asks for parity **or a difference traced to a decision one of the calling documents
-//! records**. Two such differences exist, this oracle found both by failing, and each is now
-//! asserted in the direction its record predicts — so losing either correction breaks a test
-//! rather than quietly restoring "parity".
-//!
-//! **The inbreeding mixture, which is the one place the port departs on purpose.** Production
-//! mixes its random-mating and identical-by-descent branches on two different scales — the first
-//! is a log-prior up to a shared constant, the second a true probability — so the coefficient does
-//! a fraction of the work it should; ng adds the missing term and it does all of it. **The
-//! decision is recorded in a calling document, which is what §10 requires of a traced
-//! difference**: `doc/devel/ng/spec/calling_priors.md` §3.2, *"ng corrects it deliberately (owner,
-//! 2026-08-22), and it is the one place the port departs from what it was ported from"* — and the
-//! measurement behind it is in [`MarginalizedDirichletPrior`]'s own documentation. At `F = 0` the
-//! branch short-circuits away on both sides and every fixture here agrees exactly, which is why
-//! production's default hides it. At `F = 0.9` the two call a thin sample differently, and
-//! `the_two_loops_part_at_an_inbred_panel_and_ng_is_the_corrected_one` fixes which way round.
-//!
-//! **The pass count, which is a difference in what is counted and not in where either stopped.**
-//! Both loops begin with one E-step on the reads alone, before any prior; production counts it as
-//! its first iteration, ng does not, because its `passes` counts the passes that had a prior. So
-//! production's count is ng's plus one, and every fixture here asserts that rather than ignoring
-//! it: a real difference in stopping point would break it by more than one.
-//!
-//! # One sample and a cohort are two different production code paths, and both are compared
-//!
-//! **An earlier draft of this module excluded one sample, and the argument was wrong.** It said
-//! the two loops have both already finished there — true of the *stopping rule*, since production
-//! tests `max|p̂ − p̂'|` at one sample
-//! ([`posterior_engine.rs:2724`](../../../../src/var_calling/posterior_engine.rs)) and its own
-//! comment explains that a single-sample E-step is `p̂`-independent and reaches its fixed point in
-//! one iteration. **It is not an argument about genotypes**, and it hid something worth knowing:
-//! at one sample production dispatches to a different E-step entirely — the record-static
-//! `e_step`, not the `e_step_cohort_loo` every cohort fixture here exercises. Excluding one sample
-//! meant the oracle never ran that function at all, on a caller whose committed range starts
-//! there (`CLAUDE.md`).
-//!
-//! So both are compared, and what differs between them is only *which* checks apply: the pass-count
-//! relation below is a cohort fact and is asserted through [`Comparison::assert_parity`], while the
-//! single-sample fixture asserts genotypes and convergence through
-//! [`Comparison::assert_same_calls`] and says separately what its counts were.
-//!
-//! # This is ng's test; production is only the yardstick
-//!
-//! Nothing here changed production and nothing in production names ng, exactly as
-//! [`genotype_table_parity`](super::genotype_table_parity) and
-//! [`crate::scanner_parity`] are arranged.
+//! **When a deliberate change breaks a fixture**, work out the new expectation independently —
+//! by hand, or from the spec — and change the test's expectation with the reason. Never
+//! re-record the answers from this code: then the test would only check the code against itself.
 
 use std::collections::BTreeMap;
 
@@ -396,7 +336,7 @@ struct ProductionAnswer {
 
 /// **Production's answers, one per locus a fixture below hands it**: the locus's digest, the
 /// genotype index production called for each sample, its iteration count, and whether it
-/// converged. Recorded from `run_em_columnar` at commit `d9e7b076` (promotion plan step C6).
+/// converged. Recorded from `run_em_columnar` at commit `d9e7b076`.
 const PRODUCTION_ANSWERS: [(u64, &[usize], u32, bool); 9] = [
     // the_two_loops_call_the_same_genotypes_at_a_biallelic_site
     (0xaf5a_3a78_93dc_2452, &[2, 1, 0], 2, true),
@@ -731,7 +671,7 @@ mod tests {
     ///
     /// *(The stronger check — ng's concentration against production's own array rather than
     /// against its formula — was never made: `RecordScratch::alpha` was private to
-    /// `posterior_engine`, and since promotion step C6 production is not run here at all.)*
+    /// `posterior_engine`, and the old caller is no longer run here at all.)*
     #[test]
     fn the_two_loops_split_the_alternative_concentration_the_same_way() {
         // Six genotypes at three alleles, in table order: 0/0, 0/1, 1/1, 0/2, 1/2, 2/2.
@@ -887,19 +827,16 @@ mod tests {
         );
     }
 
-    /// **The two loops run under the same threshold, the same cap and the same reference
-    /// concentration, and nothing but this asserts it.**
+    /// **The frozen answers hold only under the convergence threshold, pass cap and reference
+    /// concentration they were recorded with**, so this pins ng's shipped values to those.
     ///
-    /// They are independent constants — production's in `posterior_engine` and `genetics`, frozen
-    /// here, ng's in `inference` and `genetics` — equal because two edits agreed. Every fixture
-    /// here runs both at their defaults, so a change to one side alone would turn every parity
-    /// assertion in this file into a comparison of two differently-configured loops, and nothing
-    /// would say so.
+    /// Every fixture here runs ng at its defaults. Change one of them and every comparison in
+    /// this file is against a differently-configured loop; this test is what says so.
     #[test]
-    fn the_two_loops_run_under_the_same_threshold_and_the_same_cap() {
+    fn the_frozen_answers_hold_only_under_the_shipped_loop_defaults() {
         use crate::calling::inference::{DEFAULT_CONVERGENCE_THRESHOLD, DEFAULT_MAX_PASSES};
         // Production's `posterior_engine::DEFAULT_CONVERGENCE_THRESHOLD` and
-        // `DEFAULT_MAX_ITERATIONS` at commit `d9e7b076`, frozen at promotion step C6.
+        // `DEFAULT_MAX_ITERATIONS` at commit `d9e7b076`.
         const PRODUCTION_THRESHOLD: f64 = 1e-3;
         const PRODUCTION_CAP: u32 = 50;
         // Production's `genetics::ALPHA_REF` at the same commit.
