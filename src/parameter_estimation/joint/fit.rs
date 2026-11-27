@@ -1747,19 +1747,7 @@ pub fn fit_jointly(
         "SNP/indel fit: reading the evidence of {} sample(s)",
         names.len()
     ));
-    let FittedCohort {
-        parameters,
-        statistics,
-        passes,
-        converged,
-        starts,
-        trace,
-        contamination,
-        standard_errors,
-        density_report,
-        duplicated_report,
-        clean_rate_standard_error,
-    } = cohort.with_generic(&groups, |lent| {
+    let fitted = cohort.with_generic(&groups, |lent| {
         // Which read group each sample's own groups are, in the order the cursor visits them.
         let group_index: Vec<Vec<usize>> = lent
             .iter()
@@ -1786,390 +1774,479 @@ pub fn fit_jointly(
             depth_cap,
         );
 
-        // **What the evidence holds and how deep the samples are**, printed because both set
-        // this step's memory and neither is otherwise visible from a run's output.
-        let read_groups_held: usize = lent.iter().map(Vec::len).sum();
-        let evidence_bytes: usize = lent
-            .iter()
-            .flatten()
-            .map(|(_, records)| records.heap_bytes())
-            .sum();
-        let observations: usize = lent
-            .iter()
-            .flatten()
-            .map(|(_, records)| records.non_reference().len())
-            .sum();
-        // A sample with no walked position has no depth, and `mean_depth` stands it in at one
-        // read; it is counted apart so that it cannot read as a real sample at 1×.
-        let without_data = lent
-            .iter()
-            .filter(|sections| {
-                sections.iter().all(|(_, records)| {
-                    (0..records.depth().len())
-                        .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
-                })
+        log_the_evidence(lent, config, depth_cap, &stage);
+        let (winning_start, winner, starts) = run_the_starts(
+            lent,
+            depth_cap,
+            config,
+            &group_index,
+            &coverage,
+            &names,
+            &groups,
+            &stage,
+        );
+        the_winners_errors_and_contamination(
+            lent,
+            depth_cap,
+            config,
+            &group_index,
+            &groups,
+            &stage,
+            winning_start,
+            winner,
+            starts,
+        )
+    })?;
+    stage.always(|into| format!("SNP/indel fit: done; {into}"));
+    Ok(JointFit::from_fitted(fitted, &names, &groups))
+}
+
+/// The first phase of [`fit_jointly`]: one line of the run's log saying what the lent evidence
+/// holds and how deep the samples are.
+fn log_the_evidence(
+    lent: &[SampleGenericSections<'_>],
+    config: &JointFitConfig,
+    depth_cap: DepthCap,
+    stage: &StageProgress,
+) {
+    // **What the evidence holds and how deep the samples are**, printed because both set
+    // this step's memory and neither is otherwise visible from a run's output.
+    let read_groups_held: usize = lent.iter().map(Vec::len).sum();
+    let evidence_bytes: usize = lent
+        .iter()
+        .flatten()
+        .map(|(_, records)| records.heap_bytes())
+        .sum();
+    let observations: usize = lent
+        .iter()
+        .flatten()
+        .map(|(_, records)| records.non_reference().len())
+        .sum();
+    // A sample with no walked position has no depth, and `mean_depth` stands it in at one
+    // read; it is counted apart so that it cannot read as a real sample at 1×.
+    let without_data = lent
+        .iter()
+        .filter(|sections| {
+            sections.iter().all(|(_, records)| {
+                (0..records.depth().len())
+                    .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
             })
-            .count();
-        let mut depths = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
-        depths.sort_by(f64::total_cmp);
-        let depth_at = |share: f64| {
-            depths
-                .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
-                .copied()
-                .unwrap_or(0.0)
-        };
+        })
+        .count();
+    let mut depths = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
+    depths.sort_by(f64::total_cmp);
+    let depth_at = |share: f64| {
+        depths
+            .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    stage.always(|into| {
+        format!(
+            "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
+                 {} ({} a read group), {observations} non-reference observations; the \
+                 samples' mean depth, read from the stored codes after the cap, runs from \
+                 {:.1} to {:.1}, median {:.1}, and {without_data} sample(s) have no walked \
+                 position (read there as 1.0); fitting from {} starting point(s), at most {} \
+                 passes each",
+            crate::parameter_estimation::progress::size(evidence_bytes as u64),
+            crate::parameter_estimation::progress::size(
+                (evidence_bytes / read_groups_held.max(1)) as u64
+            ),
+            depth_at(0.0),
+            depth_at(1.0),
+            depth_at(0.5),
+            config.starting_points.len(),
+            config.max_passes
+        )
+    });
+}
+
+/// The second phase of [`fit_jointly`]: every run of [`maximise`] — the starts, the winner's finish
+/// on every position, or the one run from an earlier fit's numbers — and the start that won, with
+/// how each start ended.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lent evidence and what it means, the cohort's names, and the stage clock"
+)]
+fn run_the_starts(
+    lent: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    coverage: &[f64],
+    names: &[String],
+    groups: &[ReadGroupId],
+    stage: &StageProgress,
+) -> (usize, StartOutcome, Vec<StartRecord>) {
+    let mut best: Option<(usize, StartOutcome)> = None;
+    let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
+    // The best-scoring converged start so far.
+    let mut earlier: Option<EarlierAnswer> = None;
+    // **The starts explore on a thinned census** when the census is large enough to thin
+    // ([`JointFitConfig::explore_on`]); the winner then finishes on every position, below.
+    let census = EvidenceCursor::position_count(lent);
+    let stride = census
+        .checked_div(config.explore_on)
+        .map_or(1, |stride| stride.max(1));
+    // The runs: each start on the thinned census, then, when it was thinned, the winner's
+    // finish on every position, which continues from where that start stood.
+    // **Or one run, on every position, from an earlier run's numbers**, when they describe most
+    // of this cohort.
+    let continuing = config.earlier_fit.as_ref().filter(|earlier| {
+        let EarlierFitCoverage {
+            held_samples,
+            held_groups,
+            enough,
+        } = earlier.coverage(names, groups);
         stage.always(|into| {
             format!(
-                "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
-                     {} ({} a read group), {observations} non-reference observations; the \
-                     samples' mean depth, read from the stored codes after the cap, runs from \
-                     {:.1} to {:.1}, median {:.1}, and {without_data} sample(s) have no walked \
-                     position (read there as 1.0); fitting from {} starting point(s), at most {} \
-                     passes each",
-                crate::parameter_estimation::progress::size(evidence_bytes as u64),
-                crate::parameter_estimation::progress::size(
-                    (evidence_bytes / read_groups_held.max(1)) as u64
-                ),
-                depth_at(0.0),
-                depth_at(1.0),
-                depth_at(0.5),
-                config.starting_points.len(),
-                config.max_passes
+                "SNP/indel fit: an earlier run's numbers hold {held_samples} of the {} \
+                 sample(s) and {held_groups} of the {} read group(s); {}; {into}",
+                names.len(),
+                groups.len(),
+                if enough {
+                    "the fit starts from them, the rest at their median, on every position"
+                } else {
+                    "too few to start from, so the fit starts from its usual starting points"
+                }
             )
         });
-        let mut best: Option<(usize, StartOutcome)> = None;
-        let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
-        // The best-scoring converged start so far.
-        let mut earlier: Option<EarlierAnswer> = None;
-        // **The starts explore on a thinned census** when the census is large enough to thin
-        // ([`JointFitConfig::explore_on`]); the winner then finishes on every position, below.
-        let census = EvidenceCursor::position_count(lent);
-        let stride = census
-            .checked_div(config.explore_on)
-            .map_or(1, |stride| stride.max(1));
-        // The runs: each start on the thinned census, then, when it was thinned, the winner's
-        // finish on every position, which continues from where that start stood.
-        // **Or one run, on every position, from an earlier run's numbers**, when they describe most
-        // of this cohort.
-        let continuing = config.earlier_fit.as_ref().filter(|earlier| {
-            let EarlierFitCoverage {
-                held_samples,
-                held_groups,
-                enough,
-            } = earlier.coverage(&names, &groups);
+        enough
+    });
+    // The starts on the thinned census and, when it was thinned, the winner's finish: every run
+    // of a fit without earlier numbers, and what a run from them falls back on.
+    let usual_runs = || {
+        let mut runs: Vec<StartRun> = config
+            .starting_points
+            .iter()
+            .enumerate()
+            .map(|(index, _)| StartRun::Start {
+                number: index + 1,
+                stride,
+            })
+            .collect();
+        if stride > 1 {
+            runs.push(StartRun::Finish);
+        }
+        runs
+    };
+    let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
+        [StartRun::Continuing].into()
+    } else {
+        usual_runs().into()
+    };
+    while let Some(run) = runs.pop_front() {
+        let finishing = run == StartRun::Finish;
+        let (number, initial, which_earlier, run_stride) = match run {
+            StartRun::Start { number, stride } => (
+                number,
+                Parameters::at_start(
+                    &config.starting_points[number - 1],
+                    groups.len(),
+                    lent.len(),
+                    config,
+                ),
+                earlier.as_ref(),
+                stride,
+            ),
+            StartRun::Finish => {
+                // PANIC-FREE: the first start has no earlier answer to agree with, so it
+                // always competes.
+                let (winner, outcome) = best.take().expect("the first start always competes");
+                // The finish replaces the winner: its answer is the full census's, and the
+                // thinned census's statistics are not comparable with it.
+                earlier = None;
+                (winner, outcome.parameters, None, 1)
+            }
+            StartRun::Continuing => (
+                1,
+                Parameters::continuing(
+                    continuing.expect("only queued with an earlier fit"),
+                    groups,
+                    names,
+                    config,
+                ),
+                None,
+                1,
+            ),
+        };
+        let which = WhichStart {
+            number,
+            of: config.starting_points.len(),
+            stride: run_stride,
+            finishing,
+            continuing: run == StartRun::Continuing,
+            earlier: which_earlier,
+            sample_names: names,
+            stage,
+        };
+        let began = std::time::Instant::now();
+        let outcome = maximise(
+            lent,
+            depth_cap,
+            config,
+            group_index,
+            coverage,
+            &which,
+            initial,
+            run_stride,
+        );
+        let score = outcome.statistics.log_likelihood;
+        stage.always(|into| {
+            let (how, last_pass) = match outcome.ended {
+                StartEnding::Converged => ("converged".to_owned(), None),
+                StartEnding::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
+                StartEnding::Agreed { with_start } => (
+                    format!(
+                        "stopped, heading where start {with_start} converged (its projected \
+                         endpoint within {} of that start's standard error on every parameter \
+                         it gives one)",
+                        config.agreement_fraction
+                    ),
+                    Some("no last pass of its own, as it does not compete".to_owned()),
+                ),
+            };
+            let last_pass = last_pass.unwrap_or_else(|| {
+                format!(
+                    "its last pass, which also collects what the standard errors are \
+                     computed from, {}",
+                    cost_of_the_last_pass(
+                        began.elapsed().saturating_sub(outcome.judging_took),
+                        outcome.last_pass_took,
+                        outcome.passes - outcome.judging_passes,
+                    )
+                )
+            });
+            // Why a start that did not converge had not, at the values it returned.
+            let short_of_settled = describe_short_of_settled(
+                outcome.ended,
+                outcome.furthest_from_settled.as_ref(),
+                config.settled_fraction,
+            );
+            format!(
+                "SNP/indel fit, {}: {how} after {} pass(es), log-likelihood \
+                     {score:.6e}{short_of_settled}; {last_pass}; {into}",
+                which.label(),
+                outcome.passes,
+            )
+        });
+        let record = StartRecord {
+            number,
+            ended: outcome.ended,
+            passes: outcome.passes,
+            judging_passes: outcome.judging_passes,
+            log_likelihood: score,
+            furthest_from_settled: outcome.furthest_from_settled.clone(),
+        };
+        // The finish is the winning start continued, and a start run again on every position is
+        // that start, so each takes its start's place in the record rather than adding one.
+        if number <= starts.len() {
+            starts[number - 1] = record;
+        } else {
+            starts.push(record);
+        }
+        // **A finish that does not converge leaves no answer to have agreed with**, so the
+        // other starts run again on every position, as every start did before the census was
+        // thinned when none converged: each to its own end, or until it heads where a later
+        // one of them converged.
+        if finishing {
+            runs.extend(runs_after_the_finish(
+                outcome.ended,
+                number,
+                config.starting_points.len(),
+            ));
+        }
+        // **A run from earlier numbers is set aside for the starting points** when it did not
+        // converge — they exist for a maximum that one start does not reach — or when fewer
+        // than two samples have reads: the fit then holds each excess where it starts, and a
+        // run from the starting points holds it at no excess, not at the earlier run's number.
+        if run == StartRun::Continuing
+            && (outcome.ended != StartEnding::Converged
+                || !fits_homozygote_excess(samples_with_reads(&outcome.statistics)))
+        {
             stage.always(|into| {
                 format!(
-                    "SNP/indel fit: an earlier run's numbers hold {held_samples} of the {} \
-                     sample(s) and {held_groups} of the {} read group(s); {}; {into}",
-                    names.len(),
-                    groups.len(),
-                    if enough {
-                        "the fit starts from them, the rest at their median, on every position"
+                    "SNP/indel fit: the run from the earlier run's numbers is set aside ({}), \
+                     so the fit starts from its usual starting points; {into}",
+                    if outcome.ended == StartEnding::Converged {
+                        "fewer than two samples have reads, so no excess is fitted"
                     } else {
-                        "too few to start from, so the fit starts from its usual starting points"
+                        "it did not converge"
                     }
                 )
             });
-            enough
-        });
-        // The starts on the thinned census and, when it was thinned, the winner's finish: every run
-        // of a fit without earlier numbers, and what a run from them falls back on.
-        let usual_runs = || {
-            let mut runs: Vec<StartRun> = config
-                .starting_points
-                .iter()
-                .enumerate()
-                .map(|(index, _)| StartRun::Start {
-                    number: index + 1,
-                    stride,
-                })
-                .collect();
-            if stride > 1 {
-                runs.push(StartRun::Finish);
-            }
-            runs
-        };
-        let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
-            [StartRun::Continuing].into()
-        } else {
-            usual_runs().into()
-        };
-        while let Some(run) = runs.pop_front() {
-            let finishing = run == StartRun::Finish;
-            let (number, initial, which_earlier, run_stride) = match run {
-                StartRun::Start { number, stride } => (
-                    number,
-                    Parameters::at_start(
-                        &config.starting_points[number - 1],
-                        groups.len(),
-                        lent.len(),
-                        config,
-                    ),
-                    earlier.as_ref(),
-                    stride,
-                ),
-                StartRun::Finish => {
-                    // PANIC-FREE: the first start has no earlier answer to agree with, so it
-                    // always competes.
-                    let (winner, outcome) = best.take().expect("the first start always competes");
-                    // The finish replaces the winner: its answer is the full census's, and the
-                    // thinned census's statistics are not comparable with it.
-                    earlier = None;
-                    (winner, outcome.parameters, None, 1)
-                }
-                StartRun::Continuing => (
-                    1,
-                    Parameters::continuing(
-                        continuing.expect("only queued with an earlier fit"),
-                        &groups,
-                        &names,
-                        config,
-                    ),
-                    None,
-                    1,
-                ),
-            };
-            let which = WhichStart {
-                number,
-                of: config.starting_points.len(),
-                stride: run_stride,
-                finishing,
-                continuing: run == StartRun::Continuing,
-                earlier: which_earlier,
-                sample_names: &names,
-                stage: &stage,
-            };
-            let began = std::time::Instant::now();
-            let outcome = maximise(
-                lent,
-                depth_cap,
-                config,
-                &group_index,
-                &coverage,
-                &which,
-                initial,
-                run_stride,
-            );
-            let score = outcome.statistics.log_likelihood;
-            stage.always(|into| {
-                let (how, last_pass) = match outcome.ended {
-                    StartEnding::Converged => ("converged".to_owned(), None),
-                    StartEnding::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
-                    StartEnding::Agreed { with_start } => (
-                        format!(
-                            "stopped, heading where start {with_start} converged (its projected \
-                             endpoint within {} of that start's standard error on every parameter \
-                             it gives one)",
-                            config.agreement_fraction
-                        ),
-                        Some("no last pass of its own, as it does not compete".to_owned()),
-                    ),
-                };
-                let last_pass = last_pass.unwrap_or_else(|| {
-                    format!(
-                        "its last pass, which also collects what the standard errors are \
-                         computed from, {}",
-                        cost_of_the_last_pass(
-                            began.elapsed().saturating_sub(outcome.judging_took),
-                            outcome.last_pass_took,
-                            outcome.passes - outcome.judging_passes,
-                        )
-                    )
-                });
-                // Why a start that did not converge had not, at the values it returned.
-                let short_of_settled = describe_short_of_settled(
-                    outcome.ended,
-                    outcome.furthest_from_settled.as_ref(),
-                    config.settled_fraction,
-                );
-                format!(
-                    "SNP/indel fit, {}: {how} after {} pass(es), log-likelihood \
-                         {score:.6e}{short_of_settled}; {last_pass}; {into}",
-                    which.label(),
-                    outcome.passes,
-                )
-            });
-            let record = StartRecord {
-                number,
-                ended: outcome.ended,
-                passes: outcome.passes,
-                judging_passes: outcome.judging_passes,
-                log_likelihood: score,
-                furthest_from_settled: outcome.furthest_from_settled.clone(),
-            };
-            // The finish is the winning start continued, and a start run again on every position is
-            // that start, so each takes its start's place in the record rather than adding one.
-            if number <= starts.len() {
-                starts[number - 1] = record;
-            } else {
-                starts.push(record);
-            }
-            // **A finish that does not converge leaves no answer to have agreed with**, so the
-            // other starts run again on every position, as every start did before the census was
-            // thinned when none converged: each to its own end, or until it heads where a later
-            // one of them converged.
-            if finishing {
-                runs.extend(runs_after_the_finish(
-                    outcome.ended,
-                    number,
-                    config.starting_points.len(),
-                ));
-            }
-            // **A run from earlier numbers is set aside for the starting points** when it did not
-            // converge — they exist for a maximum that one start does not reach — or when fewer
-            // than two samples have reads: the fit then holds each excess where it starts, and a
-            // run from the starting points holds it at no excess, not at the earlier run's number.
-            if run == StartRun::Continuing
-                && (outcome.ended != StartEnding::Converged
-                    || !fits_homozygote_excess(samples_with_reads(&outcome.statistics)))
-            {
-                stage.always(|into| {
-                    format!(
-                        "SNP/indel fit: the run from the earlier run's numbers is set aside ({}), \
-                         so the fit starts from its usual starting points; {into}",
-                        if outcome.ended == StartEnding::Converged {
-                            "fewer than two samples have reads, so no excess is fitted"
-                        } else {
-                            "it did not converge"
-                        }
-                    )
-                });
-                runs.extend(usual_runs());
-                continue;
-            }
-            if is_the_new_yardstick(
-                outcome.ended,
-                score,
-                earlier.as_ref().map(|answer| answer.log_likelihood),
-            ) {
-                earlier = Some(EarlierAnswer::of(number, &outcome, &group_index));
-            }
-            if is_the_new_best(
-                outcome.ended,
-                score,
-                best.as_ref()
-                    .map(|(_, current)| current.statistics.log_likelihood),
-            ) {
-                best = Some((number, outcome));
-            }
+            runs.extend(usual_runs());
+            continue;
         }
-        // PANIC-FREE: the first start has no earlier answer to agree with, so it always competes.
-        let (
-            winning_start,
-            StartOutcome {
-                parameters,
-                statistics,
-                information,
-                passes,
-                ended,
-                furthest_from_settled: _,
-                trace,
-                last_pass_took: _,
-                judging_passes: _,
-                judging_took: _,
-            },
-        ) = best.expect("the first start always competes");
-        // The winner's statistics come from a final pass, the only pass that keeps each position's
-        // posteriors, which contamination and the returned fit read; a start that agreed has none
-        // and never competes.
-        assert!(
-            statistics.collect_noisy_posterior,
-            "the winning start's statistics are those of its final pass"
-        );
+        if is_the_new_yardstick(
+            outcome.ended,
+            score,
+            earlier.as_ref().map(|answer| answer.log_likelihood),
+        ) {
+            earlier = Some(EarlierAnswer::of(number, &outcome, group_index));
+        }
+        if is_the_new_best(
+            outcome.ended,
+            score,
+            best.as_ref()
+                .map(|(_, current)| current.statistics.log_likelihood),
+        ) {
+            best = Some((number, outcome));
+        }
+    }
+    // PANIC-FREE: the first start has no earlier answer to agree with, so it always competes.
+    let (winning_start, winner) = best.expect("the first start always competes");
+    (winning_start, winner, starts)
+}
 
-        // **Every parameter's standard error, at the parameters the fit returns**, from the
-        // information the winning start's final pass summed (spec §3.3).
-        let standard_errors = StandardErrors::of(&information);
-        // **What the data determine about the density and the duplicated class** (spec §2.1.3),
-        // from the cohort's covariance over the same information: the errors' diagonal is not
-        // enough, since the verdicts and the derived shares' errors need how the numbers move
-        // together.
-        let covariance = cohort_covariance(&information);
-        let cohort_errors = standard_errors.cohort.map(StandardError::value);
-        let density_report = DensityReport::of(&parameters.density, &cohort_errors, &covariance);
-        let duplicated_report = parameters
-            .duplicated
-            .map(|duplicated| DuplicatedReport::of(&duplicated, &cohort_errors, &covariance));
+/// The third phase of [`fit_jointly`]: the winning start's standard errors, what the data determine
+/// about the density and the duplicated class, and each sample's contamination.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lent evidence and what it means, the stage clock, and the winning start"
+)]
+fn the_winners_errors_and_contamination(
+    lent: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    groups: &[ReadGroupId],
+    stage: &StageProgress,
+    winning_start: usize,
+    winner: StartOutcome,
+    starts: Vec<StartRecord>,
+) -> FittedCohort {
+    let StartOutcome {
+        parameters,
+        statistics,
+        information,
+        passes,
+        ended,
+        furthest_from_settled: _,
+        trace,
+        last_pass_took: _,
+        judging_passes: _,
+        judging_took: _,
+    } = winner;
+    // The winner's statistics come from a final pass, the only pass that keeps each position's
+    // posteriors, which contamination and the returned fit read; a start that agreed has none
+    // and never competes.
+    assert!(
+        statistics.collect_noisy_posterior,
+        "the winning start's statistics are those of its final pass"
+    );
+
+    // **Every parameter's standard error, at the parameters the fit returns**, from the
+    // information the winning start's final pass summed (spec §3.3).
+    let standard_errors = StandardErrors::of(&information);
+    // **What the data determine about the density and the duplicated class** (spec §2.1.3),
+    // from the cohort's covariance over the same information: the errors' diagonal is not
+    // enough, since the verdicts and the derived shares' errors need how the numbers move
+    // together.
+    let covariance = cohort_covariance(&information);
+    let cohort_errors = standard_errors.cohort.map(StandardError::value);
+    let density_report = DensityReport::of(&parameters.density, &cohort_errors, &covariance);
+    let duplicated_report = parameters
+        .duplicated
+        .map(|duplicated| DuplicatedReport::of(&duplicated, &cohort_errors, &covariance));
+    stage.always(|into| {
+        format!(
+            "SNP/indel fit: standard errors at the returned values: {}; {into}",
+            standard_errors.described(
+                &parameters,
+                group_index,
+                &density_report,
+                duplicated_report.as_ref(),
+            )
+        )
+    });
+    if let Some(note) = note_on_inverted_rates(&parameters, groups) {
+        stage.always(|into| format!("SNP/indel fit: {note}; {into}"));
+    }
+    trace_the_returned_fit(
+        winning_start,
+        passes,
+        statistics.log_likelihood,
+        &parameters,
+        &standard_errors,
+        group_index,
+    );
+
+    // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
+    // the converged error rates and the converged homozygote excess, and nothing it produces
+    // feeds back into them — a sample's stray reads are a property of the tube it was in
+    // rather than of the population, so the density has no business being told about them.
+    // It runs here, inside the same call, so that the sections are lent once rather than
+    // twice.
+    // **The error rate goes in per read group, which is the grain it was fitted at.**
+    // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
+    // group's — which was exact only because every benchmark sample has one library.
+    let error_rate: BTreeMap<ReadGroupId, f64> = groups
+        .iter()
+        .zip(&parameters.clean)
+        .map(|(group, rate)| (*group, *rate))
+        .collect();
+    // **The mismapped positions are kept out of it.** A position where two stretches of
+    // genome pile up on one place puts a small share of unexpected reads into *every*
+    // sample, which is the contamination signature exactly; measured over 63 tomato
+    // accessions with those positions left in, the median accession came back 6.5%
+    // contaminated.
+    let contamination = if config.estimate_contamination {
+        stage.always(|into| format!("SNP/indel fit: fitting each sample's contamination; {into}"));
+        fit_contamination_over(
+            lent,
+            depth_cap,
+            &config.edges,
+            &error_rate,
+            &parameters.hom_excess,
+            &statistics.noisy_posterior,
+            &config.contamination,
+        )
+    } else {
         stage.always(|into| {
             format!(
-                "SNP/indel fit: standard errors at the returned values: {}; {into}",
-                standard_errors.described(
-                    &parameters,
-                    &group_index,
-                    &density_report,
-                    duplicated_report.as_ref(),
-                )
+                "SNP/indel fit: contamination not estimated, as the run asked; every \
+                     read group is taken as uncontaminated; {into}"
             )
         });
-        if let Some(note) = note_on_inverted_rates(&parameters, &groups) {
-            stage.always(|into| format!("SNP/indel fit: {note}; {into}"));
+        not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
+    };
+    // **Each read group's ordinary-position rate's error, found through its sample**: the
+    // errors are laid out a sample at a time, and a read group is one section of one sample. A
+    // read group no sample lends an ordinary-position section for — a sample whose census
+    // holds repeat tracts only — keeps no information: nothing scored it.
+    let mut clean_rate_standard_error = vec![StandardError::NoInformation; groups.len()];
+    for (s, own) in group_index.iter().enumerate() {
+        for (section, &group) in own.iter().enumerate() {
+            clean_rate_standard_error[group] =
+                standard_errors.samples[s][information::sample::rate(section, 0)];
         }
-        trace_the_returned_fit(
-            winning_start,
-            passes,
-            statistics.log_likelihood,
-            &parameters,
-            &standard_errors,
-            &group_index,
-        );
+    }
+    FittedCohort {
+        parameters,
+        statistics,
+        passes,
+        converged: ended == StartEnding::Converged,
+        starts,
+        trace,
+        contamination,
+        standard_errors,
+        density_report,
+        duplicated_report,
+        clean_rate_standard_error,
+    }
+}
 
-        // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
-        // the converged error rates and the converged homozygote excess, and nothing it produces
-        // feeds back into them — a sample's stray reads are a property of the tube it was in
-        // rather than of the population, so the density has no business being told about them.
-        // It runs here, inside the same call, so that the sections are lent once rather than
-        // twice.
-        // **The error rate goes in per read group, which is the grain it was fitted at.**
-        // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
-        // group's — which was exact only because every benchmark sample has one library.
-        let error_rate: BTreeMap<ReadGroupId, f64> = groups
-            .iter()
-            .zip(&parameters.clean)
-            .map(|(group, rate)| (*group, *rate))
-            .collect();
-        // **The mismapped positions are kept out of it.** A position where two stretches of
-        // genome pile up on one place puts a small share of unexpected reads into *every*
-        // sample, which is the contamination signature exactly; measured over 63 tomato
-        // accessions with those positions left in, the median accession came back 6.5%
-        // contaminated.
-        let contamination = if config.estimate_contamination {
-            stage.always(|into| {
-                format!("SNP/indel fit: fitting each sample's contamination; {into}")
-            });
-            fit_contamination_over(
-                lent,
-                depth_cap,
-                &config.edges,
-                &error_rate,
-                &parameters.hom_excess,
-                &statistics.noisy_posterior,
-                &config.contamination,
-            )
-        } else {
-            stage.always(|into| {
-                format!(
-                    "SNP/indel fit: contamination not estimated, as the run asked; every \
-                         read group is taken as uncontaminated; {into}"
-                )
-            });
-            not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
-        };
-        // **Each read group's ordinary-position rate's error, found through its sample**: the
-        // errors are laid out a sample at a time, and a read group is one section of one sample. A
-        // read group no sample lends an ordinary-position section for — a sample whose census
-        // holds repeat tracts only — keeps no information: nothing scored it.
-        let mut clean_rate_standard_error = vec![StandardError::NoInformation; groups.len()];
-        for (s, own) in group_index.iter().enumerate() {
-            for (section, &group) in own.iter().enumerate() {
-                clean_rate_standard_error[group] =
-                    standard_errors.samples[s][information::sample::rate(section, 0)];
-            }
-        }
-        FittedCohort {
+impl JointFit {
+    /// The last phase of [`fit_jointly`]: the fit's numbers as the returned [`JointFit`], each
+    /// with its provenance. It reads nothing of the evidence.
+    fn from_fitted(fitted: FittedCohort, names: &[String], groups: &[ReadGroupId]) -> Self {
+        let FittedCohort {
             parameters,
             statistics,
             passes,
-            converged: ended == StartEnding::Converged,
+            converged,
             starts,
             trace,
             contamination,
@@ -2177,151 +2254,150 @@ pub fn fit_jointly(
             density_report,
             duplicated_report,
             clean_rate_standard_error,
-        }
-    })?;
-    stage.always(|into| format!("SNP/indel fit: done; {into}"));
-    let score = statistics.log_likelihood;
-    let mut statistics = statistics;
-    let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
-    let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
+        } = fitted;
+        let score = statistics.log_likelihood;
+        let mut statistics = statistics;
+        let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
+        let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
 
-    let observations = statistics.positions as u64;
-    // **A read group the data never touched is a default, not a fit** (spec `fit_precision.md` §8,
-    // question 1): no position depends on its rates — a library with no reads, or one whose sample
-    // lent no ordinary-position section at all. Its rates are the start's, and calling them fitted
-    // from the run's every position would be the confident-and-wrong case the project rules out.
-    // So it is `Defaulted`, from no observation, at the stated rate; its mismapped rate, read by
-    // nothing, stays where the fit held it.
-    let noise = groups
-        .iter()
-        .enumerate()
-        .map(|(g, id)| {
-            let informed = clean_rate_standard_error[g] != StandardError::NoInformation;
-            (
-                *id,
-                Estimate {
-                    value: SiteClassNoise {
-                        clean: if informed {
-                            parameters.clean[g]
-                        } else {
-                            DEFAULT_ERROR_RATE
-                        },
-                        noisy: parameters.noisy[g],
-                    },
-                    provenance: if informed {
-                        Provenance::FittedHere
-                    } else {
-                        Provenance::Defaulted
-                    },
-                    observations: if informed { observations } else { 0 },
-                    standard_error: None,
-                },
-            )
-        })
-        .collect();
-    let hom_excess = names
-        .iter()
-        .enumerate()
-        .map(|(s, name)| {
-            // **A sample with no reads at an ordinary position has no excess to measure**, so it
-            // is `Defaulted` at no excess, from no observation — as a read group with no reads is
-            // above — rather than written as fitted. **The default value is written, not the fit's**:
-            // no read informs the excess, yet the fit's accelerated steps can still move it off its
-            // start, so the fit's value is not the default.
-            let informed = standard_errors.samples[s][information::sample::HOMOZYGOTE_EXCESS]
-                != StandardError::NoInformation;
-            (
-                name.clone(),
-                Estimate {
-                    value: HomozygoteExcess::try_new(if informed {
-                        parameters.hom_excess[s]
-                    } else {
-                        DEFAULTED_HOMOZYGOTE_EXCESS
-                    })
-                    .expect("the maximisation is confined to [0, 1]"),
-                    provenance: if informed
-                        && fits_homozygote_excess(samples_with_reads(&statistics))
-                    {
-                        Provenance::FittedHere
-                    } else {
-                        Provenance::Defaulted
-                    },
-                    observations: if informed {
-                        statistics.with_reads[s]
-                    } else {
-                        0
-                    },
-                    // `None` where the fit gives it none — at one sample, where the fit holds the
-                    // excess at its start, among others ([`StandardErrors`]).
-                    standard_error: standard_errors.samples[s]
-                        [information::sample::HOMOZYGOTE_EXCESS]
-                        .value(),
-                },
-            )
-        })
-        .collect();
-    // A census with no position leaves every count at zero: zero rates, not NaN.
-    let positions = statistics.positions.max(1.0);
-    let rates = names
-        .iter()
-        .enumerate()
-        .map(|(s, name)| {
-            (
-                name.clone(),
-                Estimate {
-                    value: SampleGenotypeRates {
-                        heterozygous: statistics.heterozygous[s] / positions,
-                        homozygous_alt: statistics.homozygous_alt[s] / positions,
-                        duplicated_carrier: statistics.carrier[s] / positions,
-                        positions_with_reads: statistics.with_reads[s],
-                        positions_with_two_reads: statistics.with_two_reads[s],
-                    },
-                    provenance: Provenance::FittedHere,
-                    observations: statistics.with_reads[s],
-                    standard_error: None,
-                },
-            )
-        })
-        .collect();
-    let contamination = names.iter().cloned().zip(contamination).collect();
-
-    Ok(JointFit {
-        noise,
-        clean_rate_standard_error: groups
+        let observations = statistics.positions as u64;
+        // **A read group the data never touched is a default, not a fit** (spec `fit_precision.md` §8,
+        // question 1): no position depends on its rates — a library with no reads, or one whose sample
+        // lent no ordinary-position section at all. Its rates are the start's, and calling them fitted
+        // from the run's every position would be the confident-and-wrong case the project rules out.
+        // So it is `Defaulted`, from no observation, at the stated rate; its mismapped rate, read by
+        // nothing, stays where the fit held it.
+        let noise = groups
             .iter()
-            .copied()
-            .zip(clean_rate_standard_error.iter().map(|error| error.value()))
-            .collect(),
-        noisy_share: parameters.noisy_share,
-        density: Estimate {
-            value: parameters.density,
-            provenance: Provenance::FittedHere,
-            observations,
-            standard_error: None,
-        },
-        hom_excess,
-        rates,
-        contamination,
-        expected_heterozygosity: parameters.density.expected_heterozygosity(),
-        census_moments: statistics.census_moments.clone(),
-        duplicated: parameters.duplicated.map(|value| Estimate {
-            value,
-            provenance: Provenance::FittedHere,
-            observations,
-            standard_error: None,
-        }),
-        density_report,
-        duplicated_report,
-        noisy_posterior: statistics.noisy_posterior,
-        genotype_posterior,
-        duplicated_posterior,
-        trace,
-        passes,
-        converged,
-        starts,
-        log_likelihood: score,
-        standard_errors,
-    })
+            .enumerate()
+            .map(|(g, id)| {
+                let informed = clean_rate_standard_error[g] != StandardError::NoInformation;
+                (
+                    *id,
+                    Estimate {
+                        value: SiteClassNoise {
+                            clean: if informed {
+                                parameters.clean[g]
+                            } else {
+                                DEFAULT_ERROR_RATE
+                            },
+                            noisy: parameters.noisy[g],
+                        },
+                        provenance: if informed {
+                            Provenance::FittedHere
+                        } else {
+                            Provenance::Defaulted
+                        },
+                        observations: if informed { observations } else { 0 },
+                        standard_error: None,
+                    },
+                )
+            })
+            .collect();
+        let hom_excess = names
+            .iter()
+            .enumerate()
+            .map(|(s, name)| {
+                // **A sample with no reads at an ordinary position has no excess to measure**, so it
+                // is `Defaulted` at no excess, from no observation — as a read group with no reads is
+                // above — rather than written as fitted. **The default value is written, not the fit's**:
+                // no read informs the excess, yet the fit's accelerated steps can still move it off its
+                // start, so the fit's value is not the default.
+                let informed = standard_errors.samples[s][information::sample::HOMOZYGOTE_EXCESS]
+                    != StandardError::NoInformation;
+                (
+                    name.clone(),
+                    Estimate {
+                        value: HomozygoteExcess::try_new(if informed {
+                            parameters.hom_excess[s]
+                        } else {
+                            DEFAULTED_HOMOZYGOTE_EXCESS
+                        })
+                        .expect("the maximisation is confined to [0, 1]"),
+                        provenance: if informed
+                            && fits_homozygote_excess(samples_with_reads(&statistics))
+                        {
+                            Provenance::FittedHere
+                        } else {
+                            Provenance::Defaulted
+                        },
+                        observations: if informed {
+                            statistics.with_reads[s]
+                        } else {
+                            0
+                        },
+                        // `None` where the fit gives it none — at one sample, where the fit holds the
+                        // excess at its start, among others ([`StandardErrors`]).
+                        standard_error: standard_errors.samples[s]
+                            [information::sample::HOMOZYGOTE_EXCESS]
+                            .value(),
+                    },
+                )
+            })
+            .collect();
+        // A census with no position leaves every count at zero: zero rates, not NaN.
+        let positions = statistics.positions.max(1.0);
+        let rates = names
+            .iter()
+            .enumerate()
+            .map(|(s, name)| {
+                (
+                    name.clone(),
+                    Estimate {
+                        value: SampleGenotypeRates {
+                            heterozygous: statistics.heterozygous[s] / positions,
+                            homozygous_alt: statistics.homozygous_alt[s] / positions,
+                            duplicated_carrier: statistics.carrier[s] / positions,
+                            positions_with_reads: statistics.with_reads[s],
+                            positions_with_two_reads: statistics.with_two_reads[s],
+                        },
+                        provenance: Provenance::FittedHere,
+                        observations: statistics.with_reads[s],
+                        standard_error: None,
+                    },
+                )
+            })
+            .collect();
+        let contamination = names.iter().cloned().zip(contamination).collect();
+
+        JointFit {
+            noise,
+            clean_rate_standard_error: groups
+                .iter()
+                .copied()
+                .zip(clean_rate_standard_error.iter().map(|error| error.value()))
+                .collect(),
+            noisy_share: parameters.noisy_share,
+            density: Estimate {
+                value: parameters.density,
+                provenance: Provenance::FittedHere,
+                observations,
+                standard_error: None,
+            },
+            hom_excess,
+            rates,
+            contamination,
+            expected_heterozygosity: parameters.density.expected_heterozygosity(),
+            census_moments: statistics.census_moments.clone(),
+            duplicated: parameters.duplicated.map(|value| Estimate {
+                value,
+                provenance: Provenance::FittedHere,
+                observations,
+                standard_error: None,
+            }),
+            density_report,
+            duplicated_report,
+            noisy_posterior: statistics.noisy_posterior,
+            genotype_posterior,
+            duplicated_posterior,
+            trace,
+            passes,
+            converged,
+            starts,
+            log_likelihood: score,
+            standard_errors,
+        }
+    }
 }
 
 /// One run of [`maximise`] in [`fit_jointly`]: a start from its starting point on every `stride`-th
