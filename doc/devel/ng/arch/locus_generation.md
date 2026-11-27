@@ -15,16 +15,18 @@ illustrative; the **contract** is the deliverable.*
 
 ## Module home
 
-`src/ng/locus_generation/` — a **folder**, per `module_layout.md` principle 1: a step whose implementations
+`src/locus_generation/` — a **folder**, per `module_layout.md` principle 1: a step whose implementations
 compete keeps its trait and every implementation side by side, and ng expects several generators
 per region kind (spec §5). Defer the tree-wide rules to the module-layout doc; this unit owns:
 
 ```
-src/ng/locus_generation/
-  mod.rs   – SampleLocusObservations, ObservedSequence, ReadCoverage, LocusGenerator,
-             the dispatcher, NoLoci, the iterator + its config/counts/error
-  ssr.rs   – the STR generator (locus_generation_ssr.md)
-  pileup/  – the generic generator (deferred, spec §11)
+src/locus_generation/
+  mod.rs      – SampleLocusObservations, SequenceObservation, LocusGenerator,
+                the dispatcher, the iterator + its config/counts/error
+  witness.rs  – the witness vocabulary (ReadWitness, LocusLen, …)
+  ssr.rs      – the STR segment generator (locus_generation_ssr.md)
+  ssr/        – its steps, and bundle.rs, the STR bundle generator (str_bundle_loci.md)
+  pileup/     – the generic generator (locus_generation_pileup.md)
 ```
 
 ## 1. The locus type

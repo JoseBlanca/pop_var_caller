@@ -60,7 +60,7 @@ Three changes, in dependency order:
   *Changed during implementation (2026-10-11).* The bundle slot is now filled
   ([`str_bundle_loci.md`](str_bundle_loci.md) §6.1): a run measures each STR bundle of at most
   `--max-str-bundle-len` bases as one locus over its hull, with the tract generator run over the
-  hull (`locus_generation/ssr_bundle.rs`). Calling still sets every bundle locus aside and counts
+  hull (`locus_generation/ssr/bundle.rs`). Calling still sets every bundle locus aside and counts
   it, so a run's calls are unchanged; its walk report no longer lists bundle bases as ground not
   stored, and the hidden-duplication filter's coverage now sees reads at bundle hulls (on the
   stuttering benchmark, one sample, 30×: the `PARALOG_LR` of 67 of 2,396 records moved, no
