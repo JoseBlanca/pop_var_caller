@@ -76,13 +76,14 @@ impl DepthRule {
 /// slippage less than `chance` of the time; tested in rounds, at most `max_rounds` of them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StutterTailRule {
-    /// 2. Without it, a tract summed over thousands of samples is flagged for slipping only a
-    /// little more than its class: the binomial test grows stricter with every read.
+    /// Production uses 2. Without it, a tract summed over thousands of samples is flagged for
+    /// slipping only a little more than its class: the binomial test grows stricter with every
+    /// read.
     pub times_rate: f64,
-    /// 0.001.
+    /// Production uses 0.001.
     pub chance: f64,
-    /// 10. A tract left out stays out, so the rounds end; a motif length still flagging tracts
-    /// after this many is reported as not settled.
+    /// Production uses 10. A tract left out stays out, so the rounds end; a motif length still
+    /// flagging tracts after this many is reported as not settled.
     pub max_rounds: usize,
 }
 
@@ -330,7 +331,7 @@ pub(super) fn tracts_in_the_stutter_tail(
     multipliers: Option<&[f64]>,
 ) -> Vec<usize> {
     let level = slippage.level;
-    if !(level > 0.0) {
+    if level.is_nan() || level <= 0.0 {
         return Vec::new();
     }
     reads_off_the_genotype_the_reads_favour(
@@ -678,7 +679,7 @@ mod tests {
             "every tract {every_tract:.4}; one round {one_round:.4} ({after_one} out); \
              settled {settled:.4} ({after_all} out)"
         );
-        assert!(after_one >= 30 && after_one < 60, "{after_one}");
+        assert!((30..60).contains(&after_one), "{after_one}");
         assert!(after_all >= 60, "{after_all}");
         assert!(settled < 0.015, "{settled}");
         assert!(one_round > 1.2 * settled, "{one_round} against {settled}");

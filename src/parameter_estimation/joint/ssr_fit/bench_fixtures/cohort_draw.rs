@@ -27,7 +27,7 @@
 //! 4. **Each sample's reads at the locus**: a Poisson number with mean [`CohortModel::depth`], each
 //!    read from either copy with even odds, its length reported through the stutter of the sample's
 //!    read group ([`Slippage::read_probabilities`] at [`read_group_level`]). A sample with no read
-//! at a    locus is left out of that locus, as the census leaves it out.
+//!    at a locus is left out of that locus, as the census leaves it out.
 //!
 //! Reads are recorded to `±read_span` (the census's [`RECORDED_OFFSET_RANGE`], 8) with the end
 //! buckets saturating, while alleles reach ±14 — so the fit's outermost allele classes (±9, which

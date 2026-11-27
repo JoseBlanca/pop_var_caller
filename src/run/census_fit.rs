@@ -608,6 +608,10 @@ fn misread_after_runs_of(
 /// was read off the fitted density — the `fitted_curve` rung — since on any other rung the seed
 /// does not come from it.
 #[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate part of the file, from a different stage of the run"
+)]
 pub fn parameters_file_of(
     parameters: &RunParameters,
     read_groups: &ReadGroups,
