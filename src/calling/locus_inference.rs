@@ -1,3 +1,6 @@
+//! What calling a locus produces: [`LocusInference`], one [`SampleGenotypeCall`] per sample
+//! and, at a repeat tract, the [`RepeatTractProvenance`] of the parameters it was scored with.
+
 use super::locus_evidence::locus_kind_word;
 #[cfg(test)]
 use crate::calling::GenotypeTable;

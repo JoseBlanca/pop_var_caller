@@ -6,23 +6,44 @@
 //! folders at the top of `src/`, the three calling architecture documents each had
 //! to state by hand that the prior and the likelihood must never import from the
 //! inference step — a rule the tree made necessary and could not enforce. Under one
-//! folder the shared vocabulary sits here, in `calling/mod.rs`, one level above all
-//! four sub-modules, so each imports downward and the rule disappears
-//! (`doc/devel/ng/arch/module_layout.md`, principle 1b).
+//! folder the types all four steps share sit one level above them, in the files
+//! listed below, and each step imports them from there
+//! (`doc/devel/ng/arch/module_layout.md`, principle 1b). The rule still holds — no code
+//! in [`genotype_prior`] or [`likelihood`] imports from [`inference`] — though nothing
+//! but review keeps it so.
+//!
+//! **The shared types are not free of the sub-modules, and imports run both ways
+//! between the two levels.** Only [`CandidateAlleles`] and [`ExpectedAlleleCopies`]
+//! need nothing from below. [`LocusEvidence`] carries the likelihood's per-sample
+//! evidence views; [`FrozenParameters`] the likelihood's calibration and contamination
+//! and the prior's seed; [`LocusInference`] the site-quality step's artifact counts —
+//! in each case a type the step that produces it defines. [`CallingScratch`] goes
+//! further by design: it holds a buffer from every sub-module, the inference step's
+//! included, because a worker owns one scratch and lends each step its part.
 //!
 //! Steps 10 and 11 are deliberately elsewhere: phasing and locus filtering read what
 //! calling produces rather than taking part in producing it.
 //!
 //! ## What is here
 //!
-//! The vocabulary that needs nothing from the sub-modules: [`CandidateAlleles`], the
-//! alleles a locus is called over; [`ExpectedAlleleCopies`], the fractional allele
-//! counts the loop feeds back to itself; and [`LocusInference`] with
-//! [`SampleGenotypeCall`], what a locus produces. Beside them, the three the calling
-//! loop takes and gives back: [`LocusEvidence`], one locus's reads per sample and the
-//! one place the SNP/indel and repeat-tract paths meet; [`FrozenParameters`], everything
-//! the parameter pre-pass fitted, gathered so one borrow crosses the seam; and
-//! [`CallingScratch`], every buffer a locus's calling fills, allocated once per worker.
+//! The shared types live one family to a file, and all are re-exported here, so each is
+//! named `crate::calling::X`:
+//!
+//! - `candidate_alleles.rs` — [`CandidateAlleles`], the alleles a locus is called over,
+//!   and [`ExpectedAlleleCopies`], the fractional allele counts the loop feeds back to
+//!   itself.
+//! - `locus_evidence.rs` — [`LocusEvidence`], one locus's reads per sample and the one
+//!   place the SNP/indel and repeat-tract paths meet, with [`GenericLocusSample`] and
+//!   [`SsrLocusShape`].
+//! - `frozen_parameters.rs` — [`FrozenParameters`], everything the parameter pre-pass
+//!   fitted, gathered so one borrow crosses the seam.
+//! - `scratch.rs` — [`CallingScratch`], every buffer a locus's calling fills, allocated
+//!   once per worker, and the borrow structs that hand each step its share of it.
+//! - `locus_inference.rs` — [`LocusInference`] with [`SampleGenotypeCall`] and
+//!   [`RepeatTractProvenance`], what a locus produces.
+//! - `tests.rs`, test-only — the fixtures the tests of more than one family use, and
+//!   that `inference`'s tests borrow.
+//!
 //! Of the four sub-modules — the candidate
 //! step, the likelihood, the genotype prior and the inference loop — three are here:
 //! [`allele_candidates`], step 6, which narrows the merge's allele table to the sequences

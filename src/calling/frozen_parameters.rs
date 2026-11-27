@@ -1,3 +1,6 @@
+//! [`FrozenParameters`]: everything the parameter pre-pass fitted, borrowed once for the whole
+//! run.
+
 use crate::calling::genotype_prior::SpectrumSeed;
 use crate::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::calling::{ContaminationView, ReadGroupCalibration};

@@ -1,3 +1,6 @@
+//! The alleles one locus is called over, [`CandidateAlleles`], and the fractional copy counts
+//! the calling loop keeps of them, [`ExpectedAlleleCopies`].
+
 use crate::locus_generation::LocusKind;
 use crate::types::AlleleId;
 

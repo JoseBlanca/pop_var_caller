@@ -1,3 +1,6 @@
+//! Test fixtures used by the tests of more than one type family in `calling`, and by
+//! `inference`'s tests (`one_batch`).
+
 use super::*;
 use crate::calling::genotype_prior::SpectrumSeed;
 use crate::locus_generation::{LocusKind, SsrDetail};
@@ -51,10 +54,6 @@ pub(super) fn region() -> GenomeRegion {
         end: Position(940),
     }
 }
-
-// ────────────────────────────────────────────────────────────────────────────────
-// The three types the calling loop takes and gives back, and the missing genotype.
-// ────────────────────────────────────────────────────────────────────────────────
 
 use std::collections::BTreeMap;
 

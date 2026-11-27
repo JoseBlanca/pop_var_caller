@@ -1,3 +1,6 @@
+//! One locus's reads per sample, as the calling loop takes them: [`LocusEvidence`] and the
+//! shapes it holds, [`GenericLocusSample`] and [`SsrLocusShape`].
+
 use crate::calling::{
     CandidateAlleles, FrozenParameters, GenericSampleEvidence, ReferenceBesideLocus,
     SsrSampleEvidence,

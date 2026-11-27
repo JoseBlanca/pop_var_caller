@@ -1,3 +1,6 @@
+//! [`CallingScratch`]: every buffer a locus's calling fills, allocated once per worker, and
+//! the borrow structs that lend each step its share of it.
+
 use crate::calling::quality::{CountPriorMemo, SiteQualityBuffers};
 use crate::calling::{
     CandidateAlleles, GenericRowScratch, GenotypeTableView, SsrRowScratch, WrongReadCharge,
