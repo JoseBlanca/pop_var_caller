@@ -27,7 +27,7 @@
 //!   the wrong file, because that fix is to name the right one and it rebuilds nothing;
 //! - **then every census's recorded settings are compared with the ones this run's selection
 //!   records under**, and every sample that differs is named with the first setting that does and
-//!   the command that regenerates it (`psp_census_pair.md` plan step C5).
+//!   the command that regenerates it (`doc/devel/ng/spec/psp_census_pair.md`).
 //!
 //! # The inbreeding coefficient, and the three things it can be
 //!
@@ -777,7 +777,7 @@ pub fn open_the_censuses(
     // **Each one apart, and not yet a cohort.** Assembling them compares the samples with each
     // other, and a refusal from that names two samples and nothing to do. Judged against this
     // run's own settings once the selection is rebuilt, below, every stale sample is named and so
-    // is the fix (plan step C5).
+    // is the fix.
     let setup = StageProgress::begin(format!(
         "reading the censuses of {} psp(s) and the reference",
         paths.len()
@@ -830,7 +830,7 @@ pub fn open_the_censuses(
     //
     // **They are the first psp's, and what makes one psp enough is the cohort opener**: it
     // compares all three settings across every file and refuses a cohort that disagrees, naming
-    // the two samples and the field (step B3). Take that away and this line is the hazard spec §6
+    // the two samples and the field (`OpenPspCohort::open`). Take that away and this line is the hazard spec §6
     // describes — a selection built from the first psp's settings that the rest cannot match.
     //
     // **And a census written under other criteria is still named**, below: its recorded settings

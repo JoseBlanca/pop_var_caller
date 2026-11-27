@@ -489,8 +489,8 @@ fn read_groups_declared_out_of_id_order_fit_to_the_same_file() {
 ///
 /// The psps here were walked asking for eleven motif copies where the default is six at period 2,
 /// and this command has no flag that says so — there is nothing to type and nothing to get wrong.
-/// Before plan step C1 the same run needed `--min-copies 11,11,11,11,11,11` and refused the
-/// cohort without it.
+/// Before the criteria were read from the psps' headers, the same run needed
+/// `--min-copies 11,11,11,11,11,11` and refused the cohort without it.
 ///
 /// **It asserts the file differs from the default walk's**, because *it fitted something* is
 /// satisfied by a fit that quietly used the defaults: the two walks type the fixture's tract two
@@ -590,8 +590,8 @@ fn the_selection_is_rebuilt_over_the_ground_the_psps_were_walked_on() {
     );
 }
 
-/// **A catalog the psps were not walked with is refused as that, before a segment is cut** (plan
-/// step C5, which makes spec §6's check exist).
+/// **A catalog the psps were not walked with is refused as that, before a segment is cut** (spec
+/// §6's check: a census built under other settings is refused, naming the setting).
 ///
 /// The catalog built here is on the cohort's own reference and holds tracts of twenty copies and
 /// up, where the psps' was built at the default floors — the same assembly, another file.
@@ -673,7 +673,7 @@ fn a_catalog_the_psps_were_not_walked_with_is_refused_before_segments_are_cut() 
 }
 
 /// **A reference the psps were not walked against is refused as that, before the selection is
-/// rebuilt** (plan step C5).
+/// rebuilt** (spec §6's check, as for the catalog above).
 ///
 /// The reference here is the cohort's own with its first base changed, so its one contig has the
 /// psps' name and length and only its bases differ — what a person meets when two builds of an
