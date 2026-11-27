@@ -255,7 +255,11 @@ impl RecordNumbers {
     /// Appends the numbers to `out`, each array its length and then its values, little-endian.
     pub fn write_to(&self, out: &mut Vec<u8>) {
         let length = |out: &mut Vec<u8>, length: usize| {
-            out.extend_from_slice(&u32::try_from(length).expect("a record's array fits u32").to_le_bytes());
+            out.extend_from_slice(
+                &u32::try_from(length)
+                    .expect("a record's array fits u32")
+                    .to_le_bytes(),
+            );
         };
         length(out, self.background_shares.len());
         for value in &self.background_shares {
@@ -286,11 +290,17 @@ impl RecordNumbers {
         }
         let length = |bytes: &mut &[u8]| u32::from_le_bytes(take(bytes)) as usize;
         let count = length(bytes);
-        let background_shares = (0..count).map(|_| f32::from_le_bytes(take(bytes))).collect();
+        let background_shares = (0..count)
+            .map(|_| f32::from_le_bytes(take(bytes)))
+            .collect();
         let count = length(bytes);
-        let likelihoods = (0..count).map(|_| u16::from_le_bytes(take(bytes))).collect();
+        let likelihoods = (0..count)
+            .map(|_| u16::from_le_bytes(take(bytes)))
+            .collect();
         let count = length(bytes);
-        let shares = (0..count).map(|_| f32::from_le_bytes(take(bytes))).collect();
+        let shares = (0..count)
+            .map(|_| f32::from_le_bytes(take(bytes)))
+            .collect();
         Self {
             background_shares,
             likelihoods,
