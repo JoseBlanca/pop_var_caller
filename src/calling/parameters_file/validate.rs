@@ -23,8 +23,8 @@
 //!
 //! **No line number.** The refusals of C1 come from a parser holding a byte span; these come from
 //! walking a value that no longer remembers where it was written. What is given instead is **the
-//! key's full path in the file's own spelling** — `inbreeding.by_sample["TS-1"]` — which a reader
-//! can search for, and which survives the file being reformatted.
+//! key's full path in the file's own spelling** — `inbreeding.by_sample[sample = "TS-1"]` — which a
+//! reader can search for, and which survives the file being reformatted.
 //!
 //! **A line is available and was not taken.** The `toml` crate re-exports `serde_spanned::Spanned`,
 //! so a field wrapped in `Spanned<T>` carries a byte range out of the parse this module's caller
@@ -154,7 +154,7 @@ impl ParametersFile {
         let read_group_count = self.fitted_from.read_groups.len();
         let mut rows_of_each_group: BTreeMap<u32, [bool; ENTRY_COUNT]> = BTreeMap::new();
         for row in &misread.entries {
-            let at = misread_row_path(row);
+            let at = row.path();
             if row.read_group as usize >= read_group_count {
                 return Err(refuse(
                     at,
@@ -1160,10 +1160,7 @@ impl ParametersFile {
             ));
         }
         for row in &self.inbreeding.by_sample {
-            let at = format!(
-                "inbreeding.by_sample[sample = {:?}].inbreeding_coefficient",
-                row.sample
-            );
+            let at = format!("{}.inbreeding_coefficient", row.path());
             a_warranted_value(
                 &at,
                 &row.inbreeding_coefficient,
@@ -1256,11 +1253,7 @@ impl ParametersFile {
         }
 
         for row in &tracts.slippage_by_stratum_and_group {
-            let at = format!(
-                "repeat_tracts.slippage_by_stratum_and_group[period = {}, reference_repeats = {}, \
-                 slippage_group = {}]",
-                row.period, row.reference_repeats, row.slippage_group
-            );
+            let at = row.path();
             a_share(
                 &format!("{at}.share_of_reads_that_slip"),
                 row.share_of_reads_that_slip,
@@ -1375,11 +1368,7 @@ impl ParametersFile {
         }
 
         for row in &tracts.substitution_rate_by_stratum {
-            let at = format!(
-                "repeat_tracts.substitution_rate_by_stratum[read_group = {}, period = {}, \
-                 reference_repeats = {}, ploidy = {}].rate",
-                row.read_group, row.period, row.reference_repeats, row.ploidy
-            );
+            let at = format!("{}.rate", row.path());
             a_warranted_value(&at, &row.rate, EvidenceCount::BasesCompared(0))?;
             finite(at.clone(), row.rate.value)?;
             if !(0.0..=1.0).contains(&row.rate.value) {
@@ -1778,14 +1767,6 @@ fn a_misread_standard_error(
         ));
     }
     Ok(())
-}
-
-/// A misread row's path in the file's own spelling, for a refusal that names it.
-fn misread_row_path(row: &MisreadAfterRunRow) -> String {
-    format!(
-        "misread_after_runs.entries[read_group = {}, shortest_run = {}, base = {:?}]",
-        row.read_group, row.shortest_run, row.base
-    )
 }
 
 /// **The entry of the misread table a row names**, or `None` where no entry has its run lengths
