@@ -2565,12 +2565,11 @@ fn maximise(
     // A pass an accepted Newton step already ran at `parameters`, with the information, and the
     // maximisation step from it: the next cycle's judging pass and first step.
     let mut accepted_pass: Option<(Parameters, Statistics)> = None;
-    // The fraction of its Newton step this start tries first: the whole step before any is kept,
-    // then where the last kept try put the log-likelihood's peak along its step (§3.3.1 point 2).
-    let mut first_fraction = 1.0_f64;
-    // The last kept step, which the next step is blended with (§3.3.1 point 1); `None` before any
-    // and after a step no try kept.
-    let mut previous_step: Option<PreviousStep> = None;
+    // What this start's Newton steps carry from one judging pass to the next.
+    let mut newton = NewtonHistory {
+        first_fraction: 1.0,
+        previous_step: None,
+    };
     // A cycle needs three passes in hand — its first, the second plain one, the jump's — but one
     // that begins with an accepted try's pass has run its first already, and judging that pass
     // costs none: it is always judged, and the guard before the SQUAREM cycle ends the start
@@ -2584,44 +2583,12 @@ fn maximise(
         let judging_pass = alternation.passes;
         // What this cycle's information pass found, at the parameters it judged; `None` before the
         // fit judges them.
-        let judged_here = entering.information.as_ref().map(|information| {
-            let standard_errors = StandardErrors::of(information);
-            let errors = standard_errors.by_coordinate(&parameters, group_index);
-            let step = newton_step(information, &standard_errors, &parameters, group_index);
-            let converged = has_converged(step.decrement, config.decrement_threshold);
-            // A start that has converged is never stopped by agreement: it competes to be the
-            // fit's answer. Agreement stops only a start still on its way.
-            let heading_to = which
-                .earlier
-                .filter(|answer| {
-                    !converged
-                        && agrees(
-                            &parameters.values(),
-                            &step.distances,
-                            answer,
-                            config.agreement_fraction,
-                        )
-                })
-                .map(|answer| answer.start);
-            Judgement {
-                decrement: step.decrement,
-                converged,
-                not_settled: not_settled(&errors, &step.distances, config.settled_fraction),
-                furthest: furthest(&errors, &step.distances),
-                heading_to,
-                distances: step.distances,
-                slopes: step.slopes,
-            }
-        });
+        let judged_here = entering
+            .information
+            .as_ref()
+            .map(|information| Judgement::of(information, &parameters, config, group_index, which));
         // The traced pass that judged records its verdict.
-        if let (Some(judgement), Some(traced)) = (
-            &judged_here,
-            alternation
-                .trace
-                .iter_mut()
-                .rev()
-                .find(|summary| summary.pass == judging_pass),
-        ) {
+        if let (Some(judgement), Some(traced)) = (&judged_here, alternation.traced(judging_pass)) {
             traced.not_settled = Some(judgement.not_settled);
             traced.decrement = Some(judgement.decrement);
         }
@@ -2653,94 +2620,24 @@ fn maximise(
         if let Some(judgement) = &judged_here
             && alternation.passes < config.max_passes
         {
-            let distances = match &previous_step {
-                Some(previous) => previous.blended(&judgement.distances, &judgement.slopes),
-                None => judgement.distances.clone(),
-            };
-            let target = parameters.newton_target(&distances);
-            // The log-likelihood's slope along the whole step, clamped as the target is: what the
-            // tries fit their parabola from (§3.3.1 point 4).
-            let slope_along: f64 = parameters
-                .coordinates()
-                .iter()
-                .zip(&target)
-                .zip(&judgement.slopes)
-                .map(|((coordinate, full), slope)| {
-                    slope.map_or(0.0, |slope| slope * (full - coordinate.value))
-                })
-                .sum();
-            let outcome = try_the_newton_step(
+            match alternation.take_the_newton_step(
+                judgement,
                 &parameters,
-                &target,
-                first_fraction,
                 entering.log_likelihood,
-                slope_along,
-                |candidate| {
-                    (alternation.passes < config.max_passes).then(|| {
-                        let (next, at_candidate) = alternation.step(candidate, true);
-                        (at_candidate.log_likelihood, (next, at_candidate))
-                    })
-                },
-            );
-            let trial = NewtonTrial {
-                first_fraction,
-                accepted: match &outcome {
-                    NewtonOutcome::Accepted { fraction, .. } => Some(*fraction),
-                    NewtonOutcome::Rejected { .. } => None,
-                },
-                last_pass: alternation.passes,
-            };
-            if let Some(traced) = alternation
-                .trace
-                .iter_mut()
-                .rev()
-                .find(|summary| summary.pass == judging_pass)
-            {
-                traced.newton = Some(trial);
-            }
-            match outcome {
+                &mut newton,
+                judging_pass,
+                cycle_began,
+            ) {
                 NewtonOutcome::Accepted {
-                    fraction,
                     parameters: candidate,
                     pass,
-                    best,
+                    ..
                 } => {
-                    let gain = pass.1.log_likelihood - entering.log_likelihood;
-                    // Where the kept try put the peak, but at most twice the fraction kept: a peak
-                    // read from a short try sees too little of the curvature to be trusted further
-                    // (§3.3.1 point 2).
-                    let doubled = first_newton_fraction(fraction);
-                    first_fraction = best.map_or(doubled, |best| best.min(doubled));
-                    previous_step = Some(PreviousStep::of(
-                        &distances,
-                        &judgement.distances,
-                        &judgement.slopes,
-                    ));
                     parameters = candidate;
                     accepted_pass = Some(pass);
-                    print_the_cycle(
-                        which,
-                        config,
-                        alternation.passes,
-                        gain,
-                        Some(&format!(
-                            "Newton step at {} accepted",
-                            as_a_fraction(fraction)
-                        )),
-                        || {
-                            judgement.described(
-                                &parameters.plain_names(which.sample_names, group_index),
-                                config,
-                            )
-                        },
-                        cycle_began,
-                    );
                     continue;
                 }
-                NewtonOutcome::Rejected { tries } => {
-                    newton_rejected = Some(tries);
-                    previous_step = None;
-                }
+                NewtonOutcome::Rejected { tries } => newton_rejected = Some(tries),
             }
         }
         // The SQUAREM cycle needs two passes more; refused tries that spent them, or a cycle that
@@ -2749,38 +2646,8 @@ fn maximise(
         if alternation.passes + 2 > config.max_passes {
             break;
         }
-        let (second, _) = alternation.step(&first, false);
-        let mut alpha = squarem_step_length(&parameters, &first, &second).clamp(1.0, reach);
-        let (landed, landed_at) = loop {
-            let jumped = if alpha > 1.0 {
-                parameters.extrapolated(&first, &second, alpha)
-            } else {
-                Some(second.clone())
-            };
-            if let Some(jumped) = jumped {
-                let (steadied, at_jump) = alternation.step(&jumped, false);
-                if at_jump.log_likelihood >= entering.log_likelihood - JUMP_SLACK || alpha <= 1.0 {
-                    if alpha >= reach {
-                        reach *= 4.0;
-                    }
-                    break (steadied, at_jump.log_likelihood);
-                }
-                reach = (reach / 4.0).max(1.0);
-            }
-            // Shortened towards the plain step, and taken as the plain step once close to it
-            // or once the passes are spent — `θ₂` is not checked, on the alternation's guarantee
-            // that a plain step does not lower the log-likelihood. That guarantee holds only to
-            // within the drift `JUMP_SLACK` describes, and it held not at all while the
-            // maximisation swapped a library's two error rates (deleted 2026-10-17): every other
-            // cycle then landed on a point tens of units lower.
-            alpha = (1.0 + alpha) / 2.0;
-            if alpha < 1.01 || alternation.passes >= config.max_passes {
-                alpha = 1.0;
-                if alternation.passes >= config.max_passes {
-                    break (second.clone(), entering.log_likelihood);
-                }
-            }
-        };
+        let (landed, landed_at) =
+            alternation.squarem_jump(&parameters, &first, entering.log_likelihood, &mut reach);
         let gain = landed_at - entering.log_likelihood;
         let gain_to_judge = config.log_likelihood_stillness * entering.positions.max(1.0);
         judging |= gain.abs() < gain_to_judge;
@@ -2810,66 +2677,248 @@ fn maximise(
             cycle_began,
         );
     }
-    // The reported statistics must be the ones the reported parameters produce, so the last
-    // cycle is followed by one more pass rather than by a pass that preceded it — and it is
-    // this pass, at the parameters that will be reported, that keeps each position's
-    // probability of being mismapped, and the information their standard errors come from.
-    // **A start that agreed has that pass already** — the one that judged it, at the parameters
-    // it returns — and no use for the posteriors, since it does not compete to be the answer.
-    let last_pass_began = std::time::Instant::now();
-    let mut statistics = agreed_at.unwrap_or_else(|| {
-        expectation_pass_every(
-            samples,
-            depth_cap,
-            config,
-            group_index,
-            coverage,
-            &parameters,
-            PassKeeps {
-                per_position_posteriors: true,
-                information: true,
+    alternation.finish(parameters, ended, agreed_at)
+}
+
+/// **What one start's Newton steps carry from one judging pass to the next**
+/// (`parameter_prepass_joint_fit.md` §3.3.1 points 1 and 2).
+struct NewtonHistory {
+    /// The fraction of its Newton step this start tries first: the whole step before any is kept,
+    /// then where the last kept try put the log-likelihood's peak along its step (point 2).
+    first_fraction: f64,
+    /// The last kept step, which the next step is blended with (point 1); `None` before any and
+    /// after a step no try kept.
+    previous_step: Option<PreviousStep>,
+}
+
+impl Alternation<'_, '_> {
+    /// The trace's record of pass `pass`, when the run keeps a trace.
+    fn traced(&mut self, pass: u32) -> Option<&mut PassSummary> {
+        self.trace
+            .iter_mut()
+            .rev()
+            .find(|summary| summary.pass == pass)
+    }
+
+    /// **The Newton step of one judging pass** ([`maximise`]): from `judged`, the parameters the
+    /// pass at `judging_pass` judged, towards where `judgement` puts the maximum, blended with the
+    /// last kept step ([`try_the_newton_step`]). The try is recorded in the trace and `history`
+    /// updated; a kept try also prints the cycle's progress line, since its cycle ends there.
+    fn take_the_newton_step(
+        &mut self,
+        judgement: &Judgement,
+        judged: &Parameters,
+        judged_log_likelihood: f64,
+        history: &mut NewtonHistory,
+        judging_pass: u32,
+        cycle_began: std::time::Instant,
+    ) -> NewtonOutcome<(Parameters, Statistics)> {
+        let config = self.config;
+        let distances = match &history.previous_step {
+            Some(previous) => previous.blended(&judgement.distances, &judgement.slopes),
+            None => judgement.distances.clone(),
+        };
+        let target = judged.newton_target(&distances);
+        // The log-likelihood's slope along the whole step, clamped as the target is: what the
+        // tries fit their parabola from (§3.3.1 point 4).
+        let slope_along: f64 = judged
+            .coordinates()
+            .iter()
+            .zip(&target)
+            .zip(&judgement.slopes)
+            .map(|((coordinate, full), slope)| {
+                slope.map_or(0.0, |slope| slope * (full - coordinate.value))
+            })
+            .sum();
+        let outcome = try_the_newton_step(
+            judged,
+            &target,
+            history.first_fraction,
+            judged_log_likelihood,
+            slope_along,
+            |candidate| {
+                (self.passes < config.max_passes).then(|| {
+                    let (next, at_candidate) = self.step(candidate, true);
+                    (at_candidate.log_likelihood, (next, at_candidate))
+                })
             },
-            stride,
-        )
-    });
-    let last_pass_took = last_pass_began.elapsed();
-    // PANIC-FREE: the final pass was asked to keep the information, and a pass that is asked
-    // starts every chunk's statistics, and its empty total, with the sums in place; an agreeing
-    // start's statistics are those of a pass that judged it, which kept the information too.
-    let information = statistics
-        .information
-        .take()
-        .expect("the pass above keeps the information");
-    // Why a start that did not converge had not, at the values it returns (spec §3.5).
-    let furthest_from_settled = (ended != StartEnding::Converged)
-        .then(|| {
-            how_far_from_settled(
-                &information,
+        );
+        let trial = NewtonTrial {
+            first_fraction: history.first_fraction,
+            accepted: match &outcome {
+                NewtonOutcome::Accepted { fraction, .. } => Some(*fraction),
+                NewtonOutcome::Rejected { .. } => None,
+            },
+            last_pass: self.passes,
+        };
+        if let Some(traced) = self.traced(judging_pass) {
+            traced.newton = Some(trial);
+        }
+        match outcome {
+            NewtonOutcome::Accepted {
+                fraction,
+                parameters: candidate,
+                pass,
+                best,
+            } => {
+                let gain = pass.1.log_likelihood - judged_log_likelihood;
+                // Where the kept try put the peak, but at most twice the fraction kept: a peak
+                // read from a short try sees too little of the curvature to be trusted further
+                // (§3.3.1 point 2).
+                let doubled = first_newton_fraction(fraction);
+                history.first_fraction = best.map_or(doubled, |best| best.min(doubled));
+                history.previous_step = Some(PreviousStep::of(
+                    &distances,
+                    &judgement.distances,
+                    &judgement.slopes,
+                ));
+                print_the_cycle(
+                    self.which,
+                    config,
+                    self.passes,
+                    gain,
+                    Some(&format!(
+                        "Newton step at {} accepted",
+                        as_a_fraction(fraction)
+                    )),
+                    || {
+                        judgement.described(
+                            &candidate.plain_names(self.which.sample_names, self.group_index),
+                            config,
+                        )
+                    },
+                    cycle_began,
+                );
+                NewtonOutcome::Accepted {
+                    fraction,
+                    parameters: candidate,
+                    pass,
+                    best,
+                }
+            }
+            NewtonOutcome::Rejected { tries } => {
+                history.previous_step = None;
+                NewtonOutcome::Rejected { tries }
+            }
+        }
+    }
+
+    /// **The rest of a SQUAREM cycle** from `start`, whose plain step reached `first`: the second
+    /// plain step, the jump — shortened towards the plain step while it loses more than
+    /// [`JUMP_SLACK`] against `start_log_likelihood` — and the step that steadies it. Returns where
+    /// the cycle landed and the log-likelihood there. `reach`, how far the jump may go, is carried
+    /// from cycle to cycle ([`maximise`]).
+    fn squarem_jump(
+        &mut self,
+        start: &Parameters,
+        first: &Parameters,
+        start_log_likelihood: f64,
+        reach: &mut f64,
+    ) -> (Parameters, f64) {
+        let (second, _) = self.step(first, false);
+        let mut alpha = squarem_step_length(start, first, &second).clamp(1.0, *reach);
+        loop {
+            let jumped = if alpha > 1.0 {
+                start.extrapolated(first, &second, alpha)
+            } else {
+                Some(second.clone())
+            };
+            if let Some(jumped) = jumped {
+                let (steadied, at_jump) = self.step(&jumped, false);
+                if at_jump.log_likelihood >= start_log_likelihood - JUMP_SLACK || alpha <= 1.0 {
+                    if alpha >= *reach {
+                        *reach *= 4.0;
+                    }
+                    break (steadied, at_jump.log_likelihood);
+                }
+                *reach = (*reach / 4.0).max(1.0);
+            }
+            // Shortened towards the plain step, and taken as the plain step once close to it
+            // or once the passes are spent — `θ₂` is not checked, on the alternation's guarantee
+            // that a plain step does not lower the log-likelihood. That guarantee holds only to
+            // within the drift `JUMP_SLACK` describes, and it held not at all while the
+            // maximisation swapped a library's two error rates (deleted 2026-10-17): every other
+            // cycle then landed on a point tens of units lower.
+            alpha = (1.0 + alpha) / 2.0;
+            if alpha < 1.01 || self.passes >= self.config.max_passes {
+                alpha = 1.0;
+                if self.passes >= self.config.max_passes {
+                    break (second.clone(), start_log_likelihood);
+                }
+            }
+        }
+    }
+
+    /// **A start's last pass and what the start hands back**, at the `parameters` it returns:
+    /// `agreed_at` stands in for the pass when the start stopped as heading where an earlier one
+    /// converged.
+    fn finish(
+        self,
+        parameters: Parameters,
+        ended: StartEnding,
+        agreed_at: Option<Statistics>,
+    ) -> StartOutcome {
+        // The reported statistics must be the ones the reported parameters produce, so the last
+        // cycle is followed by one more pass rather than by a pass that preceded it — and it is
+        // this pass, at the parameters that will be reported, that keeps each position's
+        // probability of being mismapped, and the information their standard errors come from.
+        // **A start that agreed has that pass already** — the one that judged it, at the parameters
+        // it returns — and no use for the posteriors, since it does not compete to be the answer.
+        let last_pass_began = std::time::Instant::now();
+        let mut statistics = agreed_at.unwrap_or_else(|| {
+            expectation_pass_every(
+                self.samples,
+                self.depth_cap,
+                self.config,
+                self.group_index,
+                self.coverage,
                 &parameters,
-                group_index,
-                which.sample_names,
-                config.settled_fraction,
+                PassKeeps {
+                    per_position_posteriors: true,
+                    information: true,
+                },
+                self.stride,
             )
-        })
-        .flatten();
-    let Alternation {
-        passes,
-        judging_passes,
-        judging_took,
-        trace,
-        ..
-    } = alternation;
-    StartOutcome {
-        parameters,
-        statistics,
-        information,
-        passes,
-        ended,
-        furthest_from_settled,
-        trace,
-        last_pass_took,
-        judging_passes,
-        judging_took,
+        });
+        let last_pass_took = last_pass_began.elapsed();
+        // PANIC-FREE: the final pass was asked to keep the information, and a pass that is asked
+        // starts every chunk's statistics, and its empty total, with the sums in place; an agreeing
+        // start's statistics are those of a pass that judged it, which kept the information too.
+        let information = statistics
+            .information
+            .take()
+            .expect("the pass above keeps the information");
+        // Why a start that did not converge had not, at the values it returns (spec §3.5).
+        let furthest_from_settled = (ended != StartEnding::Converged)
+            .then(|| {
+                how_far_from_settled(
+                    &information,
+                    &parameters,
+                    self.group_index,
+                    self.which.sample_names,
+                    self.config.settled_fraction,
+                )
+            })
+            .flatten();
+        let Alternation {
+            passes,
+            judging_passes,
+            judging_took,
+            trace,
+            ..
+        } = self;
+        StartOutcome {
+            parameters,
+            statistics,
+            information,
+            passes,
+            ended,
+            furthest_from_settled,
+            trace,
+            last_pass_took,
+            judging_passes,
+            judging_took,
+        }
     }
 }
 
@@ -2895,6 +2944,45 @@ struct Judgement {
 }
 
 impl Judgement {
+    /// What the judging pass that summed `information` found at `parameters`: the Newton step's
+    /// worth and distances, how far each parameter is from settled, and whether the start is
+    /// heading where an earlier one converged (`which.earlier`).
+    fn of(
+        information: &InformationSums,
+        parameters: &Parameters,
+        config: &JointFitConfig,
+        group_index: &[Vec<usize>],
+        which: &WhichStart<'_>,
+    ) -> Self {
+        let standard_errors = StandardErrors::of(information);
+        let errors = standard_errors.by_coordinate(parameters, group_index);
+        let step = newton_step(information, &standard_errors, parameters, group_index);
+        let converged = has_converged(step.decrement, config.decrement_threshold);
+        // A start that has converged is never stopped by agreement: it competes to be the
+        // fit's answer. Agreement stops only a start still on its way.
+        let heading_to = which
+            .earlier
+            .filter(|answer| {
+                !converged
+                    && agrees(
+                        &parameters.values(),
+                        &step.distances,
+                        answer,
+                        config.agreement_fraction,
+                    )
+            })
+            .map(|answer| answer.start);
+        Self {
+            decrement: step.decrement,
+            converged,
+            not_settled: not_settled(&errors, &step.distances, config.settled_fraction),
+            furthest: furthest(&errors, &step.distances),
+            heading_to,
+            distances: step.distances,
+            slopes: step.slopes,
+        }
+    }
+
     /// The progress line's account of the judgement: the decrement against the threshold, then how
     /// many parameters are not yet settled and the furthest, named by `names`.
     fn described(&self, names: &[String], config: &JointFitConfig) -> String {
