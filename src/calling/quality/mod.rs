@@ -34,7 +34,6 @@
 pub mod artifact_correction;
 
 use crate::calling::genotype_prior::SpectrumSeed;
-use crate::calling::genotype_prior::dirichlet_multinomial::log_sum_exp_2;
 use crate::calling::{GenotypeIdx, GenotypeTableView};
 use crate::float;
 use crate::genetics::{MIN_ALT_CONCENTRATION, lgamma};
@@ -531,7 +530,10 @@ pub fn score_uncorrected_site_quality(
     // prior below is the probability of one arrangement of copies over chromosomes, so each
     // sample's entry counts its own orderings — two for a diploid heterozygote.
     let mut log_orderings = [0.0f64; crate::calling::likelihood::MAX_PLOIDY_COPIES + 1];
-    for (copies, slot) in log_orderings[..copy_counts_per_sample].iter_mut().enumerate() {
+    for (copies, slot) in log_orderings[..copy_counts_per_sample]
+        .iter_mut()
+        .enumerate()
+    {
         *slot = lgamma(ploidy as f64 + 1.0)
             - lgamma(copies as f64 + 1.0)
             - lgamma((ploidy - copies) as f64 + 1.0);
@@ -551,7 +553,7 @@ pub fn score_uncorrected_site_quality(
             let reference_copies = copies_per_genotype[genotype * allele_count] as usize;
             let non_reference_copies = ploidy - reference_copies;
             let slot = &mut copy_counts[non_reference_copies];
-            *slot = log_sum_exp_2(*slot, likelihood.get());
+            *slot = float::log_sum_exp_2(*slot, likelihood.get());
         }
         for (slot, orderings) in copy_counts.iter_mut().zip(&log_orderings) {
             *slot += orderings;
@@ -651,7 +653,7 @@ pub fn score_uncorrected_site_quality(
     }
 
     // 4. Normalise, and read the entry the whole calculation exists for.
-    let log_total = log_sum_exp_over(log_allele_count_distribution);
+    let log_total = float::ln_sum_exp(log_allele_count_distribution);
     let log_probability_of_no_variant = log_allele_count_distribution[0] - log_total;
     match Phred::from_log_prob(LogProb(log_probability_of_no_variant)) {
         Ok(quality) if quality.get() <= MAX_SITE_QUALITY => quality,
@@ -849,17 +851,6 @@ fn fold_samples_into_allele_counts<'a>(
 fn negligible_share(prior_log_range: f64, entries: usize) -> f64 {
     const MARGIN_NATS: f64 = 60.0;
     float::exp(-(prior_log_range + 2.0 * float::ln(entries as f64) + MARGIN_NATS))
-}
-
-/// `ln Σ exp(v)` over a slice, in two passes: the largest entry, then the sum of the rest
-/// relative to it. `−∞` where every entry is impossible.
-fn log_sum_exp_over(values: &[f64]) -> f64 {
-    let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if largest == f64::NEG_INFINITY {
-        return f64::NEG_INFINITY;
-    }
-    let total: f64 = values.iter().map(|value| float::exp(value - largest)).sum();
-    largest + float::ln(total)
 }
 
 #[cfg(test)]
@@ -1170,7 +1161,7 @@ mod tests {
                 let copies = ((assignment >> (2 * sample)) & 0b11).count_ones() as usize;
                 log += row[copies];
             }
-            log_all = log_sum_exp_2(log_all, log);
+            log_all = float::log_sum_exp_2(log_all, log);
             if assignment == 0 {
                 log_none = log;
             }
@@ -1747,7 +1738,7 @@ mod tests {
                         for (slot, term) in out.iter_mut().zip(&prior) {
                             *slot += term;
                         }
-                        let total = log_sum_exp_over(&out);
+                        let total = float::ln_sum_exp(&out);
                         (total, Phred::from_log_prob(LogProb(out[0] - total)))
                     };
                     let (exact_total, exact) = quality_with(0.0);

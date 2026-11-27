@@ -97,6 +97,64 @@ pub fn ln_1p(x: f64) -> f64 {
     libm::log1p(x)
 }
 
+/// `ln Σ exp(v)` over a slice, in two passes: the largest entry, then the sum of every entry's
+/// exponential relative to it. `−∞` where every entry is impossible (or the slice is empty).
+///
+/// **One copy for the whole crate**: the SNP/indel fit, the contamination fit and the site quality
+/// each had this function, token for token. Not to be merged with
+/// `paralog::locus_score::log_add_exp`, which replaces `ln_1p` with a cubic series for speed and so
+/// differs in the last bits.
+#[inline]
+pub fn ln_sum_exp(values: &[f64]) -> f64 {
+    let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if largest == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    largest + ln(values.iter().map(|v| exp(v - largest)).sum::<f64>())
+}
+
+/// `ln(e^a + e^b)`, shifted by the larger so neither exponential overflows.
+///
+/// **The two `−∞` short-circuits are a saving and a floor — not a correctness guard on any row
+/// the genotype prior can produce.** An earlier version of this comment claimed otherwise and was
+/// wrong; it is recorded here because the claim reads as load-bearing and is cheap to believe.
+/// Measured: delete either short-circuit, or both, and every entry of every fixture in
+/// `calling::genotype_prior::dirichlet_multinomial` is bit-identical. The general path already
+/// returns the finite argument exactly when the other is `−∞`, because `a.max(b)` picks the finite
+/// one and `ln(1 + 0)` is `0`.
+///
+/// What they do buy is two things:
+///
+/// - **A saving on the ordinary case, and it is the second guard that provides it.** At `F = 0` the
+///   prior's identical-by-descent branch is `−∞` on every homozygous genotype, so the guard on `b`
+///   fires and skips two `exp` and a `ln` per homozygote. **This is why the mixture floors `1 − F`
+///   and not `F`**: flooring both would put every outbred sample down the general path to move
+///   nothing.
+/// - **A pair of `−∞` arguments returns `−∞` rather than `NaN`.** `−∞ − −∞` is the only route to a
+///   `NaN` here. Since the mixture floors `1 − F`, argument `a` is now never `−∞`, so the first
+///   guard cannot fire from any coefficient and the pair needs a concentration entry of zero, which
+///   [`Concentration::new`](crate::calling::genotype_prior::Concentration) refuses. The guard stays
+///   because this is a shared helper and the next caller may not floor.
+///
+/// Ported from the same engine as the mixture, whose own comment gives the saving as the reason.
+///
+/// **Two callers**: the genotype prior's mixture of its two branches, and the site quality's
+/// collapse step, which folds a row over genotypes into a row over non-reference copy counts
+/// (`doc/devel/ng/spec/calling_quality.md` §5.2). A second spelling of this would let them
+/// disagree about `−∞` without anything saying so, and the `−∞` guards are exactly what the
+/// collapse needs: an entry no genotype reached stays impossible rather than becoming a `NaN`.
+#[inline]
+pub fn log_sum_exp_2(a: f64, b: f64) -> f64 {
+    if a == f64::NEG_INFINITY {
+        return b;
+    }
+    if b == f64::NEG_INFINITY {
+        return a;
+    }
+    let larger = a.max(b);
+    larger + ln(exp(a - larger) + exp(b - larger))
+}
+
 #[cfg(test)]
 /// `eˣ − 1`, accurate when `x` is near zero.
 #[inline]
@@ -322,6 +380,41 @@ mod tests {
         assert_eq!(powi(0.0, -1), f64::INFINITY);
         assert_eq!(powi(2.0, i32::MIN), 0.0);
         assert!(powi(f64::NAN, 3).is_nan());
+    }
+
+    /// **The `−∞` guards, pinned directly**, because no row fixture can fail on them.
+    ///
+    /// Measured: delete either guard, or both, and every entry of every genotype-prior row is
+    /// bit-identical — the unguarded path computes `a + ln(1 + 0)`, which is `a` exactly. What the
+    /// guards genuinely decide is the both-`−∞` pair, which without them is `−∞ − −∞` and so a
+    /// `NaN`. That pair means both branches of the prior's mixture are impossible, and the answer
+    /// to it is an impossible genotype, not a missing number.
+    #[test]
+    fn log_sum_exp_2_returns_the_finite_argument_when_the_other_is_impossible() {
+        assert_eq!(log_sum_exp_2(f64::NEG_INFINITY, -3.5), -3.5);
+        assert_eq!(log_sum_exp_2(-3.5, f64::NEG_INFINITY), -3.5);
+        assert_eq!(
+            log_sum_exp_2(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            f64::NEG_INFINITY,
+            "two impossible branches make an impossible genotype, not a NaN"
+        );
+        // The ordinary case is still the log-sum-exp: ln(e^0 + e^0) = ln 2.
+        assert!((log_sum_exp_2(0.0, 0.0) - std::f64::consts::LN_2).abs() < 1e-15);
+        // And the shift by the larger argument is what keeps it finite when one side is far away:
+        // without it `exp(-800)` underflows to zero and `exp(800)` overflows to infinity.
+        assert!((log_sum_exp_2(-800.0, -800.0) - (-800.0 + std::f64::consts::LN_2)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn ln_sum_exp_is_impossible_only_when_every_entry_is() {
+        assert_eq!(ln_sum_exp(&[]), f64::NEG_INFINITY);
+        assert_eq!(
+            ln_sum_exp(&[f64::NEG_INFINITY, f64::NEG_INFINITY]),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(ln_sum_exp(&[f64::NEG_INFINITY, -3.5]), -3.5);
+        let three = ln_sum_exp(&[-800.0, -800.0, -800.0]);
+        assert!((three - (-800.0 + 3.0_f64.ln())).abs() < 1e-12);
     }
 
     #[test]

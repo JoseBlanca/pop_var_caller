@@ -82,6 +82,7 @@
 //! on a carrier shape, 13.5 on a share that lives in [0, 1], at two samples and 300,000 positions).
 
 use crate::float;
+use crate::parameter_estimation::joint::linear_algebra;
 
 use super::determined::{
     DensityReport, DeterminedShare, DuplicatedReport, SEPARATION_LOG_LIKELIHOOD, STATED_FREQUENCY,
@@ -244,36 +245,19 @@ impl StandardErrors {
                 .map(|s| vec![StandardError::NoInformation; full.rows_of_sample(s).len()])
                 .collect(),
         };
-        let mut inverted: Vec<InvertedParameter> = Vec::with_capacity(full.side());
         for s in 0..samples {
             for (slot, row) in full.rows_of_sample(s).enumerate() {
-                if !has_information(full.entry(row, row)) {
-                    continue;
-                }
-                if slot == sample::HOMOZYGOTE_EXCESS && !excess_is_fitted {
+                if has_information(full.entry(row, row))
+                    && slot == sample::HOMOZYGOTE_EXCESS
+                    && !excess_is_fitted
+                {
                     errors.samples[s][slot] = StandardError::HeldFixed;
-                    continue;
                 }
-                inverted.push(InvertedParameter {
-                    owner: Owner::Sample(s),
-                    slot,
-                    row,
-                });
             }
         }
-        for slot in 0..COHORT_PARAMETERS {
-            if has_information(full.entry(slot, slot)) {
-                inverted.push(InvertedParameter {
-                    owner: Owner::Cohort,
-                    slot,
-                    row: slot,
-                });
-            }
-        }
-        let rows: Vec<usize> = inverted.iter().map(|parameter| parameter.row).collect();
-        let matrix = square_of(&rows, |row, column| full.entry(row, column));
-        let reference: Vec<f64> = rows.iter().map(|&row| full.entry(row, row)).collect();
-        let identified = invert_identified(&matrix, rows.len(), &reference);
+        let elimination = WholeElimination::new(full, |_| false);
+        let inverted = &elimination.parameters;
+        let identified = &elimination.identified;
         let mut record = |parameter: InvertedParameter, error: StandardError| match parameter.owner
         {
             Owner::Sample(s) => errors.samples[s][parameter.slot] = error,
@@ -297,7 +281,8 @@ impl StandardErrors {
         errors
     }
 
-    /// **The errors from the blocks**: the arrow inverted block by block (module doc).
+    /// **The errors from the blocks**: the arrow inverted block by block (module doc,
+    /// [`ArrowElimination`]).
     pub(super) fn of_the_blocks(sums: &InformationSums) -> Self {
         let samples = sums.sample_blocks.len();
         let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess(sums));
@@ -307,89 +292,25 @@ impl StandardErrors {
                 .map(|s| vec![StandardError::NoInformation; sums.own_parameters_of(s)])
                 .collect(),
         };
-
-        // Which cohort parameters carry information at all.
-        let cohort_informed: Vec<usize> = (0..COHORT_PARAMETERS)
-            .filter(|&i| has_information(sums.cohort[i * COHORT_PARAMETERS + i]))
-            .collect();
-        let c = cohort_informed.len();
-
-        // Each sample's own block, inverted over the parameters it identifies, and `A_s⁻¹ B_s`;
-        // the sum `Σ B_sᵀ A_s⁻¹ B_s` over the informed cohort parameters.
-        let mut explained = vec![0.0; c * c];
-        let mut per_sample: Vec<Option<SampleBlockInverse>> = Vec::with_capacity(samples);
+        let elimination = ArrowElimination::new(sums, |_, _| false);
         for s in 0..samples {
             let n = sums.own_parameters_of(s);
-            let own_diagonal = |j: usize| sums.sample_blocks[s][j * n + j];
-            let mut informed = Vec::with_capacity(n);
             for j in 0..n {
-                if !has_information(own_diagonal(j)) {
-                    continue;
-                }
-                if j == sample::HOMOZYGOTE_EXCESS && !excess_is_fitted {
+                if has_information(sums.sample_blocks[s][j * n + j])
+                    && j == sample::HOMOZYGOTE_EXCESS
+                    && !excess_is_fitted
+                {
                     errors.samples[s][j] = StandardError::HeldFixed;
-                    continue;
-                }
-                informed.push(j);
-            }
-            let own: Vec<f64> = square_of(&informed, |row, column| {
-                sums.sample_blocks[s][row * n + column]
-            });
-            let reference: Vec<f64> = informed.iter().map(|&j| own_diagonal(j)).collect();
-            let identified = invert_identified(&own, informed.len(), &reference);
-            for &position in &identified.dropped {
-                errors.samples[s][informed[position]] = StandardError::NotIdentified;
-            }
-            let kept: Vec<usize> = identified.kept.iter().map(|&p| informed[p]).collect();
-            if kept.is_empty() {
-                per_sample.push(None);
-                continue;
-            }
-            let k = kept.len();
-            // `B_s` restricted: the sample's kept parameters (rows) with the informed cohort ones.
-            let with_cohort: Vec<f64> = kept
-                .iter()
-                .flat_map(|&row| {
-                    cohort_informed.iter().map(move |&column| {
-                        sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column]
-                    })
-                })
-                .collect();
-            let own_inverse_times_cross = multiply(&identified.inverse, &with_cohort, k, k, c);
-            // Σ_s B_sᵀ (A_s⁻¹ B_s), added sample by sample in the fit's order.
-            for p in 0..c {
-                for q in 0..c {
-                    let mut entry = 0.0;
-                    for j in 0..k {
-                        entry += with_cohort[j * c + p] * own_inverse_times_cross[j * c + q];
-                    }
-                    explained[p * c + q] += entry;
                 }
             }
-            per_sample.push(Some(SampleBlockInverse {
-                kept,
-                own_inverse: identified.inverse,
-                own_inverse_times_cross,
-            }));
+            for &j in &elimination.own_dropped[s] {
+                errors.samples[s][j] = StandardError::NotIdentified;
+            }
         }
 
-        // The cohort's information less what the samples explain, inverted over the parameters it
-        // identifies; each judged against its own curvature before the samples' share is taken.
-        let reduced: Vec<f64> = (0..c)
-            .flat_map(|p| {
-                let explained = &explained;
-                let cohort_informed = &cohort_informed;
-                (0..c).map(move |q| {
-                    sums.cohort[cohort_informed[p] * COHORT_PARAMETERS + cohort_informed[q]]
-                        - explained[p * c + q]
-                })
-            })
-            .collect();
-        let reference: Vec<f64> = cohort_informed
-            .iter()
-            .map(|&i| sums.cohort[i * COHORT_PARAMETERS + i])
-            .collect();
-        let identified = invert_identified(&reduced, c, &reference);
+        let cohort_informed = &elimination.cohort_informed;
+        let c = cohort_informed.len();
+        let identified = &elimination.cohort;
         for &position in &identified.dropped {
             errors.cohort[cohort_informed[position]] = StandardError::NotIdentified;
         }
@@ -403,7 +324,7 @@ impl StandardErrors {
 
         // Each sample's own inverse, plus the kept cohort parameters' uncertainty carried through
         // `A_s⁻¹ B_s`. A dropped cohort parameter is held where it was fitted: it carries none.
-        for (s, inverse) in per_sample.iter().enumerate() {
+        for (s, inverse) in elimination.samples.iter().enumerate() {
             let Some(inverse) = inverse else { continue };
             let k = inverse.kept.len();
             for (j, &which) in inverse.kept.iter().enumerate() {
@@ -869,23 +790,22 @@ pub(super) type CohortCovariance = [[Option<f64>; COHORT_PARAMETERS]; COHORT_PAR
 /// depends on how the parameters it is built from move together.
 ///
 /// Column `k` is the solve against a slope of one on parameter `k` and zero elsewhere, by the same
-/// solve [`newton_step`] uses — the whole matrix where the pass kept it ([`whole_matrix_solve`]),
-/// the arrow otherwise ([`arrow_solve`]) — with nothing held. So the parameters left out are the
+/// solve [`newton_step`] uses — the whole matrix where the pass kept it, the arrow otherwise
+/// ([`Elimination`]) — with nothing held. So the parameters left out are the
 /// ones the errors leave out: no information, or not told apart from the others; their rows and
 /// columns are `None`. A parameter whose error came out wider than its range still has its entries.
-/// Eight solves, each costing what one Newton step's first solve does: linear in the samples.
+/// One elimination and eight solves against it, each linear in the samples.
 pub(super) fn cohort_covariance(sums: &InformationSums) -> CohortCovariance {
     let layout = Layout::of(sums);
     let held = vec![false; layout.side];
+    // Nothing is held, so one elimination serves all eight solves.
+    let elimination = Elimination::of(sums, &layout, &held);
     let mut covariance = [[None; COHORT_PARAMETERS]; COHORT_PARAMETERS];
     let mut unit_slope = vec![0.0; layout.side];
     for k in 0..COHORT_PARAMETERS {
         unit_slope.fill(0.0);
         unit_slope[k] = 1.0;
-        let column = match &sums.full {
-            Some(full) => whole_matrix_solve(full, &unit_slope, &held),
-            None => arrow_solve(sums, &layout, &unit_slope, &held),
-        };
+        let column = elimination.solve(&layout, &unit_slope);
         // A parameter not solved for has no column: the solve ignored its slope. Its row is `None`
         // in every other column, since every solve leaves out the same parameters.
         if column[k].is_none() {
@@ -979,8 +899,7 @@ fn decrement_of(sums: &InformationSums, layout: &Layout, step: &[Option<f64>]) -
 ///
 /// the largest `½ (Δh / SE_h)²` over every quantity `h` built from `K` alone. The minimum is at
 /// `e_U = −I_UU⁻¹ I_UK d_K`: one solve over `U` of what moving `K` pulls on it, by the same block
-/// elimination the step uses on the arrow ([`arrow_solve`]) or the whole matrix
-/// ([`whole_matrix_solve`]), so nothing is inverted densely and the cost grows with the samples as
+/// elimination the step uses on the arrow or the whole matrix ([`Elimination`]), so nothing is inverted densely and the cost grows with the samples as
 /// the step's does. A parameter in neither set — no information, held fixed, or not told apart from
 /// the others — stays put, as it does in the step; so does one of `U` the solve over `U` cannot
 /// tell apart from the rest of `U`. **Then the length is a minimum over fewer directions, so it can
@@ -1016,10 +935,7 @@ fn determined_decrement(
     let pulled = information_times(sums, layout, &determined);
     // `I_UU⁻¹ I_UK d_K`, solved over the profiled parameters alone.
     let held: Vec<bool> = profiled.iter().map(|profiled| !profiled).collect();
-    let followed = match &sums.full {
-        Some(full) => whole_matrix_solve(full, &pulled, &held),
-        None => arrow_solve(sums, layout, &pulled, &held),
-    };
+    let followed = Elimination::of(sums, layout, &held).solve(layout, &pulled);
     let moves: Vec<f64> = determined
         .iter()
         .zip(&followed)
@@ -1086,10 +1002,7 @@ fn bounded_step(
         let curved = information_times(sums, layout, &moved);
         let slope_here: Vec<f64> = slope.iter().zip(&curved).map(|(g, c)| g - c).collect();
         let held: Vec<bool> = fixed_at.iter().map(Option::is_some).collect();
-        let towards = match &sums.full {
-            Some(full) => whole_matrix_solve(full, &slope_here, &held),
-            None => arrow_solve(sums, layout, &slope_here, &held),
-        };
+        let towards = Elimination::of(sums, layout, &held).solve(layout, &slope_here);
         // How far along it each free parameter can go before it meets an end, and the shortest.
         let room: Vec<Option<(f64, f64)>> = towards
             .iter()
@@ -1282,161 +1195,292 @@ fn information_times(sums: &InformationSums, layout: &Layout, vector: &[f64]) ->
     product
 }
 
-/// `I⁻¹ g` on the whole matrix, over the parameters [`StandardErrors::of_the_whole_matrix`] inverts
-/// less those `held`, from the flat `slope`; flat, `None` for the rest.
-fn whole_matrix_solve(full: &FullInformation, slope: &[f64], held: &[bool]) -> Vec<Option<f64>> {
-    let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess_in(full));
-    let mut solved: Vec<usize> = Vec::with_capacity(full.side());
-    for s in 0..full.samples() {
-        for (slot, row) in full.rows_of_sample(s).enumerate() {
-            if has_information(full.entry(row, row))
-                && (slot != sample::HOMOZYGOTE_EXCESS || excess_is_fitted)
-                && !held[row]
-            {
-                solved.push(row);
-            }
-        }
-    }
-    for (slot, &is_held) in held.iter().enumerate().take(COHORT_PARAMETERS) {
-        if has_information(full.entry(slot, slot)) && !is_held {
-            solved.push(slot);
-        }
-    }
-    let matrix = square_of(&solved, |row, column| full.entry(row, column));
-    let reference: Vec<f64> = solved.iter().map(|&row| full.entry(row, row)).collect();
-    let identified = invert_identified(&matrix, solved.len(), &reference);
-    let kept = identified.kept.len();
-    let mut step = vec![None; full.side()];
-    for (p, &position) in identified.kept.iter().enumerate() {
-        let moved: f64 = identified
-            .kept
-            .iter()
-            .enumerate()
-            .map(|(q, &other)| identified.inverse[p * kept + q] * slope[solved[other]])
-            .sum();
-        step[solved[position]] = Some(moved);
-    }
-    step
+/// **The whole matrix inverted over the parameters it identifies**, as both the errors
+/// ([`StandardErrors::of_the_whole_matrix`]) and the solve ([`Elimination`]) need it.
+///
+/// The parameters are those with information that the fit moves, less those `held` (by row), in
+/// the order the blocks take them: each sample's own, the samples in turn, then the cohort's. One
+/// selection for both is what keeps a Newton step and the errors over the same parameters.
+struct WholeElimination {
+    /// The parameters inverted over, in the matrix's order.
+    parameters: Vec<InvertedParameter>,
+    /// The inverse over them; its `kept` and `dropped` are positions in `parameters`.
+    identified: Identified,
+    /// How many parameters the matrix has in all.
+    side: usize,
 }
 
-/// One sample's part of the arrow's solve: its parameters kept, `A_s⁻¹ g_s` and `A_s⁻¹ B_s`.
-type SampleSolve = (Vec<usize>, Vec<f64>, Vec<f64>);
+impl WholeElimination {
+    fn new(full: &FullInformation, held: impl Fn(usize) -> bool) -> Self {
+        let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess_in(full));
+        let mut parameters: Vec<InvertedParameter> = Vec::with_capacity(full.side());
+        for s in 0..full.samples() {
+            for (slot, row) in full.rows_of_sample(s).enumerate() {
+                if has_information(full.entry(row, row))
+                    && (slot != sample::HOMOZYGOTE_EXCESS || excess_is_fitted)
+                    && !held(row)
+                {
+                    parameters.push(InvertedParameter {
+                        owner: Owner::Sample(s),
+                        slot,
+                        row,
+                    });
+                }
+            }
+        }
+        for slot in 0..COHORT_PARAMETERS {
+            if has_information(full.entry(slot, slot)) && !held(slot) {
+                parameters.push(InvertedParameter {
+                    owner: Owner::Cohort,
+                    slot,
+                    row: slot,
+                });
+            }
+        }
+        let rows: Vec<usize> = parameters.iter().map(|parameter| parameter.row).collect();
+        let matrix = square_of(&rows, |row, column| full.entry(row, column));
+        let reference: Vec<f64> = rows.iter().map(|&row| full.entry(row, row)).collect();
+        let identified = invert_identified(&matrix, rows.len(), &reference);
+        Self {
+            parameters,
+            identified,
+            side: full.side(),
+        }
+    }
 
-/// `I⁻¹ g` on the arrow of blocks, by the same elimination the errors use
-/// ([`StandardErrors::of_the_blocks`]), over the parameters it inverts less those `held`: each
-/// sample's own parameters solved given the cohort's, the cohort's from what the samples leave of its
-/// slope, and each sample's own step then corrected by the cohort's. Flat, `None` for the rest.
-fn arrow_solve(
-    sums: &InformationSums,
-    layout: &Layout,
-    slope: &[f64],
-    held: &[bool],
-) -> Vec<Option<f64>> {
-    let samples = sums.sample_blocks.len();
-    let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess(sums));
-    let mut step = vec![None; layout.side];
-    let cohort_informed: Vec<usize> = (0..COHORT_PARAMETERS)
-        .filter(|&i| has_information(sums.cohort[i * COHORT_PARAMETERS + i]) && !held[i])
-        .collect();
-    let c = cohort_informed.len();
-    let mut explained = vec![0.0; c * c];
-    // The cohort's slope less what each sample's own parameters take up of it: `g_c − Σ B_sᵀ A_s⁻¹ g_s`.
-    let mut cohort_slope_left: Vec<f64> = cohort_informed.iter().map(|&i| slope[i]).collect();
-    // Per sample: its kept parameters, `A_s⁻¹ g_s` and `A_s⁻¹ B_s`.
-    let mut per_sample: Vec<Option<SampleSolve>> = Vec::with_capacity(samples);
-    for s in 0..samples {
-        let start = layout.starts[s];
-        let n = sums.own_parameters_of(s);
-        let own_diagonal = |j: usize| sums.sample_blocks[s][j * n + j];
-        let informed: Vec<usize> = (0..n)
-            .filter(|&j| {
-                has_information(own_diagonal(j))
-                    && (j != sample::HOMOZYGOTE_EXCESS || excess_is_fitted)
-                    && !held[start + j]
+    /// `I⁻¹ g` from the flat `slope`, flat, `None` for a parameter not kept.
+    fn solve(&self, slope: &[f64]) -> Vec<Option<f64>> {
+        let identified = &self.identified;
+        let kept = identified.kept.len();
+        let mut step = vec![None; self.side];
+        for (p, &position) in identified.kept.iter().enumerate() {
+            let moved: f64 = identified
+                .kept
+                .iter()
+                .enumerate()
+                .map(|(q, &other)| {
+                    identified.inverse[p * kept + q] * slope[self.parameters[other].row]
+                })
+                .sum();
+            step[self.parameters[position].row] = Some(moved);
+        }
+        step
+    }
+}
+
+/// **The arrow's block elimination**, as both the errors ([`StandardErrors::of_the_blocks`]) and
+/// the solve ([`Elimination`]) need it.
+///
+/// The matrix is an arrow (module doc): the cohort's parameters along one edge, each sample's own
+/// in a diagonal block. For each sample the elimination
+///
+/// - chooses its parameters with information that the fit moves, less those held;
+/// - inverts its own block `A_s` over the ones it identifies;
+/// - forms `A_s⁻¹ B_s`, where `B_s` pairs them with the cohort's chosen parameters;
+///
+/// and then inverts the cohort's block less `Σ B_sᵀ A_s⁻¹ B_s` over the cohort parameters that
+/// identifies. One elimination for both is what keeps a Newton step and the errors over the same
+/// parameters.
+struct ArrowElimination {
+    /// The cohort slots eliminated over: informed, and not held.
+    cohort_informed: Vec<usize>,
+    /// Each sample's own block inverted, `None` where none of its parameters was kept.
+    samples: Vec<Option<SampleBlockInverse>>,
+    /// Each sample's own slots dropped as not told apart from the ones before them.
+    own_dropped: Vec<Vec<usize>>,
+    /// The cohort's block less what the samples explain, inverted; its `kept` and `dropped` are
+    /// positions in `cohort_informed`.
+    cohort: Identified,
+}
+
+impl ArrowElimination {
+    /// `held(owner, slot)` says which parameters to leave out, by owner and by slot among the
+    /// owner's parameters.
+    fn new(sums: &InformationSums, held: impl Fn(Owner, usize) -> bool) -> Self {
+        let samples = sums.sample_blocks.len();
+        let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess(sums));
+
+        // Which cohort parameters carry information at all.
+        let cohort_informed: Vec<usize> = (0..COHORT_PARAMETERS)
+            .filter(|&i| {
+                has_information(sums.cohort[i * COHORT_PARAMETERS + i]) && !held(Owner::Cohort, i)
             })
             .collect();
-        let own = square_of(&informed, |row, column| {
-            sums.sample_blocks[s][row * n + column]
-        });
-        let reference: Vec<f64> = informed.iter().map(|&j| own_diagonal(j)).collect();
-        let identified = invert_identified(&own, informed.len(), &reference);
-        let kept: Vec<usize> = identified.kept.iter().map(|&p| informed[p]).collect();
-        if kept.is_empty() {
-            per_sample.push(None);
-            continue;
+        let c = cohort_informed.len();
+
+        // Each sample's own block, inverted over the parameters it identifies, and `A_s⁻¹ B_s`;
+        // the sum `Σ B_sᵀ A_s⁻¹ B_s` over the informed cohort parameters.
+        let mut explained = vec![0.0; c * c];
+        let mut per_sample: Vec<Option<SampleBlockInverse>> = Vec::with_capacity(samples);
+        let mut own_dropped: Vec<Vec<usize>> = Vec::with_capacity(samples);
+        for s in 0..samples {
+            let n = sums.own_parameters_of(s);
+            let own_diagonal = |j: usize| sums.sample_blocks[s][j * n + j];
+            let informed: Vec<usize> = (0..n)
+                .filter(|&j| {
+                    has_information(own_diagonal(j))
+                        && (j != sample::HOMOZYGOTE_EXCESS || excess_is_fitted)
+                        && !held(Owner::Sample(s), j)
+                })
+                .collect();
+            let own: Vec<f64> = square_of(&informed, |row, column| {
+                sums.sample_blocks[s][row * n + column]
+            });
+            let reference: Vec<f64> = informed.iter().map(|&j| own_diagonal(j)).collect();
+            let identified = invert_identified(&own, informed.len(), &reference);
+            own_dropped.push(identified.dropped.iter().map(|&p| informed[p]).collect());
+            let kept: Vec<usize> = identified.kept.iter().map(|&p| informed[p]).collect();
+            if kept.is_empty() {
+                per_sample.push(None);
+                continue;
+            }
+            let k = kept.len();
+            // `B_s` restricted: the sample's kept parameters (rows) with the informed cohort ones.
+            let with_cohort: Vec<f64> = kept
+                .iter()
+                .flat_map(|&row| {
+                    cohort_informed.iter().map(move |&column| {
+                        sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column]
+                    })
+                })
+                .collect();
+            let own_inverse_times_cross = multiply(&identified.inverse, &with_cohort, k, k, c);
+            // Σ_s B_sᵀ (A_s⁻¹ B_s), added sample by sample in the fit's order.
+            for p in 0..c {
+                for q in 0..c {
+                    let mut entry = 0.0;
+                    for j in 0..k {
+                        entry += with_cohort[j * c + p] * own_inverse_times_cross[j * c + q];
+                    }
+                    explained[p * c + q] += entry;
+                }
+            }
+            per_sample.push(Some(SampleBlockInverse {
+                kept,
+                own_inverse: identified.inverse,
+                with_cohort,
+                own_inverse_times_cross,
+            }));
         }
-        let k = kept.len();
-        let with_cohort: Vec<f64> = kept
-            .iter()
-            .flat_map(|&row| {
-                cohort_informed.iter().map(move |&column| {
-                    sums.sample_cohort_blocks[s][row * COHORT_PARAMETERS + column]
+
+        // The cohort's information less what the samples explain, inverted over the parameters it
+        // identifies; each judged against its own curvature before the samples' share is taken.
+        let reduced: Vec<f64> = (0..c)
+            .flat_map(|p| {
+                let explained = &explained;
+                let cohort_informed = &cohort_informed;
+                (0..c).map(move |q| {
+                    sums.cohort[cohort_informed[p] * COHORT_PARAMETERS + cohort_informed[q]]
+                        - explained[p * c + q]
                 })
             })
             .collect();
-        let own_inverse_times_cross = multiply(&identified.inverse, &with_cohort, k, k, c);
-        let own_slope: Vec<f64> = kept.iter().map(|&j| slope[start + j]).collect();
-        let own_inverse_times_slope = multiply(&identified.inverse, &own_slope, k, k, 1);
-        for p in 0..c {
-            for q in 0..c {
-                let mut entry = 0.0;
-                for j in 0..k {
-                    entry += with_cohort[j * c + p] * own_inverse_times_cross[j * c + q];
-                }
-                explained[p * c + q] += entry;
-            }
-            let mut taken = 0.0;
-            for j in 0..k {
-                taken += with_cohort[j * c + p] * own_inverse_times_slope[j];
-            }
-            cohort_slope_left[p] -= taken;
-        }
-        per_sample.push(Some((
-            kept,
-            own_inverse_times_slope,
-            own_inverse_times_cross,
-        )));
-    }
-    let reduced: Vec<f64> = (0..c)
-        .flat_map(|p| {
-            let explained = &explained;
-            let cohort_informed = &cohort_informed;
-            (0..c).map(move |q| {
-                sums.cohort[cohort_informed[p] * COHORT_PARAMETERS + cohort_informed[q]]
-                    - explained[p * c + q]
-            })
-        })
-        .collect();
-    let reference: Vec<f64> = cohort_informed
-        .iter()
-        .map(|&i| sums.cohort[i * COHORT_PARAMETERS + i])
-        .collect();
-    let identified = invert_identified(&reduced, c, &reference);
-    let v = identified.kept.len();
-    // The cohort's step over the informed slots, zero for one dropped as not identified.
-    let mut cohort_solved = vec![0.0; c];
-    for (p, &position) in identified.kept.iter().enumerate() {
-        let moved: f64 = identified
-            .kept
+        let reference: Vec<f64> = cohort_informed
             .iter()
-            .enumerate()
-            .map(|(q, &other)| identified.inverse[p * v + q] * cohort_slope_left[other])
-            .sum();
-        cohort_solved[position] = moved;
-        step[cohort_informed[position]] = Some(moved);
-    }
-    for (s, solved) in per_sample.into_iter().enumerate() {
-        let Some((kept, own_inverse_times_slope, own_inverse_times_cross)) = solved else {
-            continue;
-        };
-        for (j, &which) in kept.iter().enumerate() {
-            let carried: f64 = (0..c)
-                .map(|p| own_inverse_times_cross[j * c + p] * cohort_solved[p])
-                .sum();
-            step[layout.starts[s] + which] = Some(own_inverse_times_slope[j] - carried);
+            .map(|&i| sums.cohort[i * COHORT_PARAMETERS + i])
+            .collect();
+        let cohort = invert_identified(&reduced, c, &reference);
+        Self {
+            cohort_informed,
+            samples: per_sample,
+            own_dropped,
+            cohort,
         }
     }
-    step
+
+    /// `I⁻¹ g` from the flat `slope`: each sample's own parameters solved given the cohort's, the
+    /// cohort's from what the samples leave of its slope, and each sample's own step then
+    /// corrected by the cohort's. Flat, `None` for a parameter not kept.
+    fn solve(&self, layout: &Layout, slope: &[f64]) -> Vec<Option<f64>> {
+        let cohort_informed = &self.cohort_informed;
+        let c = cohort_informed.len();
+        let mut step = vec![None; layout.side];
+        // The cohort's slope less what each sample's own parameters take up of it:
+        // `g_c − Σ B_sᵀ A_s⁻¹ g_s`, taken sample by sample in the fit's order.
+        let mut cohort_slope_left: Vec<f64> = cohort_informed.iter().map(|&i| slope[i]).collect();
+        // Per sample: `A_s⁻¹ g_s`.
+        let mut own_inverse_times_slopes: Vec<Option<Vec<f64>>> =
+            Vec::with_capacity(self.samples.len());
+        for (s, block) in self.samples.iter().enumerate() {
+            let Some(block) = block else {
+                own_inverse_times_slopes.push(None);
+                continue;
+            };
+            let start = layout.starts[s];
+            let k = block.kept.len();
+            let own_slope: Vec<f64> = block.kept.iter().map(|&j| slope[start + j]).collect();
+            let own_inverse_times_slope = multiply(&block.own_inverse, &own_slope, k, k, 1);
+            for (p, left) in cohort_slope_left.iter_mut().enumerate() {
+                let mut taken = 0.0;
+                for (j, own_step) in own_inverse_times_slope.iter().enumerate() {
+                    taken += block.with_cohort[j * c + p] * own_step;
+                }
+                *left -= taken;
+            }
+            own_inverse_times_slopes.push(Some(own_inverse_times_slope));
+        }
+        let identified = &self.cohort;
+        let v = identified.kept.len();
+        // The cohort's step over the informed slots, zero for one dropped as not identified.
+        let mut cohort_solved = vec![0.0; c];
+        for (p, &position) in identified.kept.iter().enumerate() {
+            let moved: f64 = identified
+                .kept
+                .iter()
+                .enumerate()
+                .map(|(q, &other)| identified.inverse[p * v + q] * cohort_slope_left[other])
+                .sum();
+            cohort_solved[position] = moved;
+            step[cohort_informed[position]] = Some(moved);
+        }
+        for (s, (block, own_inverse_times_slope)) in self
+            .samples
+            .iter()
+            .zip(&own_inverse_times_slopes)
+            .enumerate()
+        {
+            let (Some(block), Some(own_inverse_times_slope)) = (block, own_inverse_times_slope)
+            else {
+                continue;
+            };
+            for (j, &which) in block.kept.iter().enumerate() {
+                let carried: f64 = (0..c)
+                    .map(|p| block.own_inverse_times_cross[j * c + p] * cohort_solved[p])
+                    .sum();
+                step[layout.starts[s] + which] = Some(own_inverse_times_slope[j] - carried);
+            }
+        }
+        step
+    }
+}
+
+/// **The information eliminated over the parameters a solve moves**: the whole matrix where the
+/// pass kept it, the arrow of blocks otherwise — the same choice the errors make
+/// ([`StandardErrors::of`]).
+enum Elimination {
+    Whole(WholeElimination),
+    Arrow(ArrowElimination),
+}
+
+impl Elimination {
+    /// Over the parameters the errors invert, less those `held` (flat).
+    fn of(sums: &InformationSums, layout: &Layout, held: &[bool]) -> Self {
+        match &sums.full {
+            Some(full) => Self::Whole(WholeElimination::new(full, |row| held[row])),
+            None => Self::Arrow(ArrowElimination::new(sums, |owner, slot| match owner {
+                Owner::Cohort => held[slot],
+                Owner::Sample(s) => held[layout.starts[s] + slot],
+            })),
+        }
+    }
+
+    /// `I⁻¹ g` from the flat `slope`; flat, `None` for a parameter not solved for.
+    fn solve(&self, layout: &Layout, slope: &[f64]) -> Vec<Option<f64>> {
+        match self {
+            Self::Whole(whole) => whole.solve(slope),
+            Self::Arrow(arrow) => arrow.solve(layout, slope),
+        }
+    }
 }
 
 /// How many of the cohort's slots are parameters of this fit: all eight with the duplicated class,
@@ -1482,11 +1526,13 @@ fn summary_of(errors: &[StandardError]) -> String {
     }
 }
 
-/// One sample's own block inverted: which of its parameters were kept, the inverse over them, and
-/// that inverse times the sample's block with the informed cohort parameters (`A_s⁻¹ B_s`, `k × c`).
+/// One sample's own block inverted: which of its parameters were kept, the inverse over them, the
+/// sample's block with the informed cohort parameters over the kept ones (`B_s`, `k × c`), and the
+/// inverse times that block (`A_s⁻¹ B_s`, `k × c`).
 struct SampleBlockInverse {
     kept: Vec<usize>,
     own_inverse: Vec<f64>,
+    with_cohort: Vec<f64>,
     own_inverse_times_cross: Vec<f64>,
 }
 
@@ -1635,26 +1681,11 @@ pub(super) fn inverse_of_positive_definite(matrix: &[f64], n: usize) -> Option<V
     inverse_by_cholesky(matrix, n, &vec![0.0; n]).ok()
 }
 
-/// The inverse by the Cholesky factor `matrix = L Lᵀ`, or the position of the first pivot not above
+/// The inverse by the Cholesky factor `matrix = L Lᵀ` ([`linear_algebra::cholesky_factor`]), as
+/// `L⁻ᵀ L⁻¹`, or the position of the first pivot not above
 /// its `floor` (or not finite).
 fn inverse_by_cholesky(matrix: &[f64], n: usize, floor: &[f64]) -> Result<Vec<f64>, usize> {
-    let mut lower = vec![0.0; n * n];
-    for row in 0..n {
-        for column in 0..=row {
-            let mut entry = matrix[row * n + column];
-            for j in 0..column {
-                entry -= lower[row * n + j] * lower[column * n + j];
-            }
-            if row == column {
-                if !(entry > floor[row] && entry.is_finite()) {
-                    return Err(row);
-                }
-                lower[row * n + row] = entry.sqrt();
-            } else {
-                lower[row * n + column] = entry / lower[column * n + column];
-            }
-        }
-    }
+    let lower = linear_algebra::cholesky_factor(matrix, n, floor)?;
     // `L⁻¹`, lower triangular, by forward substitution on each column of the identity.
     let mut lower_inverse = vec![0.0; n * n];
     for column in 0..n {

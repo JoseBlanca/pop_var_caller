@@ -61,6 +61,7 @@ use super::contamination::{
     ContaminationConfig, NotIdentifiedReason, SampleContaminationEstimates, fit_contamination_over,
     not_identified_anywhere,
 };
+use super::linear_algebra;
 
 mod determined;
 mod inbreeding;
@@ -1574,14 +1575,6 @@ fn genotype_frequencies_slope_in_excess(f: f64) -> [f64; 3] {
     [moved, -2.0 * moved, moved]
 }
 
-fn ln_sum_exp(values: &[f64]) -> f64 {
-    let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if largest == f64::NEG_INFINITY {
-        return f64::NEG_INFINITY;
-    }
-    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
-}
-
 // ---------------------------------------------------------------------
 // The parameters, and one pass over the data
 // ---------------------------------------------------------------------
@@ -1851,6 +1844,16 @@ struct ReadTally {
     candidate: f64,
     neither: f64,
     reference: f64,
+}
+
+impl ReadTally {
+    /// Add one genotype's expected reads, `counts`, at its posterior `weight`.
+    #[inline(always)]
+    fn credit(&mut self, weight: f64, counts: ReadTally) {
+        self.candidate += weight * counts.candidate;
+        self.neither += weight * counts.neither;
+        self.reference += weight * counts.reference;
+    }
 }
 
 impl Statistics {
@@ -4407,6 +4410,27 @@ impl Scratch {
 const RESCALE: f64 = 1e150;
 const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
 
+/// **`ln Π terms`, the product kept in range by [`RESCALE`]**: multiplied back up whenever it is
+/// about to underflow, and its logarithm taken once at the end. `None` where the product is zero
+/// or negative — a node no sample's reads allow.
+#[inline(always)]
+fn ln_of_product(terms: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut product = 1.0_f64;
+    let mut scale = 0.0_f64;
+    for term in terms {
+        product *= term;
+        if product < 1.0 / RESCALE {
+            product *= RESCALE;
+            scale -= LN_RESCALE;
+        }
+    }
+    if product <= 0.0 {
+        None
+    } else {
+        Some(float::ln(product) + scale)
+    }
+}
+
 /// One position: its likelihood, and its contribution to every accumulated count.
 #[allow(
     clippy::needless_range_loop,
@@ -4553,23 +4577,15 @@ fn one_position(
                 offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
             }
             for node in 0..nodes {
-                let mut product = 1.0_f64;
-                let mut scale = 0.0_f64;
-                for s in 0..samples {
+                let product_ln = ln_of_product((0..samples).map(|s| {
                     let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
                     let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                    let term = prior[0] * lik[0] + prior[1] * lik[1] + prior[2] * lik[2];
-                    product *= term;
-                    if product < 1.0 / RESCALE {
-                        product *= RESCALE;
-                        scale -= LN_RESCALE;
-                    }
-                }
+                    prior[0] * lik[0] + prior[1] * lik[1] + prior[2] * lik[2]
+                }));
                 let slot = scratch.node_at(class, candidate, node);
-                scratch.node_ln[slot] = if product <= 0.0 {
-                    f64::NEG_INFINITY
-                } else {
-                    float::ln(product) + scale + offset + quadrature.ln_weights[node]
+                scratch.node_ln[slot] = match product_ln {
+                    Some(product_ln) => product_ln + offset + quadrature.ln_weights[node],
+                    None => f64::NEG_INFINITY,
                 };
             }
         }
@@ -4591,9 +4607,7 @@ fn one_position(
                 }
                 for node in 0..carrier.nodes.len() {
                     let q = carrier.nodes[node];
-                    let mut product = 1.0_f64;
-                    let mut scale = 0.0_f64;
-                    for s in 0..samples {
+                    let product_ln = ln_of_product((0..samples).map(|s| {
                         let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
                         // Where the run has a coverage summary, this is the only place it
                         // enters: how much more likely this sample's read depth around here is
@@ -4601,18 +4615,12 @@ fn one_position(
                         // sample single-copy, so the one-copy factor is common to all of them
                         // and cancels out of the position entirely.
                         let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
-                        let term = (1.0 - q) * lik[0] + q * odds * lik[1];
-                        product *= term;
-                        if product < 1.0 / RESCALE {
-                            product *= RESCALE;
-                            scale -= LN_RESCALE;
-                        }
-                    }
+                        (1.0 - q) * lik[0] + q * odds * lik[1]
+                    }));
                     let slot = scratch.node_at(class, candidate, node);
-                    scratch.carrier_node_ln[slot] = if product <= 0.0 {
-                        f64::NEG_INFINITY
-                    } else {
-                        float::ln(product) + scale + offset + carrier.ln_weights[node]
+                    scratch.carrier_node_ln[slot] = match product_ln {
+                        Some(product_ln) => product_ln + offset + carrier.ln_weights[node],
+                        None => f64::NEG_INFINITY,
                     };
                 }
             }
@@ -4629,7 +4637,7 @@ fn one_position(
                     + scratch.ln_multiplicity[candidate],
             );
         }
-        let fixed_sum = ln_sum_exp(&scratch.shares);
+        let fixed_sum = float::ln_sum_exp(&scratch.shares);
         scratch.fixed_sum_ln[class] = fixed_sum;
         let fixed_alt = fixed_sum - ln_three;
         scratch.shares.clear();
@@ -4641,7 +4649,7 @@ fn one_position(
                     .push(scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity);
             }
         }
-        let segregating_sum = ln_sum_exp(&scratch.shares);
+        let segregating_sum = float::ln_sum_exp(&scratch.shares);
         scratch.segregating_sum_ln[class] = segregating_sum;
         let segregating = segregating_sum - ln_three;
         scratch.fixed_alt_ln[class] = fixed_alt;
@@ -4664,7 +4672,7 @@ fn one_position(
                     );
                 }
             }
-            let summed = ln_sum_exp(&scratch.shares);
+            let summed = float::ln_sum_exp(&scratch.shares);
             scratch.duplicated_sum_ln[class] = summed;
             // `duplicated_ln` is kept for the scores and not reused in the branch's own sum:
             // `ln d + summed − ln 3` is added left to right, and taking `summed − ln 3` first
@@ -4676,11 +4684,11 @@ fn one_position(
             scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
-        let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        let within = float::ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
         scratch.within_ln[class] = within;
         scratch.class_ln[class] = shares.ln_class[class] + within;
     }
-    let position_ln = ln_sum_exp(&scratch.class_ln);
+    let position_ln = float::ln_sum_exp(&scratch.class_ln);
     scratch.position_ln = position_ln;
     if !position_ln.is_finite() {
         // A position whose likelihood underflowed contributes nothing to any parameter, and it
@@ -4793,10 +4801,7 @@ fn one_position(
                             allele,
                             reference_read_probability(2, ploidy, rate),
                         );
-                        let tally = &mut statistics.reads[library][class][2];
-                        tally.candidate += share * counts.candidate;
-                        tally.neither += share * counts.neither;
-                        tally.reference += share * counts.reference;
+                        statistics.reads[library][class][2].credit(share, counts);
                     }
                     statistics.homozygous_alt[s] += share;
                     scratch.position_genotype[s * 3 + 1] += share;
@@ -4878,10 +4883,7 @@ fn one_position(
                                 allele,
                                 reference_read_probability(j as u8, ploidy, rate),
                             );
-                            let tally = &mut statistics.reads[library][class][j];
-                            tally.candidate += weight * counts.candidate;
-                            tally.neither += weight * counts.neither;
-                            tally.reference += weight * counts.reference;
+                            statistics.reads[library][class][j].credit(weight, counts);
                         }
                     }
                 }
@@ -4963,10 +4965,7 @@ fn one_position(
                                     allele,
                                     reference_read_probability(j as u8, ploidy, rate),
                                 );
-                                let tally = &mut statistics.reads[library][class][j];
-                                tally.candidate += weight * counts.candidate;
-                                tally.neither += weight * counts.neither;
-                                tally.reference += weight * counts.reference;
+                                statistics.reads[library][class][j].credit(weight, counts);
                             }
                         }
                     }
@@ -5138,9 +5137,8 @@ fn maximise_error_rate(
     let score = |rate: f64| {
         let mut total = 0.0;
         for (j, tally) in tallies.iter().enumerate() {
-            let carried = j as f64 / f64::from(ploidy.get());
-            let on_candidate = carried * (1.0 - rate) + (1.0 - carried) * rate / 3.0;
-            let on_reference = (1.0 - carried) * (1.0 - rate) + carried * rate / 3.0;
+            let on_candidate = candidate_read_probability(j as u8, ploidy, rate);
+            let on_reference = reference_read_probability(j as u8, ploidy, rate);
             total += count_times_ln(tally.candidate, on_candidate)
                 + count_times_ln(tally.neither, rate / 3.0)
                 + count_times_ln(tally.reference, on_reference);
@@ -5415,58 +5413,20 @@ fn gauss_jacobi(alpha: f64, beta: f64, count: usize) -> (Vec<f64>, Vec<f64>) {
     (values, weights)
 }
 
-/// Eigenvalues and eigenvectors of a small symmetric matrix, by cyclic Jacobi rotations.
+/// Eigenvalues and eigenvectors of a small symmetric matrix, by cyclic Jacobi rotations
+/// ([`linear_algebra::jacobi_rotations`]), in ascending order of eigenvalue.
 ///
 /// `vectors[k * n + s]` is component `s` of the eigenvector for eigenvalue `k`; the rule above
 /// reads only the first component of each, which is why they are returned that way round.
 fn symmetric_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut a = matrix.to_vec();
-    let mut v = vec![0.0; n * n];
-    for i in 0..n {
-        v[i * n + i] = 1.0;
-    }
-    for _ in 0..100 {
-        let off: f64 = (0..n)
-            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-            .map(|(i, j)| a[i * n + j] * a[i * n + j])
-            .sum();
-        if off < 1e-22 {
-            break;
-        }
-        for p in 0..n {
-            for q in (p + 1)..n {
-                if a[p * n + q].abs() < 1e-18 {
-                    continue;
-                }
-                let theta = (a[q * n + q] - a[p * n + p]) / (2.0 * a[p * n + q]);
-                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                for k in 0..n {
-                    let (akp, akq) = (a[k * n + p], a[k * n + q]);
-                    a[k * n + p] = c * akp - s * akq;
-                    a[k * n + q] = s * akp + c * akq;
-                }
-                for k in 0..n {
-                    let (apk, aqk) = (a[p * n + k], a[q * n + k]);
-                    a[p * n + k] = c * apk - s * aqk;
-                    a[q * n + k] = s * apk + c * aqk;
-                }
-                for k in 0..n {
-                    let (vkp, vkq) = (v[k * n + p], v[k * n + q]);
-                    v[k * n + p] = c * vkp - s * vkq;
-                    v[k * n + q] = s * vkp + c * vkq;
-                }
-            }
-        }
-    }
+    let (diagonal, v) = linear_algebra::jacobi_rotations(matrix, n, 1e-22, 1e-18);
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| {
-        a[i * n + i]
-            .partial_cmp(&a[j * n + j])
+        diagonal[i]
+            .partial_cmp(&diagonal[j])
             .expect("no NaN in a Jacobi recurrence")
     });
-    let values = order.iter().map(|&i| a[i * n + i]).collect();
+    let values = order.iter().map(|&i| diagonal[i]).collect();
     let mut vectors = vec![0.0; n * n];
     for (k, &i) in order.iter().enumerate() {
         for s in 0..n {
