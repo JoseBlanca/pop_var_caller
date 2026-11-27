@@ -3,4 +3,4 @@
 - RepeatLadder computes modal_repeat_count on every locus; only tests read it (found by D2). Candidate speed cleanup, gate timing.
 - Release-only test failure: alignment::left_align_structured::tests::an_offset_past_the_reference_panics expects a debug_assert message (pre-existing; owner U8). **FIXED 62fd4540:** both debug-only panic tests are `#[cfg(debug_assertions)]`.
 - Two rustdoc "redundant explicit link target" warnings: stratum_fits.rs:64, cohort_merge/close.rs:18.
-- `cargo clippy --all-targets` fails on examples/solve_bench.rs: it calls `NeighbourEvidenceStage::push`/`finish`, which D6 (6176ee12) made `#[cfg(test)]` (found by U4). Either give the example another entry point or drop the example; check whether anyone still runs it.
+- `cargo clippy --all-targets` fails on examples/solve_bench.rs: it calls `NeighbourEvidenceStage::push`/`finish`, which D6 (6176ee12) made `#[cfg(test)]` (found by U4). Either give the example another entry point or drop the example; check whether anyone still runs it. **DELETED** (owner 2026-11-27: nothing used it; only the dated 2026-11-24/25 reports name it).
