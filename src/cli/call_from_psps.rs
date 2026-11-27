@@ -33,11 +33,10 @@ use std::time::Instant;
 use clap::Args;
 use thiserror::Error;
 
-use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::cli::calling_run::{self, CallingRunError};
+use crate::cli::calling_run::{self, AdvancedCallingFlags, CallingFlags, CallingRunError};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
@@ -51,7 +50,6 @@ use crate::reference_info::{
     read_reference_verifying_or_creating_fai,
 };
 use crate::region_typing::GenomeRegions;
-use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::run::report::BoundsTheRunCalledUnder;
@@ -65,14 +63,6 @@ mod tests;
 #[cfg(test)]
 /// What this subcommand is called on the command line.
 pub const SUBCOMMAND: &str = "call-from-psps";
-
-/// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
-///
-/// **About one record in a hundred of those the filter removes was really a variant.** It was
-/// `0` while the filter's scoring and writing passes did not exist, because that default would
-/// have parked every record and produced no VCF; both passes are built now, so the spec's value
-/// stands and the filter is on unless an operator turns it off with `--hidden-dup-fdr 0`.
-const DEFAULT_PARALOG_FDR: f64 = 0.01;
 
 /// Call a cohort of stored psps and write a VCF.
 ///
@@ -127,69 +117,9 @@ pub struct CallFromPspsArgs {
     #[arg(long)]
     pub defaults: bool,
 
-    /// Copies of each chromosome in every sample. Defaults to 2, or to the parameters file's.
-    ///
-    /// With a parameters file it may only repeat the file's ploidy, which the numbers were
-    /// fitted at. At most 16.
-    #[arg(long)]
-    pub ploidy: Option<u8>,
-
-    /// The site quality (QUAL) below which a site is not written. 0 writes every site.
-    ///
-    /// The default, 1, drops the sites whose artifact penalties outweigh their evidence, which
-    /// removes most false calls at little cost in true ones.
-    #[arg(
-        long,
-        default_value_t = crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        value_parser = crate::cli::calling_run::parse_min_site_quality
-    )]
-    pub min_site_quality: f32,
-
-    /// Charge a site whose variant reads carry more low base qualities than its reference reads,
-    /// at this many times the test's tail, subtracted from QUAL (`BQPEN`). 0 leaves the test off
-    /// (`doc/devel/ng/spec/low_base_quality.md`).
-    #[arg(
-        long,
-        default_value_t = crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-        value_parser = crate::cli::calling_run::parse_low_base_quality_weight
-    )]
-    pub low_base_quality_weight: f64,
-
-    /// Threads to use; 0 uses every core. The output is the same at any number.
-    #[arg(long, default_value_t = 0)]
-    pub threads: usize,
-
-    /// Replace the VCF and the log if they are already there. Without it, a run refuses before
-    /// reading anything.
-    #[arg(long)]
-    pub force: bool,
-
-    /// Where to write the run's log. Defaults to `pvc_calls.log` beside the VCF.
-    ///
-    /// The log holds the inputs by name, every setting's value, and the run's full report.
-    #[arg(long)]
-    pub log: Option<PathBuf>,
-
-    /// The directory for the run's scratch files. Defaults to the VCF's directory, or the
-    /// working directory when the VCF goes to standard output.
-    ///
-    /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
-    /// it ends, whether it succeeded or failed, unless --keep-tmp-on-error; a run that is
-    /// killed, or stops on an internal error, leaves it behind. While the hidden-dup filter is
-    /// on, every call waits there until the whole genome is called: several times the
-    /// compressed VCF's size.
-    #[arg(long)]
-    pub tmp_dir: Option<PathBuf>,
-
-    /// Keep the run's scratch directory, and the hidden-dup filter's spill in it, when the run
-    /// stops on an error. Its path is logged. A run that finishes removes it as usual. A run
-    /// stopped by a refinement window over --refine-window-bytes, after calling, keeps it with or
-    /// without this flag, so `pvc resume-calling` can finish it.
-    ///
-    /// The spill holds every called record, so on a large cohort the kept directory can take
-    /// terabytes: remove it once it is no longer needed.
-    #[arg(long)]
-    pub keep_tmp_on_error: bool,
+    // The flags both calling commands share, in the order `--help` lists them.
+    #[command(flatten)]
+    pub calling: CallingFlags,
 
     /// A locus where any sample has a read group deeper than this is not called, for any sample.
     ///
@@ -205,144 +135,9 @@ pub struct CallFromPspsArgs {
     )]
     pub max_depth: u32,
 
-    /// The most alleles a SNP/indel locus is called over, the reference among them.
-    ///
-    /// Where more segregate, the worst supported are left out. Repeat (STR) loci are not
-    /// affected: they have their own limit of 32.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        help_heading = "Advanced"
-    )]
-    pub max_generic_alleles: u16,
-
-    /// The widest locus assembled, in reference bases — and so the longest deletion called.
-    ///
-    /// The run's log says how many loci were too wide and how long they were. Long reads want a
-    /// larger value than short ones.
-    #[arg(long, default_value_t = DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
-    pub max_locus_span: u32,
-
-    /// The false-discovery rate allowed among the calls the hidden-dup filter removes. 0 turns
-    /// the filter off.
-    ///
-    /// The filter removes calls better explained by a hidden duplication — two copies of a
-    /// sequence collapsed onto one in the reference — than by a variant. While it is on, the
-    /// run needs scratch space in --tmp-dir of several times the compressed VCF's size.
-    #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
-    pub hidden_dup_fdr: f64,
-
-    /// Keep the calls the hidden-dup filter removes, marked `hiddenDup` in the FILTER column,
-    /// instead of dropping them.
-    #[arg(long, help_heading = "Advanced")]
-    pub hidden_dup_tag: bool,
-
-    /// The width, in bases, of the stretch of genome over which the hidden-dup filter estimates
-    /// how common hidden duplications are. 0 uses one genome-wide rate.
-    ///
-    /// Each call's rate comes from the calls within half the window on either side, pulled toward
-    /// the genome-wide rate where few calls are near.
-    #[arg(
-        long,
-        value_name = "BASES",
-        default_value_t = paralog_filter::DEFAULT_HIDDEN_DUP_WINDOW_BASES,
-        help_heading = "Advanced"
-    )]
-    pub hidden_dup_window: u64,
-
-    /// Whether to re-call each sample's genotypes with the evidence of the samples it shares
-    /// stretches of chromosome with, and of its own neighbouring sites. Off by default; `auto`
-    /// runs it on a diploid cohort of at least 10 samples whose median inbreeding is at least
-    /// 0.5, and `on` on any diploid cohort of two or more. The VCF header says whether it ran
-    /// and why. Where it does not run, on a diploid cohort, phase is
-    /// written from reads alone (`GT` `a|b` with a `PS`); the header's `##readBackedPhase=` line
-    /// states its thresholds.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = calling_run::RefineGenotypesArg::Off,
-        help_heading = "Advanced"
-    )]
-    pub refine_genotypes: calling_run::RefineGenotypesArg,
-
-    /// The share of the neighbour-evidence pass's drawn paths that must agree on how two
-    /// neighbouring heterozygous sites are phased for the VCF to phase them together. 1, all of
-    /// them, is the strictest; lower values give longer phase blocks with more wrong links.
-    /// The default, 0.8, was measured to keep wrong links under 1 in 200 from 12 samples up.
-    #[arg(
-        long,
-        default_value = "0.8",
-        value_parser = calling_run::parse_path_agreement,
-        help_heading = "Advanced"
-    )]
-    pub phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement,
-
-    /// The most memory, in bytes, one window of genotype refinement may hold: its records' lines,
-    /// numbers and reads, and each sample's state while it is solved. Windows shrink to fit it,
-    /// down to --refine-window-floor; a cohort whose smallest window still does not fit stops
-    /// the run with an error saying how much it needs. Each refinement thread holds, besides, its
-    /// walk's arrays, about 1 kB a record it walks, and the memory allocator holds about a sixth
-    /// more: on 2,176 samples at 48 threads the process peaked at about 1.3 times the budget. The
-    /// run estimates that peak before calling and at each window, and warns, without stopping,
-    /// where it is above 85% of the memory the run may use (the machine's, or the job's limit
-    /// where lower, such as a systemd unit's MemoryMax), naming a budget that would fit.
-    #[arg(
-        long,
-        default_value_t = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-        help_heading = "Advanced"
-    )]
-    pub refine_window_bytes: u64,
-
-    /// The shortest each margin of a genotype refinement window may become when windows shrink to
-    /// fit --refine-window-bytes, in bases; the core shrinks with them. Shorter margins hold less
-    /// memory but may cut off evidence: a sample copies stretches of up to about 300 kb.
-    #[arg(
-        long,
-        value_name = "BASES",
-        default_value_t = crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
-        help_heading = "Advanced"
-    )]
-    pub refine_window_floor: u64,
-
-    /// The shortest a genotype refinement window's core may become, in bases, when a window with
-    /// margins at --refine-window-floor is still over --refine-window-bytes. The margins keep their
-    /// length, so no record loses the evidence around it; a shorter core only makes more windows,
-    /// each solving its margins again. Defaults to --refine-window-floor.
-    #[arg(
-        long,
-        value_name = "BASES",
-        value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES),
-        help_heading = "Advanced"
-    )]
-    pub refine_core_floor: Option<u64>,
-
-    /// Walk at most this many records a kb, evenly spaced, in each genotype refinement window's
-    /// margins farther than 50 kb from its core; 0 walks every record. Stretches no denser than
-    /// that are walked in full. The core and the 50 kb next to it are always walked in full, so
-    /// every record is refined as before but sees fewer of the far records when choosing which
-    /// samples it resembles; the records not walked are held compressed. A window then holds
-    /// less memory and takes less time: on 2,176 tomato samples, 5 a kb held 41% less and took
-    /// half the time, with as many genotypes wrong.
-    #[arg(
-        long,
-        value_name = "RECORDS",
-        default_value = crate::neighbour_evidence::windows::DEFAULT_MARGIN_DENSITY,
-        value_parser = calling_run::parse_margin_density,
-        help_heading = "Advanced"
-    )]
-    pub refine_margin_density: calling_run::MarginDensity,
-
-    /// The longest a refinement window's core and each margin may be, in bases, before the budget
-    /// shrinks them (at most 1 Mb, the default margin; the default core is 2 Mb). For measurements
-    /// on short contigs, where a default window would span the contig with no margin.
-    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
-    pub refine_window_max: Option<u64>,
-
-    /// The longest a refinement window's core may be, in bases, before the budget shrinks it. For
-    /// measuring how core length alone changes the output.
-    #[arg(long, value_name = "BASES", hide = true, value_parser = clap::value_parser!(u64).range(1..=crate::neighbour_evidence::windows::DEFAULT_MARGIN_BASES))]
-    pub refine_core_max: Option<u64>,
+    // The advanced flags both calling commands share.
+    #[command(flatten)]
+    pub advanced: AdvancedCallingFlags,
 
     /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
     ///
@@ -564,9 +359,9 @@ fn psps_named_by(args: &CallFromPspsArgs) -> Result<Vec<PathBuf>, CallFromPspsCl
 pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCliError> {
     // **Everything a person typed is judged before a byte is read**, the same order the other
     // two commands use.
-    if args.threads > 0 {
+    if args.calling.threads > 0 {
         let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(args.threads)
+            .num_threads(args.calling.threads)
             .build_global();
     }
 
@@ -574,17 +369,18 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which
     // of those is a false-discovery rate.
     let asked_for = paralog_filter::WhatTheOperatorAskedFor::from_the_flags(
-        args.hidden_dup_fdr,
-        args.hidden_dup_tag,
+        args.advanced.hidden_dup_fdr,
+        args.advanced.hidden_dup_tag,
     )
     .map_err(|source| CallFromPspsCliError::ParalogTargetIsNotAFraction { source })?
-    .map(|asked| asked.with_window(args.hidden_dup_window));
+    .map(|asked| asked.with_window(args.advanced.hidden_dup_window));
 
-    let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
-    let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
+    let asked_ploidy = calling_run::ploidy_asked_for(args.calling.ploidy)?;
+    let candidate_selection =
+        calling_run::candidate_selection_for(args.advanced.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
-    calling_run::refuse_a_tmp_dir_that_is_not_a_directory(args.tmp_dir.as_deref())?;
-    if !is_standard_output(&args.output) && args.output.exists() && !args.force {
+    calling_run::refuse_a_tmp_dir_that_is_not_a_directory(args.calling.tmp_dir.as_deref())?;
+    if !is_standard_output(&args.output) && args.output.exists() && !args.calling.force {
         return Err(CallFromPspsCliError::OutputAlreadyThere {
             path: args.output.clone(),
         });
@@ -594,7 +390,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // waits for the directories to be expanded, where direct mode can count its `--alignment`
     // flags straight away.
     let merge_parameters = calling_run::merge_parameters_for(
-        args.max_locus_span,
+        args.advanced.max_locus_span,
         args.locus_builder_regions_len,
         paths.len(),
         calling_run::ObservationsReadFrom::StoredFiles,
@@ -603,10 +399,11 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // behind, and before the reference is read, so everything that takes time is in it.
     let started = Instant::now();
     let log = args
+        .calling
         .log
         .clone()
         .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
-    let run_log = run_output::open_log(&log, args.force)?;
+    let run_log = run_output::open_log(&log, args.calling.force)?;
 
     // **The FASTA is read to the end before a psp is opened**: every file's contig table is
     // compared against the reference's per-contig checksums, and a reference whose verification
@@ -685,7 +482,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
 
     let numbers = calling_run::run_parameters(
         args.parameters.as_deref(),
-        args.ploidy,
+        args.calling.ploidy,
         cohort.read_groups(),
         &with_checksums,
         asked_ploidy,
@@ -728,8 +525,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     .with_settings(calling_run::calling_settings(
         args.max_depth,
         explain.as_ref().map(|(regions, _)| regions),
-        args.min_site_quality,
-        args.low_base_quality_weight,
+        args.calling.min_site_quality,
+        args.calling.low_base_quality_weight,
     ));
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
@@ -742,24 +539,24 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &with_checksums,
         caller.sample_names().map(str::to_owned).collect(),
     )?;
-    let metadata = if args.low_base_quality_weight > 0.0 {
+    let metadata = if args.calling.low_base_quality_weight > 0.0 {
         metadata.the_low_base_quality_test_ran()
     } else {
         metadata
     };
     let metadata =
         metadata.the_neighbour_evidence_decision(calling_run::neighbour_evidence_decision(
-            args.refine_genotypes,
+            args.advanced.refine_genotypes,
             &inbreeding_by_sample,
             ploidy,
-            args.phase_min_path_agreement,
+            args.advanced.phase_min_path_agreement,
             calling_run::RefineWindowArgs {
-                window_bytes: args.refine_window_bytes,
-                window_floor: args.refine_window_floor,
-                core_floor: args.refine_core_floor,
-                margin_density: args.refine_margin_density,
-                window_max: args.refine_window_max,
-                core_max: args.refine_core_max,
+                window_bytes: args.advanced.refine_window_bytes,
+                window_floor: args.advanced.refine_window_floor,
+                core_floor: args.advanced.refine_core_floor,
+                margin_density: args.advanced.refine_margin_density,
+                window_max: args.advanced.refine_window_max,
+                core_max: args.advanced.refine_core_max,
             },
         ));
     // **Fragments are gathered only where the output will read them**, which the header just
@@ -782,8 +579,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let mut scratch = match asked_for {
         Some(_) => Some(calling_run::scratch_directory_for(
             &args.output,
-            args.tmp_dir.as_deref(),
-            calling_run::ScratchOnFailure::from_keep_flag(args.keep_tmp_on_error),
+            args.calling.tmp_dir.as_deref(),
+            calling_run::ScratchOnFailure::from_keep_flag(args.calling.keep_tmp_on_error),
         )?),
         None => None,
     };

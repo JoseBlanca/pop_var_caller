@@ -44,7 +44,6 @@ mod tests {
 
     use md5::{Digest, Md5};
 
-    use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::estimate_parameters::{EstimateParametersArgs, run_estimate_parameters};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
@@ -56,7 +55,6 @@ mod tests {
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
     };
     use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
-    use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 
     /// The width of the pool the pinned run uses; the other test checks other widths agree.
     const THREADS: usize = 4;
@@ -1307,39 +1305,25 @@ mod tests {
                 .map(|sample| psp_path_for(&psps, sample))
                 .collect(),
             output: calls.clone(),
-            force: false,
-            log: None,
-            tmp_dir: None,
-            keep_tmp_on_error: false,
             parameters: Some(parameters.clone()),
             defaults: false,
-            ploidy: None,
-            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            // The shipped false-discovery target, so the hidden-duplication filter scores and
-            // writes its two fields: it computes with `ln`, `exp` and `ln_1p` as well.
-            hidden_dup_fdr: 0.01,
-            // Off: this test pins that platforms write the same bytes, over a fixture whose three
-            // variant sites include low-quality ones; the threshold is pinned elsewhere.
-            min_site_quality: 0.0,
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            hidden_dup_tag: false,
-            hidden_dup_window: 0,
-            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-            refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_window_max: None,
-            refine_core_floor: None,
-            refine_core_max: None,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
-            threads: 0,
             max_reads_per_position: None,
             max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
+            calling: crate::cli::calling_run::CallingFlags {
+                // Off: this test pins that platforms write the same bytes, over a fixture whose three
+                // variant sites include low-quality ones; the threshold is pinned elsewhere.
+                min_site_quality: 0.0,
+                ..crate::cli::calling_run::CallingFlags::for_tests()
+            },
+            advanced: crate::cli::calling_run::AdvancedCallingFlags {
+                // The shipped false-discovery target, so the hidden-duplication filter scores and
+                // writes its two fields: it computes with `ln`, `exp` and `ln_1p` as well.
+                hidden_dup_fdr: 0.01,
+                ..crate::cli::calling_run::AdvancedCallingFlags::for_tests()
+            },
         })
         .expect("the cohort calls with its own fit");
         (parameters, calls)

@@ -76,7 +76,6 @@
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
     use crate::cli::call_from_alignments::{CallFromAlignmentsArgs, run_call_from_alignments};
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
@@ -90,7 +89,6 @@ mod tests {
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
     };
     use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
-    use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 
     /// A VCF's whole contents, as the lines a comparison holds and a failure prints.
     ///
@@ -129,36 +127,11 @@ mod tests {
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output: output.to_path_buf(),
-            // **Several runs share one directory here**, as they would for a person comparing
-            // them, so each is given its own log and replaces what an earlier run of the same
-            // name left.
-            force: true,
-            log: Some(output.with_extension("log")),
-            tmp_dir: None,
-            keep_tmp_on_error: false,
             regions: None,
             parameters: None,
             defaults: true,
-            ploidy: None,
             build_index_if_missing: false,
-            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            hidden_dup_fdr: 0.0,
-            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            hidden_dup_tag: false,
-            hidden_dup_window: 0,
-            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-            refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_window_max: None,
-            refine_core_floor: None,
-            refine_core_max: None,
             locus_builder_regions_len: None,
-            threads: 0,
             min_copies: MinCopies::default(),
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
@@ -168,6 +141,15 @@ mod tests {
             max_reads_per_position: None,
             max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
+            calling: crate::cli::calling_run::CallingFlags {
+                // **Several runs share one directory here**, as they would for a person comparing
+                // them, so each is given its own log and replaces what an earlier run of the same
+                // name left.
+                force: true,
+                log: Some(output.with_extension("log")),
+                ..crate::cli::calling_run::CallingFlags::for_tests()
+            },
+            advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
         }
     }
 
@@ -259,35 +241,19 @@ mod tests {
                 .map(|sample| psp_path_for(psps, sample))
                 .collect::<Vec<PathBuf>>(),
             output: output.to_path_buf(),
-            force: true,
-            log: Some(output.with_extension("log")),
-            tmp_dir: None,
-            keep_tmp_on_error: false,
             parameters: None,
             defaults: true,
-            ploidy: None,
-            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            hidden_dup_fdr: 0.0,
-            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            hidden_dup_tag: false,
-            hidden_dup_window: 0,
-            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-            refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_window_max: None,
-            refine_core_floor: None,
-            refine_core_max: None,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
-            threads: 0,
             max_reads_per_position: None,
             max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
+            calling: crate::cli::calling_run::CallingFlags {
+                force: true,
+                log: Some(output.with_extension("log")),
+                ..crate::cli::calling_run::CallingFlags::for_tests()
+            },
+            advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
         }
     }
 
@@ -405,13 +371,13 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut off = alignments_args(&cohort, &output);
-        off.hidden_dup_fdr = 0.0;
+        off.advanced.hidden_dup_fdr = 0.0;
         run_call_from_alignments(&off).expect("the cohort calls with the filter off");
         let unfiltered = comparable(&output);
         std::fs::remove_file(&output).expect("the off run's file makes way for the on run's");
 
         let mut on = alignments_args(&cohort, &output);
-        on.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        on.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&on).expect("the cohort calls with the filter on");
         let filtered = comparable(&output);
 
@@ -454,11 +420,11 @@ mod tests {
         let tmp_dir = cohort.directory.path().join("scratch");
         std::fs::create_dir_all(&tmp_dir).expect("the --tmp-dir");
         let mut args = psps_args(&cohort, &output, &psps, &["one", "two"]);
-        args.tmp_dir = Some(tmp_dir.clone());
-        args.keep_tmp_on_error = keep_tmp_on_error;
-        args.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
-        args.refine_genotypes = crate::cli::calling_run::RefineGenotypesArg::On;
-        args.refine_window_bytes = 1;
+        args.calling.tmp_dir = Some(tmp_dir.clone());
+        args.calling.keep_tmp_on_error = keep_tmp_on_error;
+        args.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        args.advanced.refine_genotypes = crate::cli::calling_run::RefineGenotypesArg::On;
+        args.advanced.refine_window_bytes = 1;
         (cohort, args, tmp_dir)
     }
 
@@ -562,10 +528,11 @@ mod tests {
         );
 
         let mut unbroken = args.clone();
-        unbroken.refine_window_bytes = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
-        unbroken.keep_tmp_on_error = false;
+        unbroken.advanced.refine_window_bytes =
+            crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
+        unbroken.calling.keep_tmp_on_error = false;
         unbroken.output = cohort.directory.path().join("unbroken.vcf");
-        unbroken.log = Some(cohort.directory.path().join("unbroken.log"));
+        unbroken.calling.log = Some(cohort.directory.path().join("unbroken.log"));
         run_call_from_psps(&unbroken).expect("the same run at a budget refinement fits");
 
         let without_the_command_line = |lines: Vec<String>| -> Vec<String> {
@@ -620,7 +587,8 @@ mod tests {
     #[test]
     fn a_run_that_finishes_removes_its_scratch_even_when_asked_to_keep_it_on_error() {
         let (cohort, mut args, tmp_dir) = a_psp_run_that_fails_in_the_writing_pass(true);
-        args.refine_window_bytes = crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
+        args.advanced.refine_window_bytes =
+            crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES;
 
         run_call_from_psps(&args).expect("the run finishes");
 
@@ -645,7 +613,7 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut from_alignments_args = alignments_args(&cohort, &output);
-        from_alignments_args.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        from_alignments_args.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&from_alignments_args)
             .expect("the cohort calls from its alignment files, filtered");
         let from_alignments = comparable(&output);
@@ -653,7 +621,7 @@ mod tests {
         std::fs::remove_file(&output).expect("the first route's file makes way for the second's");
         let psps = walked_into_psps(&cohort);
         let mut from_psps_args = psps_args(&cohort, &output, &psps, &["one", "two"]);
-        from_psps_args.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        from_psps_args.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_psps(&from_psps_args).expect("the stored cohort calls, filtered");
         let from_psps = comparable(&output);
 
@@ -718,7 +686,7 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut one_thread = alignments_args(&cohort, &output);
-        one_thread.threads = 1;
+        one_thread.calling.threads = 1;
         run_call_from_alignments(&one_thread).expect("the cohort calls on one thread");
         let from_alignments = comparable(&output);
         let phase = first_samples_phase(&from_alignments);
@@ -734,7 +702,7 @@ mod tests {
         assert_eq!(at(second), Some(("0|1", "121")), "{phase:?}");
 
         let mut four_threads = alignments_args(&cohort, &output);
-        four_threads.threads = 4;
+        four_threads.calling.threads = 4;
         run_call_from_alignments(&four_threads).expect("the cohort calls on four threads");
         assert_eq!(
             comparable(&output),
@@ -749,7 +717,7 @@ mod tests {
         );
 
         let mut filtered = alignments_args(&cohort, &output);
-        filtered.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        filtered.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&filtered).expect("the cohort calls, filtered");
         assert_eq!(
             without_the_filters_info_fields(&without_the_filters_header_lines(&comparable(
@@ -776,7 +744,7 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut tetraploid = alignments_args(&cohort, &output);
-        tetraploid.ploidy = Some(4);
+        tetraploid.calling.ploidy = Some(4);
         run_call_from_alignments(&tetraploid).expect("the cohort calls at ploidy four");
         let from_alignments = comparable(&output);
         assert!(records(&from_alignments) > 0, "{from_alignments:?}");
@@ -790,7 +758,7 @@ mod tests {
         std::fs::remove_file(&output).expect("the first route wrote the file this one replaces");
         let psps = walked_into_psps(&cohort);
         let mut from_psps = psps_args(&cohort, &output, &psps, &["one", "two"]);
-        from_psps.ploidy = Some(4);
+        from_psps.calling.ploidy = Some(4);
         run_call_from_psps(&from_psps).expect("the stored cohort calls at ploidy four");
         assert_eq!(
             comparable(&output),
@@ -799,7 +767,7 @@ mod tests {
         );
 
         let mut filtered = tetraploid;
-        filtered.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        filtered.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&filtered).expect("the cohort calls at ploidy four, filtered");
         assert_eq!(
             without_the_filters_info_fields(&without_the_filters_header_lines(&comparable(
@@ -959,14 +927,14 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut dropping = alignments_args(&cohort, &output);
-        dropping.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        dropping.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&dropping).expect("the cohort calls, dropping");
         let dropped = comparable(&output);
         std::fs::remove_file(&output).expect("the dropping run's file makes way");
 
         let mut tagging = alignments_args(&cohort, &output);
-        tagging.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
-        tagging.hidden_dup_tag = true;
+        tagging.advanced.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        tagging.advanced.hidden_dup_tag = true;
         run_call_from_alignments(&tagging).expect("the cohort calls, tagging");
         let tagged = comparable(&output);
 
@@ -1652,35 +1620,19 @@ mod tests {
             catalog: Some(catalog.to_path_buf()),
             psps: Vec::new(),
             output: output.to_path_buf(),
-            force: true,
-            log: Some(output.with_extension("log")),
-            tmp_dir: None,
-            keep_tmp_on_error: false,
             parameters: None,
             defaults: true,
-            ploidy: None,
-            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            hidden_dup_fdr: 0.0,
-            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-            low_base_quality_weight:
-                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
-            hidden_dup_tag: false,
-            hidden_dup_window: 0,
-            refine_genotypes: crate::cli::calling_run::RefineGenotypesArg::Auto,
-            phase_min_path_agreement: crate::neighbour_evidence::phase::PathAgreement::ALL,
-            refine_window_bytes: crate::neighbour_evidence::windows::DEFAULT_WINDOW_BYTES,
-            refine_window_floor: crate::neighbour_evidence::windows::DEFAULT_MARGIN_FLOOR_BASES,
-            refine_margin_density: crate::cli::calling_run::MarginDensity(None),
-            refine_window_max: None,
-            refine_core_floor: None,
-            refine_core_max: None,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
-            threads: 0,
             max_reads_per_position: None,
             max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
+            calling: crate::cli::calling_run::CallingFlags {
+                force: true,
+                log: Some(output.with_extension("log")),
+                ..crate::cli::calling_run::CallingFlags::for_tests()
+            },
+            advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
         }
     }
 }
