@@ -69,7 +69,7 @@ pub const DEFAULT_MIN_MAPQ: u8 = 20;
 /// 10% — comfortably outside the ~0.5-1% mismatch rate of normal
 /// Illumina at MAPQ 20+, inside the regime where adapter-runthrough,
 /// contamination, and chimeric tails live. See finding `F1` in
-/// `ia/reviews/pileup_freebayes_comparison_2026-05-08.md`.
+/// `doc/devel/reports/reviews/pileup_freebayes_comparison_2026-05-08.md`.
 pub const DEFAULT_MAX_READ_MISMATCH_FRACTION: f32 = 0.10;
 
 /// Default for `ReadFilterConfig::mismatch_bq_floor`. Matches
@@ -101,23 +101,18 @@ pub const FLAG_SUPPLEMENTARY: u16 = 0x800;
 // Per-record conversion
 // ---------------------------------------------------------------------
 
-/// Finding `G1` (adaptor-region per-base filter) — pure-logic
-/// boundary computation. Returns the 1-based reference position of
-/// the first base that lies *inside* the mate-pair adaptor, or
-/// `None` when the read is single-end, the mate is unreliable, the
-/// fragment geometry is inconsistent, or the molecule is at least
-/// as long as the read (so no read base could have been sequenced
-/// past the molecule end).
+/// The adaptor-region per-base filter's boundary computation (finding `G1` in
+/// `doc/devel/reports/reviews/pileup_gatk_comparison_2026-05-08.md`), as pure logic. Returns the
+/// 1-based reference position of the first base that lies *inside* the mate-pair adaptor, or `None`
+/// when the read is single-end, the mate is unreliable, the fragment geometry is inconsistent, or
+/// the molecule is at least as long as the read (so no read base could have been sequenced past the
+/// molecule end).
 ///
-/// Mirrors GATK's
-/// [`ReadUtils.getAdaptorBoundary`](../../gatk/src/main/java/org/broadinstitute/hellbender/utils/read/ReadUtils.java#L527)
-/// with one principled deviation: instead of GATK's hardcoded
-/// `|tlen| > DEFAULT_ADAPTOR_SIZE = 100` cap (calibrated for 100bp
-/// reads), we gate on `|tlen| < seq_len`. The molecule has to be
-/// shorter than the *read's own* sequenced length for adaptor
-/// readthrough to be possible — that condition is read-aware and
-/// stays correct for ancient-DNA short fragments and for modern
-/// 150bp+ reads alike.
+/// Mirrors GATK's `ReadUtils.getAdaptorBoundary` with one principled deviation: instead of GATK's
+/// hardcoded `|tlen| > DEFAULT_ADAPTOR_SIZE = 100` cap (calibrated for 100bp reads), we gate on
+/// `|tlen| < seq_len`. The molecule has to be shorter than the *read's own* sequenced length for
+/// adaptor readthrough to be possible — that condition is read-aware and stays correct for
+/// ancient-DNA short fragments and for modern 150bp+ reads alike.
 ///
 /// On the forward strand the boundary is `read.start + |tlen|`
 /// (first base past the molecule's 3′ end). On the reverse strand
@@ -187,7 +182,7 @@ pub(crate) fn compute_adaptor_boundary(
 
 /// Reference-span sum of `M`-, `=`-, `X`-, `D`-, and `N`-op lengths
 /// — i.e. the count of reference positions the read covers. Helper
-/// for the F1 mismatch-fraction filter, which needs the slice
+/// for the mismatch-fraction filter, which needs the slice
 /// `[pos, pos + ref_span)` of the reference to compare against.
 pub(crate) fn cigar_ref_span(cigar: &[CigarOp]) -> u32 {
     cigar
@@ -203,9 +198,9 @@ pub(crate) fn cigar_ref_span(cigar: &[CigarOp]) -> u32 {
         .sum()
 }
 
-/// Pure-logic implementation of finding `G2` (`GoodCigar`-style
-/// read-level rejection). Returns `true` when the CIGAR is
-/// "ill-formed" by either of two rules — both sentinel-grade:
+/// Pure-logic implementation of the `GoodCigar`-style read-level rejection (finding `G2` in
+/// `doc/devel/reports/reviews/pileup_gatk_comparison_2026-05-08.md`). Returns `true` when the CIGAR
+/// is "ill-formed" by either of two rules — both sentinel-grade:
 ///
 /// 1. **Adjacent `I`/`D` pair, in either order.** No biological
 ///    event produces an immediate insertion-then-deletion (or
@@ -218,11 +213,11 @@ pub(crate) fn cigar_ref_span(cigar: &[CigarOp]) -> u32 {
 ///    read bases at the wrong moment.
 ///
 /// The boundary-deletion rule must be applied to the **original**
-/// CIGAR — i.e. before F3 left-alignment runs. F3 deliberately
+/// CIGAR — i.e. before left-alignment runs. Left-alignment deliberately
 /// shifts indels through homopolymers/tandem repeats and can in
 /// principle land an indel at the read's edge as part of normal
-/// canonicalisation; rejecting that case would punish F3 for doing
-/// its job. Pre-F3 boundary deletions are the case where the
+/// canonicalisation; rejecting that case would punish it for doing
+/// its job. Boundary deletions present before left-alignment are the case where the
 /// aligner itself produced the suspect alignment.
 ///
 /// Rule 1 (consecutive `I`/`D`) targets the **aligner's** original
@@ -270,10 +265,9 @@ pub(crate) fn cigar_is_bad(cigar: &[CigarOp]) -> bool {
     false
 }
 
-/// Pure-logic implementation of finding `F1` (per-read
-/// mismatch-fraction filter). Returns `true` when the read should
-/// be dropped — i.e. its `M`-op mismatch fraction strictly exceeds
-/// `threshold`.
+/// Pure-logic implementation of the per-read mismatch-fraction filter (finding `F1` in
+/// `doc/devel/reports/reviews/pileup_freebayes_comparison_2026-05-08.md`). Returns `true` when the
+/// read should be dropped — i.e. its `M`-op mismatch fraction strictly exceeds `threshold`.
 ///
 /// - **Numerator:** count of `M`-op (or `=`/`X`-op) positions where
 ///   the read base differs from the reference base **and** the raw
@@ -618,7 +612,7 @@ mod tests {
         );
     }
 
-    // --- F1 mismatch-fraction helper: pure-logic tests ---------------
+    // --- Mismatch-fraction helper: pure-logic tests ---------------
     //
     // These exercise `read_exceeds_mismatch_fraction` directly, with
     // synthetic inputs (no Repository, no CRAM). Integration of the
@@ -780,7 +774,7 @@ mod tests {
         assert_eq!(DEFAULT_MISMATCH_BQ_FLOOR, 10);
     }
 
-    // --- G1 adaptor-boundary helper: pure-logic tests ----------------
+    // --- Adaptor-boundary helper: pure-logic tests ----------------
     //
     // These exercise `compute_adaptor_boundary` directly, with synthetic
     // SAM-flag/TLEN/mate-pos inputs. Its use in decoding a record is
@@ -930,7 +924,7 @@ mod tests {
         );
     }
 
-    // --- G2 cigar_is_bad helper: pure-logic tests --------------------
+    // --- cigar_is_bad helper: pure-logic tests --------------------
     //
     // These exercise `cigar_is_bad` directly. Its use in the read
     // filter cascade is covered by `crate::read::filtering`'s tests.
