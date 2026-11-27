@@ -40,7 +40,7 @@ use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
     SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks, phase_bytes,
 };
-use super::random::{StreamPurpose, Uniforms, pick};
+use super::random::{StreamPurpose, Uniforms};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{
     ChosenTemplate, choose_haplotypes, choose_templates_where, compared_records_where,
@@ -1469,21 +1469,6 @@ fn solve_round(
     let share_total = (template_count + 1) * allele_total;
     let mut likelihoods: Vec<f64> = Vec::with_capacity(genotype_total);
     let mut shares: Vec<f64> = Vec::with_capacity(share_total);
-    // From round 2 the states are weighed by definite alleles, one drawn from each template's
-    // shares at each site, the background's included (phasing spec §2.3): a template that is
-    // unsure is then sometimes plainly wrong, as a soft share never is. The shares themselves stay
-    // what the prediction and the drawn haplotypes read.
-    let mut definite = (round > 1).then(|| {
-        (
-            Vec::<u8>::with_capacity(share_total),
-            Uniforms::new(
-                StreamPurpose::DefiniteAlleles,
-                phasing.window_key,
-                sample,
-                round,
-            ),
-        )
-    });
     let mut spans = Vec::with_capacity(layout.sites());
     for &index in &layout.record_of_site {
         let record = &records[index];
@@ -1508,18 +1493,11 @@ fn solve_round(
             }
         }
         shares.extend(record.background_shares());
-        if let Some((drawn, uniforms)) = definite.as_mut() {
-            for template_shares in shares[share_start..].chunks_exact(record.allele_count) {
-                let allele = pick(template_shares, uniforms.next_uniform());
-                drawn.extend((0..record.allele_count).map(|a| u8::from(a == allele)));
-            }
-        }
         spans.push((
             likelihood_start..likelihoods.len(),
             share_start..shares.len(),
         ));
     }
-    let drawn = definite.map(|(drawn, _)| drawn);
     let sites: Vec<WalkSite<'_>> = layout
         .record_of_site
         .iter()
@@ -1529,7 +1507,6 @@ fn solve_round(
             allele_count: records[index].allele_count,
             likelihoods: &likelihoods[likelihood_span.clone()],
             template_shares: &shares[share_span.clone()],
-            emission_shares: drawn.as_ref().map(|drawn| &drawn[share_span.clone()]),
         })
         .collect();
     let walk_templates = template_count + 1;

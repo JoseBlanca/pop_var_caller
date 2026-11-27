@@ -600,7 +600,7 @@ threads.
   held before the solve and about 100 more in it, biallelic; *before* that day's changes about 500,
   of which the read alleles at twelve bytes each were about half. The spec's first estimate, 40
   bytes, counted only the likelihoods and shares.
-- **Per thread and record**: the round's inputs (the drawn definite alleles a byte each) and, from
+- **Per thread and record**: from
   round 2, the round's own drawn path; a site's blurred shares and likelihood matrix are computed
   where they are read, not kept (2026-11-22). The eight extra paths are handed to the phase as each
   is made, in one reused array; each path holds its states in two bytes a site, reads its uniforms

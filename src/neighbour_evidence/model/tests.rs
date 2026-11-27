@@ -92,7 +92,6 @@ fn the_walk_reproduces_the_python_prototype() {
                 allele_count: *alleles,
                 likelihoods,
                 template_shares: shares,
-                emission_shares: None,
             })
             .collect();
         let templates = case.templates + usize::from(case.background);
@@ -143,7 +142,6 @@ fn a_site_without_reads_takes_the_templates_allele() {
         allele_count: 2,
         likelihoods: &likelihoods[..],
         template_shares: &alternative_templates,
-        emission_shares: None,
     })
     .collect();
     let parameters = WalkParameters {
@@ -174,14 +172,12 @@ fn a_long_gap_returns_the_autozygous_state_to_its_share() {
             allele_count: 2,
             likelihoods: &homozygous,
             template_shares: &shares,
-            emission_shares: None,
         },
         WalkSite {
             position: 1_000_001_000,
             allele_count: 2,
             likelihoods: &flat,
             template_shares: &shares,
-            emission_shares: None,
         },
     ];
     let parameters = WalkParameters {
@@ -213,14 +209,12 @@ fn a_zero_emission_state_contributes_nothing() {
             allele_count: 2,
             likelihoods: &heterozygous,
             template_shares: &shares,
-            emission_shares: None,
         },
         WalkSite {
             position: 2_000,
             allele_count: 2,
             likelihoods: &heterozygous,
             template_shares: &shares,
-            emission_shares: None,
         },
     ];
     let parameters = WalkParameters {
@@ -255,7 +249,6 @@ fn a_drawn_path_follows_the_only_template_that_fits() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -311,7 +304,6 @@ fn a_drawn_path_follows_the_only_template_that_fits_at_three_alleles() {
             allele_count: 3,
             likelihoods: &likelihoods,
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -373,7 +365,6 @@ fn extra_paths_leave_the_round_unchanged() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -437,7 +428,6 @@ fn bare_sites(allele_counts: &[usize]) -> Vec<WalkSite<'static>> {
             allele_count,
             likelihoods: &[],
             template_shares: &[],
-            emission_shares: None,
         })
         .collect()
 }
@@ -664,7 +654,6 @@ fn reads_that_link_nothing_change_no_bit() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -718,7 +707,6 @@ fn reads_change_the_haplotypes_and_not_the_walk() {
             allele_count: 2,
             likelihoods: &likelihoods,
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -863,7 +851,6 @@ fn the_walk_with_rare_background_landings_is_a_plain_forward_backward() {
             allele_count: 2,
             likelihoods: &likelihoods[..],
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = WalkParameters {
@@ -1008,7 +995,6 @@ fn an_even_landing_share_is_no_landing_share() {
             allele_count: 2,
             likelihoods: &likelihoods[..],
             template_shares: &shares,
-            emission_shares: None,
         })
         .collect();
     let parameters = |landing| WalkParameters {
@@ -1026,54 +1012,6 @@ fn an_even_landing_share_is_no_landing_share() {
             assert!((a - b).abs() < 1e-12, "{one:?} against {other:?}");
         }
     }
-}
-
-/// **The emissions read the emission shares; the prediction reads the template shares**
-/// (phasing spec §2.3): one template, unsure (50:50) as the prediction sees it and carrying the
-/// alternative as the emissions see it. At a site without reads the prediction is the unsure
-/// template's, even between the two homozygotes, while the window's likelihood, which only
-/// the emissions make, follows the definite allele.
-#[test]
-fn the_emissions_and_the_prediction_read_their_own_shares() {
-    static UNSURE: [f64; 2] = [0.5, 0.5];
-    static DEFINITE: [u8; 2] = [0, 1];
-    static ALTERNATIVE_READ: [f64; 3] = [0.01, 0.5, 1.0];
-    static FLAT: [f64; 3] = [1.0, 1.0, 1.0];
-    let sites = |emission: Option<&'static [u8]>| -> Vec<WalkSite<'static>> {
-        [(1_000_u64, &ALTERNATIVE_READ), (2_000, &FLAT)]
-            .iter()
-            .map(|&(position, likelihoods)| WalkSite {
-                position,
-                allele_count: 2,
-                likelihoods,
-                template_shares: &UNSURE,
-                emission_shares: emission,
-            })
-            .collect()
-    };
-    let parameters = WalkParameters {
-        segment_bases: 50_000.0,
-        run_bases: 100_000.0,
-        autozygous_share: 0.3,
-        mismatch: 0.01,
-        background_landing_share: None,
-    };
-    let soft = walk(&sites(None), 1, None, parameters);
-    let split = walk(&sites(Some(&DEFINITE)), 1, None, parameters);
-    // Read off the definite allele it would be nearly all 1/1; read off the 50:50 shares it is
-    // even between the homozygotes, whatever weight the walk gives the autozygous state.
-    let predicted = &split.neighbour_predictions[1];
-    assert!(
-        (predicted[0] - predicted[2]).abs() < 1e-12,
-        "the prediction without reads reads the template shares: {predicted:?}"
-    );
-    // One read of the alternative: the definite template explains it better than the unsure one.
-    assert!(
-        split.log_likelihood > soft.log_likelihood,
-        "{} against {}",
-        split.log_likelihood,
-        soft.log_likelihood
-    );
 }
 
 /// **A drawn state's two-byte code gives the state back**, at one template, at the pass's own
@@ -1107,8 +1045,8 @@ fn a_state_code_gives_the_state_back() {
 
 /// **The forward pass alone gives the walk's log-likelihood, bit for bit**: on the four reference
 /// windows, and on a window longer than a block of the backward walk with template weights, a
-/// background landing share, multi-allelic sites and definite emission shares — each after a walk
-/// of another template count has left its arrays on the thread.
+/// background landing share and multi-allelic sites — each after a walk of another template count
+/// has left its arrays on the thread.
 #[test]
 fn the_log_likelihood_alone_has_the_walks_bits() {
     let check = |sites: &[WalkSite<'_>],
@@ -1133,7 +1071,6 @@ fn the_log_likelihood_alone_has_the_walks_bits() {
                 allele_count: *alleles,
                 likelihoods,
                 template_shares: shares,
-                emission_shares: None,
             })
             .collect();
         check(
@@ -1144,39 +1081,24 @@ fn the_log_likelihood_alone_has_the_walks_bits() {
         );
     }
 
-    // Three templates; every third site has three alleles, every fifth reads definite alleles.
+    // Three templates; every third site has three alleles.
     let templates = 3;
     let biallelic_likelihoods = [0.3, 1.0, 0.05];
     let biallelic_shares = [0.9, 0.1, 0.2, 0.8, 0.5, 0.5];
-    let biallelic_definite = [1_u8, 0, 0, 1, 1, 0];
     let triallelic_likelihoods = [0.1, 0.4, 0.02, 1.0, 0.3, 0.01];
     let triallelic_shares = [0.8, 0.1, 0.1, 0.1, 0.1, 0.8, 0.3, 0.4, 0.3];
-    let triallelic_definite = [1_u8, 0, 0, 0, 0, 1, 0, 1, 0];
     let sites: Vec<WalkSite<'_>> = (0..200_u64)
         .map(|index| {
-            let definite = index % 5 == 0;
-            let (allele_count, likelihoods, shares, emission): (usize, &[f64], &[f64], &[u8]) =
-                if index % 3 == 0 {
-                    (
-                        3,
-                        &triallelic_likelihoods,
-                        &triallelic_shares,
-                        &triallelic_definite,
-                    )
-                } else {
-                    (
-                        2,
-                        &biallelic_likelihoods,
-                        &biallelic_shares,
-                        &biallelic_definite,
-                    )
-                };
+            let (allele_count, likelihoods, shares): (usize, &[f64], &[f64]) = if index % 3 == 0 {
+                (3, &triallelic_likelihoods, &triallelic_shares)
+            } else {
+                (2, &biallelic_likelihoods, &biallelic_shares)
+            };
             WalkSite {
                 position: 1 + index * 700,
                 allele_count,
                 likelihoods,
                 template_shares: shares,
-                emission_shares: definite.then_some(emission),
             }
         })
         .collect();
@@ -1189,99 +1111,6 @@ fn the_log_likelihood_alone_has_the_walks_bits() {
     };
     check(&sites, templates, Some(&[2.0, 0.5]), parameters);
     check(&sites[..1], templates, Some(&[2.0, 0.5]), parameters);
-}
-
-/// **Emissions from definite alleles by the allele-pair table have the general computation's
-/// bits**: a site reading definite alleles as its emission shares against the same alleles given
-/// as the template shares, which the general computation reads — at 2, 3 and 5 alleles and 17
-/// templates, every allele carried by several templates. A template carrying no allele is not
-/// definite, and takes the general computation.
-#[test]
-fn definite_emissions_have_the_general_bits() {
-    let templates = 17;
-    let mismatch = 0.013;
-    for alleles in [2_usize, 3, 5] {
-        let genotypes = alleles * (alleles + 1) / 2;
-        let likelihoods: Vec<f64> = (0..genotypes)
-            .map(|genotype| 1.0 / (1.0 + genotype as f64 * 0.37))
-            .collect();
-        let carried = |template: usize| (template * 7 + 3) % alleles;
-        let mut definite = vec![0_u8; templates * alleles];
-        for template in 0..templates {
-            definite[template * alleles + carried(template)] = 1;
-        }
-        let mut no_allele = definite.clone();
-        no_allele[5 * alleles..6 * alleles].fill(0);
-        let soft = vec![1.0 / alleles as f64; templates * alleles];
-        let mut pairs = GenotypePairs::default();
-        let pairs = pairs.of(alleles);
-        let emissions_of = |site: &WalkSite<'_>| {
-            let mut terms = SiteTerms::default();
-            terms.fill(site, mismatch, pairs);
-            let mut autozygous = vec![f64::NAN; templates];
-            let mut pair_emissions = vec![f64::NAN; templates * templates];
-            emissions_into(
-                site,
-                &terms,
-                templates,
-                mismatch,
-                (&mut autozygous, &mut pair_emissions),
-                &mut EmissionScratch::default(),
-            );
-            (autozygous, pair_emissions)
-        };
-        let bits = |(autozygous, pairs): (Vec<f64>, Vec<f64>)| -> Vec<u64> {
-            autozygous
-                .iter()
-                .chain(&pairs)
-                .map(|v| v.to_bits())
-                .collect()
-        };
-        // The table takes the definite site and refuses the one with a template carrying nothing.
-        let mut terms = SiteTerms::default();
-        let table_site = WalkSite {
-            position: 1,
-            allele_count: alleles,
-            likelihoods: &likelihoods,
-            template_shares: &soft,
-            emission_shares: None,
-        };
-        terms.fill(&table_site, mismatch, pairs);
-        let mut out = (vec![0.0; templates], vec![0.0; templates * templates]);
-        for (shares, taken) in [(&definite, true), (&no_allele, false)] {
-            assert_eq!(
-                definite_emissions_into(
-                    shares,
-                    alleles,
-                    &terms.by_alleles,
-                    mismatch,
-                    (&mut out.0, &mut out.1),
-                    &mut EmissionScratch::default(),
-                ),
-                taken
-            );
-        }
-        for shares in [&definite, &no_allele] {
-            let as_template: Vec<f64> = shares.iter().map(|&share| f64::from(share)).collect();
-            let by_table = WalkSite {
-                position: 1,
-                allele_count: alleles,
-                likelihoods: &likelihoods,
-                template_shares: &soft,
-                emission_shares: Some(shares),
-            };
-            let general = WalkSite {
-                template_shares: &as_template,
-                emission_shares: None,
-                ..by_table
-            };
-            assert_eq!(
-                bits(emissions_of(&by_table)),
-                bits(emissions_of(&general)),
-                "{alleles} alleles"
-            );
-        }
-    }
 }
 
 /// **Pairs are kept by allele count, whatever order the counts are asked in**: a count not yet

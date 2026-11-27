@@ -128,20 +128,22 @@ accessions supply — simulations of 200 samples from 64 founders, 40 of them at
   cohort, but Beagle differs in more than hardness. *Measured 2026-11-05:* reading hard alleles
   everywhere from round 2 cost the outbred 1× samples of a 40-sample cohort 12 homozygous-reference
   genotypes in 100 (72 → 60 right); the stored haplotypes stay soft.
-- **From round 2 the states are weighed by definite alleles — decided 2026-11-05, measured.** A
-  template's shares do two jobs in a walk: in the emissions they decide *whom the sample is
-  copying*, and in the prediction and the drawn haplotypes they say *what it then carries*. Soft
-  shares are right for the second and wrong for the first: an unsure template — a 1× sample at 50:50
-  where it has no read — is never plainly wrong, so it explains the sample's reads as well as a
-  template that truly carries them, and the walk spreads its weight onto it. So from round 2 each
-  emission reads one allele drawn from each template's shares, the background's included, while the
-  prediction and the drawn haplotypes read the shares themselves (§2.3). On the simulated F2 (two
-  30× parents, 20 offspring at 1×) heterozygous offspring genotypes right went from 51 to 70 in 100;
-  in two 40-sample natural cohorts with samples down to 1×, the 1× samples gained 2 to 4 genotypes
-  in 100 more and the samples at 5× and above moved by at most 1 in 100. Drawing the background's
-  allele too matters: left soft, it was the one template never plainly wrong, the walk copied it
-  more, and the no-read calls it withholds (pass §4.2) rose from 8 to 21 in 100 of the outbred 1×
-  homozygous-reference genotypes (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`).
+- **The emissions read the template shares, not alleles drawn from them — decided 2026-11-27,
+  measured; reverses 2026-11-05.** From 2026-11-05 to 2026-11-27 each emission from round 2 on read
+  one allele drawn from each template's shares, the background's included, so that an unsure
+  template — a 1× sample at 50:50 where it has no read — would sometimes be plainly wrong and the
+  walk would stop spreading its weight onto it. On a simulated F2 (two 30× parents, 20 offspring at
+  1×) that took heterozygous offspring right from 51 to 70 in 100
+  (`doc/devel/reports/implementations/refine_sources_2026-11-05.md`). It was never measured on small
+  cohorts at 3×, where it does harm: on simulated founder-mosaic cohorts at 3× it raised the wrong
+  genotypes where samples had reads above calling's own in four of seven cohorts — in 10 inbred
+  samples (F 0.95) from 16 founders from 117 to 320, nearly all true homozygous-reference
+  genotypes called non-reference (2 → 143). Reading the shares, refinement helps or is neutral in
+  all seven (117 → 111 there). The price, on the cohorts the draw was built for and later code: F2
+  heterozygous offspring 91 → 88 in 100 right; outbred 1× samples 61 → 56 heterozygotes and
+  73 → 64 homozygous-reference genotypes right, the difference left missing rather than wrong;
+  samples at 5× and above within 1.2 in 100 (`doc/devel/reports/implementations/
+  refine_drawn_alleles_2026-11-27.md`).
 - **A sample does not read its own reads back — decided 2026-11-07, measured.** A sample that
   copies another lends it its reads: the second sample's haplotype there carries the first's
   alleles. Read back whole in the next round, it comes back to the first as a relative's haplotype —
@@ -193,12 +195,10 @@ lands (pass §3.5). *Changed 2026-11-05:* before, a haplotype's score was its di
 the whole window, out of the count of shared records rather than out of the expected disagreement
 (`doc/devel/reports/implementations/local_sources_2026-11-05.md`).
 
-**What a round's walk reads of its templates.** The emissions read *definite alleles*: at each site,
-one allele drawn from each template's shares — the 16 haplotypes' and the background's — from the
-stream `StreamPurpose::DefiniteAlleles`, keyed by the window, the sample and the round (§5), one
-uniform a template a site in template order. The genotype prediction and the re-estimation of the
-sample's own haplotypes read the shares (§2.2). Round 1 reads the shares for both: its templates are
-genotypes, not haplotypes, and it is the pass without phasing.
+**What a round's walk reads of its templates.** The emissions, the genotype prediction and the
+re-estimation of the sample's own haplotypes all read each template's shares — the 16 haplotypes'
+and the background's — in every round (§2.2). *Changed 2026-11-27:* from 2026-11-05 the emissions
+read one allele drawn from each template's shares instead (§2.2, the decision of 2026-11-27).
 
 **A copy that followed the reader is read without it** (§2.2). Each round's path records, per site,
 the template each copy followed, and the sample that template came from. When sample `s` reads copy
@@ -415,8 +415,6 @@ windows and then frozen (pass §3.5), so calling a contig alone or after others 
 different windows. That predates phasing.
 Each state is drawn with one uniform in [0, 1) against the cumulative weights in a
 fixed order — autozygous states first, then pair states row by row — as `phaser.py` orders them.
-The definite alleles a round's emissions read (§2.3) come from a stream of their own, keyed the same
-way with its own purpose number, so drawing them changes no path.
 Nothing depends on threads or on solving order, and rounds are synchronous (§2.1 step 3), so the
 result is the same at 1 and 30 threads. **The seed is a constant in the code, not an option.**
 

@@ -43,8 +43,8 @@ pvc call-from-psps --reference genome.fa --psp psps/ \
 - **pvc takes no pedigree.** The samples are called together as a small cohort, and how they are
   related is not used.
 - The three `generate-psps` can run at the same time.
-- **Leave imputation off.** `auto` would not run below 10 samples, and on simulated outbred
-  cohorts of 10 samples it made wrong genotypes more common (see
+- **Leave imputation off.** `auto` would not run below 10 samples, and on a simulated outbred
+  cohort of 10 samples it removed only 4 in 100 of the wrong genotypes (see
   [Genotypes from neighbouring sites](neighbour_evidence.md#when-it-runs)). The VCF is still
   phased from the reads where they link two heterozygotes.
 
@@ -88,9 +88,9 @@ pvc call-from-psps --reference genome.fa --psp psps/ \
 - **Estimate the parameters here too.** In the simulated population of the inbred recipe, the
   outbred group's estimate at 3× was 0.007, against a true 0.005: the fit does not invent
   inbreeding.
-- **Leave imputation off**, the default. On simulated outbred cohorts it removed 13% to 24% of
-  the wrong genotypes at 50 samples, but at 10 samples it left three quarters more wrong
-  genotypes than without it. Outbred species have not been measured. To impute, run a tool that
+- **Leave imputation off**, the default. On simulated outbred cohorts at 3× it removed 18% to 64%
+  of the wrong genotypes at 50 samples, but only 4% at 10 samples. Outbred species have not been
+  measured. To impute, run a tool that
   phases, such as Beagle or GLIMPSE, on pvc's VCF.
 
 ## A large cohort on a cluster

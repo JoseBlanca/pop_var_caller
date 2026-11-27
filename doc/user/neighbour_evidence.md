@@ -42,18 +42,17 @@ differ with the cohort:
 |---|---|---|
 | 400 samples from a coalescent simulation (msprime), 100 each at 30×, 10×, 5× and 2× | 2026-11-08 | SNP genotypes missed at 2×: 12,220 → 1,546; fewer at every depth below 30× ([Accuracy](accuracy.md#imputation-genotype-refinement-and-filling)) |
 | 40 samples from the same simulation, all at 2× | 2026-11-07 | genotypes right 29,381 → 31,378, but heterozygotes right 7,521 → 7,042 |
-| 50 samples at 3×, mosaics of 16 founder haplotypes | 2026-11-02 | wrong genotypes where samples had reads: 4,934 → 3,773 (24% fewer) |
-| 50 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-02 | the same: 5,308 → 4,614 (13% fewer) |
-| 10 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-02 | the same: 1,239 → 2,155 (74% more) |
+| 50 samples at 3×, mosaics of 16 founder haplotypes | 2026-11-27 | wrong genotypes where samples had reads: 4,959 → 1,780 (64% fewer) |
+| 50 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-27 | the same: 5,031 → 4,149 (18% fewer) |
+| 10 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-27 | the same: 973 → 935 (4% fewer) |
 
 The cohorts differ in more than their size. The 400-sample cohort holds 100 samples at 30×,
 whose haplotypes are good templates; in the others every sample is shallow. And with 64
 founders and 10 samples, a sample's haplotype at a given place is often carried by no other
-sample; why that cohort did worse was not measured. The code differs too:
-the founder cohorts were run before two changes, on 2026-11-06 and 2026-11-07, that removed a
-loss of heterozygotes in small, shallow outbred cohorts — the second row's 7,042 was 3,344
-before them — and they have not been run again. So the harm at 10 samples may be smaller today,
-but that is not measured. Cohorts of real outbred species, such as human, cattle or outbred
+sample, so there is little to copy. The code differs too: the first two rows were measured
+before a change on 2026-11-27 that stopped the refinement from making small cohorts at 3× worse
+(with 10 samples from 64 founders, it had raised the wrong genotypes from 973 to 1,088), and
+they have not been run again. Cohorts of real outbred species, such as human, cattle or outbred
 crops, have not been measured at all. For those, an imputation tool built for outbred
 populations, such as Beagle or GLIMPSE ([Methods § References](methods.md#references)), is the
 safer choice.
