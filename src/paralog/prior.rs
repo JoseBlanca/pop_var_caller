@@ -300,8 +300,9 @@ impl ParalogFdrCurve {
     }
 }
 
-/// The logistic function `σ(x) = 1 / (1 + e^{−x})`, `−∞`/`+∞`-safe.
-fn sigmoid(x: f64) -> f64 {
+/// The logistic function `σ(x) = 1 / (1 + e^{−x})`, `−∞`/`+∞`-safe. Shared with the windowed
+/// prior, which turns the same log ratios into probabilities.
+pub(super) fn sigmoid(x: f64) -> f64 {
     if x >= 0.0 {
         1.0 / (1.0 + float::exp(-x))
     } else {
@@ -311,8 +312,8 @@ fn sigmoid(x: f64) -> f64 {
 }
 
 /// The logit `ln(p / (1 − p))`. Callers clamp `p` into the open unit interval
-/// first via [`clamp_probability`].
-fn logit(p: f64) -> f64 {
+/// first via [`clamp_probability`] (the windowed prior clamps with its own floor).
+pub(super) fn logit(p: f64) -> f64 {
     float::ln(p / (1.0 - p))
 }
 
