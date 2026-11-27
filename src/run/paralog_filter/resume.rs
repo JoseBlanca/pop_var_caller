@@ -34,10 +34,10 @@ use super::spill_file::{SpillFile, SpillFileError};
 use crate::neighbour_evidence::phase::PathAgreement;
 use crate::neighbour_evidence::stage::NeighbourEvidenceDecision;
 use crate::neighbour_evidence::windows::{MarginThinning, WindowSizes};
-use crate::run::cohort_merge::recorded_windows::{read_the_histogram, write_the_histogram};
 use crate::types::{InbreedingF, Ploidy};
 use crate::vcf::header::{HeaderContig, VcfHeaderMetadata};
 use crate::window_coverage::SampleHistogram;
+use crate::window_coverage::histogram_line::{read_the_histogram, write_the_histogram};
 
 /// The manifest's name in the scratch directory.
 pub const RESUME_FILE_NAME: &str = "resume.json";

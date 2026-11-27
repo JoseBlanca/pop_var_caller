@@ -44,7 +44,6 @@
 //! - **A3:** how common hidden duplications are in this run and where to cut them
 //!   ([`ParalogPrior`] and [`ParalogFdrCurve`] in [`prior`], [`calibration::ParalogCalibration`]).
 
-pub mod calibrate;
 pub mod calibration;
 pub mod coverage_model;
 pub mod locus_score;
@@ -60,8 +59,10 @@ mod production_parity;
 
 // Production's own surface (`src/paralog/mod.rs`), name for name, so that the call sites
 // arriving with the later steps resolve unchanged.
-pub use calibrate::calibrate_from_the_ratio_histogram;
-pub use calibration::{CalibrationConfig, DEFAULT_FALLBACK_PARALOG_PRIOR, ParalogCalibration};
+pub use calibration::{
+    CalibrationConfig, DEFAULT_FALLBACK_PARALOG_PRIOR, ParalogCalibration,
+    calibrate_from_the_ratio_histogram,
+};
 pub use coverage_model::{
     CoverageFitConfig, CoverageModelError, ModeMedianRatioBounds, SingleCopyCoverageModel,
 };

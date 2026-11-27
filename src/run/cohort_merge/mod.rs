@@ -27,23 +27,21 @@
 //! **Still to come:** the caller objects that will own these parameters and this cache, and
 //! the run summary that reports what the merge refused (spec §13).
 //!
-//! **`pub`, though the architecture calls this crate-private machinery.** The two
-//! caller objects that will own it do not exist yet, so `pub(crate)` items here would
-//! have no consumer and the crate's `-D warnings` gate would reject them as dead code;
-//! ng's probes also live in `examples/`, which are separate crate targets and see only
-//! `pub` items. The intent is the architecture's — narrow this when the caller objects
-//! land.
+//! **Which submodules are `pub`.** [`close`] and [`observation_cache`] are, because an
+//! integration test (`tests/ng_calling_loop_calls_genotypes.rs`) builds loci by hand from their
+//! types. The rest are `pub(crate)`: their only consumers are the run's callers and the `cli`
+//! module, both inside this crate.
 
-pub mod build;
+pub(crate) mod build;
 pub mod close;
 mod frontier;
 pub mod observation_cache;
-pub mod recorded_windows;
+pub(crate) mod recorded_windows;
 /// The round driver, kept as the streaming driver's test reference: no run uses it.
 #[cfg(test)]
 mod rounds;
-pub mod serial;
-pub mod stream;
+pub(crate) mod serial;
+pub(crate) mod stream;
 
 /// The fixtures the module's test suites share — the coordinates every test writes and the
 /// failure every fake source yields.
