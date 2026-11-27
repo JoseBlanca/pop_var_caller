@@ -1,11 +1,11 @@
 //! The block index: one entry per psp block, in genomic order, so a reader can start at
 //! any block without reading what comes before it.
 //!
-//! **A flat vector, decoded whole at open** — production's shape (`src/psp/index.rs`), and
+//! **A flat vector, decoded whole at open** — the old caller's `.psp` shape, and
 //! the large psp block is what makes it affordable to keep. Measured on a tomato
 //! accession: **154 entries at 1 MB blocks against 1,674 in the equivalent `.psp`**, which
 //! scales to roughly 14,000 entries and a few hundred kilobytes for a whole genome
-//! (spec §3.3). At production's 5 kb blocks the same genome needs about 156,000 entries and
+//! (spec §3.3). At the old format's 5 kb blocks the same genome needs about 156,000 entries and
 //! a 3.8 MB index *per open sample*, which is what the memory budget cannot afford — so a
 //! large block removes the problem rather than solving it, and the coarse-index-and-chain
 //! scheme `run_streaming.md` §7.2 asks for must not be built.
@@ -57,8 +57,8 @@ const SMALLEST_ENTRY_BYTES: u64 = 1 + 1 + 8;
 /// **A contig number is a `u32` and a position is a `u64`**, so their variable-length forms run
 /// to five bytes and **ten**, not five and five: 23 bytes an entry, not 18.
 ///
-/// ⚠ The 18 was here first, carried over from production, where all four of the index's fields
-/// genuinely are `u32` ([`src/psp/index.rs`](../../../../src/psp/index.rs)). ng's position is
+/// ⚠ The 18 was here first, carried over from the old caller's `.psp`, where all four of the
+/// index's fields genuinely were `u32`. ng's position is
 /// not, and `the_widest_value_of_every_field_round_trips` already builds the very entry the old
 /// comment said could not exist. Nothing was corrupt — a `Vec` grows — but a constant named for
 /// a bound has to hold it.
@@ -68,7 +68,7 @@ const LARGEST_ENTRY_BYTES: usize = 5 + 10 + 8;
 /// byte offset it starts at.
 ///
 /// **Contig and position are variable-length; the offset is a fixed eight bytes.** That is
-/// production's split ([`src/psp/index.rs`](../../../../src/psp/index.rs)) and its reasoning
+/// the old caller's split, and its reasoning
 /// holds here: contig numbers and positions are small in most files and compress to one or two
 /// bytes each, while an offset is large and arbitrary, so a varint would usually cost the same
 /// eight bytes and sometimes nine.

@@ -9,10 +9,10 @@
 //! that was killed, and a caller reading one short would silently get a sample that stops
 //! in the middle of a chromosome (spec §3.3, goal 3).
 //!
-//! Production's 32-byte tail is the model (`src/psp/trailer.rs` — which production calls a
-//! *trailer*, a word this module uses for something else entirely). This one is wider,
-//! because it has to locate a section production has no equivalent of: the trailer, the
-//! writer's closing payload.
+//! The old caller's 32-byte tail (deleted on 2026-09-13, and called a *trailer* there, a word
+//! this module uses for something else entirely) is the model. This one is wider, because it
+//! has to locate a section the old format had no equivalent of: the trailer, the writer's
+//! closing payload.
 
 /// Bytes the footer occupies: five `u64` offsets and counts, the index checksum, and the
 /// magic.

@@ -7,13 +7,13 @@
 //! and that figure does not grow with the block size, the read depth or the length of the
 //! genome** (`doc/devel/ng/spec/psp_file_format.md` §1.1).
 //!
-//! The way it gets there is to untie two numbers production's `.psp` ties together. There,
-//! a block is at once *how far back the compressor may look for a repeated pattern* and
-//! *how much a reader must inflate before it can hand out its first record*, so shrinking a
-//! block to save memory costs compression and multiplies the index. Here the block stays
-//! large — for its ratio and for a small index — while a separate declared number caps the
-//! compressor's look-back, and the reader decodes incrementally instead of inflating a
-//! whole block.
+//! The way it gets there is to untie two numbers that the old caller's `.psp` (deleted on
+//! 2026-09-13) tied together. There, a block was at once *how far back the compressor may look
+//! for a repeated pattern* and *how much a reader must inflate before it can hand out its first
+//! record*, so shrinking a block to save memory cost compression and multiplied the index. Here
+//! the block stays large — for its ratio and for a small index — while a separate declared
+//! number caps the compressor's look-back, and the reader decodes incrementally instead of
+//! inflating a whole block.
 //!
 //! ```text
 //! +---------------------------+
@@ -31,18 +31,11 @@
 //! +---------------------------+
 //! ```
 //!
-//! **Words this module uses differently from production's `src/psp/`**, and a coder moving
-//! between the two will get them wrong: what production calls its *metadata section* is the
-//! **trailer** here, what production calls its *trailer* is the **footer** here, and *block*
-//! here always means a **psp block** — a span of reference and the records in it — never one of
-//! zstd's own internal subdivisions.
-//!
-//! **⚠ That collision reaches the method names, and it is sharpest on one pair.** Production has
-//! a `PspReader` too, and `PspReader::trailer()` means *the fixed tail* there and *the writer's
-//! closing payload* here — where the fixed tail is [`PspReader::footer`]. Two types of the same
-//! name with a method of the same name returning different sections of a file is the worst shape
-//! this vocabulary can take, and it is kept because spec §6.2 fixes both words. `seek_to` is the
-//! milder case: a genomic coordinate in production, a byte offset here.
+//! **Three section words, fixed by spec §6.2.** The **trailer** is the writer's closing payload;
+//! the **footer** is the fixed-size tail, returned by [`PspReader::footer`]; and *block* always
+//! means a **psp block** — a span of reference and the records in it — never one of zstd's own
+//! internal subdivisions. The old caller's `.psp` used *trailer* for the fixed tail and
+//! *metadata section* for the closing payload, which is why older reports read the other way.
 //!
 //! **This module is not a pipeline step.** It is infrastructure beside
 //! [`crate::ref_seq`], used by the locus generator to write and by the cohort merge to
@@ -257,10 +250,6 @@ fn read_header_bytes_from(mut file: File, path: &Path) -> Result<Vec<u8>, PspRea
 /// The variants are separate because **the instruction to whoever sees them differs**:
 /// rebuild the file, upgrade the reader, raise a limit, the data is damaged. Collapsing
 /// them into one error loses exactly that.
-///
-/// **Same name as production's `psp::errors::PspReadError`, a different type in a
-/// different module.** ng's surface is its own; the two must not be confused at a `use`
-/// site.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum PspReadError {
@@ -630,9 +619,6 @@ impl PspReadError {
 }
 
 /// Everything that can go wrong writing a psp.
-///
-/// **Same name as production's `psp::errors::PspWriteError`, a different type in a
-/// different module** — see [`PspReadError`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum PspWriteError {

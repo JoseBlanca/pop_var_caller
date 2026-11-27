@@ -1,7 +1,7 @@
 //! The header: a file's own account of what it holds and how it was written.
 //!
-//! It sits at the start of every psp and **stays plain text**, framed exactly as
-//! production's `.psp` frames its own (`src/psp/header.rs`): a 4-byte magic, an 8-byte
+//! It sits at the start of every psp and **stays plain text**, framed exactly as the old
+//! caller's `.psp` framed its own: a 4-byte magic, an 8-byte
 //! little-endian length for the TOML body, the body, and a sentinel line. The length is
 //! authoritative and the sentinel is a cross-check.
 //!
