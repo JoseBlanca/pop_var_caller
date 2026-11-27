@@ -906,14 +906,8 @@ pub(super) fn one_position(
     statistics: &mut Statistics,
 ) {
     let group_index = model.group_index;
-    let ploidy = model.ploidy;
-    let read_logs = model.read_logs.as_slice();
-    let quadrature = &model.quadrature;
     let carrier = model.carrier.as_ref().map(|rule| &rule.quadrature);
-    let parameters = model.parameters;
-    let shares = &model.branches;
     let samples = scratch.samples;
-    let nodes = scratch.nodes;
     statistics.positions += 1.0;
     for s in 0..samples {
         let depth: f64 = group_index[s]
@@ -928,6 +922,76 @@ pub(super) fn one_position(
         }
     }
 
+    candidates_of(scratch, &model.branches);
+    read_likelihoods(scratch, model);
+    frequency_integral(scratch, &model.quadrature);
+    if let Some(carrier) = carrier {
+        carrier_integral(scratch, carrier, coverage_odds);
+    }
+    branches_and_classes(scratch, &model.branches, carrier);
+    let position_ln = float::ln_sum_exp(&scratch.class_ln);
+    scratch.position_ln = position_ln;
+    if !position_ln.is_finite() {
+        // A position whose likelihood underflowed contributes nothing to any parameter, and it
+        // must still contribute an entry, or every position after it in the chunk would be
+        // attributed to its neighbour.
+        if statistics.collect_noisy_posterior {
+            statistics.noisy_posterior.push(0.0);
+        }
+        if statistics.collect_genotype_posterior {
+            statistics
+                .genotype_posterior
+                .extend(std::iter::repeat_n(0.0_f32, samples * 3));
+            statistics.duplicated_posterior.push(0.0);
+        }
+        // **And it counts as a position for the two population moments, carrying nothing.** Both
+        // routes to those moments have to see the same census: the stored array records this
+        // position as all-zero posteriors, so the running sums must record a position of no
+        // alternative copies rather than skip it, or the two would divide by different counts.
+        //
+        // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
+        // way here is taken through `float::ln(p.max(f64::MIN_POSITIVE))`, which floors a read's
+        // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one —
+        // so reaching `!position_ln.is_finite()` from well-formed evidence would take on the order
+        // of 1e305 reads at a position. What the two lines below maintain is tested where it can be:
+        // an all-zero position counts and contributes nothing, in `census_moments`'s
+        // all-reference fixtures, which build the identical buffer. Replacing this block with a
+        // `panic!` leaves the suite green, and that is a statement about the branch's
+        // reachability, not about the bookkeeping.
+        scratch.position_genotype.fill(0.0);
+        statistics
+            .census_moments
+            .add_position(&scratch.position_genotype);
+        return;
+    }
+    scratch.position_genotype.fill(0.0);
+    statistics.log_likelihood += position_ln;
+    if statistics.collect_noisy_posterior {
+        statistics
+            .noisy_posterior
+            .push(float::exp(scratch.class_ln[1] - position_ln) as f32);
+    }
+
+    let duplicated_here = attribute(scratch, model, coverage_odds, statistics, position_ln);
+
+    // **The two population moments, summed here rather than stored and reduced afterwards.**
+    // `scratch.position_genotype` is the buffer this position just filled; nothing is copied and
+    // nothing is kept (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
+    statistics
+        .census_moments
+        .add_position(&scratch.position_genotype);
+    if statistics.collect_genotype_posterior {
+        statistics
+            .genotype_posterior
+            .extend(scratch.position_genotype.iter().map(|v| *v as f32));
+        statistics.duplicated_posterior.push(duplicated_here as f32);
+    }
+}
+
+/// [`one_position`]'s first phase: the candidate alleles the position sums over, and the log of
+/// how many alleles each stands for.
+#[inline(always)]
+fn candidates_of(scratch: &mut Scratch, shares: &BranchShares) {
     // ---- which alleles the position sums over ---------------------------------------------
     //
     // The three non-reference bases, with the ones no sample showed a read on folded into one
@@ -948,8 +1012,20 @@ pub(super) fn one_position(
             .ln_multiplicity
             .push(shares.ln_multiplicity[unobserved]);
     }
-    let candidates = scratch.candidates.len();
+}
 
+/// [`one_position`]'s second phase: each sample's read likelihoods under each genotype, per noise
+/// class and candidate allele.
+#[inline(always)]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "the sample index addresses parallel arrays at once, as in `one_position`"
+)]
+fn read_likelihoods(scratch: &mut Scratch, model: &PassModel<'_>) {
+    let group_index = model.group_index;
+    let read_logs = model.read_logs.as_slice();
+    let samples = scratch.samples;
+    let candidates = scratch.candidates.len();
     // ---- the read likelihoods, once per candidate and reused across every node -------------
     //
     // **The library loop is outside the candidate loop so that the two candidate-invariant
@@ -1029,7 +1105,15 @@ pub(super) fn one_position(
             scratch.fixed_ln[class * MAX_CANDIDATES + candidate] = fixed[candidate];
         }
     }
+}
 
+/// [`one_position`]'s third phase: the segregating branch's integral over the allele frequency,
+/// one log-likelihood a quadrature node.
+#[inline(always)]
+fn frequency_integral(scratch: &mut Scratch, quadrature: &BetaQuadrature) {
+    let samples = scratch.samples;
+    let nodes = scratch.nodes;
+    let candidates = scratch.candidates.len();
     // ---- the integral over the position's own allele frequency ------------------------------
     for class in 0..2 {
         for candidate in 0..candidates {
@@ -1051,7 +1135,14 @@ pub(super) fn one_position(
             }
         }
     }
+}
 
+/// [`one_position`]'s fourth phase, when the run fits the duplicated class: its integral over the
+/// carrier frequency, one log-likelihood a node of the carrier rule.
+#[inline(always)]
+fn carrier_integral(scratch: &mut Scratch, carrier: &BetaQuadrature, coverage_odds: &[f64]) {
+    let samples = scratch.samples;
+    let candidates = scratch.candidates.len();
     // ---- the integral over how much of the panel carries the extra copy ---------------------
     //
     // The same shape as the branch above with one difference: a sample here has two states
@@ -1059,35 +1150,43 @@ pub(super) fn one_position(
     // disagree — the identical read likelihood a heterozygote has, already computed — or it
     // does not, and is homozygous reference. **There is no third state, and that absence is
     // what tells the class from a real variant across a cohort.**
-    if let Some(carrier) = carrier {
-        for class in 0..2 {
-            for candidate in 0..candidates {
-                let mut offset = 0.0;
-                for s in 0..samples {
-                    offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
-                }
-                for node in 0..carrier.nodes.len() {
-                    let q = carrier.nodes[node];
-                    let product_ln = ln_of_product((0..samples).map(|s| {
-                        let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                        // Where the run has a coverage summary, this is the only place it
-                        // enters: how much more likely this sample's read depth around here is
-                        // if it has two copies rather than one. Every other branch has every
-                        // sample single-copy, so the one-copy factor is common to all of them
-                        // and cancels out of the position entirely.
-                        let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
-                        (1.0 - q) * lik[0] + q * odds * lik[1]
-                    }));
-                    let slot = scratch.node_at(class, candidate, node);
-                    scratch.carrier_node_ln[slot] = match product_ln {
-                        Some(product_ln) => product_ln + offset + carrier.ln_weights[node],
-                        None => f64::NEG_INFINITY,
-                    };
-                }
+    for class in 0..2 {
+        for candidate in 0..candidates {
+            let mut offset = 0.0;
+            for s in 0..samples {
+                offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
+            }
+            for node in 0..carrier.nodes.len() {
+                let q = carrier.nodes[node];
+                let product_ln = ln_of_product((0..samples).map(|s| {
+                    let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                    // Where the run has a coverage summary, this is the only place it
+                    // enters: how much more likely this sample's read depth around here is
+                    // if it has two copies rather than one. Every other branch has every
+                    // sample single-copy, so the one-copy factor is common to all of them
+                    // and cancels out of the position entirely.
+                    let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
+                    (1.0 - q) * lik[0] + q * odds * lik[1]
+                }));
+                let slot = scratch.node_at(class, candidate, node);
+                scratch.carrier_node_ln[slot] = match product_ln {
+                    Some(product_ln) => product_ln + offset + carrier.ln_weights[node],
+                    None => f64::NEG_INFINITY,
+                };
             }
         }
     }
+}
 
+/// [`one_position`]'s fifth phase: the four branches' and the two noise classes' log-likelihoods.
+#[inline(always)]
+fn branches_and_classes(
+    scratch: &mut Scratch,
+    shares: &BranchShares,
+    carrier: Option<&BetaQuadrature>,
+) {
+    let nodes = scratch.nodes;
+    let candidates = scratch.candidates.len();
     // ---- the four branches, and the two classes ---------------------------------------------
     let ln_three = shares.ln_three;
     for class in 0..2 {
@@ -1149,50 +1248,30 @@ pub(super) fn one_position(
         scratch.within_ln[class] = within;
         scratch.class_ln[class] = shares.ln_class[class] + within;
     }
-    let position_ln = float::ln_sum_exp(&scratch.class_ln);
-    scratch.position_ln = position_ln;
-    if !position_ln.is_finite() {
-        // A position whose likelihood underflowed contributes nothing to any parameter, and it
-        // must still contribute an entry, or every position after it in the chunk would be
-        // attributed to its neighbour.
-        if statistics.collect_noisy_posterior {
-            statistics.noisy_posterior.push(0.0);
-        }
-        if statistics.collect_genotype_posterior {
-            statistics
-                .genotype_posterior
-                .extend(std::iter::repeat_n(0.0_f32, samples * 3));
-            statistics.duplicated_posterior.push(0.0);
-        }
-        // **And it counts as a position for the two population moments, carrying nothing.** Both
-        // routes to those moments have to see the same census: the stored array records this
-        // position as all-zero posteriors, so the running sums must record a position of no
-        // alternative copies rather than skip it, or the two would divide by different counts.
-        //
-        // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
-        // way here is taken through `float::ln(p.max(f64::MIN_POSITIVE))`, which floors a read's
-        // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one —
-        // so reaching `!position_ln.is_finite()` from well-formed evidence would take on the order
-        // of 1e305 reads at a position. What the two lines below maintain is tested where it can be:
-        // an all-zero position counts and contributes nothing, in `census_moments`'s
-        // all-reference fixtures, which build the identical buffer. Replacing this block with a
-        // `panic!` leaves the suite green, and that is a statement about the branch's
-        // reachability, not about the bookkeeping.
-        scratch.position_genotype.fill(0.0);
-        statistics
-            .census_moments
-            .add_position(&scratch.position_genotype);
-        return;
-    }
-    scratch.position_genotype.fill(0.0);
-    let mut duplicated_here = 0.0_f64;
-    statistics.log_likelihood += position_ln;
-    if statistics.collect_noisy_posterior {
-        statistics
-            .noisy_posterior
-            .push(float::exp(scratch.class_ln[1] - position_ln) as f32);
-    }
+}
 
+/// [`one_position`]'s last phase: the position's share of every accumulated count, given its
+/// log-likelihood `position_ln`. Returns its posterior of being in the duplicated class.
+#[inline(always)]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "the sample index addresses parallel arrays at once, as in `one_position`"
+)]
+fn attribute(
+    scratch: &mut Scratch,
+    model: &PassModel<'_>,
+    coverage_odds: &[f64],
+    statistics: &mut Statistics,
+    position_ln: f64,
+) -> f64 {
+    let group_index = model.group_index;
+    let ploidy = model.ploidy;
+    let quadrature = &model.quadrature;
+    let parameters = model.parameters;
+    let samples = scratch.samples;
+    let nodes = scratch.nodes;
+    let candidates = scratch.candidates.len();
+    let mut duplicated_here = 0.0_f64;
     // ---- attribute it -------------------------------------------------------------------------
     for class in 0..2 {
         let class_posterior = float::exp(scratch.class_ln[class] - position_ln);
@@ -1438,19 +1517,7 @@ pub(super) fn one_position(
             }
         }
     }
-
-    // **The two population moments, summed here rather than stored and reduced afterwards.**
-    // `scratch.position_genotype` is the buffer this position just filled; nothing is copied and
-    // nothing is kept (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
-    statistics
-        .census_moments
-        .add_position(&scratch.position_genotype);
-    if statistics.collect_genotype_posterior {
-        statistics
-            .genotype_posterior
-            .extend(scratch.position_genotype.iter().map(|v| *v as f32));
-        statistics.duplicated_posterior.push(duplicated_here as f32);
-    }
+    duplicated_here
 }
 
 pub(super) fn class_rate(parameters: &Parameters, class: usize, group: usize) -> f64 {
