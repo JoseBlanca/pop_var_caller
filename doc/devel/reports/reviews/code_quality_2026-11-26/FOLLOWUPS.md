@@ -14,3 +14,4 @@
 - calling/mod.rs doc: "Of the four sub-modules … three are here" and "three nested loops, two of which ship switched off" may be stale (X1). rustfmt --check flags calling/quality_parity.rs:344 (pre-existing).
 - doc/devel/ng/** links into src/ng/… in ~1,648 places; that tree is gone since 2026-09-13. After phase 5: rewrite src/ng/ → src/ and drop stale line anchors (found by X5).
 - ~250 plan step codes (C3, D2, …) remain in comments of locus_generation/pileup/{open_record,generator}.rs and witness.rs; X5 left them (B21 scope). Optional mechanical package.
+- fasta/fetcher.rs: the OutOfPattern variant is never raised (found by X7); candidate dead code.
