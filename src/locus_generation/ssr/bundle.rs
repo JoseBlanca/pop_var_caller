@@ -25,19 +25,19 @@
 //! alone, every motif of period 1 to 6 looked for ([`find_reference_runs`]), and carried on the
 //! locus ([`SsrBundleDetail`]).
 
-use super::ssr::{
-    EdgeRunPeriods, MeasuredRepeat, SsrGenerator, SsrGeneratorConfig, SsrGeneratorConfigError,
-    seed_for_repeat,
-};
+use super::read_cap::seed_for_repeat;
 use super::{
-    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, SampleLocusObservations,
-    SsrBundleDetail,
+    EdgeRunPeriods, MeasuredRepeat, SsrGenerator, SsrGeneratorConfig, SsrGeneratorConfigError,
 };
 use crate::alignment::PerQualityEmission;
 use crate::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use crate::alignment::ssr_unit_robust::AnchorRule;
 #[cfg(test)]
 use crate::locus_generation::ssr::SsrGeneratorCounts;
+use crate::locus_generation::{
+    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, SampleLocusObservations,
+    SsrBundleDetail,
+};
 use crate::read::filtering::ReadFilterCounts;
 use crate::read::input::SampleReads;
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq};
