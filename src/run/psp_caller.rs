@@ -829,9 +829,8 @@ impl PspVariantCaller {
             // 1.7 ms a record here, with most of the pool idle. Released records wait in `kept`
             // until [`PREPARED_A_BATCH`] have, are prepared together, and are handed over in the
             // order they were released, so the output is what preparing one at a time gave. A
-            // refusal reaches the driver at the record that filled the batch, and is named at that
-            // record's locus — as before, a later locus than the one refused, since the keeper
-            // already held records back.
+            // refusal is named at the locus of the record refused, not at the later one that
+            // filled the batch.
             let mut kept = Vec::new();
             let mut gathered = Vec::new();
             // **Both on threads of their own** ([`hand_over_pool`]), so their tasks do not queue
@@ -842,7 +841,7 @@ impl PspVariantCaller {
             };
             let mut gather = |(record, windows): (VcfRecord, Vec<WindowCoverage>),
                               _: &[WindowCoverage]|
-             -> Result<(), E> {
+             -> Result<(), RunError> {
                 gathered.extend(gathering.accept(record, windows));
                 if gathered.len() >= KEPT_A_BATCH {
                     let batch = std::mem::take(&mut gathered);
@@ -1384,21 +1383,28 @@ where
 }
 
 /// **Prepare the waiting records on the pool and hand them over in order**, leaving `waiting`
-/// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there.
+/// empty; the first refusal, of `prepare` or `hand_over`, stops the handing over there and is
+/// named at the locus of the record refused.
 fn prepare_and_hand_over<P, E>(
     waiting: &mut Vec<KeptRecord<Vec<WindowCoverage>>>,
     pool: &SidePool,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync),
     hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
-) -> Result<(), E>
+) -> Result<(), RunError>
 where
     P: Send,
-    E: Send,
+    E: std::error::Error + Send + Sync + 'static,
 {
     let batch = std::mem::take(waiting);
-    for prepared in pool.run(|| prepare_on_the_pool(batch, prepare)) {
-        let (ready, windows) = prepared?;
-        hand_over(ready, &windows)?;
+    let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
+    let prepared = pool.run(|| prepare_on_the_pool(batch, prepare));
+    for (locus, prepared) in loci.into_iter().zip(prepared) {
+        prepared
+            .and_then(|(ready, windows)| hand_over(ready, &windows))
+            .map_err(|source| RunError::RecordNotWritten {
+                locus,
+                source: Box::new(source),
+            })?;
     }
     Ok(())
 }

@@ -800,11 +800,18 @@ impl AlignedFilesVariantCaller {
                 inputs,
                 genotyper,
                 &|record, _| Ok::<_, E>(record),
+                // **A refusal is named at the record refused**, which the gathering and the keeper
+                // may have held back past several later loci — not at the locus just called.
                 &mut |record: VcfRecord, windows| {
                     for (record, windows) in gathering.accept(record, windows.to_vec()) {
                         keeper.accept(record, windows, &mut kept);
                         for (record, windows, fragments) in kept.drain(..) {
-                            hand_over(&record, &windows, fragments)?;
+                            hand_over(&record, &windows, fragments).map_err(|source| {
+                                RunError::RecordNotWritten {
+                                    locus: record.region(),
+                                    source: Box::new(source),
+                                }
+                            })?;
                         }
                     }
                     Ok(())
@@ -1229,9 +1236,11 @@ where
 /// §12.2's oracle.
 ///
 /// `hand_over` is given each record in genome order and may refuse. **The first refusal is the
-/// run's answer**, naming the locus it was writing, and no record is handed over after it — but
-/// the merge is not stopped, because its sink cannot say so (see the note beside `stopped` in
-/// the body). So the merge finishes the analysed ground before the error is returned.
+/// run's answer**, and `hand_over` names the locus itself ([`RunError::RecordNotWritten`]): what
+/// it writes may be a record it held back, not the one just handed in. No record is handed over
+/// after it — but the merge is not stopped, because its sink cannot say so (see the note beside
+/// `stopped` in the body). So the merge finishes the analysed ground before the error is
+/// returned.
 ///
 /// # Not every called locus becomes a record
 ///
@@ -1270,7 +1279,7 @@ pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, P,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
-    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), RunError>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send,
@@ -1350,15 +1359,14 @@ where
                         &worker.window_coverage,
                     );
                     match prepare(record, &worker.window_coverage)
+                        .map_err(|source| RunError::RecordNotWritten {
+                            locus: region,
+                            source: Box::new(source),
+                        })
                         .and_then(|ready| hand_over(ready, &worker.window_coverage))
                     {
                         Ok(()) => records_written += 1,
-                        Err(source) => {
-                            stopped = Some(RunError::RecordNotWritten {
-                                locus: region,
-                                source: Box::new(source),
-                            });
-                        }
+                        Err(error) => stopped = Some(error),
                     }
                 }
             }
@@ -6231,9 +6239,12 @@ mod records_handed_over_as_the_run_finishes_them {
             inputs,
             &the_shipped_genotyper(),
             &|record, _| Ok::<_, std::io::Error>(record),
-            &mut |_record, _window_coverage| {
+            &mut |record: VcfRecord, _window_coverage| {
                 handed += 1;
-                Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
+                Err(RunError::RecordNotWritten {
+                    locus: record.region(),
+                    source: Box::new(std::io::Error::other("the disk is full")),
+                })
             },
         );
         // Matched rather than `expect_err`, so the failure message can name which of the two
@@ -6527,6 +6538,128 @@ mod records_handed_over_as_the_run_finishes_them {
                     },
                     "the first of the two positions, which is where it stopped",
                 );
+                assert!(source.to_string().contains("the disk is full"));
+            }
+            other => panic!("expected the record refusal, got {other:?}"),
+        }
+    }
+
+    /// **A record the output refuses is named at its own locus, even when the run was calling a
+    /// later one.** The gathering holds a record for up to 256 bases and the fragment keeper
+    /// until reads move 1,000 bases past it, so the record `hand_over` refuses is often not the
+    /// locus just called. Here one sample varies at three positions 5 kb apart: calling the
+    /// third releases the first, and the refusal must name the first, where the file stopped.
+    #[test]
+    fn a_held_back_record_the_output_refuses_is_named_at_its_own_locus() {
+        use crate::bam::cram_files::{ContigSpec, build_fasta};
+        use crate::calling::parameters_file::DeclaredInbreeding;
+        use crate::read::input::read_groups::build_read_groups;
+        use crate::read::input::test_fixtures::read_named_with_length;
+        use crate::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
+        use noodles_sam::alignment::record_buf::Sequence;
+
+        const CONTIG: (&str, usize) = ("chrLong", 20_000);
+        let (_reference_dir, fasta) = build_fasta(&[ContigSpec {
+            name: CONTIG.0.to_string(),
+            length: CONTIG.1 as u64,
+        }])
+        .expect("the fixture reference builds");
+        let from_the_index = read_reference_info(ReferenceSource::Fai(
+            crate::reference_info::sibling_fai_path(&fasta),
+        ))
+        .expect("the fixture index reads");
+        let reference = OpenReference::new(Arc::new(ReferenceInfo {
+            fasta_path: Some(fasta),
+            md5: from_the_index.md5,
+            contigs: from_the_index.contigs.clone(),
+        }));
+
+        let mut carrying = [b'A'; 30];
+        carrying[5] = b'C';
+        let reads: Vec<RecordBuf> = [10_usize, 5_010, 10_010]
+            .into_iter()
+            .flat_map(|start| {
+                (0..3).map(move |read| {
+                    let mut record =
+                        read_named_with_length(&format!("zeta-{start}-r{read}"), 0, start, 30);
+                    *record.sequence_mut() = Sequence::from(carrying.to_vec());
+                    record
+                })
+            })
+            .collect();
+        let (_zeta_dir, zeta) = indexed_named_bam(
+            &header(
+                Some("coordinate"),
+                &[(CONTIG.0, CONTIG.1, None)],
+                &[(&read_group_for("zeta"), Some("zeta"))],
+            ),
+            &reads,
+            "zeta.bam",
+        );
+        let bounds = [crate::regions::ContigBounds {
+            name: CONTIG.0,
+            length: CONTIG.1 as u32,
+        }];
+        let segmentation = Arc::into_inner(crate::run::test_fixtures::build_segmentation_under(
+            vec![TypedRegion {
+                region: GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(1),
+                    end: Position(CONTIG.1 as u64),
+                },
+                kind: RegionKind::Generic,
+            }],
+            GenomeRegions::whole_contigs(&bounds),
+            crate::run::test_fixtures::catalog_header(),
+        ))
+        .expect("the fixture holds the only handle");
+        let read_groups =
+            build_read_groups(std::slice::from_ref(&zeta)).expect("the fixture declares its group");
+        let parameters = RunParameters::of_defaults(
+            &read_groups,
+            Ploidy::try_new(2).expect("a diploid"),
+            &DeclaredInbreeding::nothing_said(),
+        );
+        let caller = AlignedFilesVariantCaller::open(
+            AlignmentInputs {
+                read_groups: &read_groups,
+                reference: &reference,
+                read_filters: ReadFilterConfig::default(),
+                build_index_if_missing: false,
+                locus_generator_settings: PileupGeneratorConfig::default(),
+                reference_with_checksums: reference.info(),
+            },
+            segmentation,
+            parameters,
+            shipped_calling_loop(),
+            CandidateSelectionConfig::DEFAULT,
+            MergeParameters::DEFAULT,
+        )
+        .expect("one readable sample over a readable reference opens");
+
+        let mut offered = Vec::new();
+        let stopped = caller
+            .call_cohort_handing_each_record_over(
+                &the_shipped_genotyper(),
+                &mut |record, _window_coverage, _fragments| {
+                    offered.push(record.region());
+                    Err(std::io::Error::other("the disk is full"))
+                },
+            )
+            .expect_err("a refused record ends the run");
+
+        assert_eq!(
+            offered,
+            vec![GenomeRegion {
+                contig: ContigId(0),
+                start: Position(15),
+                end: Position(15),
+            }],
+            "one record offered, the first, and none after the refusal",
+        );
+        match stopped {
+            RunError::RecordNotWritten { locus, source } => {
+                assert_eq!(locus, offered[0], "the refused record's own locus");
                 assert!(source.to_string().contains("the disk is full"));
             }
             other => panic!("expected the record refusal, got {other:?}"),
@@ -7574,7 +7707,7 @@ pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, P, E>(
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
     prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
-    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), RunError>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send + Sync,
@@ -7679,12 +7812,7 @@ where
                 );
                 match hand_over(ready, &windows) {
                     Ok(()) => records_written += 1,
-                    Err(source) => {
-                        stopped = Some(RunError::RecordNotWritten {
-                            locus: region,
-                            source: Box::new(source),
-                        });
-                    }
+                    Err(error) => stopped = Some(error),
                 }
             }
         }
