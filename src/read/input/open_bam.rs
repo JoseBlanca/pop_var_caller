@@ -1576,7 +1576,7 @@ mod tests {
     /// what the shared container cache had to be made safe for.**
     ///
     /// A walk drives two locus generators over one sample and gives each its own cursor on
-    /// purpose, because their regions interleave (`walker.rs`'s `generic_path_generators`).
+    /// purpose, because their regions interleave (`walker.rs`'s `run_generators`).
     /// Since the two readers now take their decoded containers from one cache on the open file
     /// rather than each inflating their own, a cache that handed a reader the *wrong*
     /// container — a stale slot, an offset collision, a slot given up while a reader was still

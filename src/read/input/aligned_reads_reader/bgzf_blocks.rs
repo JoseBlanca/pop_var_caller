@@ -7,7 +7,7 @@
 //! repeat-tract one and the STR bundle one — and each holds its own cursor, hence its own
 //! [`BamAlignedReadsReader`](super::BamAlignedReadsReader), on purpose: their regions
 //! interleave, and one cursor between them would tie their lifetimes together (`walker.rs`'s
-//! `generic_path_generators`). Interleaving is exactly the case where they all pass through
+//! `run_generators`). Interleaving is exactly the case where they all pass through
 //! the same stretch of the file, so before this cache **each reader inflated every block it
 //! passed**, and a block of a stretch all three walk was inflated three times. Profiled on
 //! `generate-psps` over 5 simulated samples at 30x, inflating was 10,147 samples of 84,427
