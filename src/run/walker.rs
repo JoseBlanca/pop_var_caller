@@ -1640,7 +1640,7 @@ impl std::fmt::Debug for WalkReference {
 ///
 /// One set per sample: a locus generator carries state across segments and cannot be shared
 /// (spec §8).
-pub(crate) fn generic_path_generators(
+pub(crate) fn run_generators(
     reference: &WalkReference,
     config: PileupGeneratorConfig,
     segmentation_inputs: &crate::segmentation_inputs::SegmentationInputs,

@@ -20,7 +20,7 @@
 //! consumer outside tests until the
 //! subcommand lands, so narrowing it makes it dead code and the crate's `-D warnings` gate
 //! rejects the build — measured, not assumed, when this step tried it. What *did* narrow is
-//! everything reachable only through it: `WalkReference` and `generic_path_generators` are
+//! everything reachable only through it: `WalkReference` and `run_generators` are
 //! `pub(crate)`. Narrow the rest when the command exists to call it. `cohort_merge` carries the
 //! same note for the same reason.
 
@@ -92,7 +92,7 @@ use super::records::{
     reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
-use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
+use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, run_generators};
 
 /// The alignment files a run reads, and how it reads them.
 ///
@@ -462,11 +462,11 @@ impl AlignedFilesVariantCaller {
     /// **One generator set per walker, never one shared between walkers**, because a locus
     /// generator carries state
     /// across segments (spec §8). Each is the generic path filled and both repeat-tract slots
-    /// refused as unbuilt, which is what [`generic_path_generators`] documents.
+    /// refused as unbuilt, which is what [`run_generators`] documents.
     fn walkers(self) -> Result<RunReadyToWalk, RunError> {
         let mut walkers = Vec::with_capacity(self.samples.len());
         for reads in self.samples {
-            let generators = generic_path_generators(
+            let generators = run_generators(
                 &self.walk_reference,
                 self.locus_generator_settings,
                 // The generators derive the tract generator's bundle radius from here —
@@ -2100,12 +2100,12 @@ impl CohortWalkTallies {
                     SampleWalkTallies {
                         regions: walker.counts().clone(),
                         // **The slot holds a pileup generator or nothing**, which is what
-                        // `generic_path_generators` builds, so the two arms below are the two
+                        // `run_generators` builds, so the two arms below are the two
                         // real cases and the third is unreachable rather than merged in: a tally
                         // of another kind there would be a generator set built for a different
                         // path, and this reports it as counting nothing — which is what a
                         // generator set nobody mis-wired also reports. Nothing in a run can
-                        // produce it; if `generic_path_generators` ever fills the slot from a
+                        // produce it; if `run_generators` ever fills the slot from a
                         // caller's choice, this becomes two facts and needs two answers.
                         read_filters: walker.generators().read_filter_counts(),
                         snp_indel: match walker.generators().generic_counts() {
@@ -4484,7 +4484,7 @@ mod the_merge_over_walkers {
 /// segment-independence test.
 ///
 /// **What the oracle does share with the caller, and cannot not share, is the reference and the
-/// generator set.** [`WalkReference`] and [`generic_path_generators`] are on both sides, so a
+/// generator set.** [`WalkReference`] and [`run_generators`] are on both sides, so a
 /// defect in either — a swapped [`GeneratorSet`](crate::locus_generation::GeneratorSet) slot,
 /// a setting that silences the walk — moves both answers together and neither differential can
 /// see it. What pins those is
@@ -4500,7 +4500,7 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
     use crate::read::input::test_fixtures::fixture_reference_from_its_index;
     use crate::run::cohort_merge::fixtures::refuse_any_difference;
     use crate::run::cohort_merge::serial::merge_cohort_serially;
-    use crate::run::walker::{WalkReference, generic_path_generators};
+    use crate::run::walker::{WalkReference, run_generators};
     use std::convert::Infallible;
     use std::path::PathBuf;
 
@@ -4529,7 +4529,7 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
                 )
                 .expect("the fixture sample opens");
                 let default_criteria_segmentation = super::tests::segmentation();
-                let generators = generic_path_generators(
+                let generators = run_generators(
                     &walk_reference,
                     crate::locus_generation::pileup::PileupGeneratorConfig::default(),
                     default_criteria_segmentation.inputs(),
@@ -4911,7 +4911,7 @@ mod what_the_fixtures_above_could_not_distinguish {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
         let default_criteria_segmentation = super::tests::segmentation();
-        let mut generators = generic_path_generators(
+        let mut generators = run_generators(
             &walk_reference,
             PileupGeneratorConfig::default(),
             default_criteria_segmentation.inputs(),

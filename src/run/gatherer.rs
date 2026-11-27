@@ -57,7 +57,7 @@ use crate::run::psp_writer_line::{PspTrailer, PspWriterLine};
 use crate::types::{Bp, ReadGroupId};
 
 use super::read_filter_provenance::read_filter_parameters;
-use super::walker::{WalkReference, generic_path_generators};
+use super::walker::{WalkReference, run_generators};
 use super::{RunError, RunSegments, Segmentation, WalkProgress};
 
 /// What one sample's walk opens and how it filters — the per-sample counterpart of direct
@@ -461,7 +461,7 @@ impl SampleObservationGatherer {
             &segmentation,
             provenance,
         );
-        let generators = generic_path_generators(
+        let generators = run_generators(
             &walk_reference,
             inputs.locus_generator_settings,
             // The generators derive the tract generator's bundle radius from here — the
@@ -955,7 +955,7 @@ mod tests {
     ) -> Vec<SampleLocusObservations> {
         let reads = SampleReads::open_only_sample(paths, reference, read_filters, false)
             .expect("the direct open");
-        let generators = generic_path_generators(
+        let generators = run_generators(
             &WalkReference::of(reference).expect("bases"),
             settings,
             segmentation.inputs(),
