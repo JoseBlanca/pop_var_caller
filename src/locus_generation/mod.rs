@@ -8,11 +8,14 @@
 //! ([`SampleLocusObservations`]) serves a candidate SNP, a microsatellite, and a
 //! repeat cluster alike; [`LocusKind`] tags which.
 //!
-//! This module owns the **shared shape**: the locus type, the `LocusGenerator`
-//! contract, the dispatcher, and the count-only `NoLoci` generator (landing across
-//! this plan's milestones). Each real generator plugs in from its own module —
-//! `ssr.rs` (STR), `pileup/` (generic). See `doc/devel/ng/spec/locus_generation.md`
-//! (design) and `doc/devel/ng/arch/locus_generation.md` (types & interfaces).
+//! This module owns the **shared shape**: the locus type, the [`LocusGenerator`]
+//! contract, the dispatcher ([`GeneratorSet`]) with its per-kind [`GeneratorSlot`]s — a
+//! region kind with no generator is a slot that names the reason — and the per-sample
+//! cursor bookkeeping both real generators keep ([`CursorLedger`]). Each
+//! real generator plugs in from its own module: [`ssr`] holds the STR segment generator and,
+//! in [`ssr::bundle`], the STR bundle generator; [`pileup`] holds the generic one. See
+//! `doc/devel/ng/spec/locus_generation.md` (design) and
+//! `doc/devel/ng/arch/locus_generation.md` (types & interfaces).
 
 pub mod pileup;
 pub mod ssr;
