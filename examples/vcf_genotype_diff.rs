@@ -66,10 +66,14 @@ fn main() -> ExitCode {
         let _ = columns.next();
         let position = columns.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         let _ = columns.next();
-        let rest = format!("{}\t{}", columns.next().unwrap_or(""), columns.next().unwrap_or(""));
+        let rest = format!(
+            "{}\t{}",
+            columns.next().unwrap_or(""),
+            columns.next().unwrap_or("")
+        );
         (position, rest)
     };
-    let mut next = |reader: &mut BufReader<File>, line: &mut String| -> bool {
+    let next = |reader: &mut BufReader<File>, line: &mut String| -> bool {
         loop {
             line.clear();
             if reader.read_line(line).expect("reads") == 0 {
