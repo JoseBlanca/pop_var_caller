@@ -8,3 +8,6 @@
 - validate: the snp_indel_fit.by_sample[sample = …] path prints the sample unquoted, the inbreeding path quotes it (found by U6; message text only, small output item). Clippy warnings (~6) in ssr_fit/{penalised_fit,tract_exclusion,bench_fixtures/cohort_draw}.rs and run/census_fit.rs.
 - expected_counts.rs still names the concentration `ln_spread` (SamplePairs::log_likelihood, log_likelihood_by_tract); calling/genotype_prior/mod.rs ~72, ~109 describe a hardy_weinberg module that no longer exists (found by U2; X1/X3).
 - census/writer.rs doc links without a path ([add_generic], [leave_out], [mark_walked]) were broken before the S6 move (X3).
+- examples/ng_joint_duplicated_drifting.rs:213 calls DepthBinEdges::new(), which no longer exists (D3 removed it); `cargo clippy --all-targets` fails. Fix or delete the example (found by S3).
+- fit/expectation.rs ~39 links crate::parameter_estimation::generic::noise_model (gone); `cargo doc -D warnings` also fails on calling/allele_candidates/generic.rs links (leftover_of, compare_best_first) (X1/X3).
+- S3 commit 3bc7f264 (one_position cut into inline(always) phases) is speed-gated: time it against its parent; revert alone if estimate-parameters moves.
