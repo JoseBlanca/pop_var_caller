@@ -2,6 +2,51 @@ use super::*;
 use crate::calling::likelihood::TEST_TRACT_LEN;
 use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
 
+use proptest::prelude::*;
+
+use crate::calling::GenericObservation;
+use crate::calling::genotype_prior::{MarginalizedDirichletPrior, SeedRegime, SpectrumSeed};
+use crate::calling::likelihood::ssr_emission::SsrCandidate;
+use crate::calling::quality::MAX_GENOTYPE_QUALITY;
+use crate::calling::{
+    CandidateAlleles, ExpectedAlleleCopies, FrozenParameters, GenotypeIdx, GenotypeTable,
+    LocusEvidence, LocusInference, ReadGroupCalibration, SampleGenotypeCall, SsrSampleEvidence,
+    UNWRITTEN_SCRATCH_VALUE,
+};
+use crate::cohort_observation::PartialObservation;
+use crate::locus_generation::{
+    LocusKind, ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
+};
+use crate::parameter_estimation::Provenance;
+use crate::parameter_estimation::joint::stratum_fits::StratumFits;
+use crate::types::{
+    AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position, ReadGroupId, SummedLogError,
+};
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
+use super::super::{CallingLoopConfig, DEFAULT_CONVERGENCE_THRESHOLD};
+use crate::calling::MIN_CONTAMINANT_FREQUENCY;
+use crate::calling::tests::one_batch;
+use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use crate::read::input::read_groups::ReadGroups;
+use crate::types::BatchId;
+
+use crate::calling::likelihood::ssr_emission::{
+    StutterSubstitutionEmission, StutterSubstitutionScratch,
+};
+use crate::calling::{ContaminationView, EmissionCost};
+use crate::parameter_estimation::joint::contamination::ContaminationSource;
+
+mod contamination;
+mod convergence;
+mod cost;
+mod driver;
+mod final_pass;
+mod frequency_loop;
+mod repeat_tract;
+mod slippage_refit;
+
 /// The repeat unit every repeat tract in this file is built on — **a dinucleotide**, so that
 /// a whole repeat and a single base are different steps and the part-repeat half of the
 /// stutter distribution is not hidden.
@@ -314,44 +359,6 @@ fn substitution_rates_over(
     }
     rates
 }
-use proptest::prelude::*;
-
-use crate::calling::GenericObservation;
-use crate::calling::genotype_prior::{MarginalizedDirichletPrior, SeedRegime, SpectrumSeed};
-use crate::calling::likelihood::ssr_emission::SsrCandidate;
-use crate::calling::quality::MAX_GENOTYPE_QUALITY;
-use crate::calling::{
-    CandidateAlleles, ExpectedAlleleCopies, FrozenParameters, GenotypeIdx, GenotypeTable,
-    LocusEvidence, LocusInference, ReadGroupCalibration, SampleGenotypeCall, SsrSampleEvidence,
-    UNWRITTEN_SCRATCH_VALUE,
-};
-use crate::cohort_observation::PartialObservation;
-use crate::locus_generation::{
-    LocusKind, ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
-};
-use crate::parameter_estimation::Provenance;
-use crate::parameter_estimation::joint::stratum_fits::StratumFits;
-use crate::types::{
-    AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Position, ReadGroupId, SummedLogError,
-};
-use std::num::NonZeroU32;
-use std::sync::Arc;
-
-use super::super::{CallingLoopConfig, DEFAULT_CONVERGENCE_THRESHOLD};
-use crate::calling::MIN_CONTAMINANT_FREQUENCY;
-use crate::calling::tests::one_batch;
-use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
-use crate::read::input::read_groups::ReadGroups;
-use crate::types::BatchId;
-
-mod contamination;
-mod convergence;
-mod cost;
-mod driver;
-mod final_pass;
-mod frequency_loop;
-mod repeat_tract;
-mod slippage_refit;
 
 /// A genotype prior that writes numbers the test chose.
 ///
@@ -633,13 +640,6 @@ fn called(inference: &LocusInference, sample: usize) -> (&Genotype, Phred) {
         }
     }
 }
-
-use crate::calling::likelihood::ssr_emission::{
-    StutterSubstitutionEmission, StutterSubstitutionScratch,
-};
-use crate::calling::{ContaminationView, EmissionCost};
-use crate::parameter_estimation::joint::contamination::ContaminationSource;
-
 /// The shipped arm: repeat tracts scored by the shipped emission model, genotypes under
 /// the marginalized Dirichlet prior.
 fn shipped_arm() -> SummariseConditionLoop<StutterSubstitutionEmission, MarginalizedDirichletPrior>
