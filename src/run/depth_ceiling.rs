@@ -41,6 +41,15 @@ use crate::locus_generation::SampleLocusObservations;
 /// samples.
 pub const DEFAULT_MAX_READ_GROUP_DEPTH: u32 = 1_000;
 
+// **The psp route reproduces the direct route only while these two defaults agree**: a psp's
+// stored read cap (`generate-psps --max-reads-per-position`) must equal the calling run's ceiling,
+// or a thinned position is not the one `--max-depth` drops. Both record the owner's choice of
+// 2026-09-29; this makes changing one without the other a build failure.
+const _: () = assert!(
+    DEFAULT_MAX_READ_GROUP_DEPTH == crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+    "the calling commands' --max-depth default and generate-psps' read cap must be one number",
+);
+
 /// The most reads one read group may have at a locus before the locus is dropped for the whole
 /// cohort. See the module documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
