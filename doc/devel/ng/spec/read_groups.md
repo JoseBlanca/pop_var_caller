@@ -420,7 +420,7 @@ read group restores it.
 
 **ng gets its own read type** (owner, 2026-07-27). Adding a field to production's `MappedRead` was
 the alternative; it is a small change — one non-test constructor,
-[`record_buf_to_mapped_read`](../../../../src/bam/alignment_input.rs#L803), every other construction
+`record_buf_to_mapped_read` (deleted 2026-11-26), every other construction
 site being `cfg(test)` — but it makes production carry an ng concept. The ng type copies the
 constructor, not the logic: `compute_adaptor_boundary` and `cigar_to_ops` are pure and stay
 production's. It also drops `source_file_index`, which the read group makes redundant, and it

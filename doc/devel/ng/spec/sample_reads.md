@@ -31,6 +31,12 @@ Code-facing companion: [`../arch/sample_reads.md`](../arch/sample_reads.md) (typ
 > One capability moved rather than survived: `SampleReads::counts` is now
 > `SampleCursor::read_group_counts`, and it is current the moment it is asked instead of being
 > folded in as each region's stream ended.
+>
+> **Later changes (2026-11-27).** The read every stream here carries is ng's `AlignedRead`
+> (`src/read/aligned_read.rs`), which replaced production's `MappedRead` when read groups landed
+> ([`read_groups.md`](read_groups.md) §8); `MappedRead` itself was deleted on 2026-11-27. Production's
+> `segment_reader.rs` and `segment_merge.rs`, cited below as the model, were deleted on
+> 2026-11-26. Paths under `src/ng/` are now under `src/` (promotion, 2026-09-13).
 
 ## 1. What this is — scope and non-goals
 

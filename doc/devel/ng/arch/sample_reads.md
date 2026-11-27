@@ -25,6 +25,12 @@ illustrative; the **contract** is the deliverable. See the spec for every "why".
 >
 > §4's per-read budget — keys beside the heads, never a clone in the merge loop — is the part
 > to read as still binding, and it is.
+>
+> **Later changes (2026-11-27).** The read every stream here carries is ng's `AlignedRead`
+> (`src/read/aligned_read.rs`), which replaced production's `MappedRead` when read groups landed
+> ([`read_groups.md`](../spec/read_groups.md) §8); `MappedRead` itself was deleted on
+> 2026-11-27. Production's `segment_reader.rs` and `segment_merge.rs`, cited below as the model,
+> were deleted on 2026-11-26. Paths under `src/ng/` are now under `src/` (promotion, 2026-09-13).
 
 ## Module home
 

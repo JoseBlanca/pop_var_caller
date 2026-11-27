@@ -10,6 +10,15 @@ nouns for types, verbs for functions, newtypes for domain scalars, **STR** in pr
 in code (read filtering is generic, so `ssr` does not appear). Signatures are illustrative;
 the **contract** is the deliverable. See the spec for the "why" behind every decision here.*
 
+> **⛦ The types below were replaced** (2026-08-03, built):
+> [`read_filtering_stages.md`](read_filtering_stages.md) is the current shape. `ReadFilter`,
+> `RecordSource` and the `Iterator<Item = Result<MappedRead, _>>` output no longer exist; the two
+> verdicts `verdict_on_raw_read` and `verdict_on_aligned_read` (`src/read/filtering.rs`) judge a
+> raw record and an `AlignedRead`, and the alignment cursor runs the loop. Production's
+> `MappedRead`, `classify_pre_decode` and `AlignmentMergedReaderConfig`, which §5's table maps
+> onto, were deleted in November 2026. The filters, thresholds, order and drop reasons this
+> document pins down are unchanged.
+
 ## Module home
 
 One file, `src/ng/read/filtering.rs`, with its `#[cfg(test)]` block beside it — read
