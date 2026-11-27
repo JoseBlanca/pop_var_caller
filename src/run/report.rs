@@ -86,6 +86,9 @@ pub struct RunReport<'a> {
     /// How many bases of satellite the run handed to the generic path (`--call-satellites`);
     /// zero, and unprinted, on a run without it.
     satellite_bases_on_the_generic_path: u64,
+    /// **For `call-from-psps --regions` only**: the BED the run called and what the psps cover,
+    /// as one phrase. `None` for every other run, which calls everything its inputs cover.
+    regions_asked_for: Option<String>,
 }
 
 /// **How this run came by its observations, and therefore what it can say about each sample.**
@@ -184,7 +187,17 @@ impl<'a> RunReport<'a> {
             max_cohort_locus_span: bounds.max_cohort_locus_span,
             max_candidate_alleles: bounds.max_candidate_alleles,
             satellite_bases_on_the_generic_path: 0,
+            regions_asked_for: None,
         }
+    }
+
+    /// The same report, saying which `--regions` a run over stored files called and what its
+    /// psps cover — so a per-chromosome job's report names both its chromosome and the files'
+    /// whole extent.
+    #[must_use]
+    pub fn with_regions_asked_for(mut self, regions_asked_for: Option<String>) -> Self {
+        self.regions_asked_for = regions_asked_for;
+        self
     }
 
     /// The same report, saying how many bases of satellite the run handed to the generic path
@@ -305,10 +318,16 @@ impl<'a> RunReport<'a> {
             // **The ground still gets named**, because it is the one thing a VCF cannot say and
             // psp mode knows it exactly — every file's header records it and the cohort was
             // refused unless they agreed (spec §6.2).
-            lines.push(format!(
-                "analysed ground: {} — {} bases, as every file's header records them",
-                self.where_the_ground_is, self.analysed_bases,
-            ));
+            match &self.regions_asked_for {
+                Some(asked) => lines.push(format!(
+                    "analysed ground: {} — {} bases, {asked}",
+                    self.where_the_ground_is, self.analysed_bases,
+                )),
+                None => lines.push(format!(
+                    "analysed ground: {} — {} bases, as every file's header records them",
+                    self.where_the_ground_is, self.analysed_bases,
+                )),
+            }
             return;
         };
         // **Every sample walks the same ground, so one sample's region tally is the run's.**
@@ -835,7 +854,7 @@ pub(crate) fn describe(analysed: &GenomeRegions, contigs: &ContigList) -> String
 /// **Falls back to the index only where the table has no such contig**, which is a table and a
 /// span built over different references and cannot happen in a run; saying `contig 7` there is
 /// more use than a panic in a report.
-fn name_of(region: GenomeRegion, contigs: &ContigList) -> String {
+pub(crate) fn name_of(region: GenomeRegion, contigs: &ContigList) -> String {
     let mut out = String::new();
     match contigs.entries.get(region.contig.get() as usize) {
         Some(entry) => out.push_str(&entry.name),

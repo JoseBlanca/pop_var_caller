@@ -260,6 +260,22 @@ pub trait ObservationSource {
         let _ = body_start;
     }
 
+    /// **No record ending before `position` will be read** — the source may drop such records
+    /// unread instead of handing them over.
+    ///
+    /// Called with every eviction's position, which is the first base of the round about to be
+    /// covered. **On ground the merge walks without a gap this drops nothing**: a cover draws each
+    /// sample until its next record starts past the chain's reach, so by the next eviction the
+    /// next undrawn record already starts after the evicted base. Where the run's regions leave a
+    /// gap — before the first region, or between two — it is what keeps a source over a whole
+    /// genome's file from handing the merge the records of ground this run does not call.
+    ///
+    /// **The default ignores it**, which is right for a source that walks only the run's own
+    /// regions — a walker over alignment files.
+    fn nothing_wanted_before(&mut self, position: GenomePosition) {
+        let _ = position;
+    }
+
     /// **Seal the evidence this source has kept so far**, so that a round can build it while the
     /// source draws on, and hand back what builds every body at or after `from_body`
     /// ([`ObservationCache::seal_round`]).
@@ -626,6 +642,7 @@ impl<S: ObservationSource> SampleWindow<S> {
         if let Some(release_to) = release_to {
             source.release_before(release_to);
         }
+        source.nothing_wanted_before(position);
         let room = held_observations.len();
         for record in held_observations.drain(..first_survivor.min(room)) {
             if spare.len() < room {

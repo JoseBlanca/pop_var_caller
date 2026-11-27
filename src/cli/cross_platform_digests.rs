@@ -1305,6 +1305,7 @@ mod tests {
                 .map(|sample| psp_path_for(&psps, sample))
                 .collect(),
             output: calls.clone(),
+            regions: None,
             parameters: Some(parameters.clone()),
             defaults: false,
             locus_builder_regions_len: None,

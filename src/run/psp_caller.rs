@@ -10,8 +10,8 @@
 //!
 //! **Opening is two moves, not one, because the run's ground comes out of the files.** A
 //! calling run over alignment files is told what to analyse and then opens its samples; a run
-//! over psps is told nothing — the files know what ground they cover, and spec §5.3 says the
-//! analysed regions come from the headers rather than from a flag. So:
+//! over psps learns from the files what ground they cover (spec §5.3), and may be told to call a
+//! part of it (`call-from-psps --regions`) but never more. So:
 //!
 //! 1. [`OpenPspCohort::open`] opens every file, reads every header, and settles what the
 //!    cohort *is*: the settings they agree on — the catalog, the repeat-tract criteria and the
@@ -55,7 +55,7 @@ use crate::region_typing::GenomeRegions;
 use crate::run::edge_deletion_gathering::{EdgeDeletionGathering, EdgeDeletionGatheringCounts};
 use crate::run::fragment_keeper::{FragmentKeeper, KeptRecord};
 use crate::run::side_pool::SidePool;
-use crate::types::{Bp, ReadGroupId};
+use crate::types::{Bp, GenomePosition, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
@@ -272,6 +272,33 @@ impl OpenPspCohort {
         &self.paths
     }
 
+    /// **The contigs the psps' coordinates are written against** — names and lengths, in the
+    /// order a span's contig index counts — as the first psp's header records them.
+    ///
+    /// **What a run resolves a BED against before it has read the reference.** Every psp's table
+    /// is compared with the reference's before a block is decoded
+    /// ([`PspVariantCaller::open`]), so a contig name means the same here as there, and a table
+    /// that differed between two psps would be refused at that comparison.
+    #[must_use]
+    pub fn contig_table(&self) -> crate::fasta::ContigList {
+        let first = self
+            .psps
+            .first()
+            .expect("a cohort of no psps was refused when it was opened");
+        crate::fasta::ContigList {
+            entries: first
+                .header()
+                .contigs
+                .iter()
+                .map(|contig: &ContigIdentity| crate::fasta::ContigEntry {
+                    name: contig.name.clone(),
+                    length: contig.length,
+                    md5: contig.md5,
+                })
+                .collect(),
+        }
+    }
+
     /// **Refuse a reference these psps were not walked against**, naming the first file that
     /// disagrees with it and how.
     ///
@@ -456,15 +483,14 @@ impl PspVariantCaller {
     /// **Every refusal here compares one file with the run**, where
     /// [`OpenPspCohort::open`]'s compare the files with each other.
     ///
-    /// **`segmentation` must have been built over [`OpenPspCohort::analysed_regions`], and that
-    /// does get checked** — not directly, but as a consequence: every psp's analysed regions
-    /// were just forced equal to the cohort's, and `first_difference` compares that field, so a
-    /// segmentation built over other ground is refused as
-    /// [`RunError::SegmentationInputsDiffer`] naming the analysed regions. **It reads as though
-    /// the file were at fault when it is the caller**, which is why the two moves are
-    /// documented together at the top of this module. What is genuinely unchecked is narrower:
-    /// nothing compares the segmentation's *segments* against the ground its own record claims,
-    /// only the record.
+    /// **`segmentation` must have been built over [`OpenPspCohort::analysed_regions`] or over
+    /// part of it**, and that is checked for every file: the setting, catalog and criteria must
+    /// be the file's ([`RunError::SegmentationInputsDiffer`]), and every base of the run's
+    /// regions must lie in the file's ([`RunError::RegionsOutsideThePsp`]). A run over part of
+    /// the files walks each from the block holding its first region and drops what lies before
+    /// the merge's position ([`PspSummarySource::over_part`]). What is genuinely unchecked is
+    /// narrower: nothing compares the segmentation's *segments* against the ground its own record
+    /// claims, only the record.
     ///
     /// # Errors
     ///
@@ -473,8 +499,9 @@ impl PspVariantCaller {
     /// [`RunError::ReferenceIndexUnreadable`] for a reference a record cannot be padded from;
     /// [`RunError::ReferenceCheckedAgainstAnotherGenome`] when the two views of the reference
     /// are not one genome; [`RunError::PspAgainstAnotherReference`] for a file whose contig
-    /// table is not this run's; and [`RunError::SegmentationInputsDiffer`] for one walked under
-    /// a different catalog or different repeat-tract criteria.
+    /// table is not this run's; [`RunError::SegmentationInputsDiffer`] for one walked under
+    /// a different catalog or different repeat-tract criteria; and
+    /// [`RunError::RegionsOutsideThePsp`] for a run whose regions reach outside a file's.
     pub fn open(
         cohort: OpenPspCohort,
         reference: StoredCohortInputs<'_>,
@@ -517,11 +544,29 @@ impl PspVariantCaller {
             refuse_a_file_against_another_reference(header, reference_with_checksums)?;
             if let Some(field) = header
                 .segmentation_inputs
-                .first_difference(segmentation.inputs())
+                .first_difference_in_how_repeats_were_sorted(segmentation.inputs())
             {
                 return Err(RunError::SegmentationInputsDiffer {
                     sample: header.sample.clone(),
                     field,
+                });
+            }
+            // **The run may call part of what the file covers, and nothing outside it**
+            // (`call-from-psps --regions`).
+            if let Some(first) = segmentation
+                .inputs()
+                .analysed_regions
+                .parts_outside(&header.segmentation_inputs.analysed_regions)
+                .first()
+            {
+                return Err(RunError::RegionsOutsideThePsp {
+                    sample: header.sample.clone(),
+                    first: format!(
+                        "contig {} {}-{}",
+                        first.contig.get(),
+                        first.start.get(),
+                        first.end.get()
+                    ),
                 });
             }
         }
@@ -697,8 +742,25 @@ impl PspVariantCaller {
             mut psps,
             paths,
             read_groups,
-            ..
+            segmentation_inputs: as_walked,
+            observation_reach_ceiling,
         } = cohort;
+        // **A run over part of what the files cover starts each walk at its first region** and
+        // drops what lies before the merge's position; a run over all of it walks every record,
+        // exactly as before `--regions` existed.
+        let first_wanted = (segmentation.inputs().analysed_regions != as_walked.analysed_regions)
+            .then(|| {
+                segmentation
+                    .inputs()
+                    .analysed_regions
+                    .iter()
+                    .next()
+                    .map(|first| GenomePosition {
+                        contig: first.contig,
+                        position: first.start,
+                    })
+            })
+            .flatten();
         // **Started before the sources borrow the readers**, because it copies what it needs
         // out of their block indexes. It lives in the cache's cover hook and stops when the
         // cache is dropped, at the end of the calling pass.
@@ -728,8 +790,17 @@ impl PspVariantCaller {
             let read_cap =
                 super::psp_source::read_cap::needs_thinning(psp.header(), max_reads_per_position)
                     .then_some(max_reads_per_position);
+            let source = match first_wanted {
+                Some(first_wanted) => PspSummarySource::over_part(
+                    psp,
+                    &sample.read_groups,
+                    first_wanted,
+                    observation_reach_ceiling,
+                )?,
+                None => PspSummarySource::over(psp, &sample.read_groups)?,
+            };
             sources.push(
-                PspSummarySource::over(psp, &sample.read_groups)?
+                source
                     .with_read_cap(read_cap)
                     .with_depth_ceiling(Some(settings.depth_ceiling)),
             );
@@ -2360,6 +2431,45 @@ mod tests {
             segmentation.inputs(),
             "the run loops over the segmentation it was handed",
         );
+    }
+
+    /// **A run over part of what the files cover opens** (`call-from-psps --regions`), and one
+    /// reaching outside it is refused naming the sample — the caller's own check, behind the
+    /// command's.
+    #[test]
+    fn a_run_over_part_of_the_files_opens_and_one_reaching_outside_is_refused() {
+        let (_reference_dir, reference) = fixture_reference_from_its_index();
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let narrow = a_segmentation(ground(true));
+        let paths = vec![
+            a_psp(&dir, "alpha", &narrow, |_| {}),
+            a_psp(&dir, "beta", &narrow, |_| {}),
+        ];
+
+        let cohort = OpenPspCohort::open(&paths).expect("the two files agree");
+        let parameters = parameters_for(cohort.read_groups());
+        let refused = open_the_caller(
+            cohort,
+            &reference,
+            Arc::try_unwrap(a_segmentation(ground(false))).expect("one handle"),
+            parameters,
+        )
+        .expect_err("the run reaches past what the files cover");
+        assert!(
+            matches!(&refused, RunError::RegionsOutsideThePsp { sample, .. } if sample == "alpha"),
+            "got {refused:?}"
+        );
+
+        let (_dir, _, wide_paths) = a_cohort();
+        let cohort = OpenPspCohort::open(&wide_paths).expect("the two files agree");
+        let parameters = parameters_for(cohort.read_groups());
+        open_the_caller(
+            cohort,
+            &reference,
+            Arc::try_unwrap(a_segmentation(ground(true))).expect("one handle"),
+            parameters,
+        )
+        .expect("a run over part of what the files cover opens");
     }
 
     /// **The independence the calling loop rests on is what this protects.** Under a different

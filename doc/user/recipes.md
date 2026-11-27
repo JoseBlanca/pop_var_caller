@@ -95,11 +95,26 @@ pvc call-from-psps --reference genome.fa --psp psps/ \
 
 ## A large cohort on a cluster
 
-Each sample can be processed on its own up to its psp file, and each chromosome can then be
-estimated and called on its own. `call-from-psps` has no `--regions`, so to call a chromosome on
-its own, its psps are written on their own: one directory per chromosome.
+Each sample is processed on its own up to its psp file, the parameters are estimated once for
+the whole cohort, and each chromosome is then called on its own.
 
-**1. One BED per chromosome**, from the reference's index. Small contigs can go together in one
+**1. One job per sample**, writing that sample's psp over the whole genome:
+
+```
+pvc generate-psps --reference genome.fa --alignment S1.cram --output-dir psps/
+```
+
+**2. One job estimating the parameters**, over every psp:
+
+```
+pvc estimate-parameters --reference genome.fa --psp psps/ \
+    --output cohort.parameters.toml --threads 16
+```
+
+One estimate for the whole genome gives the rarer STR classes more data than one estimate per
+chromosome would.
+
+**3. One BED per chromosome**, from the reference's index. Small contigs can go together in one
 BED.
 
 ```
@@ -107,32 +122,20 @@ mkdir -p beds
 awk -v OFS='\t' '{ print $1, 0, $2 > ("beds/" $1 ".bed") }' genome.fa.fai
 ```
 
-**2. One job per sample**, writing that sample's psp for every chromosome:
+**4. One calling job per chromosome**, each reading the same psps:
 
 ```
-for bed in beds/*.bed; do
-    chrom=$(basename "$bed" .bed)
-    pvc generate-psps --reference genome.fa --alignment S1.cram \
-        --regions "$bed" --output-dir "$chrom/psps/"
-done
+pvc call-from-psps --reference genome.fa --psp psps/ --parameters cohort.parameters.toml \
+    --regions beds/chr01.bed --output chr01.vcf.gz --log chr01.log --threads 48
 ```
 
-**3. One job per chromosome**, estimating and calling:
+Give each job its own `--log`, or its own output directory, so the jobs do not refuse each
+other's logs. A job reads only its own chromosome's part of each psp.
+
+**5. Join the chromosomes**, in the reference's order:
 
 ```
-pvc estimate-parameters --reference genome.fa --psp chr01/psps/ \
-    --output chr01/parameters.toml --threads 16
-pvc call-from-psps --reference genome.fa --psp chr01/psps/ \
-    --parameters chr01/parameters.toml --output chr01/calls.vcf.gz --threads 48
-```
-
-Each chromosome's files and logs stay in its own directory, so the jobs do not refuse each
-other's logs.
-
-**4. Join the chromosomes**, in the reference's order:
-
-```
-bcftools concat -O z -o calls.vcf.gz chr01/calls.vcf.gz chr02/calls.vcf.gz ...
+bcftools concat -O z -o calls.vcf.gz chr01.vcf.gz chr02.vcf.gz ...
 bcftools index calls.vcf.gz
 ```
 
@@ -143,7 +146,9 @@ order.
   sample. pvc checks the limit before starting and says which value to set.
 - **Splitting by chromosome can change a few calls**, because the hidden-duplication filter and
   imputation then see one chromosome at a time
-  ([Splitting a run by region](calling.md#splitting-a-run-by-region)).
+  ([Splitting a run by region](calling.md#splitting-a-run-by-region)). A sex chromosome or an
+  organelle then gets a depth model of its own, and a short contig gives the filter few calls to
+  learn from.
 - **Measured, on one 96-core server**, for 2,176 tomato genomes of 783 Mb each, without
   imputation and not split by chromosome: a psp took 19 minutes and 0.5 GB for the median sample,
   and at most 8 h 22 min and 8.3 GB; the parameters took 34 h at 16 threads; calling took 104 h at

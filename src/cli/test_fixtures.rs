@@ -126,6 +126,11 @@ pub(crate) fn a_cohort_on_disk() -> ACohortOnDisk {
 /// The one contig the varying cohort is built on, and how long it is.
 pub(crate) const VARYING_CONTIG: (&str, usize) = ("chrV", 600);
 
+/// **The second contig of [`a_two_contig_varying_cohort_on_disk`]**: the same length and the same
+/// bases as [`VARYING_CONTIG`], read the same way, so each contig of that cohort calls what the
+/// one-contig cohort calls.
+pub(crate) const SECOND_VARYING_CONTIG: &str = "chrW";
+
 /// **Where the deliberate repeat tract sits**, 0-based and half-open, and what tiles it.
 ///
 /// Ten copies of `GT` against a period-2 floor of six, with non-repetitive flanks either side,
@@ -281,7 +286,14 @@ fn a_base_that_is_not(reference: u8) -> u8 {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false, false, false, 5)
+    a_varying_cohort_built(false, 0, false, false, false, 5, 1)
+}
+
+/// **The varying cohort on two contigs**, [`VARYING_CONTIG`] and [`SECOND_VARYING_CONTIG`], each
+/// with the same bases and the same reads — so a run over one contig has a second, held in the
+/// same files, that it must leave alone (`call-from-psps --regions`).
+pub(crate) fn a_two_contig_varying_cohort_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(false, 0, false, false, false, 5, 2)
 }
 
 /// **The same cohort with a sequencing error in about one read in four**, at an offset and to a base
@@ -295,7 +307,7 @@ pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
 /// error, and the tract's substitution count is no longer zero
 /// (`cli::cross_platform_digests`, plan `fit_precision.md`, checkpoint E).
 pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0, false, false, false, 5)
+    a_varying_cohort_built(true, 0, false, false, false, 5, 1)
 }
 
 /// **The same, with `further_samples` samples beside the first two**, each read from one library
@@ -306,7 +318,7 @@ pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohor
 pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
     further_samples: usize,
 ) -> AVaryingCohort {
-    a_varying_cohort_built(true, further_samples, false, false, false, 5)
+    a_varying_cohort_built(true, further_samples, false, false, false, 5, 1)
 }
 
 /// **The cohort with sequencing errors, whose first sample's header lists its read groups in the
@@ -317,13 +329,13 @@ pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
 /// tell a run that sorts a sample's read groups by declared ID from one that keeps the header's
 /// order. A walk numbers groups in header order, so this one gives `rg-one-b` the first number.
 pub(crate) fn a_varying_cohort_declaring_read_groups_out_of_order_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0, true, false, false, 5)
+    a_varying_cohort_built(true, 0, true, false, false, 5, 1)
 }
 
 /// **The varying cohort with a satellite in its reference** ([`SATELLITE`]), over which the second
 /// sample's substitution falls. Everything else is [`a_varying_cohort_on_disk`]'s.
 pub(crate) fn a_varying_cohort_with_a_satellite_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false, true, false, 5)
+    a_varying_cohort_built(false, 0, false, true, false, 5, 1)
 }
 
 /// **The varying cohort whose first sample is heterozygous at two sites 40 bases apart, in cis**
@@ -331,14 +343,14 @@ pub(crate) fn a_varying_cohort_with_a_satellite_on_disk() -> AVaryingCohort {
 /// without refinement writes the two phased together, `0|1` in one phase set. Everything else is
 /// [`a_varying_cohort_on_disk`]'s.
 pub(crate) fn a_varying_cohort_with_a_phased_pair_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false, false, true, 5)
+    a_varying_cohort_built(false, 0, false, false, true, 5, 1)
 }
 
 /// **The phased-pair cohort read every 2 bases instead of 5**: 50 reads a position, so each sample's
 /// read alleles at a record are cut to the 32 the read cap keeps (read phase spec §2.4), and the
 /// second sample carries a pair too, [`SECOND_SAMPLES_SECOND_SUBSTITUTION`], after the tract.
 pub(crate) fn a_deep_varying_cohort_with_phased_pairs_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false, false, true, 2)
+    a_varying_cohort_built(false, 0, false, false, true, 2, 1)
 }
 
 #[expect(
@@ -352,6 +364,7 @@ fn a_varying_cohort_built(
     with_a_satellite: bool,
     with_a_phased_pair: bool,
     stride: usize,
+    contig_count: usize,
 ) -> AVaryingCohort {
     use crate::read::input::test_fixtures::{
         FixtureReadGroup, header_with_read_groups, indexed_named_bam,
@@ -377,10 +390,15 @@ fn a_varying_cohort_built(
     let reference = directory.path().join("ref.fa");
     std::fs::write(
         &reference,
-        format!(
-            ">{name}\n{}\n",
-            std::str::from_utf8(&bases).expect("ACGT is text")
-        ),
+        [name, SECOND_VARYING_CONTIG][..contig_count]
+            .iter()
+            .map(|contig| {
+                format!(
+                    ">{contig}\n{}\n",
+                    std::str::from_utf8(&bases).expect("ACGT is text")
+                )
+            })
+            .collect::<String>(),
     )
     .expect("the reference writes");
 
@@ -417,8 +435,9 @@ fn a_varying_cohort_built(
      -> Vec<RecordBuf> {
         const READ: usize = 100;
         let (tract_from, tract_to) = TRACT;
-        (0..(length / stride))
-            .map(|index| {
+        (0..contig_count)
+            .flat_map(|contig| (0..(length / stride)).map(move |index| (contig, index)))
+            .map(|(contig, index)| {
                 let start = index * stride;
                 let mut sequence = bases[start..(start + READ).min(length)].to_vec();
                 // **Every second read carries the alternative**, which is a heterozygote — the
@@ -499,8 +518,15 @@ fn a_varying_cohort_built(
                     Flags::REVERSE_COMPLEMENTED
                 };
                 let mut record = RecordBuf::builder()
-                    .set_name(format!("{sample}-r{index}").as_bytes())
-                    .set_reference_sequence_id(0_usize)
+                    .set_name(
+                        if contig == 0 {
+                            format!("{sample}-r{index}")
+                        } else {
+                            format!("{sample}-c{contig}-r{index}")
+                        }
+                        .as_bytes(),
+                    )
+                    .set_reference_sequence_id(contig)
                     .set_flags(flags)
                     .set_mapping_quality(MappingQuality::new(60).expect("mapq in range"))
                     .set_alignment_start(
@@ -541,7 +567,11 @@ fn a_varying_cohort_built(
             declared.reverse();
         }
         indexed_named_bam(
-            &header_with_read_groups(Some("coordinate"), &[(name, length, None)], &declared),
+            &header_with_read_groups(
+                Some("coordinate"),
+                &[(name, length, None), (SECOND_VARYING_CONTIG, length, None)][..contig_count],
+                &declared,
+            ),
             &reads_of(sample, substitutions, shortens_the_tract, read_groups),
             file,
         )
