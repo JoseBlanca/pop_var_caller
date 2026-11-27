@@ -146,7 +146,7 @@ impl SampleGenotypeCall {
     /// quality, because no genotype was scored to have one.
     #[inline]
     #[must_use]
-    pub fn score_best_genotype(&self) -> Option<Phred> {
+    pub fn genotype_quality(&self) -> Option<Phred> {
         match self {
             Self::Called {
                 genotype_quality, ..
@@ -379,9 +379,8 @@ impl RepeatTractProvenance {
 pub struct LocusInference {
     /// Where on the reference this locus is.
     pub region: GenomeRegion,
-    /// The alleles it was finally called over — after any discovery round admitted
-    /// alleles the first pass missed, and after the prune dropped the ones no sample
-    /// carried. Read through [`Self::alleles`].
+    /// The alleles it was called over: the table candidate selection handed the loop, which
+    /// the loop does not change. Read through [`Self::alleles`].
     alleles: CandidateAlleles,
     /// One call per sample, **in the run's sample order** — the same order every
     /// per-sample slice the loop was given is indexed by. That one order for the whole
@@ -490,7 +489,7 @@ pub struct LocusInference {
     /// alternative allele against the reference, so a locus with no alternative, or one
     /// whose alternatives drew no read at all, has nothing for them to weigh; production
     /// hands back its baseline unchanged in exactly those two cases
-    /// ([`qual_refine.rs:79`](../../../src/vcf/qual_refine.rs)), and `None` is that same
+    /// (`d9e7b076:src/vcf/qual_refine.rs:79`), and `None` is that same
     /// answer as a type rather than as an early return.
     ///
     /// [`allele_candidates::SelectionVerdict::Selected`]: super::allele_candidates::SelectionVerdict::Selected
@@ -505,11 +504,10 @@ impl LocusInference {
     /// If `cohort_expected_copies` is not one entry per allele of `alleles`, in either
     /// direction. [`ExpectedAlleleCopies`] is already built against *an* allele table, so
     /// what this catches is the residue: copies built against a **different** table that
-    /// happened to be a different width. **Wider is the direction the pipeline
-    /// produces** — the final prune shrinks the allele table, so copies not re-cut
-    /// alongside it are left long, and every consumer indexes by [`AlleleId`], so the
-    /// trailing entries would ride along unread. Both are in scope exactly here, which is
-    /// why the check is here.
+    /// happened to be a different width. **Wider is the direction nothing else would
+    /// catch**: every consumer indexes by [`AlleleId`], so the trailing entries would ride
+    /// along unread. Copies and alleles are both in scope exactly here, which is why the
+    /// check is here.
     ///
     /// If `per_sample` names no sample's call. A cohort has at least one sample and every
     /// sample gets a call, so an empty one is a locus that lost its calls rather than a
@@ -530,8 +528,7 @@ impl LocusInference {
     /// dropped field.
     ///
     /// If any call is [`SampleGenotypeCall::Missing`] at a repeat tract or bundle. **A
-    /// repeat tract sets no sample aside** — a discovery round there can put back a length
-    /// the cap cut, so no sample is locked out of the locus
+    /// repeat tract sets no sample aside**, so no sample is locked out of the locus
     /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1, §9). This is the mirror of the seed
     /// marker's check above: one ruling belongs to each path, and each is refused on the
     /// other. What it catches is a sample silently dropped from a tract's output — spec §9
@@ -540,14 +537,12 @@ impl LocusInference {
     /// the locus's allele frequencies come out wrong with a well-formed record beside them.
     ///
     /// If a called genotype names an allele this locus was not called over. `Genotype::new`
-    /// checks only that the multiset is non-empty, and the final prune renumbers every id
-    /// above the one it drops ([`CandidateAlleles::admit`]), so a call not remapped
-    /// alongside it arrives stale. An out-of-range id reaches the VCF's `GT` column as an
-    /// index past the `ALT` list — an unparseable record, the same failure class
-    /// [`CandidateAlleles::new`] refuses an empty reference allele for. **It catches the
-    /// out-of-range half only:** an id that stays in range after a renumber names a
-    /// different allele silently, which is an argument for the prune returning its
-    /// remapping rather than for a wider check here.
+    /// checks only that the multiset is non-empty, so a call built against a different,
+    /// wider allele table arrives with an id past this one's end. An out-of-range id reaches
+    /// the VCF's `GT` column as an index past the `ALT` list — an unparseable record, the
+    /// same failure class [`CandidateAlleles::new`] refuses an empty reference allele for.
+    /// **It catches the out-of-range half only:** an id from a different table that happens
+    /// to be in range names a different allele silently.
     ///
     /// If `region` runs backwards. [`GenomeRegion`] is plain data with no constructor of
     /// its own, and its documentation says a caller that requires `start <= end` says so
@@ -610,12 +605,9 @@ impl LocusInference {
             "every locus takes at least one pass of the frequency loop, so a pass count \
              of zero is a counter that was never incremented"
         );
-        // **A repeat *bundle* is on the demanding side of this, deliberately and unreachably.**
-        // Written against `Generic` rather than against `Ssr(_)`, so a bundle would have to carry
-        // a record — which it could not honestly build, having no single reference repeat count
-        // and so no one allele length variation. Nothing can reach it: `tract_candidates` refuses a
-        // bundle several frames earlier. When bundle scoring lands, this is one of the places
-        // that has to answer for it, which is why it is stated rather than left to be discovered.
+        // **A repeat *bundle* carries a record too**: the check is written against `Generic`
+        // rather than against `Ssr(_)`. A bundle has no single reference repeat count, so its
+        // record states the weakest rung any of its runs' priors came from (`BundlePrior::rung`).
         assert_eq!(
             repeat_tract.is_some(),
             !matches!(alleles.kind(), LocusKind::Generic),
@@ -644,8 +636,7 @@ impl LocusInference {
                     .iter()
                     .all(|id| alleles.bases_of(*id).is_some()))),
             "a called genotype names an allele this locus was not called over: the locus \
-             holds {} alleles, and the final prune renumbers every id above the one it \
-             drops, so a call not remapped alongside it is stale",
+             holds {} alleles, so the call was built against a different allele table",
             alleles.len()
         );
         assert!(
@@ -673,8 +664,7 @@ impl LocusInference {
             assert!(
                 alleles.bases_of(counts.primary_alternative).is_some(),
                 "the artifact summary's primary alternative is allele {} and this locus \
-                 holds {} alleles: the summary was pooled against a different allele table, \
-                 or the final prune renumbered the table without re-cutting it",
+                 holds {} alleles: the summary was pooled against a different allele table",
                 counts.primary_alternative.get(),
                 alleles.len()
             );
@@ -822,7 +812,7 @@ mod tests {
         );
         assert_eq!(
             inference.per_sample[1]
-                .score_best_genotype()
+                .genotype_quality()
                 .expect("a called sample")
                 .get(),
             25.0
@@ -902,11 +892,9 @@ mod tests {
 
     /// Copies of a width the allele table does not have, in **both** directions.
     ///
-    /// Narrower is the obvious slip. **Wider is the one the pipeline produces**: the
-    /// final prune shrinks the allele table, so a copies vector that was not re-cut
-    /// alongside it is left long, and since every consumer indexes by `AlleleId` the
-    /// trailing entries would ride along unread — a pruned-away allele's expected copies
-    /// travelling in the output with nothing to notice.
+    /// Narrower is the obvious slip. **Wider is the one nothing else would notice**: every
+    /// consumer indexes by `AlleleId`, so the trailing entries would ride along unread — a
+    /// different table's expected copies travelling in the output.
     #[test]
     fn a_locus_cannot_carry_copies_of_a_width_its_alleles_do_not_have() {
         let build = |allele_count: usize, copy_count: usize| {
@@ -937,8 +925,7 @@ mod tests {
         let narrower = std::panic::catch_unwind(|| build(3, 2));
         assert!(narrower.is_err(), "3 alleles cannot carry 2 copy counts");
 
-        // Copies wider than the alleles — what an un-re-cut vector looks like after the
-        // prune, and the direction no fixture reached before.
+        // Copies wider than the alleles — the direction no fixture reached before.
         let wider = std::panic::catch_unwind(|| build(2, 3));
         assert!(wider.is_err(), "2 alleles cannot carry 3 copy counts");
     }
@@ -1272,8 +1259,7 @@ mod tests {
     }
 
     /// An artifact summary naming an allele this locus was not called over is refused, for
-    /// the reason a stale genotype is: the final prune renumbers every id above the one it
-    /// drops, so a summary not re-cut alongside the table points somewhere else.
+    /// the reason a genotype naming one is: it was built against a different allele table.
     #[test]
     #[should_panic(expected = "pooled against a different allele table")]
     fn an_artifact_summary_naming_an_allele_the_locus_lacks_is_refused() {
@@ -1303,7 +1289,7 @@ mod tests {
         let missing = SampleGenotypeCall::Missing;
         assert!(missing.is_missing());
         assert_eq!(missing.genotype(), None);
-        assert_eq!(missing.score_best_genotype(), None);
+        assert_eq!(missing.genotype_quality(), None);
 
         let called = diploid_call(0, 1, 25.0);
         assert!(!called.is_missing());
@@ -1312,7 +1298,7 @@ mod tests {
             [AlleleId(0), AlleleId(1)]
         );
         assert_eq!(
-            called.score_best_genotype().expect("a called sample").get(),
+            called.genotype_quality().expect("a called sample").get(),
             25.0
         );
     }
@@ -1372,10 +1358,9 @@ mod tests {
 
     /// A call naming an allele the locus was not called over is refused.
     ///
-    /// **The prune is what produces one.** Dropping an allele renumbers every id above it,
-    /// so a call minted before the prune and not remapped alongside it names an id past the
-    /// end — which reaches the `GT` column as an index past the `ALT` list, an unparseable
-    /// record rather than a crash.
+    /// A call built against a different, wider allele table names an id past the end — which
+    /// would reach the `GT` column as an index past the `ALT` list, an unparseable record
+    /// rather than a crash.
     #[test]
     #[should_panic(expected = "names an allele this locus was not called over")]
     fn a_call_naming_an_allele_the_locus_lost_is_refused() {

@@ -14,11 +14,12 @@ none of which it fits; [`alignment.md`](alignment.md) §5.1 and §5.2 — the se
 model composes, and the stutter distribution the two documents share;
 [`locus_generation_ssr.md`](locus_generation_ssr.md) §3 — what an STR allele is and what a read that
 saw only part of a tract claims. Production's equivalent code is
-[`per_group_merger.rs`](../../../../src/var_calling/per_group_merger.rs) and
-[`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs) (SNP/indel) and
-[`ssr/cohort/read_model/`](../../../../src/ssr/cohort/read_model/) (STR). Everything said about
+`d9e7b076:src/var_calling/per_group_merger.rs` and
+`d9e7b076:src/var_calling/posterior_engine.rs` (SNP/indel) and
+`d9e7b076:src/ssr/cohort/read_model/` (STR). Everything said about
 those files is a record of what they do, not a proposal to change them — `src/ssr/` and
-`src/var_calling/` are frozen production.*
+`src/var_calling/` were frozen production, deleted on 2026-09-13; the paths above name them at
+commit `d9e7b076`, the last that held them.*
 
 ---
 
@@ -58,7 +59,7 @@ sentence blurred the two.** Whether the caller *re-estimates* a parameter betwee
 and hands this model a new value is the EM loop document's decision, not this one's, and it is a real
 decision rather than a formality: **production's STR caller re-fits two of the seven stutter
 parameters per locus**, in up to three rounds, shrunk toward the pre-pass's per-stratum value
-([`em.rs:69`](../../../../src/ssr/cohort/em.rs)). §6.1 sorts every parameter into what must stay
+(`d9e7b076:src/ssr/cohort/em.rs:69`). §6.1 sorts every parameter into what must stay
 frozen, what is genuinely a candidate for re-estimation, and what the caller re-estimates without
 this model ever seeing it — which is what the EM document will need.
 
@@ -122,7 +123,7 @@ Six terms do real work below. Three are this project's and three are borrowed.
   showed it. **Not one read**, and not one allele: the identity is
   `(bases, read witness, read group)`, so the same sequence seen by a read that spanned the whole
   locus and by one that saw part of it is two observations
-  ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)).
+  ([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)).
 - **complete** and **partial** observation — a read that showed the whole locus pins what the
   sample carries there; a read that entered the locus and ran off its own end proves only that the
   locus is *at least* what it showed. The statistician's word for the second is **censored**: the
@@ -157,7 +158,7 @@ Six terms do real work below. Three are this project's and three are borrowed.
 
 The cohort merge hands over, per sample per locus, a list of
 observations, and each carries
-([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)):
+([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)):
 
 | field | what it holds |
 |---|---|
@@ -165,7 +166,7 @@ observations, and each carries
 | `read_witness` | whole locus, or which stretch of it |
 | `read_group` | which lane |
 | `num_obs` | how many reads showed it |
-| `chain_ids` | **the id of every read folded here**, one per read or per read pair, the reference-matching ones named too — **generic path only; empty on the STR path**, which does not phase ([`locus_generation/mod.rs:358`](../../../../src/ng/locus_generation/mod.rs)) |
+| `chain_ids` | **the id of every read folded here**, one per read or per read pair, the reference-matching ones named too — **generic path only; empty on the STR path**, which does not phase ([`locus_generation/mod.rs:358`](../../../../src/locus_generation/mod.rs)) |
 | `q_sum` | the **sum over those reads of the logarithm of each read's error probability** |
 | `num_fwd`, `mapq_sum`, `mapq_sum_sq`, `placed_left` | strand, mapping-quality and read-position moments, for the site filters |
 
@@ -191,7 +192,7 @@ the geometric mean is not the arithmetic mean. On an observation half at Phred 3
 
 **Which mean a term wants depends on the term, and the difference is not always a defect.**
 Production's contamination path substitutes the geometric mean for every read's own error
-([`posterior_engine.rs:1531`](../../../../src/var_calling/posterior_engine.rs)), and **that is the
+(`d9e7b076:src/var_calling/posterior_engine.rs:1531`), and **that is the
 right substitution for the term that dominates**, which is worth stating so that nobody "fixes" it. A
 read the genotype cannot explain contributes `log ε` plus a constant, so adding the logs and taking
 the geometric mean are the same arithmetic — identical to the last bit with contamination switched
@@ -234,7 +235,7 @@ log Lg(g)  =  Σ_o  n_o · log[ (1 − λ) · Σ_a (k_a / P) · Lr(o | a)  +  λ
 the read having come from this sample, one for it having come from somewhere else — which is
 production's shape and freebayes' shape both. Written out at a contamination fraction `c`, it is
 `(1 − c) × P(read | this sample's genotype) + c × P(read | the contaminating population)`
-([`posterior_engine.rs:1555`](../../../../src/var_calling/posterior_engine.rs)). §2.2 says what
+(`d9e7b076:src/var_calling/posterior_engine.rs:1555`). §2.2 says what
 plays the part of `λ` and `U` on each path.
 
 **Two quite different things put a read in that third term, and only one of them cancels.** The
@@ -352,7 +353,7 @@ between them is their quality — which is why this contract is about quality an
 somewhere else — because `log[(1 − λ_r)x + λ_r U]` is not additive in `λ_r` and the merge holds only
 the sum and sum-of-squares of mapping quality. So mapping error is folded into the read's error
 probability instead, at the moment the observation is minted, which is what production does
-([`open_record.rs:793`](../../../../src/pileup/walker/open_record.rs)). §10 records the per-read
+(`d9e7b076:src/pileup/walker/open_record.rs:793`). §10 records the per-read
 mixture as deferred and says what it would cost to enable.
 
 ### 2.4 Why this is one document and not two
@@ -361,8 +362,8 @@ The two emissions have no mathematics in common. The formula around them does, a
 drift if they were written twice: how observations are aggregated (§2.3), the copy-weighted mixture
 that makes the model ploidy-generic, the treatment of reads that saw only part of the locus (§5), the
 no-allocation contract (§8), and determinism. Production writes a copy-weighted mixture wrapped in one logarithm per observation twice over —
-[`posterior_engine.rs:1475`](../../../../src/var_calling/posterior_engine.rs) and
-[`ssr/cohort/likelihood.rs:75`](../../../../src/ssr/cohort/likelihood.rs) — without either half
+`d9e7b076:src/var_calling/posterior_engine.rs:1475` and
+`d9e7b076:src/ssr/cohort/likelihood.rs:75` — without either half
 knowing about the other. **They are not the same expression**, and §2.2 says how they differ: only
 the STR one carries a term for reads no allele explains, only the SNP/indel one carries
 contamination. §3 and §4 are each self-contained enough that a
@@ -402,7 +403,7 @@ the likelihood, and all four refuse to take it as reported. What differs is the 
 over problematic regions only; `--full-BAQ` applies it everywhere), **caps it at Phred 60** and at Phred 30 to 50 under the per-platform profiles, lowers a base toward its neighbours' quality, and downweights the *n*-th read supporting the same base and strand geometrically — the MAQ dependency coefficient ([`mpileup.c:1382`](../../../../bcftools/mpileup.c), [`errmod.c:77`](../../../../htslib/errmod.c)) |
 | **HipSTR** | yes, in its read-to-haplotype alignment, capped at Phred 41 ([`base_quality.h`](../../../../HipSTR/src/base_quality.h)) | — |
 | **GangSTR** | **no** — its enclosing-read likelihood is a geometric stutter term with no quality in it at all ([`enclosing_class.cpp:63`](../../../../GangSTR/src/enclosing_class.cpp)) | — |
-| **ours, today** | yes — per read, the worse of the lowest base quality across the locus window and the mapping quality ([`open_record.rs:793`](../../../../src/pileup/walker/open_record.rs)) | nothing; the reported quality is used as reported |
+| **ours, today** | yes — per read, the worse of the lowest base quality across the locus window and the mapping quality (`d9e7b076:src/pileup/walker/open_record.rs:793`) | nothing; the reported quality is used as reported |
 
 **GATK's device is the interesting one, because it is the fitted-rate idea done properly.** Base
 quality recalibration counts, over the whole genome, how often a base actually mismatched, split by
@@ -491,14 +492,14 @@ rather than minting anything.
 > **Taking the geometric mean instead is not a concession, it is the self-consistent choice**, and
 > the reason is what the scale is applied *to*. The model charges an observation
 > `exp(q_sum / num_obs)` — a geometric mean — and production does the same, clamped
-> ([`posterior_engine.rs:1536`](../../../../src/var_calling/posterior_engine.rs); production has no
+> (`d9e7b076:src/var_calling/posterior_engine.rs:1536`; production has no
 > recalibration at all, so there is nothing there to copy but the quantity). A scale built from an
 > arithmetic mean and applied to a geometric one would not make the calibrated property hold in the
 > model's own terms, so paying for the arithmetic sum would buy an inexactness rather than remove
 > one.
 >
 > **The two are not the same number, and they are twenty-five to forty-four times apart on real
-> reads** (measured 2026-08-24, `examples/ng_minted_error_means.rs`; report
+> reads** (measured 2026-08-24, `0f9281c5~1:examples/ng_minted_error_means.rs`; report
 > [`ng_prereq_closeout_two_averages_2026-08-24.md`](../../reports/implementations/ng_prereq_closeout_two_averages_2026-08-24.md)).
 >
 > | | tomato, 63 accessions, 2.5× to 28.6× | HG002, 100 benchmark regions, 300× |
@@ -542,7 +543,7 @@ Two requirements on them, and the second is easy to get wrong:
 
   **The per-position depth cap does divide them, and by 3 parts in 100 on the deepest real sample
   we have.** The histogram route thins every position to at most
-  [`MAX_BINNED_DEPTH`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs) = 124 reads
+  [`MAX_BINNED_DEPTH`](../../../../src/parameter_estimation/depth_bins.rs) = 124 reads
   before fitting; the accumulator thins nothing. *An earlier version of this paragraph said the two
   were undivided, and gave the per-site argument as the reason. The per-site argument is right and
   it is not the whole of it.*
@@ -554,7 +555,7 @@ Two requirements on them, and the second is easy to get wrong:
   differently — and deep positions are not a random sample of the genome, they are where reads pile
   up from elsewhere and where mapping quality collapses.
 
-  **The size, measured rather than argued** (`examples/ng_minted_error_means.rs`, 2026-08-24). On
+  **The size, measured rather than argued** (`0f9281c5~1:examples/ng_minted_error_means.rs`, 2026-08-24). On
   HG002's 100 benchmark regions at 300×, where the cap fires at essentially every position — the fit
   sees 70,288,390 of 172,616,054 read-positions, 41 in 100 — the denominator's geometric mean is
   2.9055 × 10⁻⁴ against 2.9862 × 10⁻⁴ with each position thinned to the cap first. **The
@@ -763,7 +764,7 @@ them side by side is the quickest way to see what is genuinely new here and what
 | a read the genotype explains | `log(k_a / P)`, no `(1 − ε)` factor | **the same** until 2026-10-31; since then the average over the genotype's copies, `1 − ε` from a copy of the read's allele (§3.3's amendment) |
 | a read the genotype cannot explain | `log[ 1 − (1 − ε_base)(1 − ε_map) ]` | `log[ max(ε_base, ε_map) ] + log scale − log m` (no `log scale` for an indel error, §3.5) |
 | combining base and mapping error | a **sum** — the read is wrong if either is | the **worse of the two**, which is production's mint |
-| which base's quality, on a multi-base allele | the **average** over the allele's bases, and the **minimum** across alleles merged into one haplotype ([`Allele.cpp:158`](../../../../freebayes/src/Allele.cpp), [`AlleleParser.cpp:3154`](../../../../freebayes/src/AlleleParser.cpp)) | the **minimum** across the whole locus window ([`open_record.rs:944`](../../../../src/pileup/walker/open_record.rs)) |
+| which base's quality, on a multi-base allele | the **average** over the allele's bases, and the **minimum** across alleles merged into one haplotype ([`Allele.cpp:158`](../../../../freebayes/src/Allele.cpp), [`AlleleParser.cpp:3154`](../../../../freebayes/src/AlleleParser.cpp)) | the **minimum** across the whole locus window (`d9e7b076:src/pileup/walker/open_record.rs:944`) |
 | where the error mass goes | nowhere — the full `ε` is charged | divided by 3 for a plain substitution (§3.5) |
 | calibration against a measured rate | none | the per-read-group scale (§3.2) |
 | pooled-error discount | the read-dependence factor, 0.9 | none — deferred (§10) |
@@ -785,7 +786,7 @@ something freebayes has that we do not.
 ### 3.4 The multinomial coefficient production inherited — dropped
 
 **Production's SNP/indel likelihood carries a term this formula does not**
-([`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs)):
+(`d9e7b076:src/var_calling/per_group_merger.rs:1948`):
 `log(N!) − Σ_a log(n_a!)` summed over the alleles the genotype carries, where `N` is how many reads
 those alleles account for. It comes from freebayes — but from freebayes' `--legacy-gls` branch
 ([`DataLikelihood.cpp:155`](../../../../freebayes/src/DataLikelihood.cpp)), and **freebayes' default
@@ -832,7 +833,7 @@ Because `n·H(f)` is largest at `f = ½`, the coefficient makes an unbalanced he
 than a balanced one — a 60:40 split at 300 reads loses 6.0 nats, 26 Phred, against 50:50. That is a
 real allele-balance test, and it is arriving through a term with no probabilistic reading. Allele
 balance belongs in the site filters, where production already computes it
-([`vcf/qual_refine.rs`](../../../../src/vcf/qual_refine.rs)), and where it can be
+(`d9e7b076:src/vcf/qual_refine.rs`), and where it can be
 calibrated. It does not belong in the likelihood by accident.)*
 
 **Decision: ng does not carry the coefficient.** This changes genotypes against production, so it is
@@ -848,7 +849,7 @@ misread — there were three bases it could have gone to.
 The three callers answer differently. GATK divides by three
 ([`LoglessPairHMM.java:90`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/utils/pairhmm/LoglessPairHMM.java));
 freebayes and production divide by nothing; production's own STR substitution term divides by three
-([`pair_hmm.rs`](../../../../src/ssr/cohort/pair_hmm.rs)), so the two halves of production disagree
+(`d9e7b076:src/ssr/cohort/pair_hmm.rs`), so the two halves of production disagree
 with each other. The pre-pass's noise model is explicit that the denominator is three — *"three bases
 to go wrong into, one to come back to"*
 ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2).
@@ -929,7 +930,7 @@ of the sample rather than of the locus (§3.6 below) is about a different axis a
 
 **The estimator produces that grain, and did not until 2026-08-20.** ng fits a contamination fraction
 inside the joint route
-([`joint/contamination.rs`](../../../../src/ng/parameter_estimation/joint/contamination.rs), wired
+([`joint/contamination.rs`](../../../../src/parameter_estimation/joint/contamination.rs), wired
 into that fit, with an `estimate-contamination` subcommand that hands the same estimator to somebody
 comparing methods). It is still off by default. **It gave one number per sample and now gives one per
 read group**, as do [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.1 and §3.4;
@@ -998,7 +999,7 @@ log Lg(g)  =  Σ_o  n_o · log[ (1 − c) · own(o | g)  +  c · q(o) ]
 > **The class split is not a modelling requirement. It is what a caller does when it has no
 > per-locus frequency to use.** Production splits by class because it has no population frequency
 > for an arbitrary alternative allele and has to fall back on a class average
-> ([`var_calling/contamination_estimation.rs`](../../../../src/var_calling/contamination_estimation.rs),
+> (`d9e7b076:src/var_calling/contamination_estimation.rs`,
 > `q_b_per_batch`, a three-entry simplex per sequencing batch). **This caller has the frequency**:
 > it is the same per-locus allele frequency the genotype prior reads and the loop re-estimates, so
 > the honest `q(o)` is that number and the classes disappear with the ignorance that motivated them.
@@ -1038,7 +1039,7 @@ path and no discontinuity to guard, and the agreement is to a stated tolerance r
 why it can afford to: its two forms differ algebraically, so it has a real discontinuity to jump
 rather than a rounding one.)* *(Production has one, and falls back to its precomputed
 non-contaminated value whenever `c` is zero rather than relying on the two agreeing
-([`posterior_engine.rs:1509`](../../../../src/var_calling/posterior_engine.rs)) — because its `own`
+(`d9e7b076:src/var_calling/posterior_engine.rs:1509`) — because its `own`
 carries an extra `(1 − ε)` factor and divides the error mass by the allele count less one, floored at
 one, so its two forms
 genuinely differ. ng's do not.)*
@@ -1092,7 +1093,7 @@ contaminated likelihood was computed once per sample per locus).
 
 **So the two halves sit in different tiers, and that is the whole of the change.** The fraction is
 §6.1's first tier, frozen before the loop starts, exactly as production fills its mixture table once
-and never touches it again ([`posterior_engine.rs:2361`](../../../../src/var_calling/posterior_engine.rs) — the
+and never touches it again (`d9e7b076:src/var_calling/posterior_engine.rs:2361` — the
 mixture branch's own comment; `let did_mixture` is on 2367).
 The frequency is recomputed per iteration alongside the frequency the genotype prior already reads,
 which costs a lookup rather than a fit. **Production's arrangement is not available to us and does
@@ -1243,7 +1244,7 @@ measured, and never a repeat count read off the reference**; the shortcut that w
 repeats instead of measuring them was considered and parked.
 
 **Some reads are allowed to skip the alignment**
-([`ssr.rs:858`](../../../../src/ng/locus_generation/ssr.rs)). If a read's CIGAR carries only matches —
+([`ssr.rs:858`](../../../../src/locus_generation/ssr.rs)). If a read's CIGAR carries only matches —
 no indel and no clip — its aligned span brackets the whole window, and its bases over that window are
 **byte-identical to the reference**, then it copied the reference across the tract. Its repeat count
 is the reference's and its tract sits where the reference's tract sits, so aligning it would spend a
@@ -1327,7 +1328,7 @@ read it — **nineteen slips in twenty are one repeat**.
 **It is a share of the slips, not a multiplier applied at each step, and the two are complements.** A
 parameter expressed as the chance of *carrying on* to the next step is `1 − this`; production's
 `StutterShape` stores that complement and calls it `decay`
-([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs) converts, `geom = 1 − decay`).
+(`d9e7b076:src/ssr/cohort/read_model/hipstr.rs` converts, `geom = 1 − decay`).
 **Getting the two the wrong way round inverts the size distribution — large slips become the common
 ones — and nothing crashes**, which is why this name says *share* rather than anything that could be
 read as a rate of decline. It is also why §12's fourth test exists.
@@ -1365,7 +1366,7 @@ contraction of four repeats or more. At a slippage level of 2 in 100 and HipSTR'
 of 0.95, that tail is about **2 parts in a million**; at a one-step share of 0.5 — a stress value, not
 a fitted one — it is about **2 parts in a thousand**, a thousandfold difference. *(An earlier version
 called 0.5 "production's fallback decay". It is not: production's only coded 0.5 fallback is
-`DEFAULT_G0_FALLBACK_P` ([`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs)),
+`DEFAULT_G0_FALLBACK_P` (`d9e7b076:src/ssr/cohort/param_estimation.rs:167`),
 the **genotype prior's** pseudocount decay, a different model. Production codes no fallback for the
 stutter one-step share.)* **So it must be computed
 and reported per candidate rather than assumed negligible**, and it is one more reason the step
@@ -1375,7 +1376,7 @@ different scales.
 
 **Slips beyond a cutoff score zero and the read falls to §4.5's outlier term.** Production applies
 one constant, 10, to the *repeat* count on the whole-repeat branch and to the re-indexed *base-pair* count on the part-repeat branch
-([`param_estimation.rs:21`](../../../../src/ssr/cohort/param_estimation.rs)) — one number on two
+(`d9e7b076:src/ssr/cohort/param_estimation.rs:21`) — one number on two
 scales. **ng carries two cutoffs, named for what they count**, because 10 repeats at a hexamer is 60 base
 pairs and 10 base pairs is not the same claim.
 
@@ -1392,7 +1393,7 @@ test.
 all — supplies the four direction shares once split by the fitted direction ratio, and the fitted
 fall-off supplies the two one-step shares. **Two of the seven are placeholders in production and must be
 recorded as such rather than mistaken for fitted values**: the part-repeat share is a fixed 5% of
-the whole-repeat share ([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)), and the
+the whole-repeat share (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`), and the
 whole-repeat and part-repeat one-step shares are tied to one number where HipSTR keeps them independent.
 The follow-up that would replace the first — binning part-repeat reads separately, as HipSTR does —
 is recorded in the model comparison's report (§4.1) and in [`alignment.md`](alignment.md) §5.2,
@@ -1409,7 +1410,7 @@ source for a coder is §4.2 above, which sets the distribution out in full preci
 has cause to open that tree.
 
 **Do not treat production's port as a cleared second source until someone establishes that it is
-one.** [`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs) implements this distribution
+one.** `d9e7b076:src/ssr/cohort/read_model/hipstr.rs` implements this distribution
 and §9's reuse map ports from it — but its own header says it *"mirrors
 `HipSTR/src/stutter_model.cpp::log_stutter_pmf`"*, and a test is named for mirroring the HipSTR
 formula. That wording may describe only what the code is equivalent to, and it may describe where the
@@ -1491,7 +1492,7 @@ and at tomato dinucleotides reaches 15.0% at 12 to 15 repeats
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.3, §4).
 
 Production already does this, by a linear function of the candidate's repeat count rather than a table
-lookup ([`em.rs:385`](../../../../src/ssr/cohort/em.rs)). ng uses the table, because the table is
+lookup (`d9e7b076:src/ssr/cohort/em.rs:385`). ng uses the table, because the table is
 what the pre-pass emits.
 
 **The consequence a coder must not miss: the stutter parameters cannot be hoisted out of the
@@ -1518,7 +1519,7 @@ Without somewhere to put them, one such read drives every candidate genotype's l
 of from the individual's alleles.
 
 **Production sets `λ` to 0.01 and spreads it uniformly over `D`, the number of distinct sequences the
-whole cohort showed at that locus** ([`em.rs:393`](../../../../src/ssr/cohort/em.rs)). **ng
+whole cohort showed at that locus** (`d9e7b076:src/ssr/cohort/em.rs:393`). **ng
 inherited the 0.01 and declared it inherited**: it is not fitted, the parameters fit has no source
 for it, and §1.2 requires that be said rather than left blank. *Since then the value has been set by
 sweeps against genotype accuracy — 0.05 and 0.20 on 2026-09-03, **0.07 on 2026-10-18** — and is
@@ -1665,7 +1666,7 @@ wait for that answer.
 **One thing does need care.** The placement enumeration of §4.2 is what makes an interrupted
 candidate's slip land in several distinct sequences, and the interruption also changes how much the
 tract slips at all — production carries a purity factor on the level for exactly that
-([`em.rs:387`](../../../../src/ssr/cohort/em.rs)). The pre-pass fits its strata over loci of mixed
+(`d9e7b076:src/ssr/cohort/em.rs:387`). The pre-pass fits its strata over loci of mixed
 purity and **emits no purity of its own** — `SsrSegment::purity_fraction()` is region typing's
 measure, which that document uses to say when its rate comparison is valid, and §4.4's list of what
 the walk emits does not contain it
@@ -1748,7 +1749,7 @@ genotypes still do not, the difference is in the models rather than in the numbe
 A read that entered the locus and ran off its own end shows a prefix or a suffix of what the sample
 carries. It does not say what the sample carries; it says the sample carries **at least** this.
 Production discards these outright at repeat tracts, counting them and moving on
-([`locus_tally.rs:91`](../../../../src/ssr/pileup/locus_tally.rs)). **HipSTR does not** — its own
+(`d9e7b076:src/ssr/pileup/locus_tally.rs:91`). **HipSTR does not** — its own
 documentation says a read that does not fully extend across the repeat still gives a lower bound and
 that HipSTR uses it. So the censored term below has a precedent in a working caller, and what is new
 here is carrying it on the generic path as well. ng's locus generators keep them,
@@ -1765,7 +1766,7 @@ this caller cannot see.
 **The danger is precise and must be designed against: a partial scored as though it were complete
 mis-scores as a *short* allele**, because its bases are a prefix of the truth. That is why
 `complete_observations()` exists as a deliberate guard on the evidence type
-([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)) and why the sections below
+([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) and why the sections below
 are careful that a lower bound produces a likelihood that is **never smaller** than the complete
 read's on the same bases — which is what stops it from reading as evidence *for* a short allele.
 
@@ -1919,7 +1920,7 @@ type's own documentation names.
 > **A set of runs, not one run, and this section used to say the singular throughout** *(corrected
 > 2026-08-24, owner; found while the read likelihood's Milestone A was built against it)*. The
 > generic fold mints witnesses **with holes in them**, so `WitnessedLocusPositions`
-> ([`witness.rs`](../../../../src/ng/locus_generation/witness.rs)) is a *set* of half-open runs and
+> ([`witness.rs`](../../../../src/locus_generation/witness.rs)) is a *set* of half-open runs and
 > not an offset and a length — its own documentation says two numbers "can only describe a hole by
 > swallowing it".
 >
@@ -2100,7 +2101,7 @@ exempted, every generic indel the scale had cost on three GIAB samples came back
 
 **This is exactly aggregable**, which is why it is the rule chosen: the witnessed positions are
 already part of an observation's identity
-([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs) — `read_witness` carries
+([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs) — `read_witness` carries
 them, as a canonical set of runs), so every read pooled into one observation witnessed the same
 positions and gets the same compatibility verdict.
 
@@ -2122,8 +2123,8 @@ should not be made on the generic path.
 **Correction, 2026-08-21: an earlier version of this section said the first of those "needs nothing
 from any other component: the evidence is there". It is not there.** The merge's collation drops
 every observation whose witness is not `Complete` before projecting it onto an allele
-([`cohort_merge/build.rs:1351`](../../../../src/ng/run/cohort_merge/build.rs)), and its projection
-panics rather than pad one ([`:323`](../../../../src/ng/run/cohort_merge/build.rs)). So a cohort
+([`cohort_merge/build.rs:1351`](../../../../src/run/cohort_merge/build.rs)), and its projection
+panics rather than pad one ([`:323`](../../../../src/run/cohort_merge/build.rs)). So a cohort
 observation as built carries no partial reads at all, and §5.2 and §5.3 have nothing to read.
 **This is a second requirement on the merge, alongside the read-group one of §2.3, and §7's table
 carries it:** a partial observation must survive collation, keyed by the stretch it witnessed, and
@@ -2135,7 +2136,7 @@ a 60-base tract are partial and an allele longer than a read can only ever be wi
 #### 5.4.1 A read is partial only where the locus is wide on the reference
 
 **The witness is measured in the locus's reference positions**
-([`witness.rs`](../../../../src/ng/locus_generation/witness.rs)), and that single fact decides which
+([`witness.rs`](../../../../src/locus_generation/witness.rs)), and that single fact decides which
 variant classes have partial reads at all. For reads of length `L` over a locus covering `W`
 reference bases, with read starts uniform, the share of overlapping reads that are partial is
 `(2W − 2)/(L + W − 1)`. At 150-base reads:
@@ -2189,7 +2190,7 @@ The merge decides whether to build a locus at all by asking whether some single 
 reads disagreeing with the reference, and it excludes partial reads from both halves of that question
 — because comparing a partial's shorter bases against the whole locus's reference bases would call a
 faithful partial non-reference
-([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs), `non_reference_reads`).
+([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs), `non_reference_reads`).
 
 **An earlier version of this section recommended changing that, and §5.4.1 says why it was wrong.**
 The classes where the rule could lose a real variant for want of partial evidence are the classes
@@ -2205,7 +2206,7 @@ rule has to change for that to mean what it says, and only on this path.**
 A read that runs off its own end inside a tract stays `Partial` even when its witnessed run covers
 every position of the locus — the saturation is a placement convention and not a claim to have seen
 the whole tract, which
-[`witness.rs`](../../../../src/ng/locus_generation/witness.rs) states outright: *"a reach that
+[`witness.rs`](../../../../src/locus_generation/witness.rs) states outright: *"a reach that
 saturates says the read ran out"*. **So a sample carrying an allele too long for a read to span shows
 no complete observation at all**, and the filter, which counts complete observations only, reads that
 as *nothing varied here*. **Not varying and carrying an allele too long to measure would be the same
@@ -2270,7 +2271,7 @@ rebuilt at each pass; *an earlier version of this paragraph said three parameter
 **Production adapts less: the shape and the level, in up to three rounds**, each shrunk toward the
 parameters fit's per-stratum value by 50 pseudo-counts for the shape and 20 slipped reads for the
 level, with the rounds settable to zero to keep the seed
-([`em.rs:69`](../../../../src/ssr/cohort/em.rs)). **ng as specified here adapts none of them.** So the
+(`d9e7b076:src/ssr/cohort/em.rs:69`). **ng as specified here adapts none of them.** So the
 three implementations sit at three points on one axis, and this document picks the frozen end
 knowingly rather than by omission. The case for it is that a tract can behave unlike
 its stratum for reasons the stratum cannot see — an interruption, a nearby indel, somatic instability
@@ -2388,9 +2389,9 @@ in probability space and logged once, which is where the single `log` per observ
 goes. Every probability that could reach zero before a logarithm is floored, so an impossible
 observation yields a finite, very negative number and one read cannot turn a sample's whole row into
 `NaN`. Production floors the per-allele error rate into `[1e-12, 0.5]`
-([`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs)) and
+(`d9e7b076:src/var_calling/contamination_estimation.rs:1449`) and
 the stutter geometrics into `(0.01, 0.99)`
-([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)); ng carries both, as named
+(`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`); ng carries both, as named
 constants with their reasons rather than as bare numbers.
 
 **Determinism.** The model is a pure function of (frozen parameters, observations, candidate
@@ -2410,7 +2411,7 @@ genotypes — §6.1 two paragraphs below says so — which is 3.5 times six, not
 genotypes it is 21.)* **Nothing may allocate inside the per-sample loop.** The caller hands in
 scratch sized by candidate count and observation count and the model fills it; production lifted
 exactly these buffers out of its own iteration after a profile put the allocator's self-time at about
-16% of cycles ([`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs)). The
+16% of cycles (`d9e7b076:src/var_calling/posterior_engine.rs:1874`). The
 STR path additionally needs a placement buffer and a substitution-alignment buffer, both per worker.
 
 **Errors.** The model has no failure mode of its own that is not a caller bug: a genotype table that
@@ -2418,7 +2419,7 @@ disagrees with the allele count, a negative count, a parameter outside its decla
 candidate whose stratum is not in the table. These are assertions, and the structural ones must hold
 in release — production asserts the analogous invariant because a scratch array too short for the allele count
 would otherwise be indexed out of bounds silently
-([`per_group_merger.rs:1963`](../../../../src/var_calling/per_group_merger.rs)).
+(`d9e7b076:src/var_calling/per_group_merger.rs:1963`).
 
 **Provenance.** The model does not branch on it (§4.4). It **propagates** it: the weakest provenance
 of any parameter that entered a locus travels onto that locus's output, so a call resting on borrowed
@@ -2431,17 +2432,17 @@ anything.
 
 | what | production code | how ng reuses it |
 |---|---|---|
-| the SNP/indel closed form | [`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs) | **shape ported, two terms changed** — the multinomial coefficient dropped (§3.4), the error mass divided by three where the alleles differ by one substitution (§3.5) |
-| the per-read error probability | [`open_record.rs:793`](../../../../src/pileup/walker/open_record.rs), [`:944`](../../../../src/pileup/walker/open_record.rs) | ported — the worse of the lowest base quality across the window and the mapping quality — and then rescaled per read group (§3.2) |
+| the SNP/indel closed form | `d9e7b076:src/var_calling/per_group_merger.rs:1948` | **shape ported, two terms changed** — the multinomial coefficient dropped (§3.4), the error mass divided by three where the alleles differ by one substitution (§3.5) |
+| the per-read error probability | `d9e7b076:src/pileup/walker/open_record.rs:793`, `d9e7b076:src/pileup/walker/open_record.rs:944` | ported — the worse of the lowest base quality across the window and the mapping quality — and then rescaled per read group (§3.2) |
 | the read-group calibration scale | — | **new**; production has nothing to port because it never fitted an error rate |
-| the contamination mixture | [`posterior_engine.rs:1475`](../../../../src/var_calling/posterior_engine.rs) | ported as §3.6, with its geometric-mean substitution recorded as a known cost rather than inherited silently |
-| the STR stutter distribution | [`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs) | **ported**, with the two placeholder parameters named as placeholders, the slip cutoff split into two constants — one counting repeats, one counting bases — and *in frame* / *out of frame* renamed (§1.3, §4.2) |
-| the substitution comparison | [`pair_hmm.rs`](../../../../src/ssr/cohort/pair_hmm.rs) | belongs to the alignment module; composed, not ported here (§4.3, §7) |
-| the placement enumeration for interrupted candidates | [`stutter.rs`](../../../../src/ssr/cohort/stutter.rs) | ported |
-| the copy-weighted mixture with an outlier floor | [`likelihood.rs:75`](../../../../src/ssr/cohort/likelihood.rs) | **ported as §2.1's shared formula, for both paths**, with the outlier spread made per-locus rather than per-cohort (§4.5) |
+| the contamination mixture | `d9e7b076:src/var_calling/posterior_engine.rs:1475` | ported as §3.6, with its geometric-mean substitution recorded as a known cost rather than inherited silently |
+| the STR stutter distribution | `d9e7b076:src/ssr/cohort/read_model/hipstr.rs` | **ported**, with the two placeholder parameters named as placeholders, the slip cutoff split into two constants — one counting repeats, one counting bases — and *in frame* / *out of frame* renamed (§1.3, §4.2) |
+| the substitution comparison | `d9e7b076:src/ssr/cohort/pair_hmm.rs` | belongs to the alignment module; composed, not ported here (§4.3, §7) |
+| the placement enumeration for interrupted candidates | `d9e7b076:src/ssr/cohort/stutter.rs` | ported |
+| the copy-weighted mixture with an outlier floor | `d9e7b076:src/ssr/cohort/likelihood.rs:75` | **ported as §2.1's shared formula, for both paths**, with the outlier spread made per-locus rather than per-cohort (§4.5) |
 | the censored term | — | **new** (§5); production discards partial observations on both paths |
-| the swappable model interface | [`read_model/mod.rs`](../../../../src/ssr/cohort/read_model/mod.rs) | shape ported — the seam is what let production swap models with zero test re-baselining, and §4.5.1 needs it |
-| Model B, the comparator | [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs) | **test-only**, exactly as production keeps it: an independent implementation is worth more as an oracle than as an alternative |
+| the swappable model interface | `d9e7b076:src/ssr/cohort/read_model/mod.rs` | shape ported — the seam is what let production swap models with zero test re-baselining, and §4.5.1 needs it |
+| Model B, the comparator | `d9e7b076:src/ssr/cohort/read_model/classic.rs` | **test-only**, exactly as production keeps it: an independent implementation is worth more as an oracle than as an alternative |
 
 ---
 
@@ -2594,7 +2595,7 @@ the compute and become a correctness boundary, which is a much stronger claim th
 
 **Unit tests, each pinning a property rather than a value.** The first three are properties
 production already tests and ng's port should carry across
-([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)).
+(`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`).
 
 1. **A read matching its allele is dominated by the same-length term.** A read identical to a candidate scores at
    least `same_length_share × (1 − ε)^length` and within 5% of it.
@@ -2708,7 +2709,7 @@ production already tests and ng's port should carry across
     the geometric and the arithmetic mean of the minted per-read error over the sites the
     error-rate histogram counts, and the ratio between them. Not a unit test, because the property
     is about a walk over real reads and no fixture can stand in for one:
-    `examples/ng_minted_error_means.rs`. **Result: 25.2 on the 63-accession tomato cohort and 44.1
+    `0f9281c5~1:examples/ng_minted_error_means.rs`. **Result: 25.2 on the 63-accession tomato cohort and 44.1
     on HG002 at 300×** — §3.2 carries the table and what it means. The same run is what checks
     §3.2's site-set requirement on real data: the reads the accumulator counts and the reads the
     walk emitted at those loci agreed exactly, 172,616,054 on HG002 and on all 63 tomato
@@ -2732,7 +2733,7 @@ production already tests and ng's port should carry across
 
 17. **Does contamination at a repeat tract earn its place?** Two rungs, and the first is runnable
     today. **Simulated:** the generator that chose Model A already builds a cohort with known
-    genotypes ([`sim.rs`](../../../../src/ssr/cohort/sim.rs)); add a contaminating individual at a
+    genotypes (`d9e7b076:src/ssr/cohort/sim.rs`); add a contaminating individual at a
     known fraction and score genotype concordance and calibration with §4.5.1 on and off, sweeping
     the fraction over 0, 1, 3 and 10 in 100 and the depth over the committed range. It is the same
     harness that produced §4.1's table, so the comparison is on proven ground. **Planted on real

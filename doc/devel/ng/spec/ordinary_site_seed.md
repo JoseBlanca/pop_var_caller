@@ -90,7 +90,7 @@ here measures the small end at low depth, and §6 makes that part of the work.
 
 **Even with the density known exactly**, compressing it to two numbers costs diversity, and costs
 more the larger the panel. Measured at `F = 0` in
-[`examples/ng_spectrum_panel_floor.rs`](../../../../examples/ng_spectrum_panel_floor.rs): the
+`examples/ng_spectrum_panel_floor.rs` (since removed; `02735054~1:examples/ng_spectrum_panel_floor.rs`): the
 heterozygosity the *fitted pair* implies, against the density's own.
 
 | density | 1 individual | 63 | 200 |

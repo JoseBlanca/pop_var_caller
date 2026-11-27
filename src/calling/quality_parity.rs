@@ -1,32 +1,32 @@
-//! **ng's site quality against the shipping caller's, at the same prior — and what moves when
-//! the prior becomes the run's own.**
-//!
-//! **Production's side is frozen since promotion step C7.** Until then the fixtures here ran
-//! production's `run_em_columnar` for the site quality and `vcf::qual_refine::refine_qual` for
-//! the artifact correction. Production is being deleted, so the value each returned on each input
-//! below was recorded at commit `d9e7b076` and is written in [`PRODUCTION_SITE_QUALITIES`] and
-//! [`PRODUCTION_CORRECTED_QUALITIES`], keyed by an FNV-1a digest of everything production was
-//! handed that could change it. A fixture whose inputs change finds no answer and fails. Production's two
-//! shipped Beta-Binomial pseudocounts, `(10, 0.01)`, are frozen too. The prose below describes
-//! the comparison as it was built, with production running; what it asserts is unchanged.
+//! **The site quality against answers recorded from the caller it was ported from — and what
+//! moves when the prior becomes the run's own.**
 //!
 //! [`score_uncorrected_site_quality`](super::quality::score_uncorrected_site_quality) is a port
-//! of `src/var_calling/posterior_engine.rs`'s `compute_qual_via_exact_af` — the same collapse
-//! to non-reference copies, the same linear-domain fold over the cohort's allele count, the
-//! same Beta-Binomial prior on that count, the same normalisation — and what a port has to
-//! prove is not that it is self-consistent but that it agrees with what it was ported from
-//! (`doc/devel/ng/spec/calling_quality.md` §11 and §14's test 2).
+//! of the deleted caller's `compute_qual_via_exact_af`
+//! (`d9e7b076:src/var_calling/posterior_engine.rs`): the same collapse to non-reference copies,
+//! the same linear-domain fold over the cohort's allele count, the same Beta-Binomial prior on
+//! that count, the same normalisation (`doc/devel/ng/spec/calling_quality.md` §11 and §14's
+//! test 2). The artifact correction is likewise a port of `refine_qual`
+//! (`d9e7b076:src/vcf/qual_refine.rs`).
 //!
-//! **It shipped without this oracle.** The module's own tests check the single-sample closed
-//! form, that a locus nobody carries does not inflate as samples are added, and that the exact
-//! log-domain zero term keeps a confident cohort off the ceiling. Every one of those is a
-//! property of ng alone; none of them would notice the whole calculation sitting a few Phred
-//! away from production's.
+//! **What is pinned.** The value the old caller returned on each input below, recorded at
+//! commit `d9e7b076`: [`PRODUCTION_SITE_QUALITIES`] for the site quality and
+//! [`PRODUCTION_CORRECTED_QUALITIES`] for the artifact correction, each keyed by an FNV-1a
+//! digest of every input that could change it. A fixture whose inputs change finds no answer
+//! and fails rather than comparing against the wrong one. The old caller's two Beta-Binomial
+//! pseudocounts, `(10, 0.01)`, are recorded beside them. The module's own tests check
+//! properties of ng alone; these are the ones that would notice the whole calculation sitting
+//! a few Phred away from what it was ported from.
+//!
+//! **When a deliberate change breaks a fixture**, work out the new expectation independently —
+//! by hand, or from the spec — and change the test's expectation with the reason. Never
+//! re-record the answers from this code: then the test would only check the code against
+//! itself.
 //!
 //! # ⚠ The prior this quality reads is **not** the one the frequency loop reads
 //!
-//! Production carries **two** concentration pairs per record, and they are different numbers
-//! from different sources:
+//! The old caller carried **two** concentration pairs per record, and they are different
+//! numbers from different sources:
 //!
 //! - `scratch.alpha`, `[1, θ̂/k, …]`, derived from the run's nucleotide diversity — the
 //!   Dirichlet the **EM** uses, and the one [`loop_parity`](super::loop_parity) holds identical;
@@ -73,7 +73,6 @@
 //! [`tests::a_cohort_past_the_ceiling_is_where_the_two_part_and_the_difference_is_the_cap`]
 //! pins the one place they diverge.
 //!
-//! Nothing here changed production.
 
 use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
 use crate::calling::quality::ArtifactTestCounts;
@@ -102,7 +101,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// **Production's site quality for each locus a fixture hands it**, as `(digest, bit pattern)`:
 /// the digest of the sample count, allele count, both concentrations and every likelihood, in
 /// that order; the `qual_phred` production's `run_em_columnar` returned. Recorded at commit
-/// `d9e7b076` (promotion plan step C7).
+/// `d9e7b076`.
 const PRODUCTION_SITE_QUALITIES: [(u64, u64); 8] = [
     (0x4a9c_064e_a4d3_9710, 0x4038_b9f2_b8bc_ad7a),
     (0x5b76_fe14_befb_9369, 0x3f08_7b9d_aa6b_0970),
@@ -117,7 +116,7 @@ const PRODUCTION_SITE_QUALITIES: [(u64, u64); 8] = [
 /// **Production's corrected quality for each set of reads a fixture hands it**, as
 /// `(digest, bit pattern)`: the digest of every sample's six read counts and called genotype, in
 /// sample order, then the baseline; the value production's `refine_qual` returned. Recorded at
-/// commit `d9e7b076` (promotion plan step C7).
+/// commit `d9e7b076`.
 const PRODUCTION_CORRECTED_QUALITIES: [(u64, u64); 8] = [
     (0xdb9e_5c01_e719_e33d, 0x0000_0000_0000_0000),
     (0x468e_27c3_4777_c2d9, 0x408c_2000_0000_0000),
@@ -344,8 +343,10 @@ mod tests {
         let mut log_all = f64::NEG_INFINITY;
         for (total, log) in totals.iter_mut().enumerate() {
             let total = total as f64;
-            *log += log_beta(alpha_alternative + total, alpha_reference + chromosomes - total)
-                - log_beta(alpha_alternative, alpha_reference);
+            *log += log_beta(
+                alpha_alternative + total,
+                alpha_reference + chromosomes - total,
+            ) - log_beta(alpha_alternative, alpha_reference);
             log_all = log_sum_exp(log_all, *log);
         }
         -10.0 * (totals[0] - log_all) / std::f64::consts::LN_10

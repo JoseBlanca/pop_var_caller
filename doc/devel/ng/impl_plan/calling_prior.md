@@ -15,8 +15,8 @@ turns that design into build order; it is **not** a place for new design — the
 [`calling_read_likelihoods`](calling_read_likelihoods.md) → [`calling_loop`](calling_loop.md) →
 [`calling_bakeoffs`](calling_bakeoffs.md). **This plan needs nothing from the prerequisites
 plan** — its upstream inputs all exist already: the fitted spectrum
-(`FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/ng/parameter_estimation/joint/fit.rs)),
-θ (`expected_heterozygosity`, [`joint/fit.rs:109`](../../../../src/ng/parameter_estimation/joint/fit.rs)),
+(`FrequencyDensity`, [`joint/fit.rs:87`](../../../../src/parameter_estimation/joint/fit.rs)),
+θ (`expected_heterozygosity`, [`joint/fit.rs:109`](../../../../src/parameter_estimation/joint/fit.rs)),
 and the per-sample `F`. It needs only the foundations plan (the genotype table's flat views,
 `AlleleId`). **That asymmetry is deliberate and worth acting on: this plan can branch the day
 foundations merges, while the read-likelihoods plan waits for prerequisites — the two fan-out
@@ -26,7 +26,7 @@ plans start on different days and still run in parallel.**
 
 ## Scope
 
-**In:** `src/ng/calling/genotype_prior/` — `mod.rs` (the `GenotypePriorModel` trait,
+**In:** `src/calling/genotype_prior/` — `mod.rs` (the `GenotypePriorModel` trait,
 `Concentration`, `sample_concentration`), `dirichlet_multinomial.rs` (the ported primitive +
 `MarginalizedDirichletPrior`), `seed_generic.rs` (`project_spectrum_seed`, `seed_for_locus`),
 `seed_ssr.rs` (`fill_ssr_seed`, `fill_seed_share_per_candidate`), `hardy_weinberg.rs` (`PlugInWrightPrior`);
@@ -58,7 +58,7 @@ bare `f64`.
 - **Reuse over rewrite.** The primitive, the floors, the mixture, the leave-one-out arithmetic
   and the STR shape are **ports** — arch §6's reconciliation table is the map, and no formula is
   re-derived. The projection is the one genuinely new function. *Its optimiser was expected to
-  reuse [`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs);
+  reuse `373bd37d~1:src/ng/parameter_estimation/fitting/multistart.rs`;
   at D2 that driver turned out to cost 6,401 predictions per candidate at 3,200 individuals, since
   it scores one cell at a time and cannot cache. Its shape and its `SearchPrecision` are reused;
   the driver is not (arch §4).*
@@ -82,12 +82,12 @@ bare `f64`.
   ([`genetics.rs:127`](../../../../src/genetics.rs)), `PROBABILITY_FLOOR` ([`:18`](../../../../src/genetics.rs)),
   `MIN_ALT_CONCENTRATION` ([`:187`](../../../../src/genetics.rs)), `alpha_from_diversity`
   ([`:214`](../../../../src/genetics.rs)), the mixture
-  ([`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs)), the
-  leave-one-out twins ([`em.rs:278`](../../../../src/ssr/cohort/em.rs),
-  [`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs)), the STR shape
-  (`g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs))
+  (`d9e7b076:src/var_calling/posterior_engine.rs:3799`), the
+  leave-one-out twins (`d9e7b076:src/ssr/cohort/em.rs:278`,
+  `d9e7b076:src/var_calling/posterior_engine.rs:3183`), the STR shape
+  (`g0_pseudocounts`, `d9e7b076:src/ssr/cohort/allele_freq_prior.rs:25`)
   and its fallback decay
-  ([`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs)).
+  (`d9e7b076:src/ssr/cohort/param_estimation.rs:167`).
 - The spectrum inputs: `FrequencyDensity` and `expected_heterozygosity` on the joint fit (above).
   **Impl-time confirmation, not design:** the concrete type `project_spectrum_seed` consumes is
   the pre-pass cohort gather's to pin (arch §6); confirm at D2 and adapt with a view, not a copy.
@@ -97,7 +97,7 @@ bare `f64`.
 - **Worktree** `../pop_var_caller-calling-prior`, **branch** `ng-calling-prior`, from `main`
   **after `ng-calling-foundations` has merged** (nothing else need have).
 - **Runs in parallel with** `ng-calling-read-likelihoods`. Conflict surface:
-  `src/ng/calling/mod.rs` — each branch adds one `pub mod` line and its re-exports. Keep the
+  `src/calling/mod.rs` — each branch adds one `pub mod` line and its re-exports. Keep the
   additions on separate, alphabetically-placed lines. `types.rs` is this branch's alone in phase
   2 (`ExpectedHeterozygosity` appended to the population-genetics section; the likelihood plan
   adds nothing to `types.rs`).
@@ -116,7 +116,7 @@ bare `f64`.
 `types.rs` gains `ExpectedHeterozygosity` (constrained to `[0, 1]`, `try_new`/`get`; **the
 cohort's expected heterozygosity at ordinary sites — not the non-reference rate**, and the doc
 comment says so) and `DEFAULT_SPECIES_DIVERSITY_FALLBACK = 1e-3` (port of
-`DEFAULT_DIVERSITY_PRIOR`, [`diversity.rs:78`](../../../../src/var_calling/diversity.rs), with
+`DEFAULT_DIVERSITY_PRIOR`, `d9e7b076:src/var_calling/diversity.rs:78`, with
 its "weakly informative, overridable, must be visible in output" reasoning). *Source:* arch §2.1;
 spec §4.
 
@@ -165,8 +165,8 @@ dominance (`α × 10⁶` at fixed ratio), the row converges to
 copy-count types rather than bare slices — both departures recorded in the step's report and owed
 to arch §3.1)*
 `α'_s(a) = seed(a) + max(0, cohort − own)` filling caller scratch — the port of
-`leave_one_out_alpha` ([`em.rs:278`](../../../../src/ssr/cohort/em.rs); SNP twin
-[`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs), identical
+`leave_one_out_alpha` (`d9e7b076:src/ssr/cohort/em.rs:278`; SNP twin
+`d9e7b076:src/var_calling/posterior_engine.rs:3183`, identical
 arithmetic). The `max(0, ·)` guards float noise only. Tests: **one sample ⇒ `out == seed` bit for
 bit, no tolerance, no branch** (spec §12 test 8); **monotone in cohort evidence** — raising an
 allele's cohort copies never lowers its weight for a sample that did not contribute the rise
@@ -195,7 +195,7 @@ two-branch sampling is the mixture's). *Source:* spec §4.1; arch §4.
 **D2. `project_spectrum_seed`.**  ✅
 Maximum-likelihood fit of D1's predicted class probabilities to the fitted spectrum's class
 weights, over **all** classes including monomorphic, via
-[`fitting/multistart.rs`](../../../../src/ng/parameter_estimation/fitting/multistart.rs) — a
+`373bd37d~1:src/ng/parameter_estimation/fitting/multistart.rs` — a
 two-parameter fit needs nothing new. `None` spectrum → `NeutralShape` at the fitted θ; no fitted
 θ → `FallbackDiversity`. `SeedRegime` (with the regularizer weight and prior/data-dominated flag)
 carried to the output. Confirm the concrete spectrum type here (`FrequencyDensity`, or the
@@ -237,7 +237,7 @@ two scalars as checked types in `ng/types.rs` and the fallback decay as
 `SeedDecayPerRepeat::FALLBACK`; the refusal withholds the concentration rather than marking a
 returned one — all three recorded in arch §5 and the step's report)*
 Geometric decay from the cohort's modal repeat count (shape of `g0_pseudocounts`,
-[`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs), floored so a far
+`d9e7b076:src/ssr/cohort/allele_freq_prior.rs:25`, floored so a far
 allele stays recoverable), scaled so the prior's own implied gene diversity equals the measured
 `D`: `Σα = D / (1 − c − D)`, `c` the shape's Simpson index. `SeedDecayPerRepeat::FALLBACK = 0.5`
 imported and **renamed for what it decays** (the genotype prior's pseudocount decay — not the
@@ -272,7 +272,7 @@ Hardy–Weinberg at the plug-in frequency `α'_s(a)/Σα'_s` with the same `F` m
 same trait — kept **only** for the spec's change measurements and the production differential,
 never a shipping default. It runs on **the same seed** as the marginalized prior: a test pins
 that no code path supplies production's `DEFAULT_REF_PSEUDOCOUNT = 10`
-([`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs)) — that constant is
+(`d9e7b076:src/var_calling/posterior_engine.rs:107`) — that constant is
 the §2.3 trap, not a config. Test: at a concentrated input the two impls agree (Var(p) → 0,
 spec §6); at one diploid sample's thin input they differ in the recorded direction (plug-in
 under-counts homozygotes). *Depends:* B2, C1. *Source:* spec §2, §5.3; arch §3.2, §7.

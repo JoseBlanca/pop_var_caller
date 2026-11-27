@@ -42,10 +42,10 @@ rather than appending to it, which is why the history is recorded here rather th
 
 **What is not a gap: the row.** The original said the STR read-likelihood row did not exist because
 `censored_emission` was `unimplemented!()`. It exists — it is
-[`likelihood/ssr.rs`](../../../../src/ng/calling/likelihood/ssr.rs)'s
+[`likelihood/ssr.rs`](../../../../src/calling/likelihood/ssr.rs)'s
 `genotype_log_likelihood_row` over the shipped `StutterSubstitutionEmission`, landed as
 [`calling_read_likelihoods.md`](calling_read_likelihoods.md)'s H1 and H2 and merged; the one
-`unimplemented!()` left anywhere under `src/ng/calling/` belongs to a `#[cfg(test)]` oracle that
+`unimplemented!()` left anywhere under `src/calling/` belongs to a `#[cfg(test)]` oracle that
 scores complete observations only.
 
 **What is a gap, as of 2026-08-26, is three things, and E2c closes the middle one.**
@@ -82,7 +82,7 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
   configs exist and their non-default values are **rejected with a clear message** until the
   bodies land, so a configuration cannot silently no-op.
 - **Candidate selection (step 6)** — **built and merged on the generic path; consume it, do not
-  edit it.** `src/ng/calling/allele_candidates/` is another plan's
+  edit it.** `src/calling/allele_candidates/` is another plan's
   ([`candidate_alleles.md`](candidate_alleles.md)) and is still moving through that plan's
   Milestone D. Its public surface is settled; the one value that may still change is
   `DEFAULT_MAX_CANDIDATE_ALLELES`. The repeat-tract half is not written at all.
@@ -104,13 +104,13 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
   rows before the loop repeats it; the loop is proven before any real evidence is shaped into it.
 - **Reuse over rewrite.** The loop's shape, the flat first pass, the convergence arithmetic, the
   emit-with-flag rule and the scratch lift are ports from
-  [`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs) (spec §10's map); ng
+  `d9e7b076:src/var_calling/posterior_engine.rs` (spec §10's map); ng
   needs no inner trait — the paths differ only in the sibling row builders.
 - **Verify against ground truth.** The SNP/indel side has a **parity oracle** — production's
   loop on the same likelihood table, prior parameters and candidates must yield the same
   genotypes, any difference traced to a recorded decision. The STR side gets a **differential,
   not a parity oracle**: production's STR loop converges on π at `1e-6`
-  ([`em.rs:137`](../../../../src/ssr/cohort/em.rs)) where ng converges on copies over
+  (`d9e7b076:src/ssr/cohort/em.rs:137`) where ng converges on copies over
   chromosomes at `1e-3`, so ng runs once under production's rule (genotypes must match), then
   under its own, and reports what moved — a check with a failing state (spec §10).
 - **Isolate the silent steps.** The fixed-order M-step sum, the ÷chromosomes in the convergence
@@ -128,14 +128,14 @@ generator's; `FrozenParameters` assembled from the pre-pass); the two loop oracl
 - Through those, prerequisites and foundations: the genotype table, the merge's axis + partials,
   the calibration accumulator, the contamination class frequencies, the `StratumFits` gather.
 - Production's loop internals as reuse targets: `GenotypeEmModel`/`run_em_loop`/`EmStepPhase`
-  ([`posterior_engine.rs:2635`](../../../../src/var_calling/posterior_engine.rs),
-  [`:2733`](../../../../src/var_calling/posterior_engine.rs),
-  [`:2586`](../../../../src/var_calling/posterior_engine.rs)), the convergence arithmetic and
-  comment ([`:2704–2726`](../../../../src/var_calling/posterior_engine.rs)), the constants
-  ([`:86`](../../../../src/var_calling/posterior_engine.rs),
-  [`:96`](../../../../src/var_calling/posterior_engine.rs)), the retired-error rule
-  ([`:26`](../../../../src/var_calling/posterior_engine.rs)), the STR final pass
-  ([`em.rs:857`](../../../../src/ssr/cohort/em.rs)).
+  (`d9e7b076:src/var_calling/posterior_engine.rs:2635`,
+  `d9e7b076:src/var_calling/posterior_engine.rs:2733`,
+  `d9e7b076:src/var_calling/posterior_engine.rs:2586`), the convergence arithmetic and
+  comment (`d9e7b076:src/var_calling/posterior_engine.rs:2704–2726`), the constants
+  (`d9e7b076:src/var_calling/posterior_engine.rs:86`,
+  `d9e7b076:src/var_calling/posterior_engine.rs:96`), the retired-error rule
+  (`d9e7b076:src/var_calling/posterior_engine.rs:26`), the STR final pass
+  (`d9e7b076:src/ssr/cohort/em.rs:857`).
 - **Candidate selection merged**, on the generic path: `select_generic` and its config, verdict,
   remapping and per-sample leftover ([`candidate_alleles.md`](candidate_alleles.md)).
 - **Not in place:** the two repeat-tract halves — the STR read-likelihood row and the STR
@@ -165,7 +165,7 @@ likelihood's `RowScratch` section — allocated once per worker, reused per locu
 (calibration, contamination, per-sample `InbreedingF`, `SpectrumSeed`, `&StratumFits`, ploidy).
 
 **`CallingScratch` also gains candidate selection's buffers as a field** — `SelectionScratch`
-(`src/ng/calling/allele_candidates/mod.rs`), which that module built standing alone and whose own
+(`src/calling/allele_candidates/mod.rs`), which that module built standing alone and whose own
 doc comment names this step as where it moves. The same worker runs selection and then the loop on
 the same locus, so a second per-worker allocation would buy nothing
 ([`../arch/candidate_alleles.md`](../arch/candidate_alleles.md) §2.4). **Nothing about its shape
@@ -185,7 +185,7 @@ rejected loudly at config validation — never silently ignored.
 
 **The allele cap is deliberately not among those constants, and this entry used to declare it**
 (corrected 2026-08-25). `DEFAULT_MAX_CANDIDATE_ALLELES` already exists, in
-`src/ng/calling/allele_candidates/mod.rs`, as a `MaxCandidateAlleles` — a newtype that refuses
+`src/calling/allele_candidates/mod.rs`, as a `MaxCandidateAlleles` — a newtype that refuses
 anything below two, because a cap of 0 or 1 is refusal under another name. A second constant of
 the same name here, typed `u16`, would be two spellings of one rule and would drop the check;
 selection's `CandidateSelectionConfig` is what carries the cap and the support bar, and the loop
@@ -218,7 +218,7 @@ quietly different output at another worker count, never a crash; the bitwise tes
 
 **C1. The flat first pass.**  ✅
 The prior-free initialisation (reads only), ported with its reasoning — `EmStepPhase`'s shape
-([`posterior_engine.rs:2586`](../../../../src/var_calling/posterior_engine.rs)); it runs at the
+(`d9e7b076:src/var_calling/posterior_engine.rs:2586`); it runs at the
 start of every outer round, which the skeleton in D preserves. Test (spec §13 test 3): after the
 first pass the expected copies reflect the reads and not the seed; **and the trap itself** — at
 a locus thin enough that the seed outweighs each sample's reads, a seeded first pass converges
@@ -527,7 +527,7 @@ because that plan's E1 shipped the function this replaces.
 **Three pieces:**
 
 1. **Carry the two values across the seam.** `StratumFits`
-   ([`joint/stratum_fits.rs`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)) gathers
+   ([`joint/stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs)) gathers
    each stratum's slippage numbers and their provenance and **drops the length spectrum and the
    concentration** that `fit_strata` produced. They are carried, keyed the same way, with the rung
    they came from beside them.
@@ -546,7 +546,7 @@ because that plan's E1 shipped the function this replaces.
 **What it does not do:** the ordinary-site side, which is a separate and smaller job and blocks
 nothing here. **Both its numbers are already fitted** — the joint fit emits the population's
 allele-frequency density and the heterozygosity read off it
-([`joint/fit.rs:207`](../../../../src/ng/parameter_estimation/joint/fit.rs), `:223`) — and what
+([`joint/fit.rs:207`](../../../../src/parameter_estimation/joint/fit.rs), `:223`) — and what
 stands between them and the caller is a **representation change**: wrap the heterozygosity in its
 newtype, and project the density into the `2N + 1` allele-count classes the seed projection takes.
 **Home:** a step of its own, spec §3.2. *Depends:* E2c. *Source:*
@@ -564,12 +564,12 @@ newtype, and project the density into the `2N + 1` allele-count classes the seed
 > its own; **piece 2 is the part that went.** Kept as the record of what was built.
 
 **Both numbers are already fitted and neither reaches the caller.** `JointFit`
-([`joint/fit.rs:198`](../../../../src/ng/parameter_estimation/joint/fit.rs)) carries the
+([`joint/fit.rs:198`](../../../../src/parameter_estimation/joint/fit.rs)) carries the
 population's allele-frequency density (`:207`) — a Beta over the segregating positions plus a point
 mass at each end — and the expected heterozygosity read off it (`:223`). The caller's seed
 projection takes an `ExpectedHeterozygosity` and a `FittedSpectrum` of `2N + 1` allele-count class
 weights, and its own seam is already built: `RunParameters::project_seed`
-([`run_parameters.rs:97`](../../../../src/ng/calling/run_parameters.rs)) takes both as arguments and
+([`run_parameters.rs:97`](../../../../src/calling/run_parameters.rs)) takes both as arguments and
 nothing supplies them. **So this is a representation change, not an estimator.**
 
 **Two pieces:**
@@ -638,7 +638,7 @@ ruling; nothing in the code changed, because this is what E3b built.
 
 **F1. The SNP/indel parity oracle.**  ✅
 Given the same likelihood table, the same prior parameters and the same candidate set,
-production's loop ([`posterior_engine.rs:2733`](../../../../src/var_calling/posterior_engine.rs))
+production's loop (`d9e7b076:src/var_calling/posterior_engine.rs:2733`)
 and ng's produce the same genotypes — any difference traced to a decision one of the three
 calling documents records, and the trace written into the test. *Depends:* E3a. *Source:* spec
 §10; §13 test 8.
@@ -653,7 +653,7 @@ difference in what is counted rather than in where either stopped: both begin wi
 the reads alone, production counts it and ng does not, so production's count is ng's plus one on
 every fixture.
 
-**Where it lives, and it needed no edit to the frozen tree**: `src/ng/calling/loop_parity.rs`,
+**Where it lives, and it needed no edit to the frozen tree**: `src/calling/loop_parity.rs`,
 beside `genotype_table_parity.rs`, so ng's `use crate::var_calling::` stays in one greppable place.
 The entry points it needs are already `pub(crate)`.
 
@@ -666,7 +666,7 @@ with a failing state, not parity with an escape clause. *Depends:* E3b. *Source:
 **⚖ What this entry calls one rule is two, and the step delivers the tolerance rather than the
 rule.** Both loops take the largest per-allele change in the cohort's expected allele copies and
 turn it into a frequency, but the SSR caller adds its prior's pseudocounts to the copies before
-normalising ([`em.rs`](../../../../src/ssr/cohort/em.rs)'s `run_pi_em` opens each pass with `let mut
+normalising (`d9e7b076:src/ssr/cohort/em.rs`'s `run_pi_em` opens each pass with `let mut
 expected = g0.to_vec()`) where ng divides by the chromosomes alone. **So at one nominal number ng's
 test is the stricter of the two**, and reproducing the SSR caller's rule exactly would mean
 declaring ng's prior strength the counterpart of those pseudocounts — a claim about the two models
@@ -699,7 +699,7 @@ than five. The genotypes do not move either way, which is why this is a note rat
   bodies; every Q1/Q2/Q3 measurement** — [`calling_bakeoffs.md`](calling_bakeoffs.md).
 - **Candidate selection (step 6)** — its own plan
   ([`candidate_alleles.md`](candidate_alleles.md)), **built and merged on the generic path**.
-  Consume `select_generic`; **do not edit `src/ng/calling/allele_candidates/`**, which is still
+  Consume `select_generic`; **do not edit `src/calling/allele_candidates/`**, which is still
   moving through that plan's Milestone D. The repeat-tract half
   ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md)) is unwritten, and that is what still
   blocks an end-to-end run at a tract.

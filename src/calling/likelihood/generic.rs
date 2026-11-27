@@ -20,9 +20,10 @@ use crate::types::{AlleleId, LogProb};
 /// pre-pass's own noise model — and because **it is what the table stores and the row divides
 /// by**, `m` in the specification's own terms.
 ///
-/// **The table held `log m` until 2026-08-24 and no longer does.** B2 chose the logarithm with
-/// a stated argument: spec §3.3's closed form takes no logarithm inside its loop, so a table of
-/// `m` would have put one there. **C1 is what made that argument false** — spec §3.6's mixture
+/// **The table held `log m` until 2026-08-24 and no longer does.** The logarithm was chosen
+/// with a stated argument: spec §3.3's closed form takes no logarithm inside its loop, so a
+/// table of `m` would have put one there. **The contamination mixture made that argument
+/// false** — spec §3.6's mixture
 /// is evaluated in probability space and takes one logarithm per term by specification (§8), so
 /// the loop has one either way, and what it needs there is `m`. Storing the logarithm then cost
 /// an `exp` on every error-side term to undo, and left the log form with no consumer at all.
@@ -492,15 +493,15 @@ fn differ_by_one_indel(left: &[u8], right: &[u8]) -> bool {
 ///   many the read did not show, so the test is that *some* division works
 ///   ([`splits_into_a_prefix_and_a_suffix`]).
 ///
-/// **Everything else is vacuous, not merely weak**, and this is the part D1 shipped wrong and its
-/// review caught. Any other shape leaves at least one run anchored to neither border — and the
-/// bases in that run are unconstrained, so they can absorb any disagreement. A three-run witness
-/// flush at both borders is satisfied by taking its prefix and its suffix to be empty; a two-run
-/// witness flush at one border, the same. Testing such a witness as though its bases were one
-/// contiguous stretch does not weaken the verdict, it **inverts** it: measured on a six-position
-/// locus, the allele agreeing with the read at every position it actually saw was charged 14 nats
-/// and the allele disagreeing was charged nothing. So *compatible with everything* is the
-/// arithmetic these shapes genuinely imply.
+/// **Everything else is vacuous, not merely weak**, and this is the part the first version of
+/// the partial-read rule shipped wrong and its review caught. Any other shape leaves at least one
+/// run anchored to neither border — and the bases in that run are unconstrained, so they can absorb
+/// any disagreement. A three-run witness flush at both borders is satisfied by taking its prefix
+/// and its suffix to be empty; a two-run witness flush at one border, the same. Testing such a
+/// witness as though its bases were one contiguous stretch does not weaken the verdict, it
+/// **inverts** it: measured on a six-position locus, the allele agreeing with the read at every
+/// position it actually saw was charged 14 nats and the allele disagreeing was charged nothing. So
+/// *compatible with everything* is the arithmetic these shapes genuinely imply.
 ///
 /// # Why an unplaceable read says nothing rather than matching anywhere
 ///
@@ -964,8 +965,8 @@ pub fn assemble_genotype_log_likelihood_row(
     // striding and `zip` stops at the shorter of the two: a table filled at another ploidy
     // truncates the walk silently, leaving the genotypes past its end holding whatever seeded
     // them. Measured on a tetraploid handed a diploid's table, the last genotype came back
-    // `0.0` against its own `−0.863`, and won. (Found by C1's review; the check was missing
-    // from B2, which added the stride check beside it.)
+    // `0.0` against its own `−0.863`, and won. (Found in review; the check was missing
+    // when the stride check beside it was added.)
     assert_eq!(
         wrong_read_charges.genotype_count(),
         genotype_count,
@@ -977,7 +978,7 @@ pub fn assemble_genotype_log_likelihood_row(
     // here rather than per observation** — which is what makes `contaminant_frequency_of` and
     // `fraction_of` unable to panic in a run: an allele or a read group an observation names
     // is already known to be one the mixture covers. Lazily, the read-group half would surface
-    // only at whichever locus first reached past the end, or never (C1's review).
+    // only at whichever locus first reached past the end, or never (found in review).
     assert!(
         contamination.is_absent() || contamination.allele_count() == allele_count,
         "the mixture holds a contaminant frequency for {} alleles and this locus is called over \
@@ -1725,7 +1726,7 @@ mod tests {
         );
     }
 
-    // ---- B2: the closed form ----
+    // ---- the closed form ----
 
     use super::super::test_batching::one_batch;
     use super::super::{
@@ -2319,8 +2320,8 @@ mod tests {
         }
     }
 
-    /// **The production differential** — the whole of Milestone B's claim, and the reason this
-    /// step is not merely "a formula that looks right".
+    /// **The production differential** — the whole claim of the SNP/indel closed form, and the
+    /// reason it is not merely "a formula that looks right".
     ///
     /// ng's row and production's `standard_log_likelihood` are the same closed form with two
     /// recorded changes: production carries a multinomial coefficient that ng drops (spec §3.4),
@@ -2341,10 +2342,11 @@ mod tests {
     /// **The spread comes out of the table rather than out of a literal `n · ln 3`**, and the
     /// coefficient's `ln(n!)` is written here rather than borrowed from production's table.
     /// Either shortcut would let the comparison agree with itself: the first passes with the
-    /// whole error-spread step deleted and the value hardcoded, which is the shape of test B1
-    /// shipped and had to repair; the second cancels a wrong table entry on both sides.
+    /// whole error-spread step deleted and the value hardcoded, which is the shape a test of the
+    /// error-spread table once shipped and had to repair; the second cancels a wrong table entry on
+    /// both sides.
     ///
-    /// **Production's side is frozen since promotion step C20.** What
+    /// **Production's side is frozen since production was deleted.** What
     /// `var_calling::per_group_merger::standard_log_likelihood` returned for each of the six
     /// genotypes of this fixture — the three supported rows as its per-allele summaries, the
     /// unmatched `q_sum` as its `other` row, three alleles, ploidy 2 — was recorded at commit
@@ -2515,7 +2517,8 @@ mod tests {
     /// **It does not follow that the differential would fail if the fill returned zero
     /// everywhere**, and an earlier version of this comment claimed it would: the differential
     /// adds back the same table value it subtracts, so a uniformly zero table cancels on both
-    /// sides. What catches a constant fill is B1's own class tests, and
+    /// sides. What catches a constant fill is the error-spread table's own class
+    /// tests, and
     /// `a_wrong_read_that_could_not_be_a_misread_takes_no_spread` above.
     #[test]
     fn the_spread_is_not_zero_in_the_production_differentials_fixture() {
@@ -3054,7 +3057,7 @@ mod tests {
         assert_eq!(assemble(&scratch), assemble(&scratch));
     }
 
-    // ---- C1: the contamination mixture ----
+    // ---- the contamination mixture ----
 
     /// How far the mixture at no contamination may sit from spec §3.3's own arithmetic,
     /// **relative**, over the sweep below — rounding only, since at `c = 0` the mixture is
@@ -3207,7 +3210,7 @@ mod tests {
         );
     }
 
-    /// **One contaminated case, every term written out** (spec §3.6, the plan's second C1 test).
+    /// **One contaminated case, every term written out** (spec §3.6).
     ///
     /// A diploid at a two-allele locus: two reads showing the reference at a summed log error of
     /// −6, one showing the alternative at −7, and the read groups 3% contaminated. The
@@ -3625,7 +3628,7 @@ mod tests {
         );
     }
 
-    /// **The allele-range check both column readers rest on**, which had no test until C1's
+    /// **The allele-range check both column readers rest on**, which had no test until a
     /// review disabled it and watched the module stay green.
     ///
     /// It is not a bounds check standing in for a panic that would happen anyway: a stride walk
@@ -3700,8 +3703,8 @@ mod tests {
     /// inner loop strides a column and `zip` stops at the shorter of the two, so a tetraploid
     /// row handed a diploid's table leaves its last genotypes holding what seeded them —
     /// measured at `0.0` against their own `−0.863`, which made the truncated genotype the
-    /// winner. The check that refuses it is C1's; the hole was B2's, beside the stride check
-    /// that was there.
+    /// winner. The check that refuses it was added in review, beside the stride check that
+    /// was already there.
     #[test]
     #[should_panic(expected = "belongs to a different ploidy")]
     fn an_error_spread_table_from_another_ploidy_is_a_caller_bug() {
@@ -3732,7 +3735,7 @@ mod tests {
     /// The fixture is what makes the difference visible: four fractions against ten
     /// calibrations, and an observation from read group 1 — which the mixture *does* cover. A
     /// lazy check passes here and would surface only at whichever locus first held a read from
-    /// group 4 or beyond, or never. (C1's review; this test asserted the lazy message until
+    /// group 4 or beyond, or never. (Found in review; this test asserted the lazy message until
     /// the eager check made it unreachable.)
     #[test]
     #[should_panic(expected = "belongs to a different run")]
@@ -3752,7 +3755,7 @@ mod tests {
             one_batch(&fractions, &frequencies),
         );
     }
-    // ---- D1: reads that saw only part of the locus ----
+    // ---- reads that saw only part of the locus ----
 
     use crate::cohort_observation::PartialObservation;
 
@@ -4062,7 +4065,8 @@ mod tests {
     }
 
     /// **A run anchored to neither border makes the whole test vacuous, and the rule has to say
-    /// so** — this is the defect D1's first version shipped, found by its own review.
+    /// so** — this is the defect the rule's first version shipped, found by its own
+    /// review.
     ///
     /// The read is flush left with a hole, and its second run stops short of the right border.
     /// Its bases are one blob and the witness never says how many of them fell in each run, so
@@ -4134,7 +4138,7 @@ mod tests {
     /// **A read whose carrier carries an insertion**, which is where the implemented rule and the
     /// positional one the specification used to state come apart — and where every other fixture
     /// here cannot tell them apart, because all of theirs spell alleles the reference's length
-    /// and show as many bases as positions (D1's review).
+    /// and show as many bases as positions (found in review).
     ///
     /// Four reference positions, a carrier spelling five bases over them. The read reached both
     /// borders and missed position 2, so its bases divide into the prefix `AXC` and the suffix
@@ -4391,7 +4395,8 @@ mod tests {
     /// **A read cannot have shown more bases than its carrier's sequence has**, and without the
     /// length guard the two agreements overlap and say a split exists where none does: the left
     /// walk runs out of allele after three, the right agrees on one, and `3 + 1` covers four
-    /// bases that are not there. Deleting the guard left the whole module green (D1's review).
+    /// bases that are not there. Deleting the guard left the whole module green (found in
+    /// review).
     #[test]
     fn a_split_refuses_bases_longer_than_the_allele() {
         assert!(!splits_into_a_prefix_and_a_suffix(b"ACTT", b"ACT"));
@@ -4452,7 +4457,7 @@ mod tests {
     /// **A partial compatible with several of a tetraploid's alleles sums their copies**, which
     /// indexes the copy-share table further than any diploid fixture reaches — and the array is
     /// sized by ploidy, so an implementation that took a maximum instead, or sized the table by
-    /// something else, is only visible above two copies (D1's review).
+    /// something else, is only visible above two copies (found in review).
     ///
     /// The genotype carries two copies each of two alleles the read cannot tell apart, so all
     /// four copies are compatible and the share is one: the read says nothing, which is right.

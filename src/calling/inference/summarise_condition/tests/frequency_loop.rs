@@ -630,15 +630,15 @@ struct CohortFixture<'a> {
 /// **`passes` is the whole reason this helper exists rather than a one-pass one.** On the
 /// first pass every sample is scored against a cohort row this function wrote before the
 /// loop, so no genotype is downstream of `sum_cohort_expected_copies` and a test reading
-/// winners off pass 1 passes against an M-step that computes nothing. Measured during
-/// B2's review: with the summing loop deleted, the one-pass version of the permutation
+/// winners off pass 1 passes against an M-step that computes nothing. Measured in review:
+/// with the summing loop deleted, the one-pass version of the permutation
 /// test below stayed green while three other tests failed. From pass 2 the winners are
 /// scored against the row the previous pass's M-step produced, which is the regime the
 /// coupling under test actually occurs in.
 ///
 /// The posterior is one reused buffer, so each sample's winner is read off before the next
-/// is scored — which is also why step C3 of the plan has to take the genotype quality as it
-/// scores rather than afterwards.
+/// is scored — which is also why the final pass takes the genotype quality as it scores
+/// rather than afterwards.
 /// One locus's worth of cohort fixture — what [`run_passes`] scores.
 fn run_passes(
     passes: usize,
@@ -912,10 +912,9 @@ fn the_sum_runs_in_ascending_sample_order() {
 /// see an M-step that mixed the alleles up: any permutation of the cohort row sums to the
 /// same number. The per-allele half compares against a fold written independently here.
 ///
-/// **This is the identity `spec/calling_em_loop.md` §5.0 will break**: once a sample the
-/// candidate step set aside stops contributing, the total becomes the ploidy times the
-/// *callable* count. Whoever builds that in step D1 should expect to edit this test, and
-/// its failing is the point.
+/// **The rows are the samples the loop scores.** A sample the candidate step set aside
+/// (`spec/calling_em_loop.md` §5.0) gets no row, so at a real locus the total is the ploidy
+/// times the *callable* count.
 #[test]
 fn the_cohort_carries_the_ploidy_for_every_sample_it_summed() {
     let (alleles, table) = generic_locus(2);
@@ -963,9 +962,7 @@ fn the_cohort_carries_the_ploidy_for_every_sample_it_summed() {
 /// table of any size reaches the cohort entry it belongs to.
 ///
 /// This is what stands between the scratch's sentinel and a cohort summary that every
-/// sample's next prior is built from. **It is also how a sample set aside by
-/// `spec/calling_em_loop.md` §5.0 fails today** — loudly, which is the right failure while
-/// the exclusion is unbuilt, and not the answer, which step D1 owes.
+/// sample's next prior is built from.
 #[test]
 #[should_panic(expected = "a sample row the E-step never wrote")]
 fn a_sample_row_that_was_never_written_is_refused() {
@@ -999,8 +996,8 @@ fn a_per_sample_table_of_the_wrong_size_is_refused() {
 ///
 /// A count of zero *satisfies* the shape check, because `0 == 0 × alleles` — so without
 /// this guard the walk sums nothing and hands back a cohort row that reads like a locus
-/// where nobody carries anything, which the finiteness check accepts. Measured during
-/// B2's review: with both `> 0` guards deleted the whole of `calling` stays green.
+/// where nobody carries anything, which the finiteness check accepts. Measured in review:
+/// with both `> 0` guards deleted the whole of `calling` stays green.
 #[test]
 #[should_panic(expected = "a sum over none is a run whose sample order went missing")]
 fn a_cohort_of_no_samples_is_refused() {
@@ -1094,10 +1091,10 @@ fn the_cohort_of_one_sample_is_that_samples_own_row_bit_for_bit() {
 /// later pass contributes its **previous** copies, finite and plausible, and nothing
 /// raises.
 ///
-/// **This is not a bug in the M-step; it is the reason spec §5.0's exclusion needs a
-/// per-pass written mask**, which step D1 owes. If a later step makes skipping a sample
-/// mid-run impossible, this test should start failing and be deleted with a note saying
-/// why.
+/// **This is not a bug in the M-step; it is why a loop that skipped a sample mid-run would
+/// need a per-pass written mask.** The driver never does — a sample set aside under spec
+/// §5.0 has no row from the start — so this pins a hazard for any future caller rather than
+/// a failure a run can reach.
 #[test]
 fn from_the_second_pass_an_unwritten_row_is_summed_as_current() {
     let (alleles, table) = generic_locus(1);
@@ -1241,7 +1238,7 @@ fn the_flat_first_pass_needs_no_cohort_summary() {
 /// for this test showed it: a rare-variant shape, where a handful of carriers sit among 60
 /// samples whose reads are firmly homozygous reference, was swept over carrier count and
 /// likelihood advantage and the two starts agreed in **every** cell. Whether the delay ever
-/// becomes permanent is governed by the pass cap, which ships at 50 and is C2's, and by
+/// becomes permanent is governed by the pass cap, which ships at 50, and by
 /// §12's question 7 on real data.
 ///
 /// **The delay is not nothing.** Production's own comment records the expectation-maximization
@@ -1409,7 +1406,7 @@ fn the_flat_pass_touches_neither_the_cohort_summary_nor_the_concentration() {
 
 /// **A prior row of the wrong width is refused on the flat arm too.**
 ///
-/// Before C1 this width was checked only inside `PriorRow::new`, which a flat pass never
+/// This width was once checked only inside `PriorRow::new`, which a flat pass never
 /// calls — so the seeded arm panicked in release and the flat arm returned a **wrong
 /// posterior in silence**: measured at a 3-genotype locus given a 2-entry prior row,
 /// `[0.199, 0.399, 0.402]` against the right `[0.25, 0.5, 0.25]`, the tail entry being the

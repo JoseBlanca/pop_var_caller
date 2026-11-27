@@ -16,18 +16,18 @@ use crate::types::AlleleId;
 /// admits `clear()`, `insert(0, …)` and `swap_remove(0)`, and nothing in the type
 /// would notice.
 ///
-/// **Owned rather than borrowed, because the table changes while a locus is called.**
-/// A discovery round admits an allele the reads suggested and the first pass missed;
-/// a final prune drops the ones no sample carries. Neither is possible against a
-/// borrowed slice of the observations the loop was handed, and both are why the
-/// alleles are stored here rather than pointed at
-/// (`doc/devel/ng/arch/calling_em_loop.md` §2).
+/// **Owned rather than borrowed**, so that a locus's alleles travel with its result.
+/// Candidate selection builds the table by admitting alleles one at a time; the calling
+/// loop takes it by value and hands it back, unchanged, inside the
+/// [`LocusInference`](crate::calling::LocusInference). The architecture also planned a
+/// discovery round and a final prune inside the loop, both of which would have changed
+/// the table (`doc/devel/ng/arch/calling_em_loop.md` §2). Neither was built: discovery
+/// runs inside candidate selection, before the loop, and nothing prunes.
 ///
-/// **The prune is not built here**, deliberately. Which alleles to drop is a policy
-/// the calling loop owns, and dropping allele *k* renumbers every id above it — so it
-/// cannot be `Vec::retain` handed out free, and every [`AlleleId`] minted before it
-/// goes stale. The method that does it has to return the remapping, and it lands with
-/// the step that needs one.
+/// **There is no way to remove an allele**, deliberately. Dropping allele *k* renumbers
+/// every id above it, so it cannot be `Vec::retain` handed out free: every [`AlleleId`]
+/// minted before it would go stale, and a method that did it would have to return the
+/// remapping.
 ///
 /// [`Self::kind`] routes two things. Which **row builder** scores the reads — that is,
 /// which model turns a read into a per-allele likelihood, and a repeat tract's model
@@ -153,11 +153,11 @@ impl CandidateAlleles {
 
     /// Admit an alternative allele and return the id that now names it.
     ///
-    /// This is what the candidate step and a discovery round both call — the
-    /// architecture's word, because discovered sequences enter the table through the
-    /// same door as selected ones (`doc/devel/ng/arch/calling_em_loop.md` §6.2). The
-    /// id is the table's previous length, so ids stay dense and in admission order,
-    /// and the reference keeps index 0 however many rounds run.
+    /// Candidate selection calls it for every allele it keeps, discovered sequences
+    /// included — the architecture's word, because discovered sequences enter the table
+    /// through the same door as selected ones (`doc/devel/ng/arch/calling_em_loop.md`
+    /// §6.2). The id is the table's previous length, so ids stay dense and in admission
+    /// order, and the reference keeps index 0 however many alleles are admitted.
     ///
     /// # Panics
     ///
@@ -494,13 +494,12 @@ mod tests {
     proptest::proptest! {
         /// Over arbitrary sequences of admitted alleles: every id `admit` mints
         /// resolves back to the bases that were admitted, ids are dense from 1, the
-        /// reference never moves off index 0 however many discovery rounds run, and
+        /// reference never moves off index 0 however many alleles are admitted, and
         /// the first id past the end resolves to nothing.
         ///
         /// The point tests above walk a fixed three-allele fixture, which cannot
         /// separate a dense id scheme from any scheme that happens to agree at widths
-        /// one to three — and the table's width is the one dimension a discovery round
-        /// moves.
+        /// one to three — and the table's width is the one dimension admission moves.
         #[test]
         fn every_id_admit_mints_resolves_back_to_the_allele_that_was_admitted(
             alleles in proptest::collection::vec(

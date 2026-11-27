@@ -1,6 +1,6 @@
 # ng calling foundations — implementation plan
 
-**Status:** draft, 2026-08-21. The build order for the **first `src/ng/calling/` code**: the
+**Status:** draft, 2026-08-21. The build order for the **first `src/calling/` code**: the
 scalars calling adds to `types.rs` (`AlleleId`, `Phred`, `Genotype`), the shared vocabulary in
 `calling/mod.rs`, and `calling/genotype_table.rs` — the port of production's `GenotypeShape`.
 Design is settled in the three calling arch docs —
@@ -22,7 +22,7 @@ prerequisites items 1–5.
 
 ## Scope
 
-**In:** `src/ng/calling/` scaffold; `types.rs` gains `AlleleId`, `Phred`, `Genotype`;
+**In:** `src/calling/` scaffold; `types.rs` gains `AlleleId`, `Phred`, `Genotype`;
 `calling/mod.rs` gains the vocabulary that needs nothing from the sibling plans —
 `CandidateAlleles`, `ExpectedAlleleCopies`, `LocusInference` + `SampleGenotypeCall`;
 `calling/genotype_table.rs` — `GenotypeTable`, `GenotypeTableView`, `GenotypeIdx`, the per-shape
@@ -46,8 +46,8 @@ cache.
   with them.
 - **Verify against ground truth.** The genotype table is a port, and production's
   `GenotypeShape` + `shape_for` cache
-  ([`posterior_engine/shape.rs:42`](../../../../src/var_calling/posterior_engine/shape.rs),
-  [`:76`](../../../../src/var_calling/posterior_engine/shape.rs)) is callable in-crate: the
+  (`d9e7b076:src/var_calling/posterior_engine/shape.rs:42`,
+  `d9e7b076:src/var_calling/posterior_engine/shape.rs:76`) is callable in-crate: the
   north-star test is **value parity with production's shape** across `(ploidy, allele count)`
   grids, not self-consistency.
 - **Foundations set the conventions.** `AlleleId` and `Phred` follow the newtype rules the tree
@@ -57,15 +57,15 @@ cache.
 
 ## Preconditions (already in place)
 
-- `src/ng/types.rs` exists with `LogProb`
-  ([`types.rs:250`](../../../../src/ng/types.rs)), `Ploidy`
-  ([`:419`](../../../../src/ng/types.rs)), `GenomeRegion` ([`:79`](../../../../src/ng/types.rs));
+- `src/types.rs` exists with `LogProb`
+  ([`types.rs:250`](../../../../src/types.rs)), `Ploidy`
+  ([`:419`](../../../../src/types.rs)), `GenomeRegion` ([`:79`](../../../../src/types.rs));
   `AlleleId`, `Phred`, `Genotype` do **not** — this plan adds them.
 - `LocusKind` exists
-  ([`locus_generation/mod.rs:422`](../../../../src/ng/locus_generation/mod.rs)) — reused as
+  ([`locus_generation/mod.rs:422`](../../../../src/locus_generation/mod.rs)) — reused as
   `CandidateAlleles.kind`, not re-minted.
 - `Provenance` exists
-  ([`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs)) — carried
+  ([`parameter_estimation/mod.rs:60`](../../../../src/parameter_estimation/mod.rs)) — carried
   on `LocusInference`.
 - Production's `GenotypeShape` — the reuse target **and** the parity oracle.
 
@@ -73,13 +73,13 @@ cache.
 
 - **Worktree** `../pop_var_caller-calling-foundations`, **branch** `ng-calling-foundations`, from
   `main`, plain `git worktree add`.
-- **Runs in parallel with** `ng-calling-prerequisites`. Shared file: `src/ng/types.rs`. Region
+- **Runs in parallel with** `ng-calling-prerequisites`. Shared file: `src/types.rs`. Region
   discipline that avoids the conflict rather than resolving it: this branch **appends** its three
   scalars at the end of the sections they belong to and appends its `DomainError` variant
   (`Phred`'s) **at the end of the enum**; prerequisites edits only the existing `InbreedingF`
   block and inserts its variant beside the existing `InbreedingF` variant. Disjoint regions.
 - **Merge order back:** whichever branch finishes first merges first; the second merges `main` in
-  and re-runs. `src/ng/calling/` is created only here, so no other phase-1 branch can conflict on
+  and re-runs. `src/calling/` is created only here, so no other phase-1 branch can conflict on
   it.
 - **What must merge before the fan-out:** the prior plan branches from `main` once **this** branch
   has merged; the read-likelihoods plan branches once **both** phase-1 branches have merged.
@@ -111,7 +111,7 @@ A1. *Source:* calling_em_loop arch §2, §Module home.
 ### Milestone B — the `calling/` scaffold and its vocabulary
 
 **B1. Scaffold.**  ✅
-`src/ng/calling/mod.rs` (declares `genotype_table`; the step sub-modules arrive with their plans)
+`src/calling/mod.rs` (declares `genotype_table`; the step sub-modules arrive with their plans)
 wired into `ng/mod.rs`. One folder for steps 6–9, per module_layout's dependency argument (keeping
 them apart forced a no-import rule). *Source:* module_layout §The tree; calling_em_loop arch
 §Module home.
@@ -155,7 +155,7 @@ arch §2; calling_priors arch §3.2, spec §3.3.
 Across ploidy 2 and 4 and allele counts 1–6: genotype count, every row's allele counts in the
 same enumeration order as production, every `ln`-coefficient to floating-point equality, and the
 homozygous lookup, all against `GenotypeShape`
-([`shape.rs:42`](../../../../src/var_calling/posterior_engine/shape.rs)) called directly. Plus a
+(`d9e7b076:src/var_calling/posterior_engine/shape.rs:42`) called directly. Plus a
 cache test: two `build` calls for one shape return one `Arc`. **Own commit, do not bundle** — a
 wrong coefficient or a swapped enumeration order is a quietly-wrong prior and posterior for every
 locus, not a crash; the oracle is production's shape, green before and after. *Depends:* C1.

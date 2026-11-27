@@ -1,5 +1,5 @@
 # Production's Dirichlet-multinomial genotype log-priors for
-# src/ng/calling/genotype_prior/dirichlet_multinomial.rs, frozen at promotion plan step C21. Each row
+# src/calling/genotype_prior/dirichlet_multinomial.rs, frozen when production was deleted. Each row
 # is one genotype of what production's genetics::dirichlet_multinomial_log_priors returned at commit
 # d9e7b076, handed the genotype table's allele counts and log multinomial coefficients and the
 # concentration the test builds from the reference entry and the alternative total.

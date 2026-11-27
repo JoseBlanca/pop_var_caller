@@ -1,7 +1,7 @@
 # ng step 13 — how sure the caller is: the genotype quality and the site quality
 
 *Design spec, 2026-08-25. **No code yet — this settles the design.** One document, one module:
-`src/ng/calling/quality/`.*
+`src/calling/quality/`.*
 
 ***What this is written against.** `SampleGenotypeCall`, `LocusInference`, `CandidateAlleles`,
 `Phred` and `SpectrumSeed` are in `main`. `CallingScratch`, `FrozenParameters`, `LocusEvidence`
@@ -18,11 +18,12 @@ Read by: whoever builds emission and site filtering — steps 11a and 11b of
 document deliberately does not set.*
 
 *Production's equivalents are
-[`posterior_engine.rs:3371`](../../../../src/var_calling/posterior_engine.rs) and
-[`:3466`](../../../../src/var_calling/posterior_engine.rs) (the two model numbers) and
-[`vcf/qual_refine.rs`](../../../../src/vcf/qual_refine.rs) (the artifact correction). Everything
+`d9e7b076:src/var_calling/posterior_engine.rs:3371` and
+`d9e7b076:src/var_calling/posterior_engine.rs:3466` (the two model numbers) and
+`d9e7b076:src/vcf/qual_refine.rs` (the artifact correction). Everything
 said about those files is a record of what they do, not a proposal to change them — `src/vcf/`,
-`src/ssr/` and `src/var_calling/` are frozen production.*
+`src/ssr/` and `src/var_calling/` were frozen production, deleted on 2026-09-13; the paths above
+name them at commit `d9e7b076`, the last that held them.*
 
 ---
 
@@ -78,7 +79,7 @@ impossible a defect production shipped and had to fix (§3.5).
 - **It does not change a genotype.** The two corrections in §6 move `QUAL` only. A sample's called
   genotype, its `GQ`, and the cohort's fitted allele frequencies are what the loop produced and
   are not revisited. Production draws the same line
-  ([`qual_refine.rs:35-45`](../../../../src/vcf/qual_refine.rs)), and it is worth stating because
+  (`d9e7b076:src/vcf/qual_refine.rs:35-45`), and it is worth stating because
   the obvious next thought — *if the site is an artifact, shouldn't the genotypes change too?* —
   is a different design with a different failure mode.
 
@@ -87,7 +88,7 @@ impossible a defect production shipped and had to fix (§3.5).
 Four terms; the last two are this document's.
 
 - **Phred** — a probability written as `−10·log₁₀(p)`. A quality of 30 means a one-in-a-thousand
-  chance of being wrong. ng's newtype is [`Phred`](../../../../src/ng/types.rs) (`types.rs:429`),
+  chance of being wrong. ng's newtype is [`Phred`](../../../../src/types.rs) (`types.rs:429`),
   and it **refuses** an infinite value rather than coercing one, which §5.3 has to answer for.
 - **cohort allele count** — how many copies of a non-reference allele the whole cohort carries,
   summed over samples: `0` at an invariant site, `2N` if every one of `N` diploid samples is
@@ -170,7 +171,7 @@ in the merge's `SampleSupport`, borrowed through `LocusEvidence`, and are gone o
 released.
 
 **But their input reduces to nine numbers, and that is what makes the stage in §3.4 affordable.**
-Reading production's refinement ([`qual_refine.rs:83-115`](../../../../src/vcf/qual_refine.rs)),
+Reading production's refinement (`d9e7b076:src/vcf/qual_refine.rs:83-115`),
 everything the two tests consume is pooled across samples except one accumulated scalar:
 
 - from the reference allele: how many reads, how many on the forward strand, how many placed in the
@@ -205,7 +206,7 @@ to step 11's document, not this one.
 ### 3.5 One quality field, mutated in place — and the defect that makes this a rule
 
 Production keeps the corrected value nowhere: it recomputes it at VCF-encode time from the engine's
-baseline ([`record_encode.rs:260`](../../../../src/vcf/record_encode.rs)). Between the correction
+baseline (`d9e7b076:src/vcf/record_encode.rs:260`). Between the correction
 shipping (`68d7a181`, 2026-06-11) and the repair (`71e2338a`, 2026-06-27), the `--min-qual`
 emission gate compared the **engine baseline** while the **corrected** number went into the QUAL
 column — so sites were emitted `PASS` carrying a written `QUAL` of 0. On the GIAB HG002 benchmark
@@ -240,13 +241,13 @@ Three details, all inherited:
 
 - **`p_best` is nudged below one before the logarithm.** A sample whose reads make every genotype
   but one impossible produces `p_best = 1.0` exactly, and `log₁₀(0)` is `−∞`. Production clamps to
-  one unit in the last place ([`posterior_engine.rs:3391`](../../../../src/var_calling/posterior_engine.rs));
+  one unit in the last place (`d9e7b076:src/var_calling/posterior_engine.rs:3391`);
   ng does the same, and the reason it is a clamp rather than an error is §5.3's.
 - **The cap is 99**, matching GATK and bcftools so that downstream tools see the range they expect
-  ([`DEFAULT_MAX_GQ_PHRED`](../../../../src/var_calling/posterior_engine.rs)). **Inherited, never
+  (`DEFAULT_MAX_GQ_PHRED` (`d9e7b076:src/var_calling/posterior_engine.rs`)). **Inherited, never
   measured against anything** — it is a convention, and marking it soft is the point of saying so.
 - **The argmax is over the posterior, and ties go to the lower genotype index.** The table's order
-  is fixed ([`genotype_table.rs`](../../../../src/ng/calling/genotype_table.rs)), so this
+  is fixed ([`genotype_table.rs`](../../../../src/calling/genotype_table.rs)), so this
   is deterministic; a fold that keeps the first strict maximum gives it.
 
 **A sample with no genotype has no genotype quality.** `SampleGenotypeCall` gained a missing variant
@@ -269,7 +270,7 @@ QUAL = −10·log₁₀ P( cohort allele count = 0 | every sample's reads )
 ```
 
 This matters, and production's own comment records why the earlier formula was replaced
-([`posterior_engine.rs:3446`](../../../../src/var_calling/posterior_engine.rs)). **The obvious
+(`d9e7b076:src/var_calling/posterior_engine.rs:3446`). **The obvious
 alternative — multiply each sample's probability of being hom-ref — is not a normalised posterior,
 and that is the whole objection.** It is a product of marginals over an event that is not the
 intersection of those marginals: the samples are coupled through the allele frequency, and
@@ -320,7 +321,7 @@ something. Where none did, nothing here is evidence of a variant, and the qualit
 ### 5.2 How it is computed
 
 Four steps, in the order the code runs them, ported from
-[`posterior_engine.rs:3466`](../../../../src/var_calling/posterior_engine.rs):
+`d9e7b076:src/var_calling/posterior_engine.rs:3466`:
 
 1. **Collapse.** Each sample's row over candidate genotypes becomes a row over *how many
    non-reference copies that genotype has* — `ploidy + 1` entries, three for a diploid, by
@@ -357,7 +358,7 @@ Four steps, in the order the code runs them, ported from
 **Run the fold in the linear domain, not the log domain.** The mathematically identical log-domain
 version spends its whole inner loop in `exp`/`ln`, and production measured it at **88% of that
 path's own time at 200 samples** before rewriting it as a plain multiply-add convolution with a
-per-sample rescaling ([`posterior_engine.rs:3588`](../../../../src/var_calling/posterior_engine.rs)).
+per-sample rescaling (`d9e7b076:src/var_calling/posterior_engine.rs:3588`).
 Port the rewritten version. The scheme: divide each sample's kernel by its own maximum, fold, then
 renormalise by the result's maximum, carrying both divisions in a running log scale — which keeps
 every live value in `(0, 1]` and leaves one `exp` per kernel entry and one `ln` per sample.
@@ -371,9 +372,9 @@ buffer can hold. Read it back from the linear array and a strongly-supported var
 **And ng's `Phred` refuses infinity where production clamps it.** `Phred::from_log_prob` returns
 `DomainError::PhredInfinite` for a log-probability of `−∞`, deliberately, and its own doc comment
 says the consumer's answer is *"cap at its own ceiling and carry on"*
-([`types.rs:454-476`](../../../../src/ng/types.rs)). **This module is that consumer and names the
+([`types.rs:454-476`](../../../../src/types.rs)). **This module is that consumer and names the
 ceiling**: `MAX_SITE_QUALITY = 9999`, production's `QUAL_MAX`
-([`record_encode.rs:44`](../../../../src/vcf/record_encode.rs)), inherited and soft. A `NaN`
+(`d9e7b076:src/vcf/record_encode.rs:44`), inherited and soft. A `NaN`
 is not capped — it is a bug in the arithmetic above and must surface as one, which `Phred::try_new`
 already does.
 
@@ -384,11 +385,11 @@ reference and non-reference frequency, integrated over that frequency. It takes 
 
 **Production's are two constants copied from GATK** — `α_ref = 10`, `α_alt = 0.01` for a SNP and
 `0.00125` for an indel, each carrying "Revisit against the cohort calibration set" in its doc
-comment ([`posterior_engine.rs:112`, `:119`, `:128`](../../../../src/var_calling/posterior_engine.rs)).
+comment (`posterior_engine.rs:112`, `:119`, `d9e7b076:src/var_calling/posterior_engine.rs:128`).
 Nobody revisited them.
 
 **ng already holds the same two numbers, fitted.** `SpectrumSeed { alpha_ref, alpha_alt_total }`
-([`genotype_prior/mod.rs:494`](../../../../src/ng/calling/genotype_prior/mod.rs)) is the run's
+([`genotype_prior/mod.rs:494`](../../../../src/calling/genotype_prior/mod.rs)) is the run's
 frequency spectrum, reached through `FrozenParameters::prior_seed`, and it lands at
 `(1, θ)` on a neutral panel — `α_ref = 1` being the neutral `1/p` density written as a Dirichlet
 ([`calling_priors.md`](calling_priors.md) §2.3, §4). **Decision: the site quality's prior is the
@@ -489,7 +490,7 @@ land on one strand by chance often enough that the test called genuine low-cover
 biased and charged them a flat 10–17 Phred — harmless where the baseline is in the hundreds,
 lethal at 5×. Production scaled the penalty by a ramp on variant-read count: nothing at or below
 3, rising linearly to full at 7 or more
-([`qual_refine.rs:180`](../../../../src/vcf/qual_refine.rs), commit `959c5c41`, 2026-06-27). On
+(`d9e7b076:src/vcf/qual_refine.rs:180`, commit `959c5c41`, 2026-06-27). On
 GIAB that restored recall (5×: 0.640 → 0.706; 10×: 0.885 → 0.913) while holding the medium-depth
 false-positive floor at 14 rather than the 28 and 43 that simply removing the test gives.
 
@@ -687,7 +688,7 @@ live, and no cohort above 3× and no cohort of thousands has been run.
 
 **At one sample** the cohort allele count runs 0, 1, 2 and the convolution is three terms; the site
 quality reduces to a closed form, which is production's own single-sample test
-([`posterior_engine.rs:4845`](../../../../src/var_calling/posterior_engine.rs)) and is ng's
+(`d9e7b076:src/var_calling/posterior_engine.rs:4845`) and is ng's
 hand-checkable oracle (§14). Nothing branches on cohort size: one sample is the general case with
 `N = 1`.
 
@@ -723,7 +724,7 @@ as its own blocker. A quality for a tract has nothing to be a quality *of*.
 **And the mechanism is genuinely different, not merely untested here.** Production's repeat-tract
 caller does not correct a posterior for artifact shape; it runs a per-locus **emission model** with
 three swappable arms — a heuristic, a likelihood-ratio test on whether a second allele earns its
-extra parameter, and a port of freebayes' formula — in `src/ssr/cohort/`, alongside a posterior
+extra parameter, and a port of freebayes' formula — in `d9e7b076:src/ssr/cohort/`, alongside a posterior
 genotype quality. Strand and read-position bias are not what goes wrong at a tract; slippage is,
 and slippage is already inside the read likelihood.
 
@@ -953,14 +954,14 @@ pub const BIAS_RAMP_FULL_POWER_AT: f64 = 7.0;
 
 | what | production code | how ng reuses it |
 |---|---|---|
-| genotype quality from a posterior row, with the below-one clamp and the cap | [`posterior_engine.rs:3371`](../../../../src/var_calling/posterior_engine.rs) | **ported unchanged**; called per sample from the loop's final pass rather than from a loop over a retained posterior table (§3.1) |
-| the site quality: collapse, fold, prior, normalise | [`posterior_engine.rs:3466`](../../../../src/var_calling/posterior_engine.rs) | **arithmetic ported; the prior's two numbers replaced by the run's fitted spectrum** (§5.4) |
-| the linear-domain fold with per-sample rescaling and the exact zero term | [`posterior_engine.rs:3588`](../../../../src/var_calling/posterior_engine.rs) | ported with both numerical devices — they are the two traps of §5.3 |
-| `ln Γ` | [`posterior_engine.rs:3406`](../../../../src/var_calling/posterior_engine.rs), [`qual_refine.rs:219`](../../../../src/vcf/qual_refine.rs) | production carries two copies of the same Lanczos approximation; ng writes one, in this module |
-| the two artifact tests and their guards | [`qual_refine.rs:52`](../../../../src/vcf/qual_refine.rs) | ported, over the nine-number summary rather than over a VCF record (§3.3) |
-| the power ramp on the strand test | [`qual_refine.rs:180`](../../../../src/vcf/qual_refine.rs) | ported; endpoints become typed constants rather than an environment variable (§6.2) |
-| the binomial two-sided tail | [`qual_refine.rs:281`](../../../../src/vcf/qual_refine.rs) | **the closed-form incomplete-beta half only** — §13's Q2 |
-| one function for the written value and the gated value | [`record_encode.rs:260`](../../../../src/vcf/record_encode.rs) | **the property is kept, the mechanism is not**: ng stores one quality instead of recomputing a correction at write time (§3.5) |
+| genotype quality from a posterior row, with the below-one clamp and the cap | `d9e7b076:src/var_calling/posterior_engine.rs:3371` | **ported unchanged**; called per sample from the loop's final pass rather than from a loop over a retained posterior table (§3.1) |
+| the site quality: collapse, fold, prior, normalise | `d9e7b076:src/var_calling/posterior_engine.rs:3466` | **arithmetic ported; the prior's two numbers replaced by the run's fitted spectrum** (§5.4) |
+| the linear-domain fold with per-sample rescaling and the exact zero term | `d9e7b076:src/var_calling/posterior_engine.rs:3588` | ported with both numerical devices — they are the two traps of §5.3 |
+| `ln Γ` | `d9e7b076:src/var_calling/posterior_engine.rs:3406`, `d9e7b076:src/vcf/qual_refine.rs:219` | production carries two copies of the same Lanczos approximation; ng writes one, in this module |
+| the two artifact tests and their guards | `d9e7b076:src/vcf/qual_refine.rs:52` | ported, over the nine-number summary rather than over a VCF record (§3.3) |
+| the power ramp on the strand test | `d9e7b076:src/vcf/qual_refine.rs:180` | ported; endpoints become typed constants rather than an environment variable (§6.2) |
+| the binomial two-sided tail | `d9e7b076:src/vcf/qual_refine.rs:281` | **the closed-form incomplete-beta half only** — §13's Q2 |
+| one function for the written value and the gated value | `d9e7b076:src/vcf/record_encode.rs:260` | **the property is kept, the mechanism is not**: ng stores one quality instead of recomputing a correction at write time (§3.5) |
 
 **Parity oracle, and it is one arm of a two-arm test.** Run ng's site quality with production's
 `(α_ref = 10, α_alt = 0.01)` on the same likelihood table and it must reproduce production's number.
@@ -1013,7 +1014,7 @@ produced, over a cohort instead of a sample.
 **Q2 — one binomial-tail implementation or two?** OPEN, low stakes, decide before coding.
 Production has both: an exact discrete sum, and a closed-form incomplete-beta tail it switches to
 above 2,000 reads, keeping the sum below that **only to hold its own output byte-identical** at the
-depths it had already validated ([`qual_refine.rs:260-269`](../../../../src/vcf/qual_refine.rs)).
+depths it had already validated (`d9e7b076:src/vcf/qual_refine.rs:260-269`).
 The two agree to floating point, not bitwise. ng has no byte-identity obligation to production —
 its oracle is a differential (§11) — and at cohort scale the pooled read count is above 2,000 in
 any case, so the discrete sum would be dead code on the runs that matter. *Leaning:* the
@@ -1046,7 +1047,7 @@ the parameter fit that produced it, not here.
 
 1. **The single-sample closed form.** At one diploid sample the site quality has a three-term
    closed form; assert the computed value against it to floating point. Production holds this test
-   ([`posterior_engine.rs:4845`](../../../../src/var_calling/posterior_engine.rs)) and it is the
+   (`d9e7b076:src/var_calling/posterior_engine.rs:4845`) and it is the
    one place the whole four-step calculation is checkable by hand.
 2. **The differential against production**, both arms (§11): with production's two constants the
    numbers must agree; with the fitted seed, the movement is reported and must match §5.4's table
@@ -1057,7 +1058,7 @@ the parameter fit that produced it, not here.
    the marginal formula exists for (§5.1) and the one the rejected product-of-hom-ref formula
    fails; production holds it as
    `site_qual_does_not_inflate_when_no_sample_has_strong_alt_evidence`
-   ([`posterior_engine.rs:4885`](../../../../src/var_calling/posterior_engine.rs)).
+   (`d9e7b076:src/var_calling/posterior_engine.rs:4885`).
 4. **A confident cohort is large and finite, never infinite.** Drive the evidence hard enough that
    the zero entry underflows the linear buffer and require a capped quality rather than an error or
    an infinity — the §5.3 trap, and the one that will bite whoever skips the exact log-domain zero
@@ -1068,7 +1069,7 @@ the parameter fit that produced it, not here.
    would pass a fold that had picked up the thread order. *Permuting the cohort itself* legitimately
    moves the last bits, because the fold's summation order genuinely changes; assert agreement to a
    tolerance instead — production's proptest uses `1e-6` on the site quality
-   ([`posterior_engine.rs:6387`](../../../../src/var_calling/posterior_engine.rs)). Writing the
+   (`d9e7b076:src/var_calling/posterior_engine.rs:6387`). Writing the
    second test where the first belongs is how a run-order dependency ships unnoticed.
 6. **The false-positive depth curve, which is the whole reason §6 exists.** On GIAB HG002 across
    the depth ladder, the median quality of false-positive SNPs must **not** rise with depth. This

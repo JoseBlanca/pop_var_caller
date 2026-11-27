@@ -26,9 +26,10 @@ which lays the prior's mass over the same ladder this builds, and
 candidate set can reach.*
 
 *Production's equivalent is
-[`ssr/cohort/candidate_set.rs`](../../../../src/ssr/cohort/candidate_set.rs) with
-[`rung_ladder.rs`](../../../../src/ssr/cohort/rung_ladder.rs). Everything said about them is a
-record of what they do, not a proposal to change them — `src/ssr/` is frozen production.*
+`d9e7b076:src/ssr/cohort/candidate_set.rs` with
+`d9e7b076:src/ssr/cohort/rung_ladder.rs`. Everything said about them is a
+record of what they do, not a proposal to change them — `src/ssr/` was frozen production, deleted on 2026-09-13; the paths above name it at commit
+`d9e7b076`, the last that held it.*
 
 ---
 
@@ -63,7 +64,7 @@ sequences are worth scoring.
 ### 1.3 Vocabulary
 
 - **tract sequence** — the bases a read showed across the repeat tract, as the locus generator
-  minted them ([`SequenceObservation`](../../../../src/ng/locus_generation/mod.rs)). An ng repeat
+  minted them ([`SequenceObservation`](../../../../src/locus_generation/mod.rs)). An ng repeat
   allele **is** a sequence, never a repeat count: two alleles of the same length can differ inside
   ([`locus_generation_ssr.md`](locus_generation_ssr.md) §3).
 - **rung** — all the observed tract sequences carrying the same number of repeats, grouped. The
@@ -79,9 +80,9 @@ sequences are worth scoring.
 **The merge closes repeat-tract loci but the assembled observation cannot key a ladder.** Closing
 handles them deliberately — a tract is exempt from the span cap, and the exemption is exhaustive
 on the locus kind so a new kind is a compile error rather than a silent default
-([`close.rs:110-125`](../../../../src/ng/run/cohort_merge/close.rs)). But the assembled
+([`close.rs:110-125`](../../../../src/run/cohort_merge/close.rs)). But the assembled
 `CohortObservation` carries only the region, the allele table and the per-sample rows
-([`build.rs:922-929`](../../../../src/ng/run/cohort_merge/build.rs)): **it drops the locus kind,
+([`build.rs:922-929`](../../../../src/run/cohort_merge/build.rs)): **it drops the locus kind,
 and with it the motif.** Without the motif there is no period, and without a period there are no
 repeat counts and no ladder.
 
@@ -91,11 +92,11 @@ stated here because it is the scheduling fact: the ordinary path of
 
 **A second thing is already in place and worth knowing**, because an earlier reading of this
 module said otherwise: the merge's per-sample rows are keyed on `(allele, read group)`, not pooled
-([`SupportedAllele`, `build.rs:1089`](../../../../src/ng/run/cohort_merge/build.rs)). The stutter
+([`SupportedAllele`, `build.rs:1089`](../../../../src/run/cohort_merge/build.rs)). The stutter
 model is fitted per read group, so the STR emission needs them apart, and it has them. **The
 support rule pools them back** — it counts reads, and a read is a read whichever lane it came from
 — which is deliberate and is the one place pooling is correct
-([`SampleSupport::pooled_support_for`, `:1070`](../../../../src/ng/run/cohort_merge/build.rs)).
+([`SampleSupport::pooled_support_for`, `:1070`](../../../../src/run/cohort_merge/build.rs)).
 
 ---
 
@@ -103,15 +104,15 @@ support rule pools them back** — it counts reads, and a read is a read whichev
 
 **A rung is keyed by repeat count: the tract sequence's length in bases divided by the motif's,
 rounded down.** Production keys it exactly so
-([`rung_ladder.rs:291-320`](../../../../src/ssr/cohort/rung_ladder.rs)) and ng keeps it, because
+(`d9e7b076:src/ssr/cohort/rung_ladder.rs:291-320`) and ng keeps it, because
 the prior's geometric seed is indexed by the same quantity and the two must land on the same
 integer ([`calling_priors.md`](calling_priors.md) §5.1). **Inside a rung, sequences stay separate
 by exact bytes** — the grouping is for nomination and for the prior, never a merge of evidence.
 
 **One inconsistency in production is not ported.** Its periodicity gate measures a read's tract in
 **bases** while the ladder keys in **units**
-([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs) against
-[`rung_ladder.rs:301`](../../../../src/ssr/cohort/rung_ladder.rs)), so a 13-base read at a
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:114-145` against
+`d9e7b076:src/ssr/cohort/rung_ladder.rs:301`), so a 13-base read at a
 dinucleotide is judged out of frame by the gate and then pooled onto rung 6 with the 12-base
 reads, where it counts toward that rung's totals. ng measured both in units while it had the
 gate, and has had none since 2026-10-22 (§7). Recorded as a fact about the code, not as a
@@ -137,21 +138,21 @@ The `±1` rescue is production's and is kept for its reason: a sample whose two 
 could not resolve is more likely to carry a neighbour of what it did resolve than anything else,
 and "occupied" keeps it honest — a neighbour is added only where some sample's reads actually
 reached that length
-([`candidate_set.rs:221`](../../../../src/ssr/cohort/candidate_set.rs)). **Nothing here invents a
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:221`). **Nothing here invents a
 length.**
 
 ### 4.1 What is replaced, and what it costs — measured
 
 **Production nominates a repeat count only if its read count exceeds *both* neighbouring counts by
 more than three reads** (`is_clear_peak`,
-[`rung_ladder.rs:274-288`](../../../../src/ssr/cohort/rung_ladder.rs), `prominence = 3` at
-[`candidate_set.rs:83`](../../../../src/ssr/cohort/candidate_set.rs)). Two consequences follow
+`d9e7b076:src/ssr/cohort/rung_ladder.rs:274-288`, `prominence = 3` at
+`d9e7b076:src/ssr/cohort/candidate_set.rs:83`). Two consequences follow
 from the predicate itself, before any data:
 
 - **A sample heterozygous for two adjacent repeat counts has no clear peak.** With the two lengths
   at similar read counts, neither exceeds the other by three. The rescue does not save it, because
   it iterates over the peaks that *were* found and there are none
-  ([`candidate_set.rs:239-258`](../../../../src/ssr/cohort/candidate_set.rs)) — so such a sample
+  (`d9e7b076:src/ssr/cohort/candidate_set.rs:239-258`) — so such a sample
   nominates nothing at all and the locus falls back to whatever other samples and the reference
   supply.
 - **It is an absolute read count with no depth term**, so it binds only at the shallow end: a
@@ -214,12 +215,12 @@ promoted length, every spelling stands on its own reads.
 **Production does something different and it cannot work below three samples.** It promotes the
 rung's best-supported sequence unconditionally and makes any sibling clear all three of: 8 reads,
 **3 distinct samples**, and 10% of that rung's reads
-([`candidate_set.rs:169-191`](../../../../src/ssr/cohort/candidate_set.rs), constants at
-[`:86-88`](../../../../src/ssr/cohort/candidate_set.rs)). The three-sample term is an absolute
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:169-191`, constants at
+`d9e7b076:src/ssr/cohort/candidate_set.rs:86-88`). The three-sample term is an absolute
 constant with no cohort-size clamp, so **at one and two samples no second spelling can ever be
 promoted** — the mechanism is simply absent. Production clamps the *other* recurrence constant for
 small cohorts and not this one
-([`driver.rs:368`](../../../../src/ssr/cohort/driver.rs)), so the omission is visible in its own
+(`d9e7b076:src/ssr/cohort/driver.rs:368`), so the omission is visible in its own
 code.
 
 *Measured 2026-08-24, same HG002 runs, scored at **sequence** level: each haplotype's tract
@@ -286,8 +287,8 @@ single sample.** [`candidate_alleles.md`](candidate_alleles.md) §3.2 makes read
 disqualifying; this section is what that costs in ported code.
 
 **The depth gate is dropped entirely.** `min_cohort_depth = 10` is a **sum over the cohort**
-([`cohort_depth`, `candidate_set.rs:94-100`](../../../../src/ssr/cohort/candidate_set.rs),
-constant at [`:84`](../../../../src/ssr/cohort/candidate_set.rs)), so the same tract is refused
+(`cohort_depth`, `d9e7b076:src/ssr/cohort/candidate_set.rs:94-100`,
+constant at `d9e7b076:src/ssr/cohort/candidate_set.rs:84`), so the same tract is refused
 alone and admitted in company. *Measured on HG002 as a single sample, 13,272 tracts:*
 
 | coverage | median spanning reads | tracts refused as `LowDepth` |
@@ -312,7 +313,7 @@ cohort and the middle one is dead below three samples.
 **The cap of 24 and its refusal are dropped**, replaced by a cap of 32 with
 truncation ([`candidate_alleles.md`](candidate_alleles.md) §4). Production's is checked against a
 set that grows monotonically with cohort size and refuses the locus outright
-([`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)), so at a large panel it
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:272-276`), so at a large panel it
 refuses loci for being polymorphic rather than for being bad.
 
 ---
@@ -375,14 +376,14 @@ overflow the cap is refused rather than allowed to evict
 **Partial reads are read here only where they single out one sequence (§8.1, adopted
 2026-10-13).** A read that ran out inside a tract gives a lower bound on the length, not a length,
 and the merge holds it on its own axis
-([`PartialObservation`, `build.rs:1130`](../../../../src/ng/run/cohort_merge/build.rs)). Such a
+([`PartialObservation`, `build.rs:1130`](../../../../src/run/cohort_merge/build.rs)). Such a
 read nominates no rung and counts toward no denominator — the treatment
 `reads_compared_with_reference` gives it upstream — unless its bases fit exactly one sequence of
 the table, when §8.1 counts it as a read of that sequence. **One consequence belongs to the merge,
 not here, and is already booked there:** a sample carrying an allele too long for a read to span
 shows no complete observation, so the merge's variability filter reads it as *nothing varied*, and
 "one line of the rule has to change for that to mean what it says, and only on this path"
-([`build.rs:1025-1034`](../../../../src/ng/run/cohort_merge/build.rs)).
+([`build.rs:1025-1034`](../../../../src/run/cohort_merge/build.rs)).
 
 ### 8.1 A partial read that singles out one sequence counts (adopted 2026-10-13)
 
@@ -544,13 +545,13 @@ likely to come true, and §12's Q2 here records it as the same open question see
 
 | what | existing code | how ng reuses it |
 |---|---|---|
-| the rung ladder — keying by repeat count, sequences kept apart inside a rung | [`build_rungs`, `rung_ladder.rs:291`](../../../../src/ssr/cohort/rung_ladder.rs) | **ported**, with the frame inconsistency of §3 corrected |
-| per-sample nomination and top-`ploidy` selection | [`assemble_candidates`, `candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs) | **shape ported, predicate replaced** (§4.1) |
-| the `±1` neighbour rescue and its `occupied` test | [`candidate_set.rs:239-258`](../../../../src/ssr/cohort/candidate_set.rs), [`:221`](../../../../src/ssr/cohort/candidate_set.rs) | **ported unchanged** |
-| the union across samples, deduplicated by exact bytes | [`candidate_set.rs:223-227`](../../../../src/ssr/cohort/candidate_set.rs) | ported; the linear `contains` scan is replaced by a set, since the cap is now checked after a bar rather than after an unbounded union |
-| the periodicity measure | [`is_periodic`, `candidate_set.rs:114`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported**: ported per sample at first, then removed (owner, 2026-10-22; §7) |
-| the reference tract seeded as allele 0 before any gate | [`candidate_set.rs:200-202`](../../../../src/ssr/cohort/candidate_set.rs) | ported; it is the inherited invariant ([`candidate_alleles.md`](candidate_alleles.md) §6.1) |
-| the depth gate, the three sibling constants, the cap of 24 | [`candidate_set.rs:80-90`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported** (§6) |
+| the rung ladder — keying by repeat count, sequences kept apart inside a rung | `build_rungs`, `d9e7b076:src/ssr/cohort/rung_ladder.rs:291` | **ported**, with the frame inconsistency of §3 corrected |
+| per-sample nomination and top-`ploidy` selection | `assemble_candidates`, `d9e7b076:src/ssr/cohort/candidate_set.rs:194` | **shape ported, predicate replaced** (§4.1) |
+| the `±1` neighbour rescue and its `occupied` test | `d9e7b076:src/ssr/cohort/candidate_set.rs:239-258`, `d9e7b076:src/ssr/cohort/candidate_set.rs:221` | **ported unchanged** |
+| the union across samples, deduplicated by exact bytes | `d9e7b076:src/ssr/cohort/candidate_set.rs:223-227` | ported; the linear `contains` scan is replaced by a set, since the cap is now checked after a bar rather than after an unbounded union |
+| the periodicity measure | `is_periodic`, `d9e7b076:src/ssr/cohort/candidate_set.rs:114` | **not ported**: ported per sample at first, then removed (owner, 2026-10-22; §7) |
+| the reference tract seeded as allele 0 before any gate | `d9e7b076:src/ssr/cohort/candidate_set.rs:200-202` | ported; it is the inherited invariant ([`candidate_alleles.md`](candidate_alleles.md) §6.1) |
+| the depth gate, the three sibling constants, the cap of 24 | `d9e7b076:src/ssr/cohort/candidate_set.rs:80-90` | **not ported** (§6) |
 
 **The oracle is a differential, not a parity test, and that is deliberate.** Three of production's
 rules are being replaced on purpose, so byte-identical output is impossible by construction and a
@@ -567,7 +568,7 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
   [`calling_priors.md`](calling_priors.md) §5.2, whose question it is. §5 gives it the fact it was
   waiting for and a leaning.
 - **The merge's variability filter at a tract too long for a read to span** — already booked at
-  [`build.rs:1025-1034`](../../../../src/ng/run/cohort_merge/build.rs) and left there (§8).
+  [`build.rs:1025-1034`](../../../../src/run/cohort_merge/build.rs) and left there (§8).
 - **Carrying the locus kind and motif on `CohortObservation`** — to
   [`cohort_merge.md`](cohort_merge.md), whose type it is (§2). This document cannot be built until
   it lands.
@@ -630,7 +631,7 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
   | caller | budget at one tract | above it |
   |---|---|---|
   | **ng, as specified** | **6 alleles counting the reference — 5 alternatives** | truncate to the best six (§4.1) |
-  | production's repeat-tract path | 24 candidates ([`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)) | **refuse the locus**, every sample no-called |
+  | production's repeat-tract path | 24 candidates (`d9e7b076:src/ssr/cohort/candidate_set.rs:272-276`) | **refuse the locus**, every sample no-called |
   | **HipSTR** | **1,000 haplotypes** (`MAX_TOTAL_HAPLOTYPES`, [`genotyper_bam_processor.h:110`](../../../../HipSTR/src/genotyper_bam_processor.h)) | **abandon the locus** — "Aborting genotyping of the locus as too many candidate haplotypes were found" ([`seq_stutter_genotyper.cpp:609`](../../../../HipSTR/src/seq_stutter_genotyper.cpp)) |
 
   **HipSTR's thousand is not a thousand tract lengths, and the conversion is the useful part.** Its
@@ -684,6 +685,7 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
   switched in, then report the move.
 - **Regression, the definition of done:** HG002 at 30× through the whole caller with real
   candidates, scoring at least the 98% adjacent-length recall of §4.1 and the 86% same-length
-  recall of §5. The harness for both already exists and produced every number in this document on
-  2026-08-24: production's `ssr-pileup` into `examples/ssr_slip_dump`, scored against
+  recall of §5. The harness for both produced every number in this document on 2026-08-24:
+  production's `ssr-pileup` into `examples/ssr_slip_dump.rs` (both since removed; read the example
+  at `6799e37c~1:examples/ssr_slip_dump.rs`), scored against
   `benchmarks/ssr_hg002/truth/`.

@@ -5811,7 +5811,7 @@ mod the_sample_order_join {
     /// rests on: `None < Some(_)`, so a sample that went missing would slip past an ordering
     /// assertion written on the options and print `None` where the message says Phred.
     fn quality_of(call: &SampleGenotypeCall) -> Option<f32> {
-        call.score_best_genotype().map(Phred::get)
+        call.genotype_quality().map(Phred::get)
     }
 }
 

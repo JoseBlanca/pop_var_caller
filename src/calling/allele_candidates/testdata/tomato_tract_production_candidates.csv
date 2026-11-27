@@ -1,5 +1,5 @@
-# Production's candidate sets for src/ng/calling/allele_candidates/ssr_production_differential.rs,
-# frozen at promotion plan step C8. Each row is what production's own selector —
+# Production's candidate sets for src/calling/allele_candidates/ssr_production_differential.rs,
+# frozen when production was deleted. Each row is what production's own selector —
 # ssr::cohort::rung_ladder::build_rungs then ssr::cohort::candidate_set::assemble_candidates, at
 # ploidy 2 with both configurations' dev_default() — returned at commit d9e7b076 for one tract the
 # tests hand it: the 269 tomato tracts with the whole panel, the same tracts with their first

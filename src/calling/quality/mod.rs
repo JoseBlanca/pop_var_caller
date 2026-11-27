@@ -132,7 +132,7 @@ pub struct ArtifactTestCounts {
 /// **`p_best` is nudged below one before the logarithm.** A sample whose reads make every
 /// genotype but one impossible produces a posterior of exactly `1.0`, and `log₁₀(0)` is
 /// `−∞`. Production clamps to one unit in the last place and so does this; the clamp is why
-/// the result is always a real quality and never a [`DomainError`](crate::types::DomainError).
+/// the result is always a real quality and never a [`DomainError`].
 ///
 /// **Ties go to the lower genotype index**, because the fold keeps the first *strict*
 /// maximum. The genotype table's order is fixed, so this is deterministic — and it has to

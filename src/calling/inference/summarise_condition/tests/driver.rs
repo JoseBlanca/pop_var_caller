@@ -1,7 +1,7 @@
 use super::*;
 
 // ────────────────────────────────────────────────────────────────────────────────
-// D1 — the driver: the table built once, the outer rounds structurally off
+// The driver: the table built once, the outer rounds structurally off
 // ────────────────────────────────────────────────────────────────────────────────
 
 /// **The driver calls genotypes from evidence** — reads in, `LocusInference` out, with the
@@ -16,7 +16,7 @@ use super::*;
 /// reference, which at eight reads a sample is most of what the prior is still worth.
 ///
 /// **The table is built once**: `EmissionCost` reports one table build over two row
-/// builds, whatever the pass count, which is the property Milestone D exists for.
+/// builds, whatever the pass count, which is the property the driver exists to keep.
 #[test]
 fn the_driver_calls_genotypes_from_reads_and_builds_the_table_once() {
     let (alleles, _) = generic_locus(1);

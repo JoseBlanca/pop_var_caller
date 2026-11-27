@@ -1,7 +1,7 @@
 use super::*;
 
 // ────────────────────────────────────────────────────────────────────────────────
-// D2 — the two cost invariants: what a locus pays for, and what a pass does not
+// The two cost invariants: what a locus pays for, and what a pass does not
 // ────────────────────────────────────────────────────────────────────────────────
 
 /// One locus's evidence over `per_sample_observations` samples, where entry *s* says how

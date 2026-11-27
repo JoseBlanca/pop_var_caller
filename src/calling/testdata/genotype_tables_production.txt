@@ -1,6 +1,6 @@
-# Production's genotype tables for src/ng/calling/genotype_table_parity.rs, frozen at promotion
-# plan step C5. Built by production's shape_for(ploidy, n_alleles)
-# (src/var_calling/posterior_engine/shape.rs) at commit d9e7b076, for every shape the test compares.
+# The deleted caller's genotype tables for src/calling/genotype_table_parity.rs. Built by its
+# shape_for(ploidy, n_alleles) (d9e7b076:src/var_calling/posterior_engine/shape.rs) at commit
+# d9e7b076, for every shape the test compares.
 #
 # A shape opens with `shape <ploidy> <alleles> <genotype count>`, followed by one line per genotype
 # in production's enumeration order: the genotype as its alleles, one base-36 digit per copy in

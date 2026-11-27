@@ -12,8 +12,8 @@
 //!
 //! **Production re-fits one set of numbers per locus, pooled over every read group** — its
 //! attribution accumulates every sample's reads into a single `LocusSlipFit`
-//! (`src/ssr/cohort/em.rs:1200`, one struct built before the sample loop and never keyed by
-//! group), and each round re-fits one shape and one level multiplier from it
+//! (`d9e7b076:src/ssr/cohort/em.rs:1200`, one struct built before the sample loop and never keyed
+//! by group), and each round re-fits one shape and one level multiplier from it
 //! (`em.rs:574-575`). The per-group structure lives entirely in the *frozen* inputs: the
 //! group's own level line is scaled by the one locus-wide multiplier. ng mirrors that shape.
 //! The counts below are pooled over the locus's read groups; the level moves as one multiplier
@@ -22,7 +22,7 @@
 //! cell's own frozen stratum values** — ng has no per-period parent shape, and the stratum's
 //! frozen values are what spec §5.1 names as the pull-back target. At zero slips every cell
 //! therefore collapses to its own frozen numbers, exactly as production collapses to its
-//! parent shape (`src/ssr/cohort/stutter.rs:188`).
+//! parent shape (`d9e7b076:src/ssr/cohort/stutter.rs:188`).
 //!
 //! # What differs from production, named
 //!
@@ -42,7 +42,7 @@ use crate::calling::inference::SlippageRefitConfig;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 
 /// The largest slip, in whole motif units, the fall-off histogram counts — production's
-/// `MAX_SLIP` (`src/ssr/cohort/param_estimation.rs:21`).
+/// `MAX_SLIP` (`d9e7b076:src/ssr/cohort/param_estimation.rs:21`).
 ///
 /// **A slip past it still counts as slipped and leaves the shape alone**, mirroring
 /// production's asymmetry (`param_estimation.rs:222-231` drops it from the histogram;
@@ -51,12 +51,12 @@ use crate::parameter_estimation::joint::ssr_fit::Slippage;
 pub(crate) const MAX_SLIP_UNITS: u64 = 10;
 
 /// The most the locus's own reads may scale a cell's frozen slippage level — production's
-/// `LEVEL_MULT_MAX` (`src/ssr/cohort/em.rs:1114`).
+/// `LEVEL_MULT_MAX` (`d9e7b076:src/ssr/cohort/em.rs:1114`).
 pub(crate) const LEVEL_MULTIPLIER_CEILING: f64 = 10.0;
 
 /// Where the raw fall-off estimate is clamped before the pull-back blends it — production's
-/// bound (`src/ssr/cohort/stutter.rs:218`). The blend below is convex, so the blended value
-/// stays inside the range whenever the frozen value does.
+/// bound (`d9e7b076:src/ssr/cohort/stutter.rs:218`). The blend below is convex, so the blended
+/// value stays inside the range whenever the frozen value does.
 const FALL_OFF_ESTIMATE_CEILING: f64 = 0.999;
 
 /// **The locus's pooled slip evidence**: every read's posterior-weighted attribution, summed
@@ -115,7 +115,7 @@ impl PooledSlipCounts {
 /// **How far the locus's reads scale every cell's frozen level** — production's formula
 /// verbatim, with the pull-back a setting instead of a constant:
 /// `clamp((slipped + P) / (expected_slipped + P), 0, 10)`
-/// (`src/ssr/cohort/em.rs:1329-1331`, `P` = 20 slipped reads there).
+/// (`d9e7b076:src/ssr/cohort/em.rs:1329-1331`, `P` = 20 slipped reads there).
 ///
 /// The pull-back's target is a multiplier of **one** — the frozen level unchanged — and the
 /// frozen level at each cell is already the fitted curve's value read off at that cell
@@ -137,9 +137,9 @@ pub(crate) fn level_multiplier(counts: &PooledSlipCounts, pull_back_slipped_read
 /// One cell's three re-fitted numbers, from the locus's pooled counts and that cell's frozen
 /// values.
 ///
-/// The formulas are production's (`src/ssr/cohort/stutter.rs:184-223`), with the pseudo-count
-/// a setting and the pull-back target this cell's frozen stratum values (see the module note
-/// for why the target differs from production's per-period parent):
+/// The formulas are production's (`d9e7b076:src/ssr/cohort/stutter.rs:184-223`), with the
+/// pseudo-count a setting and the pull-back target this cell's frozen stratum values (see the
+/// module note for why the target differs from production's per-period parent):
 ///
 /// - **level** — the frozen level scaled by the one locus-wide multiplier, clamped into
 ///   `[0, 1]` as production clamps its per-read level (`em.rs:385-388`);
@@ -207,8 +207,8 @@ pub(crate) fn refit_cells(
 /// [`round_convergence_threshold`](super::SlippageRefitConfig::round_convergence_threshold).
 ///
 /// Absolute movement on every number, as production compares its four
-/// (`src/ssr/cohort/em.rs:576`, `shapes_close` at `em.rs:1334`); ng's re-fitted numbers live
-/// per cell, so *"every re-fitted number moves less than a threshold"* (spec §6) is read over
+/// (`d9e7b076:src/ssr/cohort/em.rs:576`, `shapes_close` at `em.rs:1334`); ng's re-fitted numbers
+/// live per cell, so *"every re-fitted number moves less than a threshold"* (spec §6) is read over
 /// every cell's three.
 ///
 /// # Panics

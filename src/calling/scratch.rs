@@ -92,7 +92,8 @@ pub(crate) struct EmissionCost {
 ///
 /// **The reason is measured, not stylistic.** Production lifted exactly these buffers out of
 /// its own iteration after a profile put the allocator's own self-time at about one cycle in
-/// six (`src/var_calling/posterior_engine.rs`; `doc/devel/ng/spec/calling_em_loop.md` §8).
+/// six (`d9e7b076:src/var_calling/posterior_engine.rs`;
+/// `doc/devel/ng/spec/calling_em_loop.md` §8).
 ///
 /// **Candidate selection's buffers live here too** — the per-allele running totals it
 /// accumulates and its survivor list — rather than standing alone as a second per-worker
@@ -228,7 +229,7 @@ pub struct CallingScratch<SsrEmissionScratch> {
     ///
     /// **Grown to the locus's row count and never shrunk**, like every other buffer here —
     /// and, like the repeat-tract row's, each one sizes itself per sample, which is why they
-    /// are outside [`buffer_fingerprints`](Self::buffer_fingerprints).
+    /// are outside the test-only `buffer_fingerprints`.
     generic_rows: Vec<GenericRowScratch>,
     /// `batches × alleles`, batch-major: how many copies of each allele the samples of each
     /// sequencing batch are expected to carry, this locus, at the loop's current estimate —
@@ -327,8 +328,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// If the genotype table does not index the locus's alleles. This is the first of the
     /// three caller bugs `doc/devel/ng/spec/calling_em_loop.md` §8 names as assertions, and
     /// this is the one point where the locus's shape is fixed, so it is where the two are
-    /// compared. A table built before a discovery round admitted an allele is exactly how
-    /// the two come apart; with a table one allele narrow, every per-allele buffer is sized
+    /// compared. A table built before one more allele was admitted is exactly how the two
+    /// come apart; with a table one allele narrow, every per-allele buffer is sized
     /// for the old count and the locus is called over a set that silently excludes the
     /// allele just admitted.
     ///
@@ -349,8 +350,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             genotypes.allele_count(),
             alleles.len(),
             "the genotype table indexes {} alleles and this locus is called over {}, so the \
-             table was built for a different allele set — a discovery round that admitted \
-             an allele needs its table rebuilt with it",
+             table was built for a different allele set — admitting an allele needs the \
+             table rebuilt with it",
             genotypes.allele_count(),
             alleles.len()
         );
@@ -862,7 +863,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// **Nothing in a run reads it**, and that is what it is for: the cost it records is
     /// invisible in the output, because emissions recomputed every pass give the same
     /// genotypes.
-    /// Step D2 of the calling loop's plan is what asserts on it.
+    /// The loop's cost-invariant tests are what assert on it.
     #[inline]
     #[must_use]
     #[cfg_attr(
@@ -870,8 +871,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         expect(
             dead_code,
             reason = "an instrument: what it measures — a table built once rather than once \
-                      per pass — is invisible in a run's output, so its readers are step D2's \
-                      tests and the bakeoffs plan's benches"
+                      per pass — is invisible in a run's output, so its readers are the loop's \
+                      cost-invariant tests and the bakeoffs plan's benches"
         )
     )]
     pub(crate) fn emission_cost(&self) -> EmissionCost {
@@ -1345,7 +1346,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     ///
     /// **A second bundle for the same reason as the first** — the per-sample copies and the
     /// cohort's are two fields of one scratch, and reaching for them one accessor at a time
-    /// does not compile. Measured while B1 was in review: an M-step written against the
+    /// does not compile. Measured in review: an M-step written against the
     /// per-buffer accessors gives two `error[E0502]`.
     ///
     /// **The whole per-sample table, not one row.** The M-step's defining property is that it
@@ -1421,9 +1422,9 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     /// # Panics
     ///
     /// If [`prepare_for_locus`](Self::prepare_for_locus) has not been called. Every buffer
-    /// of a freshly-made scratch is empty, so without this a pass folding into
-    /// [`cohort_expected_copies_mut`](Self::cohort_expected_copies_mut) would run zero
-    /// iterations, write nothing, and leave the cohort's copies summing to a plausible
+    /// of a freshly-made scratch is empty, so without this a pass folding into the buffer
+    /// [`advance_cohort_expected_copies`](Self::advance_cohort_expected_copies) hands back would
+    /// run zero iterations, write nothing, and leave the cohort's copies summing to a plausible
     /// `0.0` — which the fill value cannot catch, because an unprepared buffer has no slots
     /// to fill.
     #[inline]
@@ -1621,7 +1622,7 @@ pub(crate) struct CohortSummingBuffers<'a> {
     /// what makes the shape check a check.** Derive the count from the length instead and any
     /// table divides evenly by the allele count, so a two-row table presented as three samples
     /// is accepted and the cohort comes back short by a sample with nothing raised. Measured
-    /// during B2's review: with the count derived, the suite stays green and the
+    /// in review: with the count derived, the suite stays green and the
     /// wrong-size test starts accepting that table and returning `[2.0, 2.0]`.
     pub sample_count: usize,
     /// `samples × alleles`, sample-major: each sample's own expected allele copies, as the
@@ -1873,7 +1874,7 @@ mod tests {
     /// exists: an unprepared buffer has no slots to fill, so a fold over it runs zero
     /// iterations, writes nothing, and leaves the cohort's expected copies summing to a
     /// plausible `0.0` — which is exactly the value the fill exists to keep out of a
-    /// genotype. Step B2's oracle is a bitwise comparison of those sums, and an all-zero
+    /// genotype. The M-step's oracle is a bitwise comparison of those sums, and an all-zero
     /// sum passes against another all-zero sum.
     #[test]
     #[should_panic(expected = "has not been prepared for a locus")]
@@ -1887,8 +1888,8 @@ mod tests {
     /// A genotype table built for a different allele set is refused where the locus's shape
     /// is fixed, rather than at the far end of the locus.
     ///
-    /// **This is the first of the three caller bugs the spec names as assertions**, and a
-    /// discovery round admitting an allele is exactly how the two come apart. With a table
+    /// **This is the first of the three caller bugs the spec names as assertions**, and an
+    /// allele admitted after the table was built is exactly how the two come apart. With a table
     /// one allele narrow, every per-allele buffer is sized for the old count, and the first
     /// thing to notice is the copies-versus-alleles check when the locus is finished —
     /// thousands of arithmetic operations later, naming the output rather than the table.
@@ -1896,7 +1897,7 @@ mod tests {
     #[should_panic(expected = "the table was built for a different allele set")]
     fn a_genotype_table_built_for_another_allele_set_is_refused() {
         let (mut alleles, table) = biallelic_locus();
-        // A discovery round admits a third allele; the table is still the two-allele one.
+        // A third allele is admitted; the table is still the two-allele one.
         alleles.admit(Box::from(b"G".as_slice()));
 
         let mut scratch = CallingScratch::<()>::default();

@@ -26,7 +26,7 @@ candidate path are both unwritten"*. **Half of that is stale.** The read-likelih
 its per-locus parameter assembly is written, the genotype prior's STR seed is written, and
 the frequency loop genotypes a repeat tract end to end in its own tests today
 ([`a_repeat_tract_is_called_from_its_reads`,
-`summarise_condition.rs:7623`](../../../../src/ng/calling/inference/summarise_condition.rs)) —
+`summarise_condition.rs:7623`](../../../../src/calling/inference/summarise_condition.rs)) —
 given a candidate set somebody hands it. The candidate path is the half that is genuinely
 unwritten, and around it a driver branch, the record's annotation, and a quality decision.
 
@@ -60,11 +60,11 @@ missing. Its scope ends where a `VcfRecord` for a tract exists.
   generator mints one and no design says what its candidates would be
   ([`run_ssr_observations.md`](run_ssr_observations.md) §8).
 - **Not the pre-pass or its CLI.** The STR fits exist in code
-  ([`joint/ssr_fit.rs`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs),
-  [`slippage_curve.rs`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs),
-  [`stratum_fits.rs`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)) and
+  ([`joint/ssr_fit.rs`](../../../../src/parameter_estimation/joint/ssr_fit.rs),
+  [`slippage_curve.rs`](../../../../src/parameter_estimation/joint/slippage_curve.rs),
+  [`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs)) and
   the parameters file carries their output
-  ([`bindings.rs:614-629`](../../../../src/ng/calling/parameters_file/bindings.rs)), but no
+  ([`bindings.rs:614-629`](../../../../src/calling/parameters_file/bindings.rs)), but no
   command runs a fit yet — so the first STR calls will be `--defaults` calls, scored under
   the shipped stutter constants with `Defaulted` warrants (§3.4). That is honest and weak,
   and giving the fits a command is **deferred future work** (owner, 2026-09-02) — neither
@@ -96,31 +96,31 @@ code; **missing** means neither.
 | station | SNP/indel path | STR path | state |
 |---|---|---|---|
 | cohort observation stating its kind | the merge | same object, kind carried | **[`run_ssr_observations.md`](run_ssr_observations.md) §4** — upstream of this document |
-| candidate selection | [`select_generic`](../../../../src/ng/calling/allele_candidates/generic.rs) | `select_ssr` — the ladder, nomination, ±1 rescue, periodicity verdict | **settled, code missing** (§3.1) |
-| evidence shaping | [`shape_generic_locus`](../../../../src/ng/calling/evidence_shaping.rs) | [`shape_ssr_locus`, `evidence_shaping.rs:443`](../../../../src/ng/calling/evidence_shaping.rs) | **built** |
-| read likelihood | base-quality emission ([`read_likelihoods.md`](read_likelihoods.md) §3) | stutter + substitution emission, Model A ([`StutterSubstitutionEmission`, `ssr_emission.rs:339`](../../../../src/ng/calling/likelihood/ssr_emission.rs)) | **built** |
-| per-locus parameter assembly | read-group calibrations | [`repeat_tract_parameters.rs`](../../../../src/ng/calling/inference/repeat_tract_parameters.rs): a scoring context per (read group, candidate), stated constants where a fit is absent, warrants throughout | **built** |
+| candidate selection | [`select_generic`](../../../../src/calling/allele_candidates/generic.rs) | `select_ssr` — the ladder, nomination, ±1 rescue, periodicity verdict | **settled, code missing** (§3.1) |
+| evidence shaping | [`shape_generic_locus`](../../../../src/calling/evidence_shaping.rs) | [`shape_ssr_locus`, `evidence_shaping.rs:443`](../../../../src/calling/evidence_shaping.rs) | **built** |
+| read likelihood | base-quality emission ([`read_likelihoods.md`](read_likelihoods.md) §3) | stutter + substitution emission, Model A ([`StutterSubstitutionEmission`, `ssr_emission.rs:339`](../../../../src/calling/likelihood/ssr_emission.rs)) | **built** |
+| per-locus parameter assembly | read-group calibrations | [`repeat_tract_parameters.rs`](../../../../src/calling/inference/repeat_tract_parameters.rs): a scoring context per (read group, candidate), stated constants where a fit is absent, warrants throughout | **built** |
 | genotype prior | fitted spectrum, projected ([`calling_priors.md`](calling_priors.md) §4) | the stratum's length spectrum, indexed from the reference tract length ([`calling_priors.md`](calling_priors.md) §5; `fill_seed_share_per_candidate`) | **built** |
-| the frequency loop | [`SummariseConditionLoop`, `summarise_condition.rs:2066`](../../../../src/ng/calling/inference/summarise_condition.rs) | **the same loop** — it branches on the evidence kind internally, and its tract arms are exercised end to end in tests | **built** |
-| discovery round | specified, off by default | same design ([`calling_em_loop.md`](calling_em_loop.md) §4.1); constants shipped and inert ([`inference/mod.rs:149-197`](../../../../src/ng/calling/inference/mod.rs)) | **settled, code missing — in scope here, with its measurement (§3.5)** |
+| the frequency loop | [`SummariseConditionLoop`, `summarise_condition.rs:2066`](../../../../src/calling/inference/summarise_condition.rs) | **the same loop** — it branches on the evidence kind internally, and its tract arms are exercised end to end in tests | **built** |
+| discovery round | specified, off by default | same design ([`calling_em_loop.md`](calling_em_loop.md) §4.1); constants shipped and inert ([`inference/mod.rs:149-197`](../../../../src/calling/inference/mod.rs)) | **settled, code missing — in scope here, with its measurement (§3.5)** |
 | genotype quality | posterior of the called genotype | identical — a property of a posterior, not of a kind | **built** |
-| site quality | fold + artifact correction | fold runs; artifact tests deliberately skip a tract ([`summarise_condition.rs:1913`](../../../../src/ng/calling/inference/summarise_condition.rs); test at `:5719`) | **built as far as designed; the design gap is §3.3** |
-| the driver | [`call_one_generic_locus`, `callers.rs:813`](../../../../src/ng/run/callers.rs), unconditional | a branch on the observation's kind | **missing** (§3.2) |
-| the record | [`assemble_record`](../../../../src/ng/vcf/assemble.rs) | same function; `repeat_tract: Option<TractAnnotation>` already on its input, the run passes `None` ([`records.rs:263`](../../../../src/ng/run/records.rs)); `STR`/`RU`/`PERIOD`/`REPCN` and the tract FILTERs already encode ([`encode.rs:257`](../../../../src/ng/vcf/encode.rs), [`FilterVerdict`, `vcf/mod.rs:684`](../../../../src/ng/vcf/mod.rs)) | **built; two inputs unwired** (§3.2) |
+| site quality | fold + artifact correction | fold runs; artifact tests deliberately skip a tract ([`summarise_condition.rs:1913`](../../../../src/calling/inference/summarise_condition.rs); test at `:5719`) | **built as far as designed; the design gap is §3.3** |
+| the driver | [`call_one_generic_locus`, `callers.rs:813`](../../../../src/run/callers.rs), unconditional | a branch on the observation's kind | **missing** (§3.2) |
+| the record | [`assemble_record`](../../../../src/vcf/assemble.rs) | same function; `repeat_tract: Option<TractAnnotation>` already on its input, the run passes `None` ([`records.rs:263`](../../../../src/run/records.rs)); `STR`/`RU`/`PERIOD`/`REPCN` and the tract FILTERs already encode ([`encode.rs:257`](../../../../src/vcf/encode.rs), [`FilterVerdict`, `vcf/mod.rs:684`](../../../../src/vcf/mod.rs)) | **built; two inputs unwired** (§3.2) |
 
 One fact worth a line on its own, found only by opening the file: **every run today already
 instantiates the STR machinery.** The genotyper the command builds is
 `SummariseConditionLoop<StutterSubstitutionEmission, MarginalizedDirichletPrior>`
-([`call_from_alignments.rs:627`](../../../../src/pop_var_caller_exp/call_from_alignments.rs)),
+(`d9e7b076:src/pop_var_caller_exp/call_from_alignments.rs:627`),
 so the STR emission, its scratch, and the loop's tract arms are compiled into every calling
 run and reachable the moment an `Ssr`-shaped [`LocusEvidence`,
-`calling/mod.rs:392`](../../../../src/ng/calling/mod.rs) arrives. Nothing constructs one.
+`calling/locus_evidence.rs`](../../../../src/calling/locus_evidence.rs) arrives. Nothing constructs one.
 
 ---
 
 ## 3. What is missing, precisely
 
-### 3.1 Selection: `src/ng/calling/allele_candidates/ssr.rs`
+### 3.1 Selection: `src/calling/allele_candidates/ssr.rs`
 
 The one missing piece of statistics, and its design is done:
 [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) settles the ladder, which rungs a
@@ -134,11 +134,11 @@ What the rest of the chain contracts from it, all three already typed at the con
 
 - a `CandidateAlleles` whose kind is `LocusKind::Ssr(_)` — the parameter assembly asserts
   exactly this
-  ([`repeat_tract_parameters.rs:838-847`](../../../../src/ng/calling/inference/repeat_tract_parameters.rs));
+  ([`repeat_tract_parameters.rs:838-847`](../../../../src/calling/inference/repeat_tract_parameters.rs));
 - `candidate_repeat_counts`, one `NonZeroU32` per candidate — the field on
   `LocusEvidence::Ssr` whose documentation names its producer as *"repeat-tract candidate
   selection, which is unwritten"*
-  ([`calling/mod.rs:416-431`](../../../../src/ng/calling/mod.rs)); not derivable from the
+  ([`calling/locus_evidence.rs`](../../../../src/calling/locus_evidence.rs)); not derivable from the
   bases, because an interrupted tract holds fewer whole repeats than its length says;
 - the tract FILTER verdicts that are selection's to mint — `NotPeriodic`,
   `TooManyAlleles`, `LowDepth` — for which the record's vocabulary already exists and is
@@ -152,13 +152,13 @@ What the rest of the chain contracts from it, all three already typed at the con
 unchanged, and a tract arm that runs: `select_ssr` → `shape_ssr_locus` → the same
 `genotyper.call_locus` → `assemble_record`. The scratch is already in place (the run's
 `CallingScratch` is parameterised by the STR emission's own scratch type,
-[`callers.rs:551`](../../../../src/ng/run/callers.rs)). Two values the record's assembly
+[`callers.rs:551`](../../../../src/run/callers.rs)). Two values the record's assembly
 already accepts must start arriving:
 
 - `repeat_tract: Some(TractAnnotation::new(motif))` from the observation's kind — the field
   and its `None` placeholder are at
-  [`assemble.rs:79-84`](../../../../src/ng/vcf/assemble.rs) and
-  [`records.rs:263`](../../../../src/ng/run/records.rs);
+  [`assemble.rs:79-84`](../../../../src/vcf/assemble.rs) and
+  [`records.rs:263`](../../../../src/run/records.rs);
 - the FILTER verdict from selection/loop rather than the converged-or-not derivation alone.
 
 Same station, one more obligation: **the run report.** A tract called, a tract refused
@@ -237,7 +237,7 @@ scored from per-stratum slippage, a length spectrum, and substitution rates; whe
 parameters file supplies fitted values the assembly uses them, and every absence is answered
 with a stated constant and a warrant — the shipped HipSTR stutter model, `Defaulted`, per
 cell
-([`repeat_tract_parameters.rs:22-46`](../../../../src/ng/calling/inference/repeat_tract_parameters.rs))
+([`repeat_tract_parameters.rs:22-46`](../../../../src/calling/inference/repeat_tract_parameters.rs))
 — with the outlier weight production's 0.01, declared inherited. Producing fitted files is
 **deferred future work** (§1.2, §6), so the first tract calls will be `--defaults` calls:
 uncalibrated slippage the way the path already calls SNPs with uncalibrated base qualities —
@@ -257,7 +257,7 @@ discovery round looks after convergence for lengths the posteriors keep explaini
 admits the ones that clear an evidence bar, and reruns the loop to a fixpoint — HipSTR's
 mechanism, set out arm by arm in [`calling_em_loop.md`](calling_em_loop.md) §4.1. That
 design is settled, its evidence-bar constants are shipped and inert
-([`inference/mod.rs:158`](../../../../src/ng/calling/inference/mod.rs) — *"inherited from
+([`inference/mod.rs:158`](../../../../src/calling/inference/mod.rs) — *"inherited from
 HipSTR's high-depth human setting and soft"*), and on the STR path an admitted allele changes
 every genotype's likelihood — the rows are recomputed rather than carried over
 ([`calling_em_loop.md`](calling_em_loop.md) §4's table), while the per-read emission columns
@@ -310,13 +310,13 @@ than the candidate set, and nothing in the owner's ruling touched it — deferre
 
 | what | source | how |
 |---|---|---|
-| the loop, both optional rounds' design | [`calling_em_loop.md`](calling_em_loop.md) + [`summarise_condition.rs`](../../../../src/ng/calling/inference/summarise_condition.rs) | as is — already branches on the evidence kind |
-| emission Model A | [`likelihood/ssr_emission.rs`](../../../../src/ng/calling/likelihood/ssr_emission.rs), [`ssr.rs`](../../../../src/ng/calling/likelihood/ssr.rs) | as is; why this model is [`read_likelihoods.md`](read_likelihoods.md) §4.1 |
-| per-locus parameter assembly | [`repeat_tract_parameters.rs`](../../../../src/ng/calling/inference/repeat_tract_parameters.rs) | as is |
+| the loop, both optional rounds' design | [`calling_em_loop.md`](calling_em_loop.md) + [`summarise_condition.rs`](../../../../src/calling/inference/summarise_condition.rs) | as is — already branches on the evidence kind |
+| emission Model A | [`likelihood/ssr_emission.rs`](../../../../src/calling/likelihood/ssr_emission.rs), [`ssr.rs`](../../../../src/calling/likelihood/ssr.rs) | as is; why this model is [`read_likelihoods.md`](read_likelihoods.md) §4.1 |
+| per-locus parameter assembly | [`repeat_tract_parameters.rs`](../../../../src/calling/inference/repeat_tract_parameters.rs) | as is |
 | STR seed | [`calling_priors.md`](calling_priors.md) §5 + `genotype_prior` | as is |
 | selection design | [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) (+ arch, + plan) | build `allele_candidates/ssr.rs` to it |
 | production's selector | `src/ssr/cohort/candidate_set.rs` (frozen) | **differential oracle only** — with its three replaced rules switched in, `select_ssr` must reproduce it (the plan's own acceptance); never a dependency |
-| record + fields | [`vcf/assemble.rs`](../../../../src/ng/vcf/assemble.rs), [`encode.rs`](../../../../src/ng/vcf/encode.rs) | as is; wire the two inputs |
+| record + fields | [`vcf/assemble.rs`](../../../../src/vcf/assemble.rs), [`encode.rs`](../../../../src/vcf/encode.rs) | as is; wire the two inputs |
 | accuracy harnesses | `benchmarks/giab/` (this year's three-caller split), `benchmarks/ssr_hg002/` (HipSTR/truth eval), `benchmarks/ssr_tomato1/` | acceptance, §8 |
 
 ## 6. Deferred, with a recommended home

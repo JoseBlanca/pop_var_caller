@@ -131,9 +131,12 @@ Two rules of thumb the read-filtering spec pinned down (`../spec/read_filtering.
 dependency.** As four sibling folders, the three calling design documents each had to state that
 the prior and the likelihood must never import from `inference/`, and the shared types had to
 cross as flat slices partly to enforce it — a constraint the tree imposed rather than the design.
-Under one `calling/` folder the shared vocabulary sits at the top of `calling/` and every
-sub-module imports downward, so the rule disappears. **When keeping steps apart forces a
-no-import rule between them, they are one folder.**
+Under one `calling/` folder the shared vocabulary sits one level above the steps, in files beside
+`calling/mod.rs`, and the rule that mattered — the prior and the likelihood never import from
+`inference/` — still holds, though only review keeps it so. The shared types are not free of the
+steps: several carry a type a step defines, and `CallingScratch` holds a buffer from every step by
+design, because a worker owns one scratch and lends each step its part. **When keeping steps apart
+forces a no-import rule between them, they are one folder.**
 
 **2. STR-ness is not a separate subtree.** The STR implementation of a step sits next to the
 generic one in that step's folder — `locus_generation/ssr/` beside `locus_generation/pileup/`,

@@ -57,10 +57,10 @@ runs that prove each of those.
 
 - The shared selection module, merged: `select_generic`, `SelectionVerdict`,
   `UnmatchedSupport`, `AlleleRemap`, `SelectionScratch`
-  ([`allele_candidates/`](../../../../src/ng/calling/allele_candidates/)).
+  ([`allele_candidates/`](../../../../src/calling/allele_candidates/)).
 - The tract scoring chain, built and tested end to end given candidates:
   `shape_ssr_locus`, `StutterSubstitutionEmission`, `repeat_tract_parameters`, the loop's
-  tract arms ([`summarise_condition.rs:7623`](../../../../src/ng/calling/inference/summarise_condition.rs)),
+  tract arms ([`summarise_condition.rs:7623`](../../../../src/calling/inference/summarise_condition.rs)),
   the encoder's `STR`/`RU`/`PERIOD`/`REPCN` and `FilterVerdict` (spec §2's table).
 - **From the parallel plan, before A1:** its Checkpoint A (`CohortObservation.kind`) merged
   to `main`. **Before C1:** its Checkpoint C (slot filled, set-aside guard) merged.
@@ -117,16 +117,16 @@ slot belongs to the parallel plan.
 
 **C1. The dispatch.**  ✅
 `call_one_generic_locus`'s call site branches on `CohortObservation::kind`
-([`callers.rs:813`](../../../../src/ng/run/callers.rs)): `Generic` unchanged; `Ssr` runs
+([`callers.rs:813`](../../../../src/run/callers.rs)): `Generic` unchanged; `Ssr` runs
 `select_ssr` → `shape_ssr_locus` → the same `genotyper.call_locus`, replacing the
 observations plan's set-aside guard. `SsrBundle` stays set aside and counted. The scratch is
-already the STR emission's ([`callers.rs:551`](../../../../src/ng/run/callers.rs)).
+already the STR emission's ([`callers.rs:551`](../../../../src/run/callers.rs)).
 *Depends:* B1; the parallel plan's Checkpoint C merged, rebase first.
 *Source:* spec §3.2.
 
 **C2. The record's two unwired inputs.**  ✅
 `records.rs` passes `Some(TractAnnotation::new(motif))` from the observation's kind
-(today `None`, [`records.rs:263`](../../../../src/ng/run/records.rs)), the per-allele repeat
+(today `None`, [`records.rs:263`](../../../../src/run/records.rs)), the per-allele repeat
 counts reach `REPCN`, and the FILTER verdict comes from selection and the loop
 (`NotPeriodic`, `TooManyAlleles`, `LowDepth`, `EmDidNotConverge`) rather than from
 convergence alone. Round-trip pin: a tract record through `bcftools` unchanged.

@@ -27,12 +27,12 @@ built without a field `CohortObservation` does not carry.*
 
 **In:**
 
-- `src/ng/run/cohort_merge/close.rs` and `build.rs` — `ClosedLocus` carries the locus kind, and
+- `src/run/cohort_merge/close.rs` and `build.rs` — `ClosedLocus` carries the locus kind, and
   `CohortObservation` gains `pub kind: LocusKind` (Milestone A). Without it there is no motif, so
   no period, so no repeat count and no ladder.
-- `src/ng/calling/allele_candidates/ssr.rs` — `RepeatLadder`, `SsrSelectionConfig` with
+- `src/calling/allele_candidates/ssr.rs` — `RepeatLadder`, `SsrSelectionConfig` with
   `DEFAULT_MAX_OFF_GRID_SHARE`, `SsrLocusSelection`, `select_ssr`.
-- `src/ng/calling/allele_candidates/mod.rs` — `SelectionScratch` gains the ladder's buffers.
+- `src/calling/allele_candidates/mod.rs` — `SelectionScratch` gains the ladder's buffers.
 - `examples/ng_candidate_selection_probe.rs` — a repeat-tract arm, so the ladder is exercised on
   real reads through the merge (Milestone E).
 
@@ -45,7 +45,7 @@ built without a field `CohortObservation` does not carry.*
   [`../spec/calling_priors.md`](../spec/calling_priors.md) §5.2. Spec §5 hands it the fact it was
   waiting for and a leaning; this plan produces `repeat_counts` and stops there.
 - **The merge's variability filter at a tract too long for a read to span** — already booked in
-  the merge's own code ([`build.rs:1025-1034`](../../../../src/ng/run/cohort_merge/build.rs)) and
+  the merge's own code ([`build.rs:1025-1034`](../../../../src/run/cohort_merge/build.rs)) and
   left there. Spec §8.
 - **Wiring the STR generator into a production run's `GeneratorSet`** — nothing in `src/` builds
   one with the `Ssr` slot filled today; only tests and examples do. Milestone E fills it in the
@@ -78,17 +78,17 @@ built without a field `CohortObservation` does not carry.*
   config and constants, `SelectionVerdict`, `UnmatchedSupport`, `AlleleRemap`, `LocusSelection`,
   `SelectionScratch`, and the fold and ranking `select_ssr` reuses.
 - **The merge, complete** ([`cohort_merge.md`](cohort_merge.md)), including the closer's exhaustive
-  branch on the locus kind ([`close.rs:110-125`](../../../../src/ng/run/cohort_merge/close.rs)),
+  branch on the locus kind ([`close.rs:110-125`](../../../../src/run/cohort_merge/close.rs)),
   which is what makes Milestone A a carry-through rather than a new derivation.
 - **The STR locus generator**: `SsrGenerator` and `SsrDetail` with its `Motif`
-  ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs);
-  `Motif::period` at [`types.rs:1138`](../../../../src/ng/types.rs)).
+  ([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs);
+  `Motif::period` at [`types.rs:1138`](../../../../src/types.rs)).
 - **The measurement rig**: `benchmarks/ssr_hg002/` with its Tier catalog, its 5×–300× read ladder
   and its assembly-derived truth set; production's `ssr-pileup` and
   `examples/ssr_slip_dump`, which produced every number spec §4.1 and §5 quote.
 - **Production's selector as the differential's other end**:
-  [`candidate_set.rs`](../../../../src/ssr/cohort/candidate_set.rs) and
-  [`rung_ladder.rs`](../../../../src/ssr/cohort/rung_ladder.rs), read-only — `src/ssr/` is frozen.
+  `d9e7b076:src/ssr/cohort/candidate_set.rs` and
+  `d9e7b076:src/ssr/cohort/rung_ladder.rs`, read-only — `src/ssr/` is frozen.
 
 ## Branch and merge
 
@@ -115,7 +115,7 @@ built without a field `CohortObservation` does not carry.*
 
 **A1. `ClosedLocus` and `CohortObservation` carry `LocusKind`.**  ✅
 The closer already has the kind in scope where it builds a `ClosedLocus`
-([`close.rs:713-721`](../../../../src/ng/run/cohort_merge/close.rs)) and drops it; carry it
+([`close.rs:713-721`](../../../../src/run/cohort_merge/close.rs)) and drops it; carry it
 through, and have `CohortObservation::over` copy it onto the assembled locus. **The clone is one
 per *built* locus, not per closed one**, and `LocusKind::Ssr` boxes two flanks — say so in the doc
 comment, per the repo's clone-audit rule, and note that the generic variant clones nothing.
@@ -165,7 +165,7 @@ length. Production's `is_clear_peak` is not called and not ported.
 **C2. The `±1` rescue and the union. — own commit, do not bundle.**  ✅
 When a sample resolved fewer than `ploidy` counts, promote each promoted count's `±1` neighbours
 **where some sample's reads reached that length** — production's `occupied` test
-([`candidate_set.rs:221`](../../../../src/ssr/cohort/candidate_set.rs)), ported unchanged. The
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:221`), ported unchanged. The
 cohort's promoted set is the union across samples.
 **Why this one is isolated:** dropping the `occupied` test invents a length, and firing the rescue
 on a sample that did resolve its ploidy widens every locus — both are extra candidates, not
@@ -192,8 +192,8 @@ that is not a whole number of motif units from the ladder's mode; the locus is `
 when **no** sample is periodic. A `NotPeriodic` locus returns the reference tract alone, that
 verdict, an empty leftover and a one-entry `repeat_counts`.
 **Why this one is isolated:** production measures this offset in bases while keying its ladder in
-units ([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs) against
-[`rung_ladder.rs:301`](../../../../src/ssr/cohort/rung_ladder.rs)); repeating that mismatch
+units (`d9e7b076:src/ssr/cohort/candidate_set.rs:114-145` against
+`d9e7b076:src/ssr/cohort/rung_ladder.rs:301`); repeating that mismatch
 refuses periodic loci and admits non-periodic ones, and nothing fails.
 *Oracle:* a locus whose reads are all a whole number of units from the mode is periodic whatever
 their lengths in bases; one sample being periodic saves a locus every other sample fails.

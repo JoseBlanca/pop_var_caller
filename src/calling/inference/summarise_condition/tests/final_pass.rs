@@ -1,7 +1,7 @@
 use super::*;
 
 // ────────────────────────────────────────────────────────────────────────────────
-// C3b — the final pass: the calls, the site quality, and the artifact summary
+// The final pass: the calls, the site quality, and the artifact summary
 // ────────────────────────────────────────────────────────────────────────────────
 
 /// **One sample's call, its confidence, and its artifact counts, on numbers a reader can
@@ -350,10 +350,9 @@ fn a_locus_called_over_the_reference_alone_carries_no_artifact_summary() {
 /// sample included the alternative would draw **26 reads of 38** rather than the 6 of 12
 /// asserted here, and the expectation would move with it.
 ///
-/// **Why the fixture has to write that sample's likelihood row at all.** Nothing sets a
-/// sample aside before the loop yet — that is step D1's — so this test hands the loop a
-/// complete table and flags the sample only in the evidence. What it pins is the final
-/// pass's half of the ruling, which is the half this step owns.
+/// **Why the fixture writes that sample's likelihood row at all.** The helper takes one row
+/// per sample of the run and, like the driver, never reads a set-aside sample's; the sample
+/// is flagged in the evidence. What this pins is the final pass's half of the ruling.
 /// **A sample whose reads said nothing is called and counted nowhere**
 /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.2): adding one leaves the cohort's copies,
 /// and every other sample's genotype and quality, exactly as they were. Before the ruling
@@ -436,7 +435,7 @@ fn a_sample_the_candidate_step_set_aside_is_missing_and_counted_nowhere() {
     assert!(inference.per_sample[1].is_missing());
     assert!(
         inference.per_sample[1].genotype().is_none()
-            && inference.per_sample[1].score_best_genotype().is_none(),
+            && inference.per_sample[1].genotype_quality().is_none(),
         "a sample set aside has no genotype and no quality: there is nothing that was \
          scored to have one"
     );

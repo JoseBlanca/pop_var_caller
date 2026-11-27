@@ -1,34 +1,29 @@
-//! **ng's genotype table against production's, value for value.**
+//! **The genotype table against tables recorded from the caller it was ported from, value for
+//! value.**
 //!
-//! [`GenotypeTable`](super::genotype_table::GenotypeTable) is a port of production's
-//! `GenotypeShape` (`src/var_calling/posterior_engine/shape.rs`), and the thing a port
-//! has to prove is not that it is self-consistent but that it agrees with what it was
-//! ported from. It holds four quantities per shape — the genotype count, the allele
-//! counts in the VCF `PL` order, the log multinomial coefficients, and the homozygous
-//! lookup — and **three of the four would be wrong silently** if the port had slipped:
-//! a different enumeration order labels every `PL` entry with the wrong genotype, a
-//! coefficient off in the last bits shifts every prior, a homozygous entry in the wrong
-//! row fires the inbreeding mixture on the wrong genotype. Only a wrong count is loud
-//! (`doc/devel/ng/impl_plan/calling_foundations.md`, step C2;
-//! `doc/devel/ng/arch/calling_em_loop.md` §8).
+//! [`GenotypeTable`](super::genotype_table::GenotypeTable) is a port of the deleted caller's
+//! `GenotypeShape` (`d9e7b076:src/var_calling/posterior_engine/shape.rs`). It holds four
+//! quantities per shape — the genotype count, the allele counts in the VCF `PL` order, the log
+//! multinomial coefficients, and the homozygous lookup — and **three of the four would be wrong
+//! silently** if the port had slipped: a different enumeration order labels every `PL` entry
+//! with the wrong genotype, a coefficient off in the last bits shifts every prior, a homozygous
+//! entry in the wrong row fires the inbreeding mixture on the wrong genotype. Only a wrong count
+//! is loud (`doc/devel/ng/arch/calling_em_loop.md` §8).
 //!
-//! **The oracle is production's own artefact, built by production's own code — frozen since
-//! promotion step C5.** Until then this file called `shape_for(ploidy, n_alleles)`, which
-//! returned the `GenotypeShape` production's posterior engine used, and compared every field
-//! the engine read. Production is being deleted, so each of the 76 shapes the tests compare was
-//! written once, at commit `d9e7b076`, to
-//! [`testdata/genotype_tables_production.txt`](testdata/genotype_tables_production.txt) — 27,384
-//! genotype rows — and the tests compare against that file. Nothing is re-derived here and
-//! nothing is transcribed by hand.
+//! **What is pinned.** The old caller's table for each of 76 shapes, 27,384 genotype rows in
+//! all, written once at commit `d9e7b076` to
+//! `testdata/genotype_tables_production.txt`.
+//! Nothing is re-derived here and nothing is transcribed by hand. The widest shape is 18
+//! alleles: the old enumeration iterated over a `u8`, so above 255 alleles it produced no
+//! genotypes at all, where the port reaches 65,536.
 //!
-//! **This is ng's test; production is only the yardstick.** It is its own file rather than a
-//! block inside `genotype_table.rs`'s `mod tests` so that the table's own tests stay free of
-//! the comparison.
+//! **When a deliberate change breaks a shape**, work out the new expectation independently —
+//! the VCF genotype order has a closed form, and the coefficients are exact sums of `ln k` —
+//! and replace the fixture with it, giving the reason. Never re-record the fixture from this
+//! code: then the test would only check the code against itself.
 //!
-//! **The oracle stopped being production above 255 alleles.** `genotype_order`, which
-//! `GenotypeShape::build` enumerated with, iterated `min_allele..(n_alleles as u8)`, so
-//! 256 alleles yielded no genotypes at all, where the port reaches 65,536. The widest shape
-//! here is 18 alleles.
+//! A file of its own rather than a block inside `genotype_table.rs`'s tests, so that the
+//! table's own tests stay free of the comparison.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};

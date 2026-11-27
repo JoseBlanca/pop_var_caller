@@ -24,7 +24,7 @@
 //!
 //! ## Two functions with one contract between them
 //!
-//! (And, since plan step E2, one export that belongs to neither: the repeat-tract seed's shape
+//! (And one export that belongs to neither: the repeat-tract seed's shape
 //! before it is scaled, which the read likelihood's contamination term composes —
 //! [`seed_ssr::fill_seed_share_per_candidate`].)
 //!
@@ -49,8 +49,8 @@
 //! pre-pass's answer to *how variable is this population?*, written as chromosome counts.
 //! Each locus's concentration is the seed plus what the other samples showed at that locus.
 //! **Nothing refines the seed** — unlike the starting values the STR cohort's EM also calls
-//! seeds (`src/ssr/cohort/em_init.rs`), which an iteration then moves, this one is frozen
-//! for the whole run.
+//! seeds (the deleted caller's `d9e7b076:src/ssr/cohort/em_init.rs`), which an iteration then
+//! moves, this one is frozen for the whole run.
 //!
 //! ## What lands where
 //!
@@ -58,22 +58,17 @@
 //!   what you get by drawing the locus's allele frequencies from a Dirichlet and then
 //!   drawing this sample's few allele copies from those frequencies. Because it *averages
 //!   over* the unknown frequencies rather than fixing them at one estimate —
-//!   marginalizing — it is the default here (plan steps B1–B2).
+//!   marginalizing — it is the prior used here.
 //! - [`seed_generic`] — the SNP/indel starting point, read off the pre-pass's fitted frequency
-//!   spectrum (plan step D). *Generic* is the crate's word for the non-STR path, as in
+//!   spectrum. *Generic* is the crate's word for the non-STR path, as in
 //!   `parameter_estimation::generic`, so it pairs with [`seed_ssr`] on the same axis.
 //! - [`seed_ssr`] — the STR starting point, read off the fitted **allele length variation** and
-//!   concentration the joint repeat fit produces for this tract's stratum (plan step E2e;
-//!   `doc/devel/ng/spec/population_diversity.md` §4). **Its two spectra are different
+//!   concentration the joint repeat fit produces for this tract's stratum
+//!   (`doc/devel/ng/spec/population_diversity.md` §4). **Its two spectra are different
 //!   quantities and neither is ever called just "the spectrum"**: [`seed_generic`]'s is a
 //!   *frequency* spectrum, how allele frequencies are spread across the population;
 //!   [`seed_ssr`]'s is a *length* spectrum, how a stratum's chromosomes are spread over tract
 //!   lengths. **STR** in prose, `ssr` in module paths, as everywhere in ng.
-//! - `hardy_weinberg` — the comparator: Hardy–Weinberg at a single estimated frequency,
-//!   plugged in as though it were the truth, kept only so the change the marginalized prior
-//!   makes stays measurable (plan step F). Named for the distribution, like its sibling
-//!   [`dirichlet_multinomial`]; the plug-in character survives in the type it holds,
-//!   `PlugInWrightPrior`.
 //!
 //! Build order and step contracts: `doc/devel/ng/impl_plan/calling_prior.md`. The design
 //! and every why: `doc/devel/ng/spec/calling_priors.md`; the types and this seam:
@@ -99,18 +94,18 @@ use crate::types::InbreedingF;
 /// The measured scalars the caller consumes are **not** here. They are the parameter pre-pass's
 /// outputs, so they live in [`crate::types`] —
 /// [`ExpectedHeterozygosity`](crate::types::ExpectedHeterozygosity) and
-/// [`RepeatGeneDiversity`](crate::types::RepeatGeneDiversity) — and reject with a
-/// `DomainError` rather than a panic: a degenerate fit that returns a `NaN` is a run the caller
-/// should refuse with a message, not abort. *(`SeedDecayPerRepeat` stood beside them until step
-/// E2e; it was the decay of a constructed geometric shape the fitted allele length variation replaced,
-/// and it went with the construction.)*
+/// [`ExpectedAlternativeFrequency`](crate::types::ExpectedAlternativeFrequency) — and reject
+/// with a `DomainError` rather than a panic: a degenerate fit that returns a `NaN` is a run the
+/// caller should refuse with a message, not abort. *(`SeedDecayPerRepeat` once stood beside
+/// them; it was the decay of a constructed geometric shape the fitted allele length variation
+/// replaced, and it went with the construction.)*
 ///
 /// The nesting is load-bearing rather than tidy, and it was measured. A private field is
-/// visible to a module's *descendants*, and `dirichlet_multinomial`, `hardy_weinberg`,
-/// `seed_generic` and `seed_ssr` are all descendants of `genotype_prior` — so with these
-/// types declared directly in `genotype_prior`, a struct literal in any of those four files
+/// visible to a module's *descendants*, and `dirichlet_multinomial`, `seed_generic` and
+/// `seed_ssr` are all descendants of `genotype_prior` — so with these types declared
+/// directly in `genotype_prior`, a struct literal in any of those three files
 /// compiles and skips the constructor entirely. Verified: a probe in
-/// `dirichlet_multinomial.rs` built a `PriorRow` field by field, compiled, and ran. Those four
+/// `dirichlet_multinomial.rs` built a `PriorRow` field by field, compiled, and ran. Those three
 /// files are the ones that hold every implementation of [`GenotypePriorModel`] and every seed
 /// builder, which is to say the only callers the checks exist for. One level of nesting makes
 /// them siblings of this module instead of descendants, and the literal stops compiling.
@@ -305,7 +300,8 @@ mod checked {
             );
             // The premise [`Self::ploidy`] rests on, checked rather than assumed. A genotype
             // table's rows all sum to the ploidy, but `genotype_allele_counts` arrives as a bare
-            // slice with no tie to any table, and until B2 nothing read its *values*. Now the
+            // slice with no tie to any table, and until the inbreeding mixture was added nothing
+            // read its *values*. Now the
             // inbreeding mixture adds `lgamma(Σα + m) − lgamma(Σα)` to one branch only, so a wrong
             // `m` is not a shared constant the row can carry — it re-weights the mixture. Measured
             // on a diploid biallelic table whose first row was edited to `[6, 0]`: the
@@ -579,8 +575,7 @@ pub enum SeedRegime {
     /// blend and the search are deleted, and the two regulariser numbers described a spectrum
     /// emission the cohort gather no longer makes (`parameter_prepass_cohort.md` §4). What a run
     /// on this route owes its reader instead is
-    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7's list, which is a Milestone C
-    /// step and not built.
+    /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §7's list, which is not built.
     FittedCurve,
     /// No population curve was fitted, so there is no measured shape and the pair is the
     /// neutral `(1, θ)` at the heterozygosity the pre-pass **did** fit.
@@ -649,7 +644,7 @@ pub enum SeedRegime {
 /// cannot be negative and anything below zero is floating-point noise — **up to a point**. Past
 /// this one it means the two paths that produce the counts have gone out of step; production names
 /// the pair that can disagree in its own engine, a biallelic fast path against a per-row
-/// accumulator (`src/var_calling/posterior_engine.rs`).
+/// accumulator (`d9e7b076:src/var_calling/posterior_engine.rs`).
 ///
 /// **The value is production's, and it holds across this caller's range with room to spare.**
 /// Measured on the worst leave-one-out cancellation at ploidy scale: the two-path gap reaches
@@ -710,10 +705,10 @@ pub(crate) const COUNT_PATH_DESYNC_THRESHOLD: f64 = -1e-6;
 ///
 /// Fills the caller's buffer and **allocates nothing**, so it costs no allocation per sample per
 /// pass. Production's two spellings differ here and only one of them allocates: the STR cohort's
-/// `leave_one_out_alpha` (`src/ssr/cohort/em.rs`) collects a fresh `Vec`, while the SNP engine
-/// already writes a reused scratch buffer (`src/var_calling/posterior_engine.rs`), which is the
-/// shape this follows — spec §8 records production lifting exactly these buffers out of its loop
-/// after a profile put the allocator's own self-time at about one cycle in six.
+/// `leave_one_out_alpha` (`d9e7b076:src/ssr/cohort/em.rs`) collects a fresh `Vec`, while the SNP
+/// engine already writes a reused scratch buffer (`d9e7b076:src/var_calling/posterior_engine.rs`),
+/// which is the shape this follows — spec §8 records production lifting exactly these buffers out
+/// of its loop after a profile put the allocator's own self-time at about one cycle in six.
 ///
 /// **The three lengths are checked in release, and neither production spelling checks them at
 /// all** — the STR one asserts in debug, the SNP one not at any level. Both can afford that: one
@@ -777,16 +772,16 @@ pub fn fill_sample_concentration(
     }
 }
 
-/// One sample's log-prior over every candidate genotype at one locus — the seam step 8's
-/// two competing answers sit behind.
+/// One sample's log-prior over every candidate genotype at one locus — the seam a genotype
+/// prior sits behind.
 ///
-/// **The two answers, and why the losing one is kept.** The default integrates over the
-/// unknown allele frequency; the comparator estimates the frequency and substitutes the
-/// estimate as though it were the truth. The second undercounts homozygotes by exactly the
-/// variance of that frequency, and on GIAB's three samples, each called on its own at 5×,
-/// the difference between them was 11 points of genotype accuracy at true variants —
-/// 83.6% against 94.6% (spec §2.2). The comparator ships only so that measurement stays
-/// re-runnable.
+/// **One answer ships, and the spec measured it against another.** The shipped prior,
+/// [`MarginalizedDirichletPrior`], integrates over the unknown allele frequency. The
+/// alternative estimates the frequency and substitutes the estimate as though it were the
+/// truth; it undercounts homozygotes by exactly the variance of that frequency, and on GIAB's
+/// three samples, each called on its own at 5×, it lost 11 points of genotype accuracy at true
+/// variants — 83.6% against 94.6% (spec §2.2). That alternative is not built here; the other
+/// implementations of this trait are test doubles.
 ///
 /// ## The contract
 ///
@@ -802,11 +797,10 @@ pub fn fill_sample_concentration(
 ///
 /// **This is a rule for every implementation, which is why it is here and not in one
 /// implementation's tests.** Production's own mixture writes `−∞` at this point, so the default
-/// implementation departs from what it ports; the comparator arriving at plan step F1 is instead
-/// ported from `wright_genotype_log_priors`, which already floors. Two priors are compared behind
-/// this seam to attribute a difference in genotypes to the *model*, and that only works if they
-/// agree on this. The floor changes no call either way — moving a genotype off it would take read
-/// evidence worth about 3,000 Phred (owner, 2026-08-22).
+/// implementation departs from what it ports. Two priors compared behind this seam can only
+/// attribute a difference in genotypes to the *model* if they agree on this. The floor changes no
+/// call either way — moving a genotype off it would take read evidence worth about 3,000 Phred
+/// (owner, 2026-08-22).
 ///
 /// **Same inputs, bit-identical rows, at any thread count.** No RNG, no clock, no
 /// thread-dependent iteration order.

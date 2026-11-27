@@ -1,7 +1,7 @@
 use super::*;
 
 // ---------------------------------------------------------------------------------
-// C2 — convergence, the cap, and the emitted flag
+// Convergence, the cap, and the emitted flag
 // ---------------------------------------------------------------------------------
 
 /// A configuration a locus can meet **only by reaching a bitwise fixed point**, so that

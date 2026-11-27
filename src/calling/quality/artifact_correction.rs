@@ -140,7 +140,7 @@ const _: () = assert!(
 /// is why: it is production's line, kept as the net under the clamp rather than as live
 /// arithmetic.
 ///
-/// Production's [`tail_phred`](../../../../src/vcf/qual_refine.rs).
+/// Production's `tail_phred` (`d9e7b076:src/vcf/qual_refine.rs`).
 pub fn two_sided_binomial_tail_phred(observed: f64, total: f64, expected_share: f64) -> f64 {
     (-10.0 * float::log10(two_sided_binomial_tail(observed, total, expected_share))).max(0.0)
 }
@@ -155,7 +155,7 @@ pub fn two_sided_binomial_tail_phred(observed: f64, total: f64, expected_share: 
 /// split is a byte-identity boundary and not an accuracy one**: the beta method is exact at
 /// every `total`, and the sum is kept below the boundary purely to hold production's own output
 /// bit-for-bit unchanged at the single-sample depths it had already validated
-/// ([`qual_refine.rs`](../../../../src/vcf/qual_refine.rs), `EXACT_TAIL_MAX_N`).
+/// (`d9e7b076:src/vcf/qual_refine.rs`, `EXACT_TAIL_MAX_N`).
 ///
 /// **ng has no such obligation** — its oracle is a differential against production, not
 /// byte-identity with it — and at cohort scale `total` is the pooled read count across every
@@ -172,7 +172,7 @@ pub fn two_sided_binomial_tail_phred(observed: f64, total: f64, expected_share: 
 /// The binomial is unimodal, so *no more likely than `observed`* is the near tail through
 /// `observed` plus a far tail beyond the opposite-flank outcome of equal probability. Each flank
 /// is monotone, so that opposite cutoff is one binary search. Production's
-/// [`binom_two_sided_p_beta`](../../../../src/vcf/qual_refine.rs), ported unchanged.
+/// `binom_two_sided_p_beta` (`d9e7b076:src/vcf/qual_refine.rs`), ported unchanged.
 fn two_sided_binomial_tail(observed: f64, total: f64, expected_share: f64) -> f64 {
     if total < 1.0 {
         return 1.0;
@@ -346,7 +346,7 @@ fn log_binomial_probability(count: f64, total: f64, share: f64) -> f64 {
 /// decomposition found this test at zero for true heterozygotes at every depth while growing with
 /// depth for false positives; it is the strand test next door that had the power problem (§6.2).
 ///
-/// Production's, inline in [`refine_qual`](../../../../src/vcf/qual_refine.rs).
+/// Production's, inline in `refine_qual` (`d9e7b076:src/vcf/qual_refine.rs`).
 pub fn allele_balance_penalty(counts: &ArtifactTestCounts) -> Phred {
     // A locus with no alternative reads has nothing to weigh. It cannot arise from a run — the
     // worker hands back no summary at all in that case — but this is where a division by zero
@@ -902,7 +902,7 @@ mod tests {
     ///
     /// Every outcome from none to all, keeping the ones no more likely than the observed. This
     /// is production's shipped path below 2,000 reads
-    /// ([`binom_two_sided_p`](../../../../src/vcf/qual_refine.rs)); in ng it exists only here,
+    /// (`binom_two_sided_p`, `d9e7b076:src/vcf/qual_refine.rs`); in ng it exists only here,
     /// because it costs `O(total)` and answers nothing the closed form does not (spec §13's Q2).
     /// **It is the oracle precisely because it is the naive definition** — no continued
     /// fraction, no binary search, no unimodality argument, nothing that could be wrong in the

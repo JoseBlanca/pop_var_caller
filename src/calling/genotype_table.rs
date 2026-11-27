@@ -8,7 +8,7 @@
 //! functions of the pair `(ploidy, allele count)`, and that pair repeats across
 //! millions of loci in a run. So the tables are built once per pair and shared
 //! ([`GenotypeTable::build`]), which is the port of production's `GenotypeShape`
-//! (`src/var_calling/posterior_engine/shape.rs`, `doc/devel/ng/arch/calling_em_loop.md`
+//! (`d9e7b076:src/var_calling/posterior_engine/shape.rs`, `doc/devel/ng/arch/calling_em_loop.md`
 //! §8).
 //!
 //! **The genotype order is the VCF one, and it is a contract rather than an
@@ -18,8 +18,7 @@
 //! production's `genotype_order` produces; the test module pins it two ways — the
 //! diploid triallelic and tetraploid biallelic orders written out by hand, and the
 //! ordering rule itself as a law over a grid of shapes — and the value-for-value
-//! comparison against production's own function is step C2 of
-//! `doc/devel/ng/impl_plan/calling_foundations.md`.
+//! comparison against the deleted caller's own function is in `genotype_table_parity`.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -33,7 +32,7 @@ use crate::types::{AlleleId, Ploidy};
 pub const MAX_ALLELE_COUNT: usize = u16::MAX as usize + 1;
 
 /// Cache the tables for ploidy up to 8, ported from production's bound
-/// (`src/var_calling/posterior_engine/shape.rs`). A diploid or tetraploid locus falls
+/// (`d9e7b076:src/var_calling/posterior_engine/shape.rs`). A diploid or tetraploid locus falls
 /// inside; so does the hexaploid or octoploid region of a polyploid crop.
 ///
 /// **Outside the bounds the table is still built, just never kept**: every
@@ -495,8 +494,8 @@ fn count_genotypes(ploidy: Ploidy, allele_count: usize) -> Option<usize> {
 
 /// The allele-count table, `entries` numbers in all — one row of `allele_count` per
 /// genotype — in the VCF genotype order, the order production's `genotype_order`
-/// (`src/var_calling/per_group_merger.rs:522`) produces. Pinned by hand and as a law
-/// here; pinned against that function in step C2.
+/// (`d9e7b076:src/var_calling/per_group_merger.rs:522`) produces. Pinned by hand and as a law
+/// here; pinned against that function's output in `genotype_table_parity`.
 fn enumerate_allele_counts(ploidy: Ploidy, allele_count: usize, entries: usize) -> Vec<u32> {
     let mut rows = Vec::with_capacity(entries);
     let mut counts = vec![0_u32; allele_count];
@@ -632,7 +631,7 @@ mod tests {
     /// shapes written out by hand: consecutive rows, read as sorted allele lists, are
     /// strictly increasing when compared from the highest copy downwards. That is the
     /// comparator production's `genotype_order` sorts with
-    /// (`src/var_calling/per_group_merger.rs`), and it is what pins the order at
+    /// (`d9e7b076:src/var_calling/per_group_merger.rs`), and it is what pins the order at
     /// ploidy 3 and above over three or more alleles — where swapping two rows changes
     /// which one is homozygous-reference while every other test here still passes,
     /// because the three tables permute together.
