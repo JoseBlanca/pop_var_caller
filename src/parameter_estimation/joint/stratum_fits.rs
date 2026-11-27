@@ -40,9 +40,9 @@
 //! (`spec/parameter_prepass_joint_fit.md` §4). A run may declare that several of its read groups
 //! slip alike by naming them in one **slippage group**, and one group per read group is the
 //! **specified grain** — which is not the same as what happens by default: the only builder of
-//! that map in this tree pools every read group into one set unless told otherwise
-//! (`examples/ng_joint_records_walk.rs`). So a lookup takes the read group the caller has and
-//! this module translates, rather than making every caller carry the translation.
+//! that map in this tree, [`every_read_group_pooled`](crate::run::every_read_group_pooled), pools
+//! every read group into one set. So a lookup takes the read group the caller has and this module
+//! translates, rather than making every caller carry the translation.
 
 use std::collections::BTreeMap;
 
@@ -61,7 +61,7 @@ use super::ssr_fit::{
 ///
 /// **One read group's stutter multiplier for one motif length**, and what stands behind it
 /// (`str_library_stutter.md` §3, §7). A read of the read group slips at
-/// [`read_group_level`](super::ssr_fit::read_group_level)`(class rate, value)`.
+/// [`read_group_level`]`(class rate, value)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StutterMultiplier {
     /// The multiplier: one is a read group of typical stutter for its slippage group.

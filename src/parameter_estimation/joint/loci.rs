@@ -169,7 +169,7 @@ impl SelectableRegions {
 /// **Measured, and it is a property of the reference rather than a rounding term**: with a
 /// two-million-position budget, tomato SL4.00 puts **135** kept positions inside `N` and
 /// GRCh38 with the hs38d1 decoys puts **106,423** — 5.3% of the whole budget, because 5.3%
-/// of that assembly is `N` (`examples/ng_joint_loci_probe.rs`).
+/// of that assembly is `N` (measured by `examples/ng_joint_loci_probe.rs`, since deleted).
 ///
 /// **It costs no read of its own.** This is a [`ReferenceBasesObserver`], so the mask comes
 /// off the same forward pass that computes the reference's digests — the seam the repeat

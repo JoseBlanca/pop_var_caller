@@ -35,10 +35,9 @@ const CANDIDATE_ALTERNATIVES: usize = 3;
 /// allele**, and is dropped rather than computed.
 ///
 /// The chance a read shows *anything* other than the reference base is
-/// `carried·(1 − ε/3) + (1 − carried)·ε`, which is
-/// [`alternative_read_probability`](crate::parameter_estimation::generic::noise_model)
-/// exactly — the two routes score a read the same way, which is what makes the comparison
-/// between them a comparison.
+/// `carried·(1 − ε/3) + (1 − carried)·ε`, where `carried` is the share of the sample's copies
+/// that carry the alternative.
+///
 /// **The reference-read term and the non-reference total are handed in rather than taken
 /// here**, because neither depends on which base the alternative is. [`ln_reference_reads`]
 /// reads the library, its depth weights and how many copies of the alternative the sample

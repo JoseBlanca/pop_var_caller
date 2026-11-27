@@ -19,23 +19,22 @@
 //! distribution cannot express which base was substituted, so the two share the selection
 //! rule and nothing about their contents.
 //!
-//! **Three states must survive a write and a read** — a locus never walked (a bug), a locus
-//! walked with no coverage (data), and a locus whose reads all matched (data). [`DepthCode`]
-//! is what makes the first expressible at an ordinary position, and [`WalkedBits`] at a repeat
-//! tract.
+//! **At an ordinary position, three states survive a write and a read** — a position never
+//! walked (a bug), a position walked with no coverage (data), and a position whose reads all
+//! matched (data). [`DepthCode`] is what makes the first expressible.
+//!
+//! **At a repeat tract the first two are not told apart.** [`WalkedBits`] marks a tract only when
+//! a read reached it, so a tract in a walked region that no read reached reads as never walked.
+//! No fit acts on the difference: the repeat-tract fit treats every tract that no read crossed
+//! alike.
 //!
 //! **A repeat tract had a fourth until 2026-08-14** — reads reached it and crossed none of it,
 //! so none reported a length. That count is now kept per *stratum* rather than per locus
 //! ([`SsrEvidence::covering_not_crossing`]), which is the grain the loss runs along: a tract
 //! longer than the reads is never crossed in any sample at any depth.
 //!
-//! # What is not here yet
-//!
-//! **The byte-level census file.** Where the evidence lives between the walk and the fit is a
-//! non-goal of the spec (§1.2) — what it requires is a property, that the fit reaches every
-//! sample's evidence without walking the reads again. The encoding that carries the *content*
-//! is here and is tested by packing and unpacking it; the framing that would put it in a file
-//! is the next unit, and it changes none of these types.
+//! **The byte-level census file is [`census_file`](super::census_file).** This module holds the
+//! content and its encoding; that one frames it into a file and reads it back.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -123,9 +122,7 @@ impl ObservedAllele {
 /// distinguishable from *visited and empty* because only the first is a bug. So the stored
 /// code is the ladder's bins plus one sentinel.
 ///
-/// **The ladder is not defined here.** It is [`DepthBinEdges`], shared with the histogram
-/// route so the two cannot bin differently — which is what makes the comparison between the
-/// routes a comparison.
+/// **The ladder is not defined here.** It is [`DepthBinEdges`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DepthCode {
     /// The region holding this position was never walked. **A bug, not data.**
@@ -451,7 +448,8 @@ impl OffsetCounts {
         self.counts[(clamped + RECORDED_OFFSET_RANGE) as usize]
     }
 
-    /// The buckets themselves, `-4 … +4` in order — for the codec that writes them.
+    /// The buckets themselves, `-8 … +8` in order ([`RECORDED_OFFSET_RANGE`]) — for the codec
+    /// that writes them.
     pub fn counts(&self) -> &[u16; OFFSET_BUCKETS] {
         &self.counts
     }
@@ -592,12 +590,13 @@ pub struct Stratum {
     pub reference_repeats: u64,
 }
 
-/// One bit a locus: whether the walk reached it.
+/// One bit a locus: whether a read reached it.
 ///
 /// **A byte would carry 58 kB of information in 0.46 MB** on tomato's 462,701 kept tracts a
 /// read group, and this is the field that has to exist at every locus whether or not anything
-/// happened there — it is the STR half's answer to the generic half's never-walked sentinel,
-/// and every other vector reads the same for a locus never walked and one walked with no read.
+/// happened there. It is the STR half's counterpart of the generic half's never-walked sentinel,
+/// but weaker: it is set only where a read reached the tract, so a tract in a walked region that
+/// no read reached is left unset, as if never walked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkedBits {
     bits: Vec<u8>,
@@ -667,10 +666,10 @@ impl WalkedBits {
 /// by the tract's position **within this stratum**, in genome order, and the two counts that
 /// spanned strata are now one number each.
 ///
-/// **Three states at a locus**: the region was never walked; it was walked and no read crossed
-/// the whole tract, so none reported a length; or reads crossed it. The generic set's
-/// zero-depth-against-quiet distinction is the last pair, and [`walked`](WalkedBits) is what
-/// makes the first expressible.
+/// **Three states at a locus**: no read reached it; reads reached it and none crossed the whole
+/// tract, so none reported a length; or reads crossed it. [`walked`](WalkedBits) is set in the
+/// last two. A tract no read reached is reported as [`SsrLocusState::NeverWalked`] whether or not
+/// its region was walked, unlike an ordinary position, where [`DepthCode`] tells the two apart.
 ///
 /// **A fourth state was expressible per locus until 2026-08-14 and is not any more** — reads
 /// that reached the tract and crossed none of it. Spec §3 moved that count to the stratum, so
@@ -826,6 +825,10 @@ impl SsrEvidence {
 
 /// Which of the three states a sample is in at a kept STR locus.
 ///
+/// **[`Self::NeverWalked`] also covers a tract in a walked region that no read reached**, because
+/// [`WalkedBits`] is set only where a read did. The repeat-tract fit treats both of the first two
+/// states alike, so nothing depends on telling them apart.
+///
 /// **There were four until 2026-08-14**, the fourth being *reads reached the locus and crossed
 /// none of it*. That count moved to the stratum (spec §3), so per locus it can no longer be
 /// told from *no read reached the locus at all* — both report no length, which is the only
@@ -833,10 +836,10 @@ impl SsrEvidence {
 /// in [`SsrEvidence::covering_not_crossing`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SsrLocusState {
-    /// The region was never walked — a bug, not data.
+    /// No read reached the tract: either its region was never walked (a bug), or it was walked
+    /// and no read got there (data).
     NeverWalked,
-    /// Walked, and no read crossed the whole tract, so none reported a length. Either no read
-    /// reached the locus, or reads reached it and stopped inside it.
+    /// Reads reached the tract and none crossed the whole of it, so none reported a length.
     NoLengthReported,
     /// At least one read crossed the tract.
     Crossed,
@@ -967,8 +970,8 @@ impl DepthLadderDigest {
 /// the direction to fail in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionTermsDigest {
-    /// In the order [`SelectionTerms::first_disagreement`] checks them, and named as it names
-    /// them, so the sentence a mismatch produces is the same one it always was.
+    /// In the order [`first_disagreement`](Self::first_disagreement) checks them, and named as
+    /// it names them, so the sentence a mismatch produces is the same one it always was.
     fields: Vec<(&'static str, [u8; 16])>,
 }
 
@@ -976,8 +979,8 @@ pub struct SelectionTermsDigest {
 /// read no catalog (`--generic-path-only`).
 const NO_CATALOG_READ: &[u8] = b"no catalog was read";
 
-/// The seven, in the order `SelectionTerms::first_disagreement` checks them and under the
-/// names it gives them. **One list, so the writer, the reader and the refusal cannot drift.**
+/// The seven, in the order [`SelectionTermsDigest::first_disagreement`] checks them and under
+/// the names it gives them. **One list, so the writer, the reader and the refusal cannot drift.**
 pub const SELECTION_FIELDS: [&str; 7] = [
     "selection seed",
     "reference digest",

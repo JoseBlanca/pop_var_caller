@@ -6,6 +6,9 @@
 //!
 //! **This is the generic path.** The repeat-tract half of the spec (§4) is not here.
 //!
+//! **Plan steps cited below** (B1 and the like) are those of
+//! `doc/devel/implementation_plans/fit_precision.md`.
+//!
 //! # What having every sample at one locus buys, in one sentence
 //!
 //! A position's own allele frequency in the population becomes a quantity the fit can weight
@@ -354,19 +357,13 @@ pub struct JointFit {
     /// wide one is not predicted by whether the curve can hold its shape**.
     ///
     /// **These are sums and not the finished moments, and that is deliberate**: the heterozygosity
-    /// needs the panel's inbreeding coefficient, which is not this fit's to choose.
-    /// `CensusMomentSums::finish` takes it, and
-    /// `CensusMomentsReport::of` is where the two
-    /// meet.
+    /// needs the panel's inbreeding coefficient, which is not this fit's to choose. **Nothing
+    /// finishes them yet**: no code reads this field (see [`CensusMomentSums`]).
     ///
-    /// **Where that coefficient comes from is settled and is not this route's problem.** §4.1
-    /// prefers the runs-of-homozygosity estimator, and §8's fifth question asked how a run on this
-    /// route obtains one, since that estimator walks genome windows in the per-sample histogram
-    /// route while this one walks census positions. **That is true of where it lives and not of
-    /// whether a run can reach it**: `parameter_prepass.md`'s step table gives `F` its own row —
-    /// fitted after each sample's walk, from that sample's windowed histogram and nothing else —
-    /// over a section stating that both routes are built and both run. So the coefficient is
-    /// already there, per sample, and what was missing was only the join.
+    /// **The coefficient there is to finish them with is [`Self::hom_excess`]**, each sample's
+    /// departure from Hardy–Weinberg. Spec §4.1 prefers a runs-of-homozygosity estimator, but that
+    /// one walked genome windows in the per-sample histogram route, which has been deleted (see
+    /// the [`parameter_estimation`](crate::parameter_estimation) module doc).
     pub census_moments: CensusMomentSums,
     /// **For every kept position, in position order, the probability that it is mismapped** —
     /// that two stretches of genome the reference holds once are both piling reads up here.

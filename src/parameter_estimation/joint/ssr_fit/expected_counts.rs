@@ -1,12 +1,13 @@
 //! **A repeat class's stutter and allele-length shares by expectation maximisation, without the
-//! average over tract frequencies** — the owner's routes 1 and 2 together (2026-10-11), a prototype.
+//! average over tract frequencies** — the owner's routes 1 and 2 together (2026-10-11).
 //!
 //! The climb, the fit this replaced (deleted 2026-10-16), averaged each tract's likelihood over how
 //! its alleles could be shared among its chromosomes, and that average, over 256 points, is several
 //! log-likelihood units a tract wrong at thirteen allele lengths
-//! (`fit_precision_quadrature_average_2026-10-01.md`). It also made the fit slow. This estimates the same stutter and the class's allele-length shares from a simpler
-//! objective: a sample's alleles at a random tract of the class are drawn from the class's shares,
-//! whatever that tract's own frequencies, so
+//! (`fit_precision_quadrature_average_2026-10-01.md`). It also made the fit slow. This estimates
+//! the same stutter and the class's allele-length shares from a simpler objective: a sample's
+//! alleles at a random tract of the class are drawn from the class's shares, whatever that tract's
+//! own frequencies, so
 //!
 //! `Σ over (tract, sample) of ln Σ_g prior(g | shares, F) L(g | stutter)`
 //!
@@ -1057,7 +1058,8 @@ impl<'a> ScoredDistinctRows<'a> {
     }
 }
 
-/// For the fitting bench's proxy for calling (plan step D6), not for a run.
+/// For the fitting bench's proxy for calling (step D6 of
+/// `doc/devel/ng/impl_plan/str_penalised_fit.md`), not for a run.
 #[cfg(test)]
 impl ScoredDistinctRows<'_> {
     /// **The genotype each sample's weights put highest**: for every (tract, sample) with reads,
@@ -1211,8 +1213,8 @@ pub(super) struct TractOffLengthReads {
 }
 
 /// **One round's expected counts over the whole class**, at the stutter `slippage`, the
-/// allele-length shares `shares` and the spread `concentration`: the counts of
-/// [`expected_counts_by_tract`] summed, with every distinct row of reads scored once however many
+/// allele-length shares `shares` and the spread `concentration`: each tract's expected counts
+/// summed over the class's tracts, with every distinct row of reads scored once however many
 /// samples hold it ([`DistinctRows`]).
 ///
 /// **What is not exactly the same as summing the tracts.** The sums are taken in another order,
@@ -1299,11 +1301,12 @@ fn pooled_reads(sample: &SampleTractReads, buckets: usize) -> Vec<u32> {
 /// likelihoods, shares and excesses, so none is negative and `N` is evaluated without cancellation.
 ///
 /// **Why a cubic.** Write `w = α · s` for the urn's weights. Every term of the pair's likelihood
-/// ([`pair_likelihood`]) is a sum over alleles of a row's likelihoods times a product of weights,
-/// over the urn's denominator `α(α + 1)…`: each sample one draw over `α(α + 1)`, one and two over
-/// `α(α + 1)(α + 2)`, two and two over `α(α + 1)(α + 2)(α + 3)`. Pulling `α` out of each weight
-/// leaves sums that depend on the shares only, a polynomial in `α` over each denominator, and
-/// putting the four terms over the largest denominator gives a cubic over `(α + 1)(α + 2)(α + 3)`.
+/// (`pair_likelihood`, a test-only function) is a sum over alleles of a row's likelihoods times a
+/// product of weights, over the urn's denominator `α(α + 1)…`: each sample one draw over
+/// `α(α + 1)`, one and two over `α(α + 1)(α + 2)`, two and two over `α(α + 1)(α + 2)(α + 3)`.
+/// Pulling `α` out of each weight leaves sums that depend on the shares only, a polynomial in `α`
+/// over each denominator, and putting the four terms over the largest denominator gives a cubic
+/// over `(α + 1)(α + 2)(α + 3)`.
 /// The sums, with `L` a sample's row, `D_x = L(x, x)`, `U_x = Σ_c L(c, x) s_c`, `Q = Σ_x U_x s_x`
 /// and `R = Σ_x D_x s_x`:
 ///
@@ -1315,7 +1318,7 @@ fn pooled_reads(sample: &SampleTractReads, buckets: usize) -> Vec<u32> {
 /// - each two draws: `(α³ Q¹Q² + α² (Q¹R² + R¹Q² + 4 Y) + α (R¹R² + 4 X₁₂ + 4 X₂₁ + 2 Z) + 6 S) /
 ///   ((α + 1)(α + 2)(α + 3))`.
 ///
-/// Checked against [`pair_likelihood`] in `a_pairs_cubic_is_its_closed_form_likelihood`.
+/// Checked against `pair_likelihood` in `a_pairs_cubic_is_its_closed_form_likelihood`.
 pub(super) type PairCubic = [f64; 4];
 
 /// A sample's row of ordered allele-pair likelihoods summarised at the shares: its diagonal `D`,

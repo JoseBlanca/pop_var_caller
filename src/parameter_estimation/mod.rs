@@ -24,8 +24,7 @@
 //! **The coefficient a caller reads is now the per-sample departure from Hardy–Weinberg**, which
 //! [`joint::fit`] measures from the census because it is an average over positions rather than a
 //! local quantity. That estimator is **circular** — it is measured against a population
-//! expectation the same fit produced — and `joint::census_moments`'s output says so rather than
-//! hiding it. Removing the runs estimator gave that up knowingly
+//! expectation the same fit produced. Removing the runs estimator gave that up knowingly
 //! (`impl_plan/remove_histogram_route.md`, and the measurement behind the decision is
 //! `doc/devel/reports/ng_census_inbreeding_budget_2026-09-11.md`).
 //!
@@ -162,9 +161,8 @@ pub const DEFAULT_ERROR_RATE: f64 = 0.001;
 mod tests {
     use super::*;
 
-    /// The four provenances are distinct values, not a scale — `Borrowed` is not
-    /// "better" than `Defaulted` in any ordering the type imposes, and deliberately so:
-    /// what a consumer should do with each is the consumer's decision.
+    /// The four provenances are distinct values. (They are also ranked, by
+    /// [`Provenance::weaker_of`]; this test checks only that no two are equal.)
     #[test]
     fn the_four_provenances_are_distinct() {
         let all = [

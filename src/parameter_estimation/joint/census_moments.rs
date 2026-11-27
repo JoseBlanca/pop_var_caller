@@ -16,12 +16,9 @@
 //! Design: `doc/devel/ng/spec/ordinary_site_prior_moments.md` §3.
 //!
 //! **Where this is reached from.** The joint fit's expectation step feeds [`CensusMomentSums`] one
-//! position at a time and `JointFit` carries the result; `CensusMomentsReport::of` turns that
-//! plus the panel's inbreeding coefficient into what a run reports.
-//!
-//! **What is not built is anything downstream of that.** `RunParameters::assemble` — which takes
-//! the seed these two numbers imply — has no caller outside its own tests, so the pre-pass to
-//! calling handover does not exist as a whole. Nothing here waits on it.
+//! position at a time, and `JointFit::census_moments` carries the result. **Nothing reads it
+//! yet**: the type has no accessor and no run reports the two averages. Whether to finish the
+//! report or delete the accumulation is still to be decided.
 
 /// **How many alternative copies a position carries across the panel, and how uncertain that
 /// count is** — one position's contribution, before it is averaged with the others.
@@ -47,31 +44,13 @@ struct AlternativeCopiesAtAPosition {
 /// expectation step's own scratch buffer, and is merged chunk into chunk the way every other sum
 /// there is. What it holds is a handful of `f64`s, whatever the census and whatever the cohort.
 ///
-/// ## Why this and not the stored array
-///
-/// The fit can be asked to keep every position's genotype posteriors
-/// (`JointFitConfig::genotype_posteriors`), and `CensusMoments::from_posteriors` reduces that
-/// array. **It is off by default because it weighs twelve bytes a position a sample** — three
-/// `f32`s — which over the shipped two-million-position census is **1.2 GB at fifty samples and
-/// 1.5 GB at the tomato cohort's sixty-three**, held to be summed once and thrown away. The design
-/// asks for the sums instead (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5), and this is
-/// them.
-///
-/// **⚑ Spec §5 pairs the 1.5 GB figure with fifty samples, and 1.5 GB is the sixty-three-sample
-/// number**; `12 × 50 × 2×10⁶` is 1.2 GB and `12 × 63 × 2×10⁶` is 1.512 GB. The same pairing is on
-/// `JointFitConfig::genotype_posteriors` and predates this module. Corrected here rather than
-/// propagated.
-///
-/// **And the array's peak is about twice whichever figure applies.** The pass that collects it
-/// gathers every chunk's own vector and *then* absorbs them into an exactly-reserved merged one,
-/// so both are live at once — the collect is deliberate, because `reduce` may join chunks in any
-/// order and the array is in position order.
-///
-/// **The array route is kept and is not dead**: it is what the sums are checked against, at a
-/// relative `1e-6` and **not** to the last bit — the array passes through `f32` on the way out
-/// while the sums stay in `f64` throughout
-/// ([`fit::whole_fit_tests::the_summed_moments_and_the_stored_array_agree`](super::fit)). It is
-/// also what `examples/ng_prior_moments_from_reads.rs` sets the flag for.
+/// **Why sums and not an array.** The fit can keep every position's genotype posteriors
+/// (`JointFitConfig::genotype_posteriors`, off by default), and the moments could be reduced
+/// from that array afterwards. But it weighs twelve bytes a position a sample — three `f32`s —
+/// and over the shipped two-million-position census is 1.2 GB at fifty samples and 1.5 GB at the
+/// tomato cohort's sixty-three, held to be summed once and thrown away. The design asks for the
+/// sums instead (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5). Nothing reduces the
+/// array to the moments any more.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CensusMomentSums {
     /// The panel's size in diploid individuals. Held rather than derived from the chromosome count
@@ -87,7 +66,7 @@ pub struct CensusMomentSums {
     frequency_squares: f64,
     heterozygosity_squares: f64,
     /// `Σ P(the position segregates in this panel)` — the soft count of
-    /// [`probability_that_the_panel_segregates`].
+    /// `probability_that_the_panel_segregates` (a test-only function below).
     segregating: f64,
 }
 
@@ -363,7 +342,7 @@ mod tests {
 
     /// **The per-sample variance is a sum of per-sample squares, not the square of the sum.**
     ///
-    /// Nothing reads it until plan step B2, so this pins the quantity where it is computed. At
+    /// Nothing reads it yet, so this pins the quantity where it is computed. At
     /// posteriors of a half on heterozygous and a half on both-non-reference, one sample's
     /// expected copies are `0.5 + 1.0 = 1.5` and its `E[k²]` is `0.5 + 2.0 = 2.5`, so its variance
     /// is `2.5 − 2.25 = 0.25`. **Two such samples give 0.5**, where squaring the whole sum instead

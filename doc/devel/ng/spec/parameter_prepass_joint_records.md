@@ -888,7 +888,7 @@ nothing to adopt now rather than later:
 
 - **the directory gives absolute byte extents**, so a reader seeks to a section without walking the
   ones before it. Already the layout
-  ([`census_file.rs`](../../../../src/ng/parameter_estimation/joint/census_file.rs), the directory
+  ([`census_file.rs`](../../../../src/parameter_estimation/joint/census_file.rs), the directory
   written before the sections precisely so it can hold absolute offsets);
 - **a section decodes with no state carried from any other section.** Anything shared between
   sections — a compression dictionary, a running base — must live in the header, where every worker

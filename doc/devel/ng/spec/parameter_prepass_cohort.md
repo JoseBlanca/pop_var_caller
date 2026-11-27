@@ -172,7 +172,7 @@ and by the same factor.
 how variable a population is before it can judge whether a rare allele is surprising, and how it
 turns that measure into a genotype prior is its own design. What is worth recording is only that
 today the number is not measured at all: the STR path takes a fixed `SFS_THETA = 0.01`
-([`src/ssr/cohort/freebayes_emit.rs:42`](../../../../src/ssr/cohort/freebayes_emit.rs)), freebayes'
+(`src/ssr/cohort/freebayes_emit.rs:42` (file since removed)), freebayes'
 default, commented *"Fixed, not a per-run knob"*, while the interfaces list a population diversity
 among the panel parameters this step is supposed to estimate
 ([`../arch/ng_step_interfaces.md:347-349`](../arch/ng_step_interfaces.md)). Nothing estimates it.

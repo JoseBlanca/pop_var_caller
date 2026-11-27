@@ -331,7 +331,7 @@ genome, where 800 Mb at 3 reads leaves hundreds of millions of base observations
 **What is accumulated: a `(depth, alt-count)` histogram per read group**, including every site with
 **no** alternative reads. Those `k = 0` cells are the majority of the genome and the strongest
 evidence there is about `ε`; production discards them at
-[`het.rs:147-148`](../../../../src/sample_summary/het.rs) and that is
+`het.rs:147-148` (file since removed) and that is
 [`parameter_prepass.md`](parameter_prepass.md) §2.1's second finding.
 
 **How `ε` is fitted — a scan on the outside, a climb on the inside.** The procedure is
@@ -1158,7 +1158,7 @@ histogram-versus-census comparison, the read-group grain, scan spacing, memory, 
    against the genome's *realised* autozygous fraction, not the transition rates' nominal one**: a
    finite genome does not have the `F` its rates imply, and comparing against the nominal value
    reads sampling as bias. The harness is
-   [`examples/ng_inbreeding_harness.rs`](../../../../examples/ng_inbreeding_harness.rs).
+   `examples/ng_inbreeding_harness.rs` (file since removed).
    1a. **The floor is measured at the run's own window count** and reported beside `F`: fit a genome
    generated with **no runs at all** and record what comes back (§6.1, §6.5). It is the estimator's
    resolution, it changes with genome size, and without it a small `F` cannot be read.

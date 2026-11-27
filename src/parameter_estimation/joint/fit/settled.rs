@@ -1,8 +1,10 @@
 //! **When the SNP/indel fit stops**: once the step still left to the likelihood's maximum, as a
 //! Newton step estimates it, is worth less than a thousandth of a log-likelihood unit.
 //!
-//! Design: `doc/devel/ng/spec/fit_precision.md` §2 (as amended at plan step B1, and again on
-//! 2026-10-16) and §3.3. Build order: `doc/devel/ng/impl_plan/snp_fit_convergence.md`, steps A1–A2.
+//! Design: `doc/devel/ng/spec/fit_precision.md` §2 (as amended at step B1 of the plan
+//! `doc/devel/implementation_plans/fit_precision.md`, and again on 2026-10-16) and §3.3. Build
+//! order: `doc/devel/ng/impl_plan/snp_fit_convergence.md`, steps A1–A2. The other plan steps
+//! cited below (B2, B4) are those of `implementation_plans/fit_precision.md`.
 //!
 //! # The rule
 //!

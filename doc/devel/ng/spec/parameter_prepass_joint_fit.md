@@ -1741,7 +1741,7 @@ benchmark run cannot show a difference and is not evidence that the change works
 anything else means the split leaked into one of the quantities that did not move grain.
 
 **The evidence that it works comes from drawn panels** with libraries that differ
-([`../../../../examples/ng_joint_contamination_control.rs`](../../../../examples/ng_joint_contamination_control.rs),
+(`../../../../examples/ng_joint_contamination_control.rs` (file since removed),
 `LIBRARIES`), which give exact truth, and the numbers are in §3.4.
 
 **What is *not* a reason to worry, and an earlier plan for this work said it was: read length.**

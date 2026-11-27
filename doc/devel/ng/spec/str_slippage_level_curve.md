@@ -133,7 +133,7 @@ exponential's 15.5%. **At every period with enough cells to mean anything the fi
 both fixed ends and lands between them**, which is the finding that fixes the family.
 
 **`rise_shape = 1` is production's own shape.** Production fits `baseline + slope · units` and
-clamps to `[0, 1]` ([`em.rs:385`](../../../../src/ssr/cohort/em.rs#L385)), so this family nests
+clamps to `[0, 1]` (`em.rs:385` (file since removed)), so this family nests
 what production does rather than replacing it with something unrelated.
 
 ### 2.1 Two families that were live and lost
@@ -169,16 +169,16 @@ what production does rather than replacing it with something unrelated.
 | `rise_shape` | **per motif period, shared by every slippage group** | It is a curvature, and a curvature needs the whole span of repeat counts visible at once. On tomato one library at 3 reads a position puts about 12 slipped reads behind a cell — enough for a level, not for a shape. |
 
 **A slippage group is the set of read groups a run fits one set of slippage numbers for**
-([`ssr_fit.rs:291`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L291) — `slippage`
+([`ssr_fit.rs:291`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L291) — `slippage`
 is one entry per group, `None` where that group put no read in the cell). The walk builds it
 (`examples/ng_joint_records_walk.rs:747`, its repeat-tract half deleted in commit `3198d55d`): one group
 per read group, or all of them pooled.
 
 **⚠ What "per read group" can mean today is narrower than it sounds, and a coder must know
 this before promising anything.** A read group is identified by its index *within one sample*
-([`types.rs:210`](../../../../src/ng/types.rs#L210) — `ReadGroupId(pub u32)`), and the cohort's
+([`types.rs:210`](../../../../src/types.rs#L210) — `ReadGroupId(pub u32)`), and the cohort's
 list is the *union* of those indices across samples
-([`census.rs:1670`](../../../../src/ng/parameter_estimation/joint/census.rs#L1670)). Every tomato
+([`census.rs:1670`](../../../../src/parameter_estimation/joint/census.rs#L1670)). Every tomato
 CRAM declares its own library — `LB:PRJNA454805_SRR7279481` and so on, 63 of them — and every one
 of them is read group 0 inside its own sample, so the cohort sees **one** read group and the run
 prints `1 read groups in 1 slippage group, pooled`. **So this design fits per slippage group as
@@ -270,7 +270,7 @@ own precision. So is the repeat-count range fitted over, and how many cells stoo
   [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) has ever asked for.
 - **The monotonicity merge is not retired here, because it does not exist here.** The joint route
   has borrowing only; `merge_until_monotone` lives in the per-sample route
-  ([`ssr/mod.rs:1479`](../../../../src/ng/parameter_estimation/ssr/mod.rs#L1479)). What the curve
+  (`ssr/mod.rs:1479` (file since removed)). What the curve
   does to that rule is the per-sample route's question.
 
 **What the curve is worth against the rule it replaces, measured.** The dip the merge rule exists
@@ -459,7 +459,7 @@ the curve's value whole.
 
 **A cell that today is refused can now carry a level, so the emitted object has to be able to say
 so.** Today's outcome is either a fit or a refusal
-([`ssr_fit.rs:322`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L322)); after this
+([`ssr_fit.rs:322`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L322)); after this
 change a cell can hold a level with no shares, which is neither.
 
 Per cell, beside the four numbers:
@@ -588,7 +588,7 @@ cells that are already fitted independently. It adds no shared state to stage on
 | what | existing code | how it is reused |
 |---|---|---|
 | the per-cell fit that stage one runs | `fit_stratum` / `fit_pooled` (`ssr_fit.rs`, deleted in commit `3198d55d`) | called unchanged, with `borrowing_floor = 0` |
-| the per-cell evidence the weight reads | [`StratumEvidence`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L169) | `spanning_reads()` and the fitted level give the slipped-read count |
+| the per-cell evidence the weight reads | [`StratumEvidence`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L169) | `spanning_reads()` and the fitted level give the slipped-read count |
 | borrowing, for the two shares | `borrow_up_to_the_floor` (`ssr_fit.rs`, deleted in commit `3198d55d`) | kept, narrowed to the shares |
 | the walk that produces a cell table | `examples/ng_joint_records_walk.rs` (its repeat-tract half deleted in commit `3198d55d`) | the measurement vehicle and the parity oracle |
 

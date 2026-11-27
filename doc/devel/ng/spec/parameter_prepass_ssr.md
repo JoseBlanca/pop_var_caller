@@ -635,7 +635,7 @@ times as much score. The observation count emitted beside each fit
 >
 > **The section stands as the record of the per-sample route**, where both procedures are still what
 > the code does (`merge_until_monotone` in
-> [`ssr/mod.rs`](../../../../src/ng/parameter_estimation/ssr/mod.rs)). What the curve does to that
+> `ssr/mod.rs` (file since removed)). What the curve does to that
 > route is that route's question and has not been asked.
 
 Two procedures copied from DRAGstr, both of which **change the estimate**:
@@ -827,7 +827,7 @@ to widen:**
 - **Tract impurity.** §4.1 counts a mismatch by comparing a read against the motif tiled to that
   read's length, so an interruption inside the tract is charged to this path's substitution rate and
   to nothing in the generic path's. `SsrSegment::purity_fraction()`
-  ([`segment_criteria.rs:209`](../../../../src/ng/region_typing/segment_criteria.rs)) measures it per
+  ([`segment_criteria.rs:209`](../../../../src/region_typing/segment_criteria.rs)) measures it per
   stratum, so the comparison runs on strata at full purity or states the offset it expects.
 - **Which reads survived admission.** §4.1 records that base quality is systematically worse inside
   repeat tracts, so the two rates describe the same chemistry only if the same share of reads was
@@ -1257,7 +1257,7 @@ were `[6, 4, 4, 3, 3, 3]` for periods 1–6, documented as *"the copy number at 
 to stutter — below it, the generic SNP/indel caller handles the tract fine and only a stuttering one
 needs the STR route"*, with every value marked *"a starting value, soft and swept"*. This section is
 the sweep, and **the floors it measured — `[8, 6, 6, 6, 5, 4]` — are what the code applies since
-2026-08-10** ([`segment_criteria.rs:444`](../../../../src/ng/region_typing/segment_criteria.rs), with
+2026-08-10** ([`segment_criteria.rs:444`](../../../../src/region_typing/segment_criteria.rs), with
 the two surveys' reasoning at `:402-443`). §5.1.1 is the derivation, and the paragraphs below are the
 evidence that got there; where one of them says "ng's `[6, 4, 4, 3, 3, 3]`" it is describing what was
 being argued against, not what runs.
@@ -1329,7 +1329,7 @@ model at calling time without disturbing the locus set the censuses share. **Hom
 takes on the calling step's marker routing.
 
 **The floors are a default, not a constant.** `MinCopies` is already a per-period knob
-([`segment_criteria.rs:355`](../../../../src/ng/region_typing/segment_criteria.rs)), so what follows
+([`segment_criteria.rs:355`](../../../../src/region_typing/segment_criteria.rs)), so what follows
 changes a default rather than adding a mechanism. Someone cataloguing repeats rather than genotyping
 them wants a lower floor and should set one — and since 2026-08-11 that is exactly what the catalog
 does, at floors of its own that sit under every routing floor (§5.3).
@@ -1465,7 +1465,7 @@ where the repeats came from — and a second bound now sits under it, §5.3.)*
 
 **`MinCopies` decides two different things and only one of them is the floor.** It is read by
 `prefilter`, which runs **before** bundling
-([`segment_criteria.rs:648`](../../../../src/ng/region_typing/segment_criteria.rs)), and again by
+([`segment_criteria.rs:648`](../../../../src/region_typing/segment_criteria.rs)), and again by
 `classify` after it (`:820`). The first reading decides **what counts as a neighbouring repeat**;
 the second decides **what is admitted as a locus**. Folding them into one value was deliberate —
 the type's own note calls a swept floor moving both "the whole point" (`:346-353`) — and it is
@@ -1538,7 +1538,7 @@ agree.**
   ten puts it at `[·, 6, 7, 6, 5, 4]`.
 - **Where stutter grows large enough to matter** — the per-read slippage rate, fitted by summing
   over the genotype, over 181 libraries
-  ([`ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs)). The repeat count at
+  (`ng_str_stutter_rate.rs` (file since removed)). The repeat count at
   which the rate first reaches **5%**:
 
 | tract | libraries | earliest | median | latest |
@@ -1592,7 +1592,7 @@ go to the generic path where an ordinary indel is what the model expects, which 
 their 30% to 76% guard shares say they are producing.
 
 **The change was taken on 2026-08-10** and `MinCopies::default` is `[8, 6, 6, 6, 5, 4]`
-([`segment_criteria.rs:444`](../../../../src/ng/region_typing/segment_criteria.rs)). **Two things
+([`segment_criteria.rs:444`](../../../../src/region_typing/segment_criteria.rs)). **Two things
 this document says about measurements are now dated by it**, and both matter to anyone rerunning
 them: every empirical figure in §2, §3, §5 and §5.1 was taken over the loci the *old* floors
 admitted, and so was the per-stratum accounting the research note reports (the entry counts, the
@@ -1603,7 +1603,7 @@ asserting one of them will fail on arrival** rather than catch a regression.
 **And the mononucleotide floor of 6 carries a reason that survives this framing rather than being
 overridden by it.** It was chosen deliberately over ~9 — "the Illumina read-artifact onset, not the
 higher ~9-unit germline-slippage threshold"
-([`segment_criteria.rs`](../../../../src/ng/region_typing/segment_criteria.rs)). Under the
+([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)). Under the
 definition above that is right: the stutter model is a **noise** model, so a tract that stutters
 because of the instrument needs the STR route exactly as much as one that stutters in the germline.
 Raising that floor means overturning a considered choice, not filling a gap. What the survey adds is
@@ -1632,7 +1632,7 @@ enough unique sequence to anchor a short read".
 anchor. A mis-anchored read placed a whole repeat off lands in an offset bucket and reads as
 **slippage** — the very parameter this step fits — so a measurement with no truth to compare against
 would report the failure as a finding. The answer comes from the synthetic bake-off
-([`ng_ssr_synthetic_bakeoff.rs`](../../../../examples/ng_ssr_synthetic_bakeoff.rs)), which builds
+(`ng_ssr_synthetic_bakeoff.rs` (file since removed)), which builds
 each read from a chosen allele and scores the recovered length against it. For the shipped delimiter
 across 166 scenarios — including flanks carrying a repeat of their own below every copy floor, which
 is what the radius permits and what a marginal locus looks like:
@@ -1708,7 +1708,7 @@ floors of §4.3 and §4.5 count those.
 A repeat tract mutates orders of magnitude faster than a base does, so the population's diversity at
 STR loci is a different quantity from its diversity at ordinary sites — not a correction to it. The
 STR path already depends on such a number: `SFS_THETA = 0.01`
-([`src/ssr/cohort/freebayes_emit.rs:42`](../../../../src/ssr/cohort/freebayes_emit.rs)), described in
+(`src/ssr/cohort/freebayes_emit.rs:42` (file since removed)), described in
 its own comment as *"freebayes' default `-T`"*, which is a **SNP-scale** value applied to repeat
 tracts. It is not incidental — the same comment explains that each distinct allele pays a factor of
 `θ`, so this constant is what decides how much read evidence a rare STR allele must produce before it
@@ -1958,7 +1958,7 @@ walks each cohort.
    recovery test above generates its data from the model it then fits, so a shared misspecification
    cancels and passes.
 
-   Fitted by [`ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs) over the
+   Fitted by `ng_str_stutter_rate.rs` (file since removed) over the
    50,000-interval tandem-repeat set at 30×, against the direct measurements in §3 and §5:
 
    | | fitted, summing over the genotype | measured on known-homozygous loci |

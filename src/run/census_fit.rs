@@ -108,7 +108,7 @@ pub enum CohortFitError {
     /// **The third of spec §4.2's three causes, and the only one a cheap read cannot reach**: it
     /// needs the run's reference read and its selection rebuilt. **`estimate-parameters` makes
     /// that comparison itself and reports it as rows of
-    /// [`CensusesToRegenerate`](super::CensusesToRegenerate)** (plan step C5), so what reaches
+    /// [`CensusesToRegenerate`](super::CensusesToRegenerate)**, so what reaches
     /// here from a command is nothing, and what reaches here at all is a caller that fitted
     /// without comparing.
     ///
@@ -341,9 +341,7 @@ fn stutter_multipliers_by_read_group(
 /// in the cohort's own sample order — the order the tract evidence numbers its samples in — and 0
 /// for a sample the generic fit gave none.
 ///
-/// [`fit_a_cohort`] hands this to the repeat-tract fit; the fitting bench's psp mode
-/// (`examples/ng_str_fit_bench.rs`) calls it so that its held-out fits weigh genotypes exactly as
-/// `estimate-parameters` does.
+/// [`fit_a_cohort`] hands this to the repeat-tract fit.
 #[must_use]
 pub fn homozygote_excess_in_cohort_order(
     cohort: &CohortCensusEvidence,
@@ -1105,7 +1103,7 @@ mod tests {
         );
         // **And it says what to do about it** (spec §4.2, third row). No command reaches this
         // message: `estimate-parameters` compares the recorded settings itself and reports them as
-        // rows of its regeneration report (plan step C5). What it serves is a caller that fits
+        // rows of its regeneration report. What it serves is a caller that fits
         // without comparing, which is why it still offers both ways out — such a caller has ruled
         // out neither.
         let said = error.to_string();
@@ -1129,8 +1127,8 @@ mod tests {
 
 #[cfg(test)]
 mod writing_the_parameters_file {
-    //! **Plan step C5**: the fit's numbers, assembled and written as the file a calling run
-    //! takes.
+    //! **`parameter_prepass_runs.md` plan step C5**: the fit's numbers, assembled and written as
+    //! the file a calling run takes.
     //!
     //! # What made this run at all
     //!
@@ -1138,8 +1136,9 @@ mod writing_the_parameters_file {
     //! read-error total, and says why: the two come from one pass over one set of reads. The plan
     //! had assumed the pair would fall back to a defaulted calibration; it does not, it panics,
     //! and these tests found that on their first run. **The owner's answer, 2026-09-05, was to
-    //! bring Milestone E forward**: the census now accumulates the totals as its loci go past, so
-    //! both halves are present and the calibration is fitted rather than defaulted.
+    //! build those totals early** (the same plan's Milestone E): the census now accumulates the
+    //! totals as its loci go past, so both halves are present and the calibration is fitted
+    //! rather than defaulted.
 
     use super::tests::the_censuses_in;
     use super::*;
