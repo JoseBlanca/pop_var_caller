@@ -9,16 +9,17 @@
 //!
 //! # Why this is not a call into `normalize_alleles`
 //!
-//! Production's [`normalize_alleles`](crate::alignment::norm_seqs::normalize_alleles) *is* a
-//! left-aligner, and `left_align_indels` drives it. If this checker were built on it, it would
-//! grade the left-aligner against itself — an oracle has to be independent of the thing it grades.
-//! So the shift test here is written straight from the definition: it looks at each indel and the
-//! aligned column immediately to its left, and applies the one-base-left shift condition directly.
+//! [`normalize_alleles`](crate::alignment::norm_seqs::normalize_alleles), ported from production,
+//! *is* a left-aligner, and `left_align_indels` drives it. If this checker were built on it, it
+//! would grade the left-aligner against itself — an oracle has to be independent of the thing it
+//! grades. So the shift test here is written straight from the definition: it looks at each indel
+//! and the aligned column immediately to its left, and applies the one-base-left shift condition
+//! directly.
 //!
 //! # The shift condition, exactly
 //!
 //! An indel can slide one base left only by **crossing an aligned column that is a real match**
-//! — left-alignment is a *lossless* re-placement that never moves a mismatch (production's port
+//! — left-alignment is a *lossless* re-placement that never moves a mismatch (the port
 //! asserts the read's mismatch count is unchanged, [`indel_norm`](crate::alignment::indel_norm)). So an
 //! indel with the aligned column `(read[q-1] ↔ reference[r-1])` immediately to its left can shift
 //! one base left iff that column matches **and** the base leaving the indel on the left equals the

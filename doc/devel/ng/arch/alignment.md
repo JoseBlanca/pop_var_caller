@@ -9,6 +9,27 @@ verbs for functions, newtypes for domain scalars, **STR** in prose ↔ `ssr` in 
 illustrative; the **contract** is the deliverable. See the spec for the reasoning behind every
 decision recorded here.*
 
+> ## What was built — read this first (2026-11-27)
+>
+> This document designed three traits and ten algorithms. What exists in `src/alignment/` today:
+>
+> - **`BestPathAligner`** and two repeat-aware implementations of it:
+>   `ssr_best_path_flat_gap.rs` (algorithm 3, the STR-bundle hull delimiter and the module's
+>   byte-parity oracle against production) and `ssr_unit_robust.rs` (algorithm 4r, a hardened
+>   form of algorithm 4 and the STR generator's per-repeat delimiter). Algorithm 4, its other
+>   hardened variants, and the two marginal aligners (5, 6) were built, measured, and removed on
+>   2026-10-31 because no `pvc` command used them. The affine aligner (2) was never built.
+> - **No `MarginalAligner`.** It went with the marginal aligners.
+> - **No `AlignmentNormalizer`.** Algorithm 1b went on 2026-10-31; the trait, algorithms 1a and
+>   1c, the `Alignment` type and `left_align_structured.rs` went on 2026-11-27. Indel
+>   left-alignment is the function `indel_norm::left_align_indels(&mut cigar, seq, ref_seq)`,
+>   which is algorithm 1a and which read preparation calls directly.
+> - `emission.rs` and `stutter.rs` are as designed; `delimit_parity.rs` and
+>   `leftmost_property.rs` are the test-only oracles.
+>
+> The module lives at `src/alignment/`, not `src/ng/alignment/` (promotion, 2026-09-13). The rest
+> of this document is the design as written.
+
 ## Module home
 
 `src/ng/alignment/` — a **folder**, because it holds competing implementations that get compared

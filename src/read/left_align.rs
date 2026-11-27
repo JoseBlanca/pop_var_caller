@@ -12,7 +12,7 @@
 //! ones. Bases and qualities are copied through untouched; only the CIGAR changes.
 //!
 //! **The shifting is not implemented here.** It is
-//! [`left_align_indels`](crate::alignment::indel_norm::left_align_indels), a port of GATK's
+//! [`left_align_indels`], a port of GATK's
 //! `AlignmentUtils.leftAlignIndels`, called directly — this module supplies the reference window
 //! and the policy of when to fetch at all.
 //!
@@ -30,15 +30,15 @@ use crate::types::ContigId;
 
 /// Whether this line-up carries anything left-alignment could move.
 ///
-/// **It must stay exactly production's `is_indel`** — insertion or deletion, nothing else
-/// ([indel_norm.rs](../../../pileup/walker/indel_norm.rs)). This predicate is what decides
-/// whether a read fetches a reference window at all, so a narrower one here would silently skip
-/// normalization for a read production *would* shift: a mis-placed indel, with no error and
-/// nothing in the output to show for it.
+/// **It must stay exactly `is_indel` in `alignment/indel_norm.rs`** — insertion or deletion,
+/// nothing else. This predicate is what decides whether a read fetches a reference window at
+/// all, so a narrower one here would silently skip normalization for a read `left_align_indels`
+/// *would* shift: a mis-placed indel, with no error and nothing in the output to show for it.
 ///
-/// Production reaches the same conclusion one layer down — `left_align_indels` early-returns on
+/// The aligner reaches the same conclusion one layer down — `left_align_indels` early-returns on
 /// a CIGAR with no indel before it touches the reference. ng asks first instead, because unlike
-/// production it has nothing else to fetch the window *for*: `F1` moved to step 1, so
+/// production it has nothing else to fetch the window *for*: the mismatch-fraction filter moved
+/// to step 1, so
 /// left-alignment is the reference's only consumer here (spec §5).
 fn cigar_has_indel(cigar: &[CigarOp]) -> bool {
     cigar
@@ -116,7 +116,7 @@ impl<R: RefSeq> LeftAlignPreparer<R> {
         let reference_span = u64::from(cigar_ref_span(&read.cigar));
         // A read that consumes no reference — an all-insertion CIGAR — has nothing to align
         // against, and asking for a zero-length window would be asking a question with no
-        // answer. Production guards the same case by skipping F3 entirely when its span is zero
+        // answer. Production skips left-alignment entirely when its span is zero
         // (`fetch_raw_slice` returns `None`), so skipping here keeps the two in step.
         if reference_span == 0 {
             return Ok(());
@@ -461,8 +461,8 @@ mod tests {
         assert_eq!(groups, vec![ReadGroupId(3), ReadGroupId(11)]);
     }
 
-    /// A read that consumes no reference has nothing to align against. Production skips `F3`
-    /// for it; so does this, rather than asking for a zero-length window.
+    /// A read that consumes no reference has nothing to align against. Production skips
+    /// left-alignment for it; so does this, rather than asking for a zero-length window.
     #[test]
     fn an_all_insertion_read_is_passed_through_without_fetching() {
         let preparer = LeftAlignPreparer::new(NeverFetched);

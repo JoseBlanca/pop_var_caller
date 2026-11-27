@@ -6,13 +6,17 @@
 //! The fixed fields at the front of every record, which let a reader decide without building
 //! anything. [`RecordEncoder::encode_record`] writes one and hands it back; [`read_record_head`]
 //! reads one and bounds the body behind it, which is the whole of the skip — a reader that does
-//! not want the record advances past it and touches no byte of its body. [`decode_record`] does
-//! both halves and checks that the head's declared length and the body's real shape agree.
+//! not want the record advances past it and touches no byte of its body. [`decode_the_body_of`]
+//! builds the body behind a head already read. The test-only `decode_record` does both halves
+//! and checks that the head's declared length and the body's real shape agree.
 //!
 //! ```text
-//! record = position-offset | reference-span | locus-kind | non-reference-reads
-//!          | reads-compared-with-reference | record-body-byte-count | chain-id-changes | body
-//!          └──────────────── the head, as the manifest names it ────────────────────┘  └ skipped ┘
+//! record = position-offset | reference-span | non-reference-reads
+//!          | reads-compared-with-reference | reads-discarded-by-the-depth-cap-head-copy
+//!          | chain-id-base-change | record-body-byte-count | chain-id-changes
+//!          └──────────────── the head, as the manifest names it ────────────────┘
+//!          | body
+//!            └ skipped ┘
 //! ```
 //!
 //! **[`RecordHead`] is the fixed part of the head, and only the fixed part.** The chain-id
@@ -39,17 +43,18 @@
 //!
 //! # The body
 //!
-//! [`encode_record_body`] and [`decode_record_body`] are the other half of this file: one
+//! [`encode_record_body_reusing`] and [`decode_record_body`] are the other half of this file: one
 //! [`SampleLocusObservations`] to bytes and back, exactly, with no compression, no file and
 //! nothing read from outside the bytes themselves. The fields and their encodings are
 //! [`BODY_FIELDS`], which is what a writer declares in the header's manifest and what a reader
 //! refuses a file for disagreeing with — **a fingerprint of the layout rather than a recipe a
 //! third party could parse a body from**, since nothing in it says which fields repeat.
 //!
-//! **Two things are deliberately not in it yet.** A record's chain ids are dropped, because
-//! they hold state across records and that is Milestone E of the plan. And the record's
-//! coordinate is not in the body at all: it rides in the head, so [`decode_record_body`] is
-//! handed the region rather than reading one.
+//! **Two things are not in the body, or not wholly.** A record's chain ids are split: the
+//! live-set changes, which hold state across records, ride in the head, and the body keeps only
+//! the exception lists, from which the decoder derives the residual observation's reads. And the
+//! record's coordinate is not in the body at all: it rides in the head, so
+//! [`decode_record_body`] is handed the region rather than reading one.
 
 use crate::locus_generation::{
     HeldFlank, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
@@ -158,8 +163,8 @@ pub struct RecordHead {
 /// is quicker to read and costs less than it looks after compression — the head compressed on its
 /// own is **0.498 bytes a record at 10.25 reads a position and 3.882 at 280.32**, re-taken
 /// 2026-09-04 — but that the two encodings had never been compared *in place*. **They have been
-/// since Milestone D2, and variable-length won on both samples and at every width tried**, so the
-/// choice here is settled by measurement rather than left open.
+/// since, and variable-length won on both samples and at every width tried**, so the choice
+/// here is settled by measurement rather than left open.
 ///
 /// **The last field is not a scalar and is here for the one reason that outranks tidiness.**
 /// The chain ids' live-set changes carry state: a reader knows which reads are live only because
@@ -174,8 +179,7 @@ pub struct RecordHead {
 /// ⚠ **Switching them then is a format change, not just a manifest one.** This reader is driven
 /// by [`RECORD_HEAD_FIELDS`], and [`RecordLayout::from_manifest`] refuses a file declaring
 /// anything else — so a build that switched would reject every psp written before it, and a
-/// build before it would reject every psp written after. It costs nothing today because no psp
-/// exists; from Milestone F it costs a version.
+/// build before it would reject every psp written after. It costs a version.
 ///
 /// **Format 1.1 added the fifth and sixth fields**: a copy of the body's count of reads the depth
 /// cap discarded, so that a record's whole depth can be read from its head, and the change in the
@@ -223,18 +227,17 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(6);
 
 /// Every field a record's **body** carries, in encoding order.
 ///
-/// **A field list, not a count of values per record.** Twelve of these twenty-five are written
-/// more than once: ten once per *observation* — one of those ten for every observation but the
-/// residual — and two more once per *witness run* inside an observation. The repeat's motif and
-/// its two flanks are written only when the locus kind is a repeat tract. Three fields close every
-/// body whatever its kind, each a length-prefixed byte string empty on most records: the
-/// observations' flank deletions (format 1.2), an STR bundle's payload — its flanks and its
-/// reference runs — (format 2.0), and the flank each observation held where its witness does not
-/// say it (format 2.1). The manifest says
-/// what one appearance of a field looks like — a single value, or a counted run of them
-/// ([`FieldShape`]); it does not say how often a field appears. So what this list gives a
-/// reader is the order, the encodings and each field's own shape; how many of each a body
-/// holds is read from the counts the body itself carries.
+/// **A field list, not a count of values per record.** Twelve of these twenty-six are written more
+/// than once: ten once per *observation* — one of those ten for every observation but the residual
+/// — and two more once per *witness run* inside an observation. The repeat's motif and its two
+/// flanks are written only when the locus kind is a repeat tract. Four fields close every body
+/// whatever its kind, each a length-prefixed byte string empty on most records: the observations'
+/// flank deletions, an STR bundle's payload (its flanks and its reference runs), the flank each
+/// observation held where its witness does not say it, and the observations' counts of low-quality
+/// reads. The manifest says what one appearance of a field looks like — a single value, or a
+/// counted run of them ([`FieldShape`]); it does not say how often a field appears. So what this
+/// list gives a reader is the order, the encodings and each field's own shape; how many of each a
+/// body holds is read from the counts the body itself carries.
 ///
 /// [`FieldShape`]: crate::psp::header::FieldShape
 ///
@@ -243,20 +246,16 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(6);
 /// file declaring something else ([`RecordLayout::from_manifest`]), so a file from another version
 /// is rejected rather than decoded into plausible nonsense.
 ///
-/// **It does not drive the codec, and the compiler cannot make it.** [`encode_record_body`] and
-/// [`decode_record_body`] write and read these fields in this order by hand — which they must,
+/// **It does not drive the codec, and the compiler cannot make it.** [`encode_record_body_reusing`]
+/// and [`decode_record_body`] write and read these fields in this order by hand — which they must,
 /// since nothing here says which of them repeat. What holds the two in step is
 /// `the_fixture_encodes_to_these_exact_bytes`: reorder the codec and that test fails; reorder
 /// this array and the manifest tests fail. **Change both together and you have changed the
 /// format — raise the version.**
 ///
-/// **The head's seven fields are not here.** They are the part in front of the body (see
-/// the module doc) and they arrive with C2; this array is what a reader meets *after* deciding
-/// it wants the record.
-///
-/// **The chain ids are not here either, and that is Milestone E.** A record's chain ids are
-/// dropped by [`encode_record_body`] and come back empty from [`decode_record_body`], which is
-/// stated on both and pinned by a test rather than left for a reader to discover.
+/// **The head's eight fields are not here.** They are the part in front of the body
+/// ([`RECORD_HEAD_FIELDS`]); this array is what a reader meets *after* deciding it wants the
+/// record.
 const BODY_FIELDS: [(&str, FieldEncoding); 26] = [
     ("reference-bases", FieldEncoding::LengthPrefixedBytes),
     ("observation-count", FieldEncoding::Varint),
@@ -303,28 +302,29 @@ const BODY_FIELDS: [(&str, FieldEncoding); 26] = [
     ("repeat-motif", FieldEncoding::LengthPrefixedBytes),
     ("repeat-left-flank", FieldEncoding::LengthPrefixedBytes),
     ("repeat-right-flank", FieldEncoding::LengthPrefixedBytes),
-    // **Format 1.2: the flank bases each observation's deletion took beside an STR segment**
-    // (`str_edge_deletion_alleles.md` §5.2), on every record whatever its kind, so that a 1.1
-    // reader can walk past it as the unknown final field it is. A list of `(observation, left,
-    // right)` varint triples for the observations whose flank deletion is not none — empty, one
-    // byte before compression, on every generic record and nearly every tract.
+    // **The flank bases each observation's deletion took beside an STR segment** (added 2026-10-10;
+    // `str_edge_deletion_alleles.md` §5.2), on every record whatever its kind, so that a reader
+    // that predates it can walk past it as the unknown final field it is. A list of `(observation,
+    // left, right)` varint triples for the observations whose flank deletion is not none — empty,
+    // one byte before compression, on every generic record and nearly every tract.
     (
         "observation-flank-deletions",
         FieldEncoding::LengthPrefixedBytes,
     ),
-    // **Format 2.0: an STR bundle's payload** (`str_bundle_loci.md` §6.2) — its two flanks and
-    // its reference runs — as one byte string on every record whatever its kind, empty but for
-    // a bundle's, for the reason the flank deletions above are: a field every record carries
-    // is one a reader can walk past. Inside it: the left flank and the right flank, each
-    // length-prefixed; the run count; then each run's offset into the hull, its length and its
-    // motif, the motif length-prefixed.
+    // **An STR bundle's payload** (added 2026-10-11; `str_bundle_loci.md` §6.2) — its two flanks
+    // and its reference runs — as one byte string on every record whatever its kind, empty but for
+    // a bundle's, for the reason the flank deletions above are: a field every record carries is one
+    // a reader can walk past. Inside it: the left flank and the right flank, each length-prefixed;
+    // the run count; then each run's offset into the hull, its length and its motif, the motif
+    // length-prefixed.
     ("str-bundle-payload", FieldEncoding::LengthPrefixedBytes),
-    // **Format 2.1: the flank each observation's reads held, where its witness cannot say it**
-    // (`str_bundle_loci.md` §7.6) — a partial at an STR bundle whose witness covers the whole
-    // hull. On every record whatever its kind, for the reason the two fields above are: a 2.0
-    // reader walks past it as an unknown final field and scores such a read from both flanks,
-    // one half each, as it did. A list of `(observation, flank)` varint pairs, the flank 0 for
-    // the left and 1 for the right — empty, one byte before compression, on nearly every record.
+    // **The flank each observation's reads held, where its witness cannot say it** (added
+    // 2026-10-12; `str_bundle_loci.md` §7.6) — a partial at an STR bundle whose witness covers the
+    // whole hull. On every record whatever its kind, for the reason the two fields above are: a
+    // reader that predates it walks past it as an unknown final field and scores such a read from
+    // both flanks, one half each, as it did. A list of `(observation, flank)` varint pairs, the
+    // flank 0 for the left and 1 for the right — empty, one byte before compression, on nearly
+    // every record.
     (
         "observation-held-flanks",
         FieldEncoding::LengthPrefixedBytes,
@@ -449,11 +449,11 @@ const MOST_ENTRIES_RESERVED: usize = 4_096;
 
 /// The longest byte string or list a body may declare.
 ///
-/// **A record body's length is a `u32` in the head** (spec `psp_file_format.md` §4.3), so
-/// nothing inside one can honestly declare more bytes than that. A larger value is a byte
-/// sequence no writer produced — damage — rather than a buffer that stopped early, and telling
-/// the two apart is what Milestone D's restartable read is built on: it grows its buffer for
-/// the second and must not for the first.
+/// **A record body's length is a `u32` in the head** (spec `psp_file_format.md` §4.3), so nothing
+/// inside one can honestly declare more bytes than that. A larger value is a byte sequence no
+/// writer produced — damage — rather than a buffer that stopped early, and telling the two apart is
+/// what the streaming reader's restartable read is built on: it grows its buffer for the second and
+/// must not for the first.
 const MOST_BYTES_A_BODY_CAN_DECLARE: u64 = BodyByteCount::MAX as u64;
 
 /// What a writer declares in the header's manifest: every field of a record, **head then
@@ -482,7 +482,7 @@ fn fields_this_build_knows() -> impl Iterator<Item = FieldSpec> {
 /// How this reader must read the records in one particular file.
 ///
 /// Built once per file from its manifest and then used for every record, because checking a
-/// twenty-eight-field declaration per record on a path that decodes about twenty million records a
+/// thirty-four-field declaration per record on a path that decodes about twenty million records a
 /// second (spec §4.5) is work with one possible answer.
 ///
 /// **What it carries is the part that differs between files: the fields this reader does not
@@ -647,15 +647,15 @@ pub enum RecordLayoutError {
 /// **Every variant is an input problem, not a bug**, and there are three of them because a
 /// caller should do three different things. Either the body **stops** before the record does,
 /// and a reader meeting a record straddling its buffer reads more bytes and tries again rather
-/// than treating it as damage (Milestone D); or the bytes **say something that cannot be
+/// than treating it as damage; or the bytes **say something that cannot be
 /// true**, and the file is corrupt; or the bytes are well formed and **name something this
 /// reader does not know**, and the instruction is to upgrade the reader.
 ///
-/// ⚠ **The first two are what Milestone D's restartable read branches on**, so a fault put in
-/// the wrong class there makes a streaming reader either reject a good record or retry forever
+/// ⚠ **The first two are what the streaming reader's restartable read branches on**, so a fault put
+/// in the wrong class there makes a streaming reader either reject a good record or retry forever
 /// on a bad one. `a_body_cut_short_is_truncated_at_every_cut_and_never_malformed` and
-/// `a_length_no_body_could_hold_is_malformed_and_never_truncated` are the two tests that hold
-/// the line.
+/// `a_length_no_body_could_hold_is_malformed_and_never_truncated` are the two tests that hold the
+/// line.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RecordDecodeError {
@@ -733,7 +733,7 @@ impl RecordDecodeError {
     /// counts from the record's. And a `Truncated` becomes damage: the body was handed exactly
     /// the byte count the head declared, so a field running off *that* end is not a buffer that
     /// stopped early — no quantity of further bytes changes the answer, and leaving it in the
-    /// class Milestone D fetches more bytes for is a retry that never ends.
+    /// class the streaming reader fetches more bytes for is a retry that never ends.
     fn inside_a_bounded_body(self, head_bytes: usize, body_bytes: usize) -> Self {
         match self {
             Self::Truncated { field, bytes_in } => Self::Malformed {
@@ -843,7 +843,7 @@ fn check_a_derived_read_list(
 /// **⚠ And a record whose derivation would not be exact stores every list instead.** A chain id
 /// names a read *pair*, and if both mates cover this record showing different sequences the same
 /// id is in two observations — the derivation, which is the live set minus the others, would then
-/// drop it from the residual. The spec's definition assumes that away; Checkpoint E asks for
+/// drop it from the residual. The spec's definition assumes that away, but the spec asks for
 /// chain ids that "round-trip **exactly**". So the writer checks, and falls back to naming
 /// everything when the two disagree. The cost is one record's residual list; the alternative is a
 /// read silently missing from the reference allele, which is exactly the failure §5 names.
@@ -936,11 +936,9 @@ fn check_a_read_list_against_its_read_count(names: usize, num_obs: u32) -> bool 
 #[cfg(test)]
 /// Append `record`'s body to `out`, and never fail.
 ///
-/// **The chain ids are dropped.** [`SequenceObservation::chain_ids`] is Milestone E of
-/// `doc/devel/ng/impl_plan/psp_file_format.md`, so a record encoded here and read back has
-/// empty lists where it had ids, and everything else identical. Encoding a record that
-/// carries them is not an error today and produces a file the cohort merge could not use;
-/// the writer that produces real files arrives after E does.
+/// **Test-only**: [`encode_record_body_reusing`] with a scratch of its own. Writers call that
+/// one through [`RecordEncoder`]. Both encode the chain ids: every observation's list but the
+/// residual one's, whose reads the decoder derives from the live set.
 ///
 /// **Appends rather than returning a buffer**, so a writer keeps one and clears it between
 /// records instead of allocating per record; the same path decodes at about twenty million
@@ -955,7 +953,7 @@ fn check_a_read_list_against_its_read_count(names: usize, num_obs: u32) -> bool 
 /// the next record needs. The head is the half that carries state (spec §4.3), which is why the
 /// chain ids' live-set *changes* go there and their exception lists stay here.
 ///
-/// **⚠ With one exception, and it is the whole of Milestone E4**: the decoder takes a `&LiveSet`,
+/// **⚠ With one exception, the residual observation's reads**: the decoder takes a `&LiveSet`,
 /// because one observation's reads are not in the body at all — they are the live set minus every
 /// other observation's. That is a difference from the records before this one, and it is the one
 /// thing here a skipped body *would* have stranded had it been stored rather than derived. It is
@@ -967,8 +965,8 @@ fn check_a_read_list_against_its_read_count(names: usize, num_obs: u32) -> bool 
 ///
 /// **Getting it wrong would be silent**: a body carrying a difference still round-trips under a
 /// walk that builds every record, and misreads only the records that follow a skipped one. The
-/// tests under this module's `C3` banner are what see it; the injected-defect run that checked
-/// they can is in `doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md`.
+/// tests under this module's "body stands on its own" banner are what see it; the injected-defect
+/// run that checked they can is in `doc/devel/reports/implementations/ng_psp_c3_2026-08-26.md`.
 ///
 /// It cannot fail. Every field of a [`SampleLocusObservations`] has a representation here and
 /// the variable-length integers are unbounded; the one subtraction, a witnessed run's length,
@@ -999,8 +997,8 @@ pub struct ResidualScratch {
 /// Append `record`'s body to `out`, reusing `scratch` rather than allocating the residual
 /// derivation's three lists afresh.
 ///
-/// See [`encode_record_body`], which is this with a scratch of its own and is the whole of the
-/// difference between them.
+/// The test-only `encode_record_body` is this with a scratch of its own, and that is the whole
+/// of the difference between them. Its doc holds the contract both share.
 pub fn encode_record_body_reusing(
     record: &SampleLocusObservations,
     out: &mut Vec<u8>,
@@ -1090,7 +1088,7 @@ const HELD_FLANK_LEFT: u64 = 0;
 const HELD_FLANK_RIGHT: u64 = 1;
 
 /// The flanks the observations held, where recorded, as one length-prefixed field: a varint pair
-/// `(observation, flank)` for each observation that has one, in observation order (format 2.1).
+/// `(observation, flank)` for each observation that has one, in observation order.
 fn put_held_flanks(out: &mut Vec<u8>, observations: &[SequenceObservation]) {
     let mut pairs: Vec<u8> = Vec::new();
     for (at, observation) in observations.iter().enumerate() {
@@ -1109,7 +1107,7 @@ fn put_held_flanks(out: &mut Vec<u8>, observations: &[SequenceObservation]) {
 }
 
 /// An STR bundle's flanks and reference runs as one length-prefixed field, empty for every
-/// other kind (format 2.0; `str_bundle_loci.md` §6.2).
+/// other kind (`str_bundle_loci.md` §6.2).
 fn put_bundle_payload(out: &mut Vec<u8>, kind: &LocusKind) {
     let LocusKind::SsrBundle(detail) = kind else {
         put_bytes(out, &[]);
@@ -1233,7 +1231,7 @@ fn put_flank_deletions(out: &mut Vec<u8>, observations: &[SequenceObservation]) 
 /// reading primitives hand back slices borrowed from `bytes`, and spec §4.6's second reason for
 /// rejecting `serde` is exactly that borrow — but nothing consumes it yet, because the record
 /// type is owned by design (arch §2). Whether a borrowed record view is worth building is
-/// Milestone D3's question, with its own measurement.
+/// a question for a measurement of its own.
 ///
 /// **The decode is not injective.** A witness whose runs touch is normalised on the way in, and
 /// LEB128 admits a non-canonical encoding of a small number, so two different bodies can
@@ -1534,9 +1532,9 @@ fn put_kind(out: &mut Vec<u8>, kind: &LocusKind) {
 ///
 /// **`pub(super)` so that [`chain_ids`](super::chain_ids) reads its bytes through this and not
 /// through a second spelling.** The line this type draws — a field that ran out of bytes is
-/// `Truncated` and a field that cannot mean what it says is `Malformed` — is what Milestone D's
-/// restartable reader branches on, and a chain-id stream that drew it slightly differently would
-/// make a streaming reader either reject a good record or retry for ever on a bad one.
+/// `Truncated` and a field that cannot mean what it says is `Malformed` — is what the streaming
+/// reader's restartable read branches on, and a chain-id stream that drew it slightly differently
+/// would make a streaming reader either reject a good record or retry for ever on a bad one.
 pub(super) struct FieldReader<'a> {
     bytes: &'a [u8],
     bytes_read: usize,
@@ -1603,8 +1601,8 @@ impl<'a> FieldReader<'a> {
 
     /// Advance by what the varint codec consumed, and turn its fault into this module's.
     ///
-    /// **Both integer readers meet the two classes here**, so the line between "this record
-    /// stopped early" — which Milestone D reads more bytes for — and "no writer produced these
+    /// **Both integer readers meet the two classes here**, so the line between "this record stopped
+    /// early" — which the streaming reader reads more bytes for — and "no writer produced these
     /// bytes" is drawn once.
     fn accept<T>(
         &mut self,
@@ -1648,7 +1646,7 @@ impl<'a> FieldReader<'a> {
     ///
     /// **Bounding it here is what keeps `Truncated` meaning what it says.** A count of 2⁴⁰
     /// observations is not a buffer that stopped early — no record body is that long — so
-    /// reporting it as a short read would ask Milestone D's reader to grow its buffer to a
+    /// reporting it as a short read would ask the streaming reader to grow its buffer to a
     /// terabyte instead of reporting damage.
     pub(super) fn read_count(
         &mut self,
@@ -1710,11 +1708,11 @@ impl<'a> FieldReader<'a> {
     ///
     /// **Runs are required to ascend and never touch, rather than being sorted and merged into
     /// whatever they describe.** [`WitnessedLocusPositions::from_half_open_runs`] would happily
-    /// normalise `(0,5),(3,9)` into the single run `(0,9)` — a witness the encoder could not
-    /// have written, decoding into a *different valid record* with the byte count still right,
-    /// so even C2's length check would not see it. That is the one class this decoder would
-    /// otherwise repair instead of reporting, and depth is raised over a witness, so a merged
-    /// run is a read credited with positions it never saw.
+    /// normalise `(0,5),(3,9)` into the single run `(0,9)` — a witness the encoder could not have
+    /// written, decoding into a *different valid record* with the byte count still right, so even
+    /// the head's byte-count check would not see it. That is the one class this decoder would
+    /// otherwise repair instead of reporting, and depth is raised over a witness, so a merged run
+    /// is a read credited with positions it never saw.
     fn read_witness(&mut self) -> Result<ReadWitness, RecordDecodeError> {
         let declared_runs = self.read_count(WITNESS_RUN_COUNT, LEAST_BYTES_PER_WITNESS_RUN)?;
         if declared_runs == 0 {
@@ -1763,7 +1761,7 @@ impl<'a> FieldReader<'a> {
     }
 
     /// The locus kind and what a repeat tract carries with it. A bundle comes back with an
-    /// empty payload, which the body's last field fills (format 2.0).
+    /// empty payload, which the bundle-payload field fills.
     fn read_locus_kind(&mut self) -> Result<LocusKind, RecordDecodeError> {
         let at = self.bytes_read;
         let tag = self.read_varint(LOCUS_KIND)?;
@@ -1877,7 +1875,7 @@ pub enum RecordEncodeError {
     ///
     /// **Refused rather than accepted**: coordinate order is what the block index and every
     /// seek rest on, and a file that breaks it seeks wrongly rather than failing. The writer
-    /// of Milestone F3 turns this into `PspWriteError::OutOfOrder`, which names the file.
+    /// turns this into `PspWriteError::OutOfOrder`, which names the file.
     ///
     /// The message says *the position its offset is measured from* rather than *the previous
     /// record*, because for a block's first record there is no previous record — the base is
@@ -1977,10 +1975,10 @@ impl OffsetBase {
 /// decodes at about twenty million records a second in the measuring prototype (spec §4.5), and
 /// nobody has measured the writer's own rate.
 ///
-/// **It also holds the base every position offset is measured from, and advances it itself.**
-/// That was a parameter until a review priced the alternative: a caller that forgets to advance
-/// it writes a file at coordinates nobody asked for, without an error anywhere. Milestone D1
-/// gives the block its own reader-side state; this is the writer's half of it.
+/// **It also holds the base every position offset is measured from, and advances it itself.** That
+/// was a parameter until a review priced the alternative: a caller that forgets to advance it
+/// writes a file at coordinates nobody asked for, without an error anywhere. The block reader keeps
+/// its own reader-side state; this is the writer's half of it.
 #[derive(Debug)]
 pub struct RecordEncoder {
     /// Kept across blocks: reused so a writer does not allocate one per record.
@@ -2002,12 +2000,12 @@ pub struct RecordEncoder {
 /// Everything of the encoder's that **restarts when a block does** (spec §3.2).
 ///
 /// **A struct rather than loose fields**, because a field added beside a running difference and
-/// initialised once is one that silently never resets: measured at Milestone D, a field added to
-/// [`RecordEncoder`] and initialised in its constructor alone builds clean, passes every test,
-/// and writes a file that is wrong from each block's first record — plausibly wrong, because
-/// coverage is smooth.
+/// initialised once is one that silently never resets: measured when the block reader was built, a
+/// field added to [`RecordEncoder`] and initialised in its constructor alone builds clean, passes
+/// every test, and writes a file that is wrong from each block's first record — plausibly wrong,
+/// because coverage is smooth.
 ///
-/// **⚠ The second running difference is *not* in here, and that is deliberate.** Milestone E's
+/// **⚠ The second running difference is *not* in here, and that is deliberate.** The
 /// chain-id live set lives in [`RecordEncoder::live_reads`] beside this struct, because
 /// [`LiveSetWriter`] owns scratch buffers that must survive a block boundary — only the *set*
 /// must not, and `LiveSetWriter::start_block` is what empties it. What keeps that from being the
@@ -2023,7 +2021,7 @@ pub struct RecordEncoder {
 /// lifetimes so that making it wrong is visible rather than invisible.
 ///
 /// **⚠ Not `Copy`, deliberately** — the same reason `BlockCursor` on the reading side is not.
-/// Milestone E's chain-id live set is a collection, and a `Copy` struct cannot hold one: adding
+/// The chain-id live set is a collection, and a `Copy` struct cannot hold one: adding
 /// it here under a `Copy` derive gives `error[E0204]: the trait `Copy` cannot be implemented for
 /// this type` *before* the `E0063` that is the point, and the cheapest way past `E0204` is to put
 /// the field on [`RecordEncoder`] instead, where it compiles and is never reset. Dropping `Copy`
@@ -2448,7 +2446,7 @@ pub struct DecodedRecord {
 /// this function does that its two halves cannot. [`read_record_head`] hands the body a slice of
 /// exactly the length the head declared, so a field running off the end of *that* is not a
 /// buffer that stopped early — no quantity of further bytes changes the answer. Left in the
-/// `Truncated` class it would ask Milestone D's reader to fetch more and try again, for ever, on
+/// `Truncated` class it would ask the streaming reader to fetch more and try again, for ever, on
 /// one damaged record.
 pub fn decode_record(
     bytes: &[u8],
@@ -2665,7 +2663,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // C1 — the record body, encoded and decoded
+    // The record body, encoded and decoded
     // -----------------------------------------------------------------
 
     use crate::psp::header::{
@@ -2818,9 +2816,9 @@ mod tests {
     // The round trip
     // -----------------------------------------------------------------
 
-    /// The whole of C1: what goes in comes back, field for field, and the decoder's own
+    /// The body codec as a whole: what goes in comes back, field for field, and the decoder's own
     /// count of bytes read is the length of what the encoder wrote — which is the number
-    /// C2's head will be checked against.
+    /// the head's byte count is checked against.
     #[test]
     fn a_generic_record_round_trips_field_for_field() {
         let written = a_rich_record();
@@ -2841,28 +2839,18 @@ mod tests {
     /// **Never regenerate it to make a test pass.** A change here is a change to the format:
     /// the manifest in [`BODY_FIELDS`] has to move with it and the version has to rise.
     ///
-    /// ⚠ **It changed at Milestone E4**, deliberately: two body fields arrived — which
-    /// observation's reads are derived rather than stored, and each stored observation's list —
-    /// and [`BODY_FIELDS`] moved with them. The version did not rise, for the reason
-    /// [`RECORD_HEAD_FIELDS`] already gives about its own additions: **no psp file exists yet**,
-    /// so there is nothing to be incompatible with. From Milestone F, which writes files that
-    /// outlive a build, a change here costs a version.
+    /// ⚠ **It has changed deliberately, each time with [`BODY_FIELDS`]:**
     ///
-    /// ⚠ **And it changed again when the head took the locus-kind tag**, deliberately: the body
-    /// lost the one byte that said what kind of locus it is, keeping only what a repeat tract
-    /// brings with it, so a generic record's body now ends at the depth-cap count. Same window,
-    /// same reason (spec `psp_head_compared_reads.md` §3.1).
-    ///
-    /// ⚠ **And at format 1.2** (2026-10-10), with the version raised: every body ends with the
-    /// observations' flank deletions, one empty byte string here (`str_edge_deletion_alleles.md`
-    /// §5.2).
-    ///
-    /// ⚠ **And at format 2.0** (2026-10-11), with the major version raised: every body ends with
-    /// an STR bundle's payload, one empty byte string here (`str_bundle_loci.md` §6.2).
-    ///
-    /// ⚠ **And at format 2.1** (2026-10-12): every body ends with the flanks its observations
-    /// held where their witness does not say it, one empty byte string here
-    /// (`str_bundle_loci.md` §7.6).
+    /// - when the chain ids were first written: which observation's reads are derived rather
+    ///   than stored, and each stored observation's list. No psp file existed yet, so the
+    ///   version did not rise;
+    /// - 2026-10-10: every body ends with the observations' flank deletions, one empty byte
+    ///   string here (`str_edge_deletion_alleles.md` §5.2);
+    /// - 2026-10-11: then an STR bundle's payload, one empty byte string here
+    ///   (`str_bundle_loci.md` §6.2);
+    /// - 2026-10-12: then the flanks its observations held where their witness does not say
+    ///   it, one empty byte string here (`str_bundle_loci.md` §7.6);
+    /// - then the observations' counts of low-quality reads (`low_base_quality.md`).
     #[test]
     fn the_fixture_encodes_to_these_exact_bytes() {
         let mut bytes = Vec::new();
@@ -2916,9 +2904,9 @@ mod tests {
                 12, // reads-without-observation
                 177, 2, // reads-discarded-by-the-depth-cap
                 0, // locus-kind: Generic
-                0, // observation-flank-deletions: none (format 1.2)
-                0, // str-bundle-payload: empty, the record is no bundle (format 2.0)
-                0, // observation-held-flanks: none (format 2.1)
+                0, // observation-flank-deletions: none
+                0, // str-bundle-payload: empty, the record is no bundle
+                0, // observation-held-flanks: none
                 0, // observation-low-quality-reads: none
             ]
         );
@@ -2929,7 +2917,8 @@ mod tests {
     /// the only shape that catches an observation count written conditionally: with
     /// observations present, an omitted zero cannot show.
     ///
-    /// *Why they are stored at all is spec `psp_record_encoding.md` §4 and the C1 report §2.1.*
+    /// *Why they are stored at all is spec `psp_record_encoding.md` §4 and
+    /// `doc/devel/reports/implementations/ng_psp_c1_2026-08-26.md` §2.1.*
     #[test]
     fn a_record_with_no_observations_round_trips_and_needs_no_reference() {
         let written = SampleLocusObservations {
@@ -3210,8 +3199,8 @@ mod tests {
         assert_eq!(decoded.record, written);
     }
 
-    /// **The flank an observation held round-trips where one was recorded** (format 2.1,
-    /// `str_bundle_loci.md` §7.6), and a flank that is neither left nor right is refused.
+    /// **The flank an observation held round-trips where one was recorded**
+    /// (`str_bundle_loci.md` §7.6), and a flank that is neither left nor right is refused.
     #[test]
     fn the_held_flanks_round_trip_and_a_flank_out_of_range_is_refused() {
         let mut written = a_rich_record();
@@ -3333,11 +3322,10 @@ mod tests {
         }
     }
 
-    /// **The chain ids round-trip exactly, which is what Checkpoint E asks for.**
+    /// **The chain ids round-trip exactly.**
     ///
-    /// ⚠ This test was `chain_ids_come_back_empty_and_nothing_else_changes` from Milestone C1 —
-    /// *"the day E lands, this test is what fails if the ids are still being dropped"*. E4 is
-    /// that day, and this is what it became.
+    /// ⚠ This test was `chain_ids_come_back_empty_and_nothing_else_changes` while the body
+    /// dropped chain ids, written to fail the day they were encoded; this is what it became.
     ///
     /// The record below is the interesting shape: three observations naming reads, so the writer
     /// derives the largest list and stores the other two.
@@ -3565,7 +3553,7 @@ mod tests {
     }
 
     /// The manifest a writer declares has to be one the header can carry. The module has been
-    /// bitten here before: the A1+A2 review found `encode` writing headers its own reader
+    /// bitten here before: a review found `encode` writing headers its own reader
     /// refused, twice over.
     #[test]
     fn the_fields_a_writer_declares_survive_a_header_round_trip() {
@@ -4003,7 +3991,7 @@ mod tests {
     }
 
     /// A later writer's trailing field cut off by a block boundary is a short body — the class
-    /// Milestone D reads more bytes for — and not a panic.
+    /// the streaming reader reads more bytes for — and not a panic.
     #[test]
     fn an_unknown_trailing_field_cut_short_is_truncated_without_panicking() {
         let record = a_rich_record();
@@ -4036,9 +4024,9 @@ mod tests {
     // Damaged and hostile bodies
     // -----------------------------------------------------------------
 
-    /// A body cut at any point is refused at that point, **as `Truncated` and never as
-    /// damage** — the split Milestone D's restartable read branches on, and one no other test
-    /// in this module asserts. Nothing in the decoder indexes past what it holds.
+    /// A body cut at any point is refused at that point, **as `Truncated` and never as damage** —
+    /// the split the streaming reader's restartable read branches on, and one no other test in this
+    /// module asserts. Nothing in the decoder indexes past what it holds.
     #[test]
     fn a_body_cut_short_is_truncated_at_every_cut_and_never_malformed() {
         let record = a_rich_record();
@@ -4054,8 +4042,8 @@ mod tests {
             ) {
                 Err(RecordDecodeError::Truncated { .. }) => {}
                 other => panic!(
-                    "{cut} bytes of a record is a short buffer, which Milestone D reads more \
-                     bytes for — not damage; got {other:?}"
+                    "{cut} bytes of a record is a short buffer, which the streaming reader reads \
+                     more bytes for — not damage; got {other:?}"
                 ),
             }
         }
@@ -4072,7 +4060,7 @@ mod tests {
     }
 
     /// A length or a count no record body could hold is **damage and never a short buffer**:
-    /// reported as truncation it would ask Milestone D's reader to grow its buffer to a
+    /// reported as truncation it would ask the streaming reader to grow its buffer to a
     /// terabyte instead of refusing the file.
     #[test]
     fn a_length_no_body_could_hold_is_malformed_and_never_truncated() {
@@ -4312,11 +4300,11 @@ mod tests {
     }
 
     /// **Runs this encoder could not have written are refused, not repaired.**
-    /// `WitnessedLocusPositions::from_half_open_runs` sorts and merges whatever it is handed,
-    /// so an unsorted or overlapping pair would otherwise decode into a *different valid
-    /// record* — with the byte count still right, so even C2's length check would not see it.
-    /// A witness is what read depth is raised over, so a merged run credits a read with
-    /// positions it never saw.
+    /// `WitnessedLocusPositions::from_half_open_runs` sorts and merges whatever it is handed, so an
+    /// unsorted or overlapping pair would otherwise decode into a *different valid record* — with
+    /// the byte count still right, so even the head's byte-count check would not see it. A witness
+    /// is what read depth is raised over, so a merged run credits a read with positions it never
+    /// saw.
     #[test]
     fn witness_runs_that_do_not_ascend_or_that_touch_are_refused() {
         // An empty reference, one observation, empty bases, two runs, then the rest as zeroes.
@@ -4557,7 +4545,7 @@ mod tests {
 
     // -----------------------------------------------------------------
     // -----------------------------------------------------------------
-    // C2 — the record head, and the skip it exists for
+    // The record head, and the skip it exists for
     // -----------------------------------------------------------------
 
     /// The contig every fixture here sits on. A block never crosses one, so a reader takes it
@@ -4644,8 +4632,8 @@ mod tests {
         body.len()
     }
 
-    /// The whole of C2: a record laid down as a head and a body comes back as the same record,
-    /// with the head's own fields intact and the byte count covering both halves.
+    /// The head and body together: a record laid down as a head and a body comes back as the same
+    /// record, with the head's own fields intact and the byte count covering both halves.
     #[test]
     fn a_record_round_trips_through_its_head_and_its_body() {
         let mut live_reads = a_live_set_reader();
@@ -4667,7 +4655,7 @@ mod tests {
     }
 
     /// **What the encoder hands back is what it wrote.** The block index and the position
-    /// summary of Milestones D and F are built from this return value rather than by re-reading
+    /// summary are built from this return value rather than by re-reading
     /// the bytes, so a head that disagrees with its own record would seek wrongly rather than
     /// fail. The fixture discriminates because its three records differ in all three fields.
     #[test]
@@ -5136,8 +5124,8 @@ mod tests {
     }
 
     /// **A walk that builds only every other record reaches the same records as one that builds
-    /// them all** — a skipped body strands nothing. This is Milestone C3's oracle in miniature,
-    /// over one block's worth of records rather than a file's.
+    /// them all** — a skipped body strands nothing. This is the stand-alone-body oracle in
+    /// miniature, over one block's worth of records rather than a file's.
     #[test]
     fn a_walk_that_skips_every_other_record_matches_a_full_decode_on_the_ones_it_keeps() {
         let mut live_reads = a_live_set_reader();
@@ -5303,7 +5291,7 @@ mod tests {
 
     /// **An offset of zero is legal and cannot be refused here.** A block's first record is
     /// measured from its own start, so zero is what that record writes. Refusing a *repeated*
-    /// position belongs to the block writer of Milestone D1, which knows which record it is on.
+    /// position belongs to the block writer, which knows which record it is on.
     #[test]
     fn a_record_at_the_base_it_is_measured_from_is_written_with_a_zero_offset() {
         let record = a_rich_record();
@@ -5469,9 +5457,9 @@ mod tests {
     }
 
     /// **A fault inside a body the head already bounded is damage, and never a short read.**
-    /// `Truncated` is the class Milestone D fetches more bytes for, and more bytes cannot help
-    /// here: the body is re-bounded to the same declared length however large the buffer grows.
-    /// Left in that class, one damaged record is a retry that never ends.
+    /// `Truncated` is the class the streaming reader fetches more bytes for, and more bytes cannot
+    /// help here: the body is re-bounded to the same declared length however large the buffer
+    /// grows. Left in that class, one damaged record is a retry that never ends.
     #[test]
     fn a_fault_inside_a_bounded_body_is_damage_and_more_bytes_do_not_help() {
         let mut live_reads = a_live_set_reader();
@@ -5690,7 +5678,7 @@ mod tests {
     ///
     /// A chain id names a read *pair*. If both mates cover this record and show different
     /// sequences, the same identifier is in two observations — and the derivation, which is the
-    /// live set minus the others, would then drop it from the residual. Checkpoint E asks for
+    /// live set minus the others, would then drop it from the residual. The spec asks for
     /// chain ids that round-trip **exactly**, so the writer checks and falls back.
     #[test]
     fn a_read_named_by_two_observations_makes_the_writer_store_every_list() {
@@ -6031,8 +6019,8 @@ mod tests {
     }
 
     /// A whole record cut anywhere is `Truncated` — including the cut where the head is complete
-    /// and the body is one byte short, which is what a record straddling Milestone D's rolling
-    /// buffer looks like.
+    /// and the body is one byte short, which is what a record straddling the streaming reader's
+    /// rolling buffer looks like.
     ///
     /// **And the live set does not move at any of those cuts**, which is the half this test was
     /// blind to. ⚠ Its record had no chain ids, so every cut met the two bytes `0, 0` and a set
@@ -6202,7 +6190,7 @@ mod tests {
     /// deliberately.** Spec §8 refuses a fixed maximum record size — "a single record can exceed
     /// the rolling buffer … the buffer has to grow rather than fail" — so there is no length at
     /// which this reader may call a declared body damage. What bounds it is the head's own
-    /// `u32`, which the test above pins, and Milestone D's block.
+    /// `u32`, which the test above pins, and the block reader's buffer ceiling.
     #[test]
     fn a_head_declaring_a_body_no_buffer_holds_is_truncated_not_malformed() {
         let mut live_reads = a_live_set_reader();
@@ -6334,7 +6322,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // C3 — the body stands on its own
+    // The body stands on its own
     // -----------------------------------------------------------------
 
     /// How many records [`twelve_records_in_order`] holds.
@@ -6380,9 +6368,9 @@ mod tests {
     /// Twelve records over one contig in coordinate order, of every shape this codec can be
     /// handed.
     ///
-    /// **Not called a block**, though a later milestone's blocks will hold runs like it: a psp
+    /// **Not called a block**, though blocks hold runs like it: a psp
     /// block is a span of reference compressed as one unit and cut on a 100 kb grid
-    /// (spec §2, §4.1), and this is 232 bases of records in memory. Blocks arrive at D1.
+    /// (spec §2, §4.1), and this is 232 bases of records in memory.
     ///
     /// What varies, and every clause of this is asserted by
     /// `the_run_is_the_run_its_doc_describes` rather than left in prose:
@@ -6395,9 +6383,8 @@ mod tests {
     /// - **reference bases that differ between records of the same length**, for the same reason;
     /// - records with no observations at all, records where every read agreed with the reference,
     ///   and three at three hundred reads a position;
-    /// - **chain ids on some observations.** C1's encoder drops them, so the comparisons go
-    ///   through [`as_a_decode_can_return_it`] — and the day Milestone E writes them, that helper
-    ///   becomes the identity and this oracle covers the exception lists with no test touched.
+    /// - **chain ids on some observations**, so this oracle covers the exception lists and the
+    ///   residual derivation.
     fn twelve_records_in_order() -> Vec<SampleLocusObservations> {
         let spans = [1u64, 7, 1, 3, 1, 12, 1, 1, 4, 9, 1, 2];
         let mut records = Vec::new();
@@ -6510,12 +6497,9 @@ mod tests {
         records
     }
 
-    /// The record a decode can currently return for `record`: everything it carries except the
-    /// chain ids, which C1's encoder drops
-    /// (`chain_ids_come_back_empty_and_nothing_else_changes`).
-    ///
-    /// **When Milestone E starts writing them this becomes the identity and can be deleted**, and
-    /// the oracle covers the exception lists from that moment without a test being touched.
+    /// The record a decode returns for `record`: the record itself, now that the body encodes
+    /// the chain ids. It was a projection that emptied them while the encoder dropped them, and
+    /// is the identity now; it can be deleted.
     fn as_a_decode_can_return_it(record: &SampleLocusObservations) -> SampleLocusObservations {
         record.clone()
     }
@@ -6531,7 +6515,7 @@ mod tests {
 
     /// Walk `bytes`, building the records `is_kept` says to build and reading only the head of
     /// the rest. **Every head is read** — a skipping reader must, because the head carries the
-    /// running position and, from Milestone E3, the chain-id changes.
+    /// running position and the chain-id changes.
     ///
     /// `what` names the walk, so a refusal from inside says which of a test's several patterns
     /// was running.
@@ -6680,7 +6664,7 @@ mod tests {
             records
                 .iter()
                 .any(|record| record.observations.iter().any(|o| !o.chain_ids.is_empty())),
-            "chain ids, so Milestone E is covered the day it writes them"
+            "some observations carry chain ids, so their encoding is covered"
         );
 
         // Two records of the same length whose reference bases differ.
@@ -6716,7 +6700,7 @@ mod tests {
         );
     }
 
-    /// **The oracle C3 exists for.** A walk that builds only some of a run's records gets, for
+    /// **The stand-alone-body oracle.** A walk that builds only some of a run's records gets, for
     /// each one it does build, exactly the record a walk that built them all gets — under every
     /// pattern, including the ones that skip the first record, the last, and all but one.
     ///

@@ -24,9 +24,9 @@
 //! block's size from the reader's memory. [`BlockStream`] reads a run of them back a record at a
 //! time, holding two 16 kB buffers and nothing that grows with the block.
 //!
-//! **Nothing here writes or opens a file.** Milestone F owns the header, the index and the
-//! footer; this module is handed bytes and hands bytes back, which is what lets a caller start a
-//! reader at any block it has an offset for.
+//! **Nothing here writes or opens a file.** The writer and reader modules own the header, the index
+//! and the footer; this module is handed bytes and hands bytes back, which is what lets a caller
+//! start a reader at any block it has an offset for.
 //!
 //! Design authority: `doc/devel/ng/spec/psp_file_format.md` §3.2 (a block is self-contained),
 //! §4.1 (the cut rule and what it buys), §4.2 (the window is declared and the reader honours
@@ -281,7 +281,7 @@ pub enum BlockHeadDecodeError {
 /// A whole block payload split into its head and the records behind it.
 ///
 /// **For a caller holding a block entire** — a writer's own tests, and the compressed-block
-/// round trip Milestone D2 adds. The streaming reader of Milestone D3 holds a rolling buffer
+/// round trip. The streaming reader, [`BlockStream`], holds a rolling buffer
 /// rather than a whole block and goes to [`BlockHead::decode`] directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -300,11 +300,11 @@ pub struct BlockRecords<'a> {
 impl<'a> BlockRecords<'a> {
     /// Split a whole block payload into its head and the records behind it.
     ///
-    /// **A short head is damage here, never `Truncated`.** The caller holds the block entire,
-    /// so no quantity of further bytes changes the answer, and a reader handed the retry class
-    /// about a block already wholly in memory retries for ever. That is the C2 review's Blocker
-    /// one level up: `record.rs` converts the same class at the same kind of boundary, once the
-    /// container's length is known (`RecordDecodeError::inside_a_bounded_body`).
+    /// **A short head is damage here, never `Truncated`.** The caller holds the block entire, so no
+    /// quantity of further bytes changes the answer, and a reader handed the retry class about a
+    /// block already wholly in memory retries for ever. That is a blocking defect a review found in
+    /// the record decoder, one level up: `record.rs` converts the same class at the same kind of
+    /// boundary, once the container's length is known (`RecordDecodeError::inside_a_bounded_body`).
     pub fn split(payload: &'a [u8]) -> Result<Self, BlockHeadDecodeError> {
         let decoded = BlockHead::decode(payload).map_err(|fault| match fault {
             BlockHeadDecodeError::Truncated { field, bytes_in } => {
@@ -372,7 +372,7 @@ impl OpenBlock {
 /// Turns a stream of records into block payloads, cutting them on the coordinate grid.
 ///
 /// **It hands back bytes, not a file.** One payload is exactly what a compressor is given
-/// (Milestone D2) and what the block index will point at (Milestone F1); nothing here
+/// and what the block index points at; nothing here
 /// compresses or writes.
 ///
 /// # What closes a block
@@ -426,7 +426,7 @@ impl OpenBlock {
 /// block half-closed, so a caller that reports a refusal and carries on produces the file it
 /// would have produced had the refused record never been offered — measured over 40,000 random
 /// record streams with 91,247 refusals interleaved, byte-identical to replaying only the
-/// records that were accepted (the D1 review's fuzzing).
+/// records that were accepted (a review's fuzzing).
 #[derive(Debug)]
 #[must_use]
 pub struct BlockBuilder {
@@ -499,7 +499,7 @@ impl BlockBuilder {
         let Manifest {
             genomic_block_size_bp,
             block_byte_ceiling,
-            // Milestone D2's: it configures the compressor, which this builder does not own.
+            // It configures the compressor, which this builder does not own.
             look_back_window_log: _,
             // Checked below rather than ignored — `RecordLayout::from_manifest` is the one
             // reader of this field, and it refuses a layout this build cannot write.
@@ -693,7 +693,7 @@ impl BlockBuilder {
 ///
 /// **Its own type rather than a variant of [`BlockWriteError`]**, because the two operations
 /// fail in disjoint ways: a builder that exists can never raise these, and building one can
-/// never raise the others. Milestone F3 maps each to a `PspWriteError` that also names the
+/// never raise the others. The writer maps each to a `PspWriteError` that also names the
 /// file, and a variant that cannot occur at a call site is how that mapping acquires an
 /// `unreachable!`.
 #[non_exhaustive]
@@ -716,7 +716,7 @@ pub enum BlockCutRuleError {
     /// extended with records this build produces.
     // **No `{source}` in the message, and `#[source]` below is why**: a chain that prints the
     // same sentence twice reads as a fault in the printer, and `PspWriteError::UnsupportedHeader`
-    // is where that first showed (the G3 review).
+    // is where that first showed, in review.
     #[error("the file declares a record layout this writer cannot honour")]
     UnsupportedRecordLayout {
         #[source]
@@ -727,7 +727,7 @@ pub enum BlockCutRuleError {
 /// Why a record could not be laid down in a block.
 ///
 /// **Every variant is a record the writer was handed that the format cannot hold**, not an
-/// internal fault. The writer of Milestone F3 turns each into a [`PspWriteError`] that also
+/// internal fault. The writer turns each into a [`PspWriteError`] that also
 /// names the file, which is the one thing a cohort gathering sixty samples at once needs and
 /// this type does not know — including a `ContigOutOfOrder` of its own, since
 /// `PspWriteError::OutOfOrder` renders a sentence about positions that is wrong for a contig
@@ -785,9 +785,9 @@ pub enum BlockWriteError {
 /// *nobody is driven by it* is not the same as *nobody needs to know it*: goal 5's
 /// byte-identity check, an append that must match the bytes already in a file, and every byte
 /// figure the specs quote all rest on the level a file was written at. So a compressor keeps
-/// its own ([`BlockCompressor::compression_level`]), and **recording it in the header's
-/// writer-provenance parameters is Milestone F3's** — that is where a writer's exposed knobs
-/// go, and nothing writes a header yet.
+/// its own ([`BlockCompressor::compression_level`]), and **the writer records it in the header's
+/// writer-provenance parameters** (`zstd-compression-level`), which is where a writer's exposed
+/// knobs go.
 pub const ZSTD_COMPRESSION_LEVEL: i32 = 9;
 
 /// How many bytes stand in front of each compressed block, saying how long it is.
@@ -886,8 +886,8 @@ impl BlockCompressor {
     /// written at.
     ///
     /// **[`from_manifest`](Self::from_manifest) is what a writer should use.** This is for a
-    /// caller that has a window and no manifest — the tests below, and Milestone D3's own
-    /// fixtures.
+    /// caller that has a window and no manifest — the tests below, and the streaming
+    /// reader's own fixtures.
     pub fn new(look_back_window_log: u8) -> Result<Self, BlockCompressError> {
         Self::with_level(look_back_window_log, ZSTD_COMPRESSION_LEVEL)
     }
@@ -1114,8 +1114,7 @@ impl BlockCompressError {
 /// How many compressed bytes a reader pulls from the file at a time.
 ///
 /// **16 kB, and it is an optimum rather than a floor** (spec §4.4). **⚠ The numbers below are
-/// the measuring prototype's reader, not this one** — nothing has yet timed `BlockStream`, and
-/// Milestone H is where that happens. Re-measured there on a quiet machine over a walk of
+/// the measuring prototype's reader, not this one**, re-measured on a quiet machine over a walk of
 /// 7.69 M records: 4 kB takes 0.149 s and holds 233 kB an open sample,
 /// 16 kB takes 0.143 s and holds 257 kB, 64 kB takes 0.161 s and holds 353 kB, and 256 kB takes
 /// 0.200 s. Going up costs both time and memory; going down costs a little time and saves a
@@ -1149,8 +1148,8 @@ pub const ROLLING_BYTES: usize = 16 * 1024;
 ///   the committed range — three hundred reads a position, one observation each, with their
 ///   moments — a record encodes to **18,292 bytes** at a 50-base span and **48,693** at 150 bases.
 ///   (An earlier version of this comment said "roughly 30 kB" from estimation; the measured figure
-///   is the first of those. Milestone E's chain ids add about 8 bytes a read on top, since
-///   `encode_record_body` drops them today.)
+///   is the first of those. It was taken before records carried chain ids, which add about 8
+///   bytes a read on top.)
 /// - **It is what keeps the worst case inside the budget spec §1.1 states.** A caller holds one
 ///   reader per sample at up to several thousand; three thousand samples every one of which met a
 ///   damaged block at the same moment is **1,572,864,000 bytes**, against the 1.5 GB §1.1 gives
@@ -1177,7 +1176,7 @@ const _: () = assert!(
 const _: () = assert!(
     ROLLING_BUFFER_CEILING_BYTES >= 64 * 1024,
     "a ceiling under 64 kB refuses records this caller's own depth cap produces: 48,693 bytes \
-     at a 150-base span, and Milestone E's chain ids are still to come"
+     at a 150-base span, before the chain ids"
 );
 
 /// One record as a walk met it.
@@ -1225,7 +1224,7 @@ pub struct StreamedRecord {
 /// from. This type hands each record over and retains only its two buffers, the decoder's own
 /// state, and where it is.
 ///
-/// **It reads forward from wherever `source` is.** Milestone F's index turns a coordinate into a
+/// **It reads forward from wherever `source` is.** The block index turns a coordinate into a
 /// byte offset and seeks before handing the source over; this type knows nothing about files,
 /// which is what lets a caller start one at an arbitrary block.
 pub struct BlockStream<R> {
@@ -1255,8 +1254,8 @@ pub struct BlockStream<R> {
     /// **Kept unconditionally, at eight bytes against a 500 kB budget.** It is the one thing
     /// about a restartable parse that cannot be seen from outside — a walk that comes out right
     /// is silent about whether the retry ever ran — and it was `#[cfg(test)]` until a review
-    /// pointed out that this hides it from `tests/`, from benches, and from Milestone H, which
-    /// is the one place this reader is to be timed.
+    /// pointed out that this hides it from `tests/`, and from benches, which
+    /// are where this reader is timed.
     parses_restarted: u64,
 
     /// How many blocks this reader has opened — counted the moment a block's declared length
@@ -1299,7 +1298,7 @@ pub struct BlockStream<R> {
     /// one read. Measured on a 219,758-byte file of 150 blocks: after the first refusal the
     /// reader resynchronised at the next read-chunk boundary, took four arbitrary bytes for a
     /// block length, and carried on; on a smaller file it refused once and then handed back
-    /// 5,681 further records and ended cleanly. Milestone F hands this reader a seeked `File`,
+    /// 5,681 further records and ended cleanly. The psp reader hands this reader a seeked `File`,
     /// where that is the ordinary case rather than the exotic one.
     refused: bool,
 
@@ -1315,10 +1314,10 @@ pub struct BlockStream<R> {
 
 /// Everything a reader **restarts when a block does** (spec §3.2).
 ///
-/// **A struct rather than loose fields, for the reason D1 gave `RecordEncoder`'s own per-block
-/// state**: spec §3.2 requires every running difference inside a block to restart, Milestone E
-/// adds the chain-id live set, and a field added beside these and initialised once is one that
-/// silently never resets — a file that then reads back wrong from every block's first record,
+/// **A struct rather than loose fields, for the reason `RecordEncoder` keeps its own per-block
+/// state in one**: spec §3.2 requires every running difference inside a block to restart, the
+/// chain-id live set is one of them, and a field added beside these and initialised once is one
+/// that silently never resets — a file that then reads back wrong from every block's first record,
 /// and plausibly wrong, because coverage is smooth. It is rebuilt by one assignment from
 /// [`opening`](Self::opening), whose literal is exhaustive, so a field added here is a compile
 /// error at the reset.
@@ -1326,7 +1325,7 @@ pub struct BlockStream<R> {
 /// **The two buffers are not in here**, and that is the distinction: they are storage a reader
 /// reuses across blocks, not state a record is parsed against.
 ///
-/// **⚠ Not `Copy`, deliberately.** Milestone E's chain-id live set is a collection, and a `Copy`
+/// **⚠ Not `Copy`, deliberately.** The chain-id live set is a collection, and a `Copy`
 /// struct cannot hold one — `error[E0204]` — so a coder meeting that would put the field on
 /// [`BlockStream`] instead, where it compiles, passes every test, and is never reset. Measured: a
 /// live set added there builds clean and all 197 `psp` tests pass. Dropping `Copy` is what
@@ -1627,8 +1626,7 @@ impl<R: std::io::Read> BlockStream<R> {
     /// call** (spec §6.2). A record the predicate declines costs its head and a pointer advance;
     /// its body is never decoded. **⚠ What that is worth was measured on the prototype's reader
     /// and not on this one**: over 7.69 M records of a tomato accession, a walk keeping one
-    /// record in a hundred took 0.141 s against 0.29 s for one building every record. Milestone
-    /// H times this reader.
+    /// record in a hundred took 0.141 s against 0.29 s for one building every record.
     ///
     /// **The bytes still have to arrive either way.** Skipping saves building the record, not
     /// decompressing it: a block comes out of zstd sequentially and there is nothing to seek
@@ -2574,9 +2572,10 @@ mod tests {
         }
     }
 
-    /// **A whole block whose head stops early is damage, never `Truncated`.** The caller holds
-    /// the block entire, so *fetch more bytes* is a retry that never ends — the C2 review's
-    /// Blocker one level up, and the reason `split` exists as more than a two-line forward.
+    /// **A whole block whose head stops early is damage, never `Truncated`.** The caller holds the
+    /// block entire, so *fetch more bytes* is a retry that never ends — a blocking defect a review
+    /// found in the record decoder, one level up, and the reason `split` exists as more than a
+    /// two-line forward.
     #[test]
     fn a_short_whole_block_is_malformed_and_never_truncated() {
         let mut whole = Vec::new();
@@ -3193,8 +3192,8 @@ mod tests {
     #[test]
     fn a_manifest_declaring_a_layout_this_writer_cannot_honour_is_refused() {
         let mut manifest = a_manifest();
-        // Four fields short: one short is format 2.0, two short format 1.2 and three short
-        // format 1.1, which a reader reads.
+        // Four fields short, as a psp written before the last body fields arrived declares it;
+        // nothing but this build's own list is accepted.
         manifest.fields.truncate(manifest.fields.len() - 4);
 
         let refused = BlockBuilder::from_manifest(&manifest)
@@ -3279,10 +3278,9 @@ mod tests {
     /// which is what a reader configured from the file's declaration would do.
     ///
     /// **It grows its output rather than sizing it from the frame**, which is the property the
-    /// design turns on: the frame carries no content size, so there is nothing to size from
-    /// even if this wanted to. It is not the reader — that streams into a rolling buffer at
-    /// Milestone D3 — it is just enough to ask zstd whether the window it was promised is the
-    /// window the frame needs.
+    /// design turns on: the frame carries no content size, so there is nothing to size from even if
+    /// this wanted to. It is not the reader — that streams into a rolling buffer — it is just
+    /// enough to ask zstd whether the window it was promised is the window the frame needs.
     fn decompress_capped_at(frame: &[u8], window_log_max: u32) -> Result<Vec<u8>, NotInflated> {
         let mut decoder = zstd::zstd_safe::DCtx::create();
         decoder
@@ -3412,12 +3410,12 @@ mod tests {
         );
     }
 
-    /// **⚠ A frame's own declared window is never *wider* than the file's, and is often
-    /// narrower.** zstd narrows it to fit a payload smaller than the cap, so an ordinary block
-    /// under a 32 kB declaration can write a frame needing 1 kB. Spec §4.2 calls a mismatch
-    /// between our declaration and the frame's "a corruption worth detecting rather than
-    /// tolerating" — **and the check that implements that has to be `≤`, not `=`**, or Milestone
-    /// D3 rejects almost every block of every file this writer produces.
+    /// **⚠ A frame's own declared window is never *wider* than the file's, and is often narrower.**
+    /// zstd narrows it to fit a payload smaller than the cap, so an ordinary block under a 32 kB
+    /// declaration can write a frame needing 1 kB. Spec §4.2 calls a mismatch between our
+    /// declaration and the frame's "a corruption worth detecting rather than tolerating" — **and
+    /// the check that implements that has to be `≤`, not `=`**, or the streaming reader rejects
+    /// almost every block of every file this writer produces.
     #[test]
     fn a_frames_own_window_is_never_wider_than_the_file_declares() {
         let a_few = vec![a_record(0, 1, 1), a_record(0, 2, 1), a_record(0, 3, 1)];
@@ -3907,8 +3905,8 @@ mod tests {
     // Reading a block back, a record at a time
     // -----------------------------------------------------------------
 
-    /// A whole file of compressed blocks, and where each one begins — which is what Milestone
-    /// F's index will hold and what lets a test start a reader at an arbitrary block.
+    /// A whole file of compressed blocks, and where each one begins — which is what the block
+    /// index holds and what lets a test start a reader at an arbitrary block.
     struct BlocksOnDisk {
         bytes: Vec<u8>,
         block_offsets: Vec<usize>,
@@ -4073,7 +4071,7 @@ mod tests {
     }
 
     /// **A reader can start at any block, and gets what a full read gives from there.** The
-    /// offsets are what Milestone F's index will hold; nothing else about the file is needed.
+    /// offsets are what the block index holds; nothing else about the file is needed.
     #[test]
     fn a_reader_starting_at_a_block_gets_the_tail_of_a_full_read() {
         let records: Vec<_> = (0..200).map(|index| a_record(0, 100 + index, 1)).collect();
@@ -4210,8 +4208,8 @@ mod tests {
         ));
 
         let mut manifest = a_manifest();
-        // Five fields short: one short is the layout before the low-quality counts, two short
-        // format 2.0, three short format 1.2 and four short format 1.1, which a reader reads.
+        // Five fields short, as a psp written before the last body fields arrived declares it;
+        // nothing but this build's own list is accepted.
         manifest.fields.truncate(manifest.fields.len() - 5);
         assert!(matches!(
             BlockStream::new([].as_slice(), &manifest),
@@ -4774,11 +4772,11 @@ mod tests {
         }
     }
 
-    /// **A record retried after a refill is parsed from its first byte, against state the retry
-    /// did not touch.** This is spec §8's named trap — *"a parse that half-advances that state
-    /// before failing corrupts every record after it, plausibly"* — and it is the property
-    /// Milestone D4 exists to prove. Putting the defect in advances every later coordinate by
-    /// one, which only a walk that compares the records it built can see.
+    /// **A record retried after a refill is parsed from its first byte, against state the retry did
+    /// not touch.** This is spec §8's named trap — *"a parse that half-advances that state before
+    /// failing corrupts every record after it, plausibly"* — and it is the property the restartable
+    /// read exists to provide. Putting the defect in advances every later coordinate by one, which
+    /// only a walk that compares the records it built can see.
     ///
     /// The source hands back one byte at a time, so **every record in the file is retried**,
     /// most of them many times.
@@ -4966,12 +4964,12 @@ mod tests {
     /// the same block still has to be read — the buffer is then a large empty vector, and what it
     /// holds is one record's worth.
     ///
-    /// This is the one mutation that survived the whole D4/D5 suite: `self.rolling.capacity() >=
-    /// self.buffer_ceiling` in place of `self.rolling.len() >= …`. Under it a well-formed file
-    /// whose records each need more than half the ceiling is refused with *"a record needs more
-    /// than the … bytes this reader allows one to hold"* — a valid file reported as a record too
-    /// large for the reader, which is the refusal that sends an operator to raise a limit that was
-    /// never binding.
+    /// This is the one mutation that survived the whole restartable-read suite:
+    /// `self.rolling.capacity() >= self.buffer_ceiling` in place of `self.rolling.len() >= …`.
+    /// Under it a well-formed file whose records each need more than half the ceiling is refused
+    /// with *"a record needs more than the … bytes this reader allows one to hold"* — a valid file
+    /// reported as a record too large for the reader, which is the refusal that sends an operator
+    /// to raise a limit that was never binding.
     #[test]
     fn a_block_whose_records_each_grow_the_buffer_to_the_ceiling_still_reads() {
         // Sized so one record needs more than half the ceiling: the buffer doubles from
@@ -5505,7 +5503,7 @@ mod tests {
 
     /// **And a reader that starts at an arbitrary block, skipping, agrees from there.**
     ///
-    /// Milestone F's index hands a reader a block offset and nothing else. The two rules meet
+    /// The block index hands a reader a block offset and nothing else. The two rules meet
     /// here: the set restarts at the block, and the skipping reader still applies every head.
     #[test]
     fn a_skipping_walk_from_any_block_has_the_reads_a_full_walk_has_there() {
@@ -5642,7 +5640,7 @@ mod tests {
     ///
     /// **⚠ The first version of this fixture was a single block.** Its 1,999 records all fell in
     /// cell 0 of the grid it named, so the sweep retried tens of thousands of times and never
-    /// crossed a block boundary while doing it — and the test's name, and D4's report, were both
+    /// crossed a block boundary while doing it — and the test's name, and its report, were both
     /// plural about one block. The grid below cuts, and `payloads.len() >= 3` is what says so.
     ///
     /// Measured on the fixture as it now stands — three blocks, the largest 73,849 bytes against
@@ -5826,15 +5824,16 @@ mod tests {
     /// block shows up as records at the wrong coordinates — and **plausibly** wrong, because
     /// coverage is smooth and a position difference that is slightly off still parses.
     ///
-    /// **What it adds over D3's `a_reader_starting_at_a_block_gets_the_tail_of_a_full_read`**,
+    /// **What it adds over `a_reader_starting_at_a_block_gets_the_tail_of_a_full_read`**,
     /// which reads every *tail* of the same file: a byte range that both begins **and ends** at a
-    /// block boundary — the shape Milestone F's index will hand a reader — and a fixture whose
+    /// block boundary — the shape the block index hands a reader — and a fixture whose
     /// blocks are about 86 million bases apart, so a carried difference is not a small coordinate
     /// error. ⚠ It is not a strictly stronger test: a review could build no mutation that kills
-    /// this one and spares D3's.
+    /// this one and spares that one.
     ///
-    /// Today there is one running difference, the position offset. **Milestone E adds the
-    /// chain-id live set, which is the second**, and this test is what it will meet.
+    /// **Its records carry no chain ids, so the difference it holds is the position offset.**
+    /// The chain-id live set's restart is held by
+    /// `a_skipping_walk_from_any_block_has_the_reads_a_full_walk_has_there`.
     #[test]
     fn a_block_read_alone_gives_what_it_gives_in_the_middle_of_a_file() {
         let records = records_whose_blocks_are_far_apart();
@@ -5876,8 +5875,8 @@ mod tests {
     /// **Restart equals sequential, from every block, at every refill schedule.**
     ///
     /// The plan's own oracle: reading from an arbitrary block gives what a full read gives from
-    /// that point. D4 showed that where a reader refills is not where a writer cut, so the two
-    /// boundaries are crossed together here — a stale difference that survived a block boundary
+    /// that point. A review showed that where a reader refills is not where a writer cut, so the
+    /// two boundaries are crossed together here — a stale difference that survived a block boundary
     /// and one that survived a buffer boundary are different defects.
     #[test]
     fn restart_equals_sequential_from_every_block_at_five_refill_schedules() {

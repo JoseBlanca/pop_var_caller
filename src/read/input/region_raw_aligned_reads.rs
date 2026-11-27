@@ -24,7 +24,7 @@
 //! total. One here would be a second, worse copy of a number that already exists. Pinned by
 //! `the_step_one_tally_accumulates_across_regions`.
 //!
-//! **These four methods were a trait until C3** — `RecordSource`, which existed so a filter
+//! **These four methods were once a trait** — `RecordSource`, which existed so a filter
 //! living apart from the cursor could be driven by test doubles. It had one production
 //! implementation and, once the cursor owned the loop, no generic consumer at all, so it went
 //! and the methods became inherent (spec §6).
@@ -68,9 +68,9 @@ pub(crate) struct RegionRawAlignedReads {
     /// The chromosome every region must be on — the cursor's, checked before this is ever
     /// asked to move.
     contig: ContigId,
-    /// The region being served, or `None` before the first [`move_to`](Self::move_to). A
-    /// source asked for records before it has been pointed anywhere yields nothing rather
-    /// than guessing at a region.
+    /// The region being served, or `None` before the first [`jump_to`](Self::jump_to) or
+    /// [`continue_into`](Self::continue_into). A source asked for records before it has been
+    /// pointed anywhere yields nothing rather than guessing at a region.
     region: Option<GenomeRegion>,
     /// How this file's records are assigned to read groups. Settled at open; consulted per
     /// record only when it says it must.
@@ -208,8 +208,9 @@ impl RegionRawAlignedReads {
             // **The sorted early stop.** The file is coordinate-ordered, so once a record on
             // this contig begins past the region's end, no later record can reach back into
             // it. Reported as an ordinary end of input, because that is the only end a
-            // narrowing could report before C3 — which is exactly why the old filter distinguished a
-            // clean stop from a failure, and why a cursor undoes the former when it moves on.
+            // narrowing could report while it sat behind the `RecordSource` trait — which is
+            // exactly why the old filter distinguished a clean stop from a failure, and why a
+            // cursor undoes the former when it moves on.
             if on_this_contig
                 && buf
                     .record
@@ -230,10 +231,10 @@ impl RegionRawAlignedReads {
             // something different for a narrowed read than for a whole-file one.
             //
             // **One overlap rule, and there is now only one path to apply it.** It came
-            // from the per-region query, was moved here at Milestone C so the new read path
-            // did not depend on the module Milestone F would delete, and was shared by both
-            // until that deletion — because the single thing that must never happen in this
-            // design is two paths disagreeing about which reads a region contains.
+            // from the per-region query, was moved here so the new read path did not depend on
+            // a module due for deletion, and was shared by both until that deletion — because the
+            // single thing that must never happen in this design is two paths disagreeing about
+            // which reads a region contains.
             if !on_this_contig || !overlaps(&buf.record, region) {
                 continue;
             }
@@ -270,8 +271,8 @@ impl RegionRawAlignedReads {
 ///
 /// **One rule, applied by every path that has ever asked the question.** It came from the
 /// per-region query, where the BAM and CRAM sources reached it through a re-export; it was
-/// moved here at Milestone C so the new read path did not depend on the module Milestone F
-/// would delete, rather than the other way round, and F left it the only copy. The single
+/// moved here so the new read path did not depend on a module due for deletion, rather than
+/// the other way round, and that deletion left it the only copy. The single
 /// thing that must never happen in this design is two paths disagreeing about which reads a
 /// region contains, and sharing one body is what made them provably identical rather than
 /// identical-looking while both existed.
@@ -440,7 +441,7 @@ mod tests {
     /// one on no contig at all. Neither has a footprint, so neither can touch a region — and
     /// neither is a *filter* drop, because it is discarded here, before the filter is reached.
     ///
-    /// Inherited from the per-region query, which owned this rule until Milestone F. The
+    /// Inherited from the per-region query, which owned this rule until it was deleted. The
     /// oracle tests around it cannot see this: they drop these records by the same rule, so
     /// they would agree however this arm behaved.
     #[test]

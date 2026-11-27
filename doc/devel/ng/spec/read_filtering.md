@@ -31,12 +31,16 @@ and reads **raw** bytes (matching production, for a clean port-back); it stays i
 filtering (§3, §7).
 
 
-> **⛦ §5's single-type shape is under revision** (2026-08-03,
-> [`read_filtering_stages.md`](read_filtering_stages.md)). `ReadFilter` does three jobs in one
-> loop — admit on the raw record, decode, admit on the read — and only two of them are
-> filtering. Splitting them is drafted there, with four open questions. **Everything else in
-> this document stands**, including the whole of the filter policy: which nine filters run,
-> their thresholds, their order, and the drop reasons.
+> **⛦ §5's single-type shape was replaced** (2026-08-03,
+> [`read_filtering_stages.md`](read_filtering_stages.md), built). `ReadFilter` did three jobs in
+> one loop — admit on the raw record, decode, admit on the read — and only two of them are
+> filtering. `ReadFilter` and `RecordSource` no longer exist: the two filtering jobs are the
+> functions `verdict_on_raw_read` and `verdict_on_aligned_read` in `src/read/filtering.rs`, and
+> the loop belongs to the alignment cursor. The read they judge is ng's `AlignedRead`
+> (`src/read/aligned_read.rs`), not production's `MappedRead`, which was deleted on 2026-11-27
+> along with `classify_pre_decode` and `AlignmentMergedReaderConfig` (2026-11-26). **The filter
+> policy stands**: which nine filters run, their thresholds, their order, and the drop
+> reasons.
 
 ---
 

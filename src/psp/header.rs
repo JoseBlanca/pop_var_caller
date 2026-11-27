@@ -1,7 +1,7 @@
 //! The header: a file's own account of what it holds and how it was written.
 //!
-//! It sits at the start of every psp and **stays plain text**, framed exactly as
-//! production's `.psp` frames its own (`src/psp/header.rs`): a 4-byte magic, an 8-byte
+//! It sits at the start of every psp and **stays plain text**, framed exactly as the old
+//! caller's `.psp` framed its own: a 4-byte magic, an 8-byte
 //! little-endian length for the TOML body, the body, and a sentinel line. The length is
 //! authoritative and the sentinel is a cross-check.
 //!
@@ -67,7 +67,7 @@ pub struct Header {
     /// reader can size its observation cache up front, taking the maximum over its
     /// files, instead of growing it — and a forward reader never needs it at all, so
     /// nothing refuses on it. `cohort_merge.md` §13 is the consumer; it reads this at
-    /// open (plan step E4).
+    /// open.
     pub observation_reach_ceiling_bp: Bp,
     /// What produced the file and what it ran with.
     pub writer: WriterProvenance,
@@ -246,7 +246,7 @@ impl Manifest {
     /// What a writer that was told nothing records in the file it writes.
     ///
     /// **The one place every default is assembled**, so that a caller does not have to know
-    /// which four values a manifest holds and F3's writer is not the fifth hand-built literal
+    /// which four values a manifest holds and the writer is not the fifth hand-built literal
     /// to get one of them wrong: [`DEFAULT_GENOMIC_BLOCK_SIZE_BP`],
     /// [`DEFAULT_BLOCK_BYTE_CEILING`], [`DEFAULT_LOOK_BACK_WINDOW_LOG`], and the fields this
     /// build of the record codec encodes.
@@ -513,7 +513,7 @@ pub const MIN_LOOK_BACK_WINDOW_LOG: u8 = 10;
 /// **This is what zstd allows, not what a reader should budget for.** A file may legally
 /// declare a 2 GiB window and a cohort reader holding one file per sample cannot afford it —
 /// that refusal is [`PspReadError::WindowTooLarge`], a reader's budget rather than a format
-/// rule, and it belongs to the reader that Milestone D builds.
+/// rule, and it belongs to the streaming block reader.
 pub const MAX_LOOK_BACK_WINDOW_LOG: u8 = 31;
 
 /// The look-back window a writer takes when nothing else says otherwise: 2^15 = 32 kB.
@@ -1708,7 +1708,7 @@ mod tests {
             },
             manifest: a_manifest(),
         };
-        // Through the real A4 path, so the recorded filters in every test's header are
+        // Through the real provenance path, so the recorded filters in every test's header are
         // what `read_filter_parameters` writes, not a hand-kept copy of it.
         header.writer.record_parameters(
             crate::run::read_filter_provenance::read_filter_parameters(
@@ -2255,7 +2255,7 @@ mod tests {
     /// damaged one, so it is a different error.
     #[test]
     fn a_production_psp_is_refused_as_a_foreign_file_not_as_a_damaged_one() {
-        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen at promotion step C18.
+        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen while ng replaced it.
         const PRODUCTION_HEAD_MAGIC: [u8; 4] = *b"PSP\n";
         let mut productions = Vec::new();
         productions.extend_from_slice(&PRODUCTION_HEAD_MAGIC);

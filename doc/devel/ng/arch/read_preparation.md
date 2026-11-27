@@ -10,13 +10,36 @@ the STR path has none (spec §1). Naming follows
 verbs for functions; **STR** in prose ↔ `ssr` in code (this step is generic, so `ssr` does not appear).
 Signatures are illustrative; the **contract** is the deliverable. Every "why" lives in the spec.*
 
+> ## Changed since this was written — read this first
+>
+> §1–§3 describe the code as it is on 2026-11-27. The rest of the document is the design record
+> from 2026-07-26, and four things in it are no longer true:
+>
+> - **The input is ng's `AlignedRead`** (`src/read/aligned_read.rs`), which carries the read
+>   group, and the output is ng's own `PreparedRead` (`src/read/prepared_read.rs`). Production's
+>   `MappedRead` was the input until 2026-11-27; it was retired, and `prepare_passthrough` now
+>   takes the `AlignedRead` and *moves* its qualities rather than copying them. That settles §6's
+>   "call `prepare_passthrough` or port it".
+> - **There is no normalizer trait.** `AlignmentNormalizer`, `DefaultAlignmentNormalizer`, the
+>   `Alignment` wrapper and `left_align_structured.rs` were removed on 2026-11-27, and with them
+>   the constructor `with_default_normalizer`. `LeftAlignPreparer` calls
+>   `alignment::indel_norm::left_align_indels` directly; §4's "the normalizer is a type parameter"
+>   and §5's normalizer rows describe the earlier shape.
+> - **Eviction is the preparer's, on the driver's say.** `ReadPreparer::evict_reference_before`
+>   (a no-op by default) lets the driver tell a preparer where the walk has reached, and
+>   `EvictableRefSeq::evict_before` takes `&self`. §4's "the driver MUST evict, because
+>   `prepare_read(&self, …)` cannot provide `&mut`" describes the earlier shape.
+> - **Paths.** `src/ng/` became `src/` when ng was promoted (2026-09-13), and production's tree
+>   (`src/pileup/`, `src/ssr/`) was deleted then. §5's links into production record what that code
+>   was at design time and no longer resolve.
+
 ## Module home
 
 Two files in the existing `read/` module (`module_layout.md` principle 1b — steps 1 and 2 share it):
 
-- **`src/ng/read/mod.rs`** — the `ReadPreparer` trait and `ReadPrepError`. The trait sits in `mod.rs`
+- **`src/read/mod.rs`** — the `ReadPreparer` trait and `ReadPrepError`. The trait sits in `mod.rs`
   because it is the module's shared contract; the impls sit beside it.
-- **`src/ng/read/left_align.rs`** — `LeftAlignPreparer`, the v1 impl, with its `#[cfg(test)]` block.
+- **`src/read/left_align.rs`** — `LeftAlignPreparer`, the v1 impl, with its `#[cfg(test)]` block.
 
 A folder is not warranted yet, but this step **does** have a bake-off (unlike step 1): further impls —
 a pass-through-only null arm, and the gated re-align mode — land as sibling files in `read/`.
@@ -29,11 +52,11 @@ confirm" section already says.
 
 ### 1.1 Nothing new to mint
 
-The input is production's `MappedRead` and the output is production's `PreparedRead`, both reused
-as-is (spec §3) — so this step seeds **no scalar newtypes** and defines no read type of its own. One
-conversion crosses the seam: `MappedRead.ref_id: usize` → `PreparedRead.chrom_id: u32`. It is the same
-narrowing step 1 already does, with the same treatment — a value that did not fit would be a corrupt
-record, so it fails loudly rather than truncating silently.
+The input is `AlignedRead`, step 1's output, and the output is `PreparedRead`; both live in
+`src/read/` — so this step seeds **no scalar newtypes** and defines no read type of its own. One
+conversion crosses the seam: `AlignedRead.ref_id: usize` → `ContigId(u32)` for the reference fetch.
+It is the same narrowing step 1 already does, with the same treatment — a value that did not fit
+would be a corrupt record, so it fails loudly rather than truncating silently.
 
 ### 1.2 Step-2-local types
 
@@ -55,7 +78,7 @@ pub enum ReadPrepError {
 pub struct LeftAlignScratch {
     /// The reference window, refilled per indel-bearing read. Reads with no indel never
     /// touch it (spec §5).
-    ref_buf: Vec<u8>,
+    reference_window: Vec<u8>,
 }
 ```
 
@@ -82,30 +105,30 @@ pub trait ReadPreparer {
     /// `Err` — the run is broken; never a per-read verdict.
     fn prepare_read(
         &self,
-        read: MappedRead,
+        read: AlignedRead,
         scratch: &mut Self::Scratch,
     ) -> Result<Option<PreparedRead>, ReadPrepError>;
+
+    /// Release any reference bases this preparer has read and gone past. A hint, never a fact
+    /// an answer depends on; the default does nothing.
+    fn evict_reference_before(&self, _pos: u64) {}
 }
 
-/// v1: pass-through + left-alignment. Generic over both the reference it fetches from and the
-/// normalizer it calls — neither is chosen by taste, and both stay visible at the use site.
-pub struct LeftAlignPreparer<R: RefSeq, N: AlignmentNormalizer = DefaultAlignmentNormalizer> {
+/// v1: pass-through + left-alignment. Generic over the reference it fetches from; the
+/// left-aligner is `alignment::indel_norm::left_align_indels`, called directly.
+pub struct LeftAlignPreparer<R: RefSeq> {
     reference: R,
-    normalizer: N,
 }
 
-impl<R: RefSeq, N: AlignmentNormalizer> LeftAlignPreparer<R, N> {
-    pub fn new(reference: R, normalizer: N) -> Self;
-}
-impl<R: RefSeq> LeftAlignPreparer<R, DefaultAlignmentNormalizer> {
-    /// The recommended construction: algorithm 1a, the GATK/production left-aligner.
-    pub fn with_default_normalizer(reference: R) -> Self;
+impl<R: RefSeq> LeftAlignPreparer<R> {
+    pub fn new(reference: R) -> Self;
 }
 
-impl<R: RefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N> {
+impl<R: RefSeq + EvictableRefSeq> ReadPreparer for LeftAlignPreparer<R> {
     type Scratch = LeftAlignScratch;
-    fn prepare_read(&self, read: MappedRead, scratch: &mut LeftAlignScratch)
+    fn prepare_read(&self, read: AlignedRead, scratch: &mut LeftAlignScratch)
         -> Result<Option<PreparedRead>, ReadPrepError>;
+    fn evict_reference_before(&self, pos: u64);
 }
 ```
 
@@ -121,17 +144,15 @@ scratch, and cannot fail. Any `RefSeqError` is fatal and returned as `Err`, neve
 
 Two details that decide whether this compiles cleanly, both invisible from the signatures.
 
-**The CIGAR round-trip.** `AlignmentNormalizer::normalize` works on an ng `Alignment`, not on a
-`Vec<CigarOp>`, so the CIGAR is moved out of the read and back — no allocation, and no clone:
+**The CIGAR is rewritten in place.** `left_align_indels` takes the read's own `Vec<CigarOp>` — no
+allocation, no clone:
 
 ```rust
-let mut alignment = Alignment { reference_offset: 0, cigar: std::mem::take(&mut read.cigar) };
-self.normalizer.normalize(&mut alignment, &read.seq, &scratch.ref_buf);
-read.cigar = alignment.cigar;
+left_align_indels(&mut read.cigar, &read.seq, &scratch.reference_window);
 ```
 
-`reference_offset` is `0` because the fetched window *starts* at the read's first aligned base — the
-offset exists for callers holding a larger stretch, and a non-zero value here would double-count.
+The fetched window *starts* at the read's first aligned base, which is the reference
+`left_align_indels` expects as its `ref_seq[0]`.
 
 **The window.** `[read.pos, read.pos + cigar_ref_span(&read.cigar))`, fetched **uppercased** via
 `RefSeq::fetch_into` — ng's deliberate divergence from production's raw bytes (spec §6). The fetched

@@ -8,6 +8,14 @@ ports and adapts but never edits. **No code yet.** Naming: **STR** in prose, `ss
 Code-facing companion: [`../arch/alignment.md`](../arch/alignment.md) (the types and trait
 signatures).*
 
+> **What was built (2026-11-27).** Of the algorithms in §10, the code has algorithm 3 (the flat-gap
+> delimiter, `src/alignment/ssr_best_path_flat_gap.rs`) and algorithm 4r (a hardened algorithm 4,
+> `src/alignment/ssr_unit_robust.rs`), and algorithm 1a as the plain function
+> `indel_norm::left_align_indels`. Algorithms 1b, 4, 5 and 6 and the `MarginalAligner` trait
+> were built and then removed on 2026-10-31, and the `AlignmentNormalizer` trait of §6 and §7 on
+> 2026-11-27; algorithm 2 was never built. [`../arch/alignment.md`](../arch/alignment.md) lists
+> what exists.
+
 ---
 
 ## 1. What this module is

@@ -45,7 +45,7 @@ use crate::types::GenomeRegion;
 /// re-layering: that source stopped its `.crai` walk at the first container beginning past the
 /// region's end, and filtered each container's records against the region. Both behaviours
 /// belong to a reader that answers one region and is then thrown away, and neither can be
-/// here — which is why Milestone F deleting that source retired those rules rather than
+/// here — which is why deleting that source retired those rules rather than
 /// leaving them for this arm to inherit.
 ///
 /// # Each record carries its own read group — the documented exception

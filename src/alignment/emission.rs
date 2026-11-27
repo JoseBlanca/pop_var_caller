@@ -103,9 +103,8 @@ pub trait Emission: Sized {
     /// "whether quality arrives per call or as a pre-resolved row", to be settled once
     /// two implementations existed; they now do, and the answer is per row. A quality
     /// belongs to a *read base*, so it is constant along a whole row of the alignment
-    /// matrix while the reference base varies along it — production's own loop resolves
-    /// it once per row and leaves a compare-and-select in the inner loop
-    /// ([src/ssr/pileup/alignment.rs](../../../ssr/pileup/alignment.rs)). Billing a table
+    /// matrix while the reference base varies along it — the old caller's loop resolved
+    /// it once per row and left a compare-and-select in the inner loop. Billing a table
     /// lookup per *cell* would put work in the hottest loop in the module that the
     /// structure of the problem does not require.
     ///
@@ -115,13 +114,12 @@ pub trait Emission: Sized {
 
     /// Score an **inserted** read base, which has no reference base to score against.
     ///
-    /// The two implementations have **no common source** for this value, so it is worth
-    /// stating where each comes from. Production's per-quality path scores an inserted
-    /// base against a uniform base composition, `ln(1/4)`. Its flat path has no emission
-    /// for an inserted base at all — the value it uses there is a *transition* cost
-    /// (`gap = eps`, [src/ssr/cohort/pair_hmm.rs](../../../ssr/cohort/pair_hmm.rs)), not
-    /// an emission. So [`FlatEmission`]'s value is a **decision, not a port** (arch §2.3);
-    /// see its documentation for the reasoning.
+    /// The two implementations have **no common source** for this value, so it is worth stating
+    /// where each comes from. The old caller's per-quality path scored an inserted base against a
+    /// uniform base composition, `ln(1/4)`. Its flat path had no emission for an inserted base at
+    /// all — the value it used there was a *transition* cost (`gap = eps` in its cohort pair-HMM),
+    /// not an emission. So [`FlatEmission`]'s value is a **decision, not a port** (arch §2.3); see
+    /// its documentation for the reasoning.
     fn insert_ln(&self) -> f64;
 
     #[cfg(test)]
@@ -503,9 +501,8 @@ pub struct FlatEmission {
 }
 
 impl FlatEmission {
-    /// Build a flat model from a per-base error rate, `ε`, matching production's flat
-    /// path (`align_subst`,
-    /// [src/ssr/cohort/pair_hmm.rs](../../../ssr/cohort/pair_hmm.rs)): a match scores
+    /// Build a flat model from a per-base error rate, `ε`, matching the old caller's flat
+    /// path (`align_subst` in its cohort pair-HMM): a match scores
     /// `1 − ε` and a mismatch `ε / 3`, converted to log space here.
     ///
     /// # Errors
@@ -541,14 +538,12 @@ impl FlatEmission {
         Ok(Self::from_unchecked_rate(error_rate))
     }
 
-    /// Everything [`Self::new`] does **except** the debug assertion — that is, exactly
-    /// what a release build runs.
+    /// Everything [`Self::try_new`] does **after** its range check: build the scores,
+    /// clamping an out-of-range rate (a NaN becomes 1) rather than refusing it.
     ///
-    /// It exists to be testable. The totality contract has to hold once the assertion is
-    /// compiled out, but a test cannot reach that path through `new`, because the
-    /// assertion fires in the test profile. Testing the clamp through this function is
-    /// the only way to assert the release behaviour without conditionally compiling the
-    /// test out of the build anyone actually runs.
+    /// Only the totality test hands it a rate outside `[0, 1]`; `try_new` refuses one
+    /// first. The clamp is kept so that the scores stay finite and ordered even for a rate
+    /// that should never reach here.
     fn from_unchecked_rate(error_rate: f64) -> Self {
         let error_rate = if error_rate.is_nan() {
             1.0
@@ -750,14 +745,12 @@ mod tests {
         assert!(FlatEmission::try_new(0.01).is_ok());
     }
 
-    /// **Totality must survive a violated precondition**, because the debug assertion
-    /// that guards it is compiled out of the release build this project runs. Each of
-    /// these rates would, without the clamp, produce a score that inverts the model
-    /// rather than merely skewing it: `+inf` mismatches, or a match score above zero.
+    /// **Totality must survive a violated precondition.** Each of these rates would,
+    /// without the clamp, produce a score that inverts the model rather than merely
+    /// skewing it: `+inf` mismatches, or a match score above zero.
     ///
-    /// Goes through `from_unchecked_rate` rather than `new` because `new`'s debug
-    /// assertion fires in the test profile — the path under test is precisely the one
-    /// that runs when that assertion is gone.
+    /// Goes through `from_unchecked_rate` because `try_new` refuses every one of these
+    /// rates before reaching the clamp.
     #[test]
     fn flat_emission_stays_total_for_rates_outside_the_contract() {
         for error_rate in [

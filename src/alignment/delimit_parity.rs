@@ -1,7 +1,7 @@
 //! **Byte-parity of ng's tract delimiter against production's — the port anchor.**
 //!
-//! **Production's side is frozen since promotion step C10.** Until then every case ran production's
-//! `delimit_read` beside ng's aligner. Production is being deleted, so its answer on each of the
+//! **Production's side is frozen.** Every case once ran production's `delimit_read` beside
+//! ng's aligner. Before production was deleted, its answer on each of the
 //! 11,992 cases the tests build was recorded at commit `d9e7b076` into
 //! `testdata/delimit_parity_production.tsv`, keyed by a digest of the case, and the tests compare
 //! ng against that file. The prose below describes the oracle as it was built; what is asserted is
@@ -10,16 +10,16 @@
 //!
 //! Algorithm 3 ([`SsrFlatGapAligner`](super::ssr_best_path_flat_gap::SsrFlatGapAligner)) is
 //! a port of production's `delimit_read`, and it is the **only aligner in this module with a
-//! parity oracle**: algorithms 2, 4, 5 and 6 are *measured*, not verified (spec §10.3, arch
+//! parity oracle**: the unit-robust delimiter is *measured*, not verified (spec §10.3, arch
 //! §Test & bench shape). So this test is what the whole port rests on, and it is what makes
-//! Milestone C's banding a *performance* change rather than a behaviour change — banding
-//! must leave every assertion here untouched.
+//! the delimiter's banding a *performance* change rather than a behaviour change — banding
+//! leaves every assertion here untouched.
 //!
 //! # What parity means here, exactly
 //!
 //! Production answers with a two-case `Delimited`: a `Region(range)` or a side-blind
 //! `BorderOffEnd`. ng answers with the four-case [`RepeatSpan`]. The two are **not** the same
-//! shape, because the widening is the point of step B2 — so parity is asserted where the two
+//! shape, because the widening is the point — so parity is asserted where the two
 //! are comparable and *counted* where they are not:
 //!
 //! - **Every read production calls `Region` must measure the same bytes here.** Not the same
@@ -29,13 +29,12 @@
 //!   case.** It cannot be checked against production more finely than that, because
 //!   production discarded the information: `BorderOffEnd` does not say which flank was
 //!   missing. So the reclassification is checked **by count and by shape**, which is all the
-//!   oracle can support (plan step B3).
+//!   oracle can support.
 //!
 //! # Why this lives beside ng's code, not in production's tree
 //!
-//! It is **ng's test**: its subject is ng's aligner, and production is only the yardstick — since
-//! promotion step C10 a recorded one, so the test reads a file and depends on nothing in
-//! production.
+//! It is **ng's test**: its subject is ng's aligner, and production is only the yardstick — now
+//! a recorded one, so the test reads a file and depends on nothing in production.
 
 use super::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
 use super::{
@@ -258,8 +257,8 @@ fn production_answer(case: &Case) -> Delimited {
 ///
 /// **The scratch is passed in, not created here.** Hoisting it out of the loop is what makes
 /// this the one randomized, size-varying driver that exercises `ViterbiScratch`'s
-/// grow-but-never-clear reuse — the hazard `ssr_best_path_flat_gap` names as *the* Milestone-C
-/// risk, since banding will stop the fill being exhaustive. A fresh scratch per case would be
+/// grow-but-never-clear reuse — the hazard `ssr_best_path_flat_gap` names as banding's main
+/// risk, since a banded fill is not exhaustive. A fresh scratch per case would be
 /// structurally blind to it.
 fn ng_answer(case: &Case, scratch: &mut ViterbiScratch) -> RepeatSpan {
     let reference = case.reference();
@@ -291,7 +290,7 @@ fn ng_answer(case: &Case, scratch: &mut ViterbiScratch) -> RepeatSpan {
 /// **Both implications are conditional on the flank existing**, and the first version of this
 /// function was wrong for omitting that — it asserted the unconditional form and its own test
 /// caught it. A side reports "not anchored" for *two* different reasons: the read ran past
-/// that junction, **or** there is no flank on that side to anchor against (step B2). Only the
+/// that junction, **or** there is no flank on that side to anchor against. Only the
 /// first constrains the offsets; with a zero-length flank the tract begins at reference
 /// column 0 and the read's tract offset can still be non-zero, from a leading insertion.
 fn assert_self_consistent(span: &RepeatSpan, case: &Case, context: &str) {
@@ -316,22 +315,22 @@ fn assert_self_consistent(span: &RepeatSpan, case: &Case, context: &str) {
 /// hit many times over, small enough to stay a unit test.
 const CASES_PER_SEED: usize = 3_000;
 
-/// Cases per seed, overridable by `PVC_PARITY_CASES` — since promotion step C10 only downward,
-/// since production's recorded answers stop at 3,000 a seed.
+/// Cases per seed, overridable by `PVC_PARITY_CASES` — only downward, since production's
+/// recorded answers stop at 3,000 a seed.
 ///
 /// The default is a **sentinel**, not a campaign: every recurrence mutation tried against
 /// this harness died within the first 40 cases, so 3,000 × 4 catches drift promptly and
 /// cheaply. The port was originally justified by a far larger sweep, which
 /// `PVC_PARITY_CASES=50000 cargo test ng_measures_the_same_bytes` reproduced **while production
-/// ran beside it**; since promotion step C10 only the recorded 3,000 cases a seed have answers, and
-/// a larger value fails on the first case past them.
+/// ran beside it**; now only the recorded 3,000 cases a seed have answers, and a larger value
+/// fails on the first case past them.
 ///
 /// **The default's detection floor is coarser for *banding* than for the recurrence.** A
 /// gross band deficiency (dropping the run-off flank terms) still fails on the first seed
 /// inside 3,000 cases, but a *one-cell*-too-narrow band (a `BAND_HEADROOM` short by one) first
 /// diverges only around case 28,307 — past the default. So the delimiter's band headroom
 /// carries a deliberate multiple-cell margin (see `BAND_HEADROOM`). **A change that narrows the
-/// band toward its true minimum has had no validation since promotion step C10**: the soak that
+/// band toward its true minimum has had no validation since production was deleted**: the soak that
 /// validated it compared against production, and production's answers are recorded only for the
 /// default cases. Until a reference that does not need production exists — ng's own aligner with the
 /// band opened to the whole matrix is the natural one — the margin must not be lowered.
@@ -385,7 +384,7 @@ fn ng_measures_the_same_bytes_as_production() {
                     // **The one place ng deliberately disagrees.** With a zero-length flank,
                     // production still answers `Region`, because its `left_off`/`right_off`
                     // tests are guarded on the flank existing. ng answers a *bound*, because
-                    // a flank that does not exist cannot anchor (step B2): at a contig edge a
+                    // a flank that does not exist cannot anchor: at a contig edge a
                     // read that ended because the tract ended and one that ran out mid-tract
                     // produce an identical readout, so a measurement claim would over-claim
                     // for one of them.
@@ -527,7 +526,7 @@ fn the_named_fixture_cases_all_agree_with_production() {
 /// ng's copied slip cutoffs must not drift from production's — asserted where the stutter
 /// model lives, and re-stated here because this file is where "ng agrees with production" is
 /// the subject. Production's `ssr::cohort::param_estimation::MAX_SLIP` was 10 at commit
-/// `d9e7b076`, frozen here at promotion step C10.
+/// `d9e7b076`, frozen here before production was deleted.
 ///
 /// **ng carries two where production carries one**, named for the scale each counts in
 /// (`doc/devel/ng/spec/read_likelihoods.md` §4.2). Both inherit production's provisional 10,

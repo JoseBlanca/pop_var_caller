@@ -92,7 +92,7 @@ pub(super) fn walk_from<'a>(
     // index's own offset, so this never saturates; it is written this way because an underflow
     // here would be a sixteen-exabyte read rather than an error.
     let blocks_bytes = blocks_end.saturating_sub(block_offset);
-    // ⚠ **This arm has no test, and the H2 review could not find a fixture that reaches it.**
+    // ⚠ **This arm has no test, and a review could not find a fixture that reaches it.**
     // `Seek` on a regular file fails only for an offset `SeekFrom::Start(u64)` cannot express,
     // and every offset arriving here has already been bounded inside the file by `open`. The
     // write-only descriptor that gives the *read* below a genuine `EBADF` does not help: seeking
@@ -259,8 +259,9 @@ impl<'a> RecordIter<'a> {
 
     /// One record out of the stream, with its failure put in the class whose instruction fits.
     ///
-    /// **The one place a record is stepped**, so [`Iterator`] and [`SelectiveRecordIter`] cannot drift:
-    /// the only difference between a full walk and a selective one is the predicate handed here.
+    /// **The one place a record is stepped**, so [`Iterator`] and the test-only
+    /// `SelectiveRecordIter` cannot drift: the only difference between a full walk and a
+    /// selective one is the predicate handed here.
     fn step(
         &mut self,
         want: impl FnMut(&RecordHead) -> bool,
@@ -288,7 +289,7 @@ impl<'a> RecordIter<'a> {
 ///
 /// **Exhaustive, with no `_` arm, and that is the point.** A variant added to [`BlockReadError`]
 /// tomorrow would otherwise become *the file is corrupt* silently, with no compile error at the
-/// place that has to choose. It is a free function rather than a method so that G2's selective
+/// place that has to choose. It is a free function rather than a method so that the selective
 /// walk can share it whatever shape it takes.
 ///
 /// `first_block` is the ordinal the walk began at and `blocks_begun` how many it has opened
@@ -741,7 +742,7 @@ mod tests {
     /// on the same base (`index.rs` §"Two blocks may share a first position"); asking for that
     /// base must not skip the earlier block.
     ///
-    /// ⚠ This is the fixture that found the G1 review's Blocker. The search was *the last block
+    /// ⚠ This is the fixture that found a blocking defect in review. The search was *the last block
     /// starting at or before `at`*, which enters a run of equal positions at its **end**: the
     /// walk came back with two records where the file holds three, with no error.
     #[test]
@@ -835,8 +836,7 @@ mod tests {
     /// Written against `a_finished_psp`, whose every observation carries an empty `chain_ids`,
     /// the live set is empty at all 40 records — so an accessor answering about the wrong
     /// record, or about the block's opening set, passes exactly as the right one does. That is
-    /// the second of Milestone F's four shapes: a fixture where several wrong implementations
-    /// agree.
+    /// the shape to avoid: a fixture where several wrong implementations agree.
     #[test]
     fn live_reads_names_the_reads_live_at_the_record_just_yielded() {
         let (_dir, path) = a_file();
@@ -1447,10 +1447,9 @@ mod tests {
         ));
         let (block_at, mut generic) = the_only_block(&path_a);
         let (_, bundle) = the_only_block(&path_b);
-        // A body ends with its kind tag, its flank deletions, its bundle payload (format 2.0),
-        // its held flanks (format 2.1) and its low-quality counts: `0, 0, 0, 0, 0` for the
-        // generic record, and for the bundle `2, 0`, a three-byte payload of two empty flanks and
-        // no run, and `0, 0`.
+        // A body ends with its kind tag, its flank deletions, its bundle payload, its held
+        // flanks and its low-quality counts: `0, 0, 0, 0, 0` for the generic record, and for
+        // the bundle `2, 0`, a three-byte payload of two empty flanks and no run, and `0, 0`.
         assert_eq!(
             generic[generic.len() - 5..],
             [0, 0, 0, 0, 0],
@@ -1701,7 +1700,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The head-driven skip (G2)
+    // The head-driven skip
     // -----------------------------------------------------------------
 
     /// **A declined record still arrives; what it does not carry is a body.** `records_where`
@@ -1737,9 +1736,10 @@ mod tests {
 
     /// **The records a predicate keeps are the records a full walk gives**, field for field.
     ///
-    /// This is Milestone C3's property through the file: every difference a body carries
-    /// restarts at the record, so a skipped body strands nothing — and the failure it guards
-    /// against is silent, because the records after a skipped one decode plausibly and wrong.
+    /// This is the record module's stand-alone-body property through the file: every difference a
+    /// body carries restarts at the record, so a skipped body strands nothing — and the failure it
+    /// guards against is silent, because the records after a skipped one decode plausibly and
+    /// wrong.
     #[test]
     fn the_records_a_predicate_keeps_match_a_full_walk() {
         let (_dir, path) = a_finished_psp();

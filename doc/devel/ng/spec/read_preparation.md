@@ -12,6 +12,15 @@ left-alignment** — nothing else. Grounded in the production `process_read` fol
 is [`../arch/read_preparation.md`](../arch/read_preparation.md) (types, trait signatures, the
 reconciliation table). Naming: **STR** in prose, `ssr` in code.*
 
+> **What is built (2026-11-27).** The status above is from 2026-07-25 and is out of date in three
+> places. The `PreparedRead`-producing preparer **is built**: `LeftAlignPreparer`
+> (`src/read/left_align.rs`), pass-through plus left-alignment, used by the generic path. It takes
+> ng's `AlignedRead` (`src/read/aligned_read.rs`), not production's `MappedRead`, which was deleted
+> on 2026-11-27. And it calls the left-aligner `alignment::indel_norm::left_align_indels`
+> directly: the `AlignmentNormalizer` trait, its implementations and `left_align_structured.rs`
+> were removed on 2026-10-31 and 2026-11-27. Links into production's deleted tree
+> (`src/pileup/`) no longer resolve, and `src/ng/` paths are now under `src/`.
+
 ---
 
 ## 1. What read preparation is — and why only the generic path has it

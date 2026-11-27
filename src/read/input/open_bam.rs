@@ -61,23 +61,22 @@ use super::AlignmentFileError;
 /// that made it and carries no lifetime, so the file it was minted from has to be
 /// shareable rather than borrowed ([`cursor`](Self::cursor)).
 pub struct AlignmentFile {
-    /// `Arc` so the per-query order guard can hold it for its error message
-    /// without an allocation per query.
+    /// `Arc` so every reader a cursor is built on can hold it for its error
+    /// messages without an allocation per cursor.
     path: Arc<Path>,
-    /// Kept for the region query, which resolves a contig to a `ref_id` and
-    /// hands the header to the record source. Read from C2 onwards.
+    /// Handed to every reader a cursor is built on.
     ///
-    /// `Arc` so a region source can **own** its header rather than borrow this
-    /// one: a borrowed header ties the returned stream to the file's lifetime,
-    /// and a resumable generator has to hold that stream across calls
+    /// `Arc` so a reader can **own** its header rather than borrow this one: a
+    /// borrowed header ties the reader to the file's lifetime, and a resumable
+    /// generator has to hold its reader across calls
     /// (`doc/devel/ng/arch/locus_generation_pileup.md` §2.2). An independent
-    /// `Arc`, cloned out per query — *not* a reference into an `Arc`'d file,
-    /// which is what would make the source self-referential. Parsed once at
-    /// open either way; the clone is one atomic increment per query.
+    /// `Arc`, cloned out per reader — *not* a reference into an `Arc`'d file,
+    /// which is what would make the reader self-referential. Parsed once at
+    /// open either way; the clone is one atomic increment per reader.
     header: Arc<sam::Header>,
-    /// Parsed once, at open — never re-read per query (spec §3.3). Queried from
-    /// C2 onwards, which is the guarantee the whole per-query cost model rests
-    /// on: a query is an in-memory lookup plus a seek.
+    /// Parsed once, at open — never re-read (spec §3.3), so positioning a reader
+    /// is an in-memory lookup plus a seek.
+    ///
     /// **A BAM's index, and `None` for a CRAM.** A cursor over a BAM is built from this; a
     /// cursor over a CRAM is built from `crai_by_contig` below, which is the same entries
     /// bucketed by contig at open. So on the CRAM arm the flat index is never read again, and
@@ -125,7 +124,7 @@ pub struct AlignmentFile {
     /// call sites, which is more than the step that introduced `contigs` should
     /// carry. Recorded as a follow-up rather than left as an unexplained pair.
     ///
-    /// Captured at open and compared much later, by `check_assembly` (D1),
+    /// Captured at open and compared much later, by `check_assembly`,
     /// once the caller has joined `reference_info`'s background verification.
     sq_md5s: Vec<Option<[u8; 16]>>,
     /// Handed to each cursor's `ReadFilter`. Held on the file rather than passed
@@ -388,8 +387,7 @@ impl AlignmentFile {
     /// **A format this function does not know is refused** rather than silently mis-read
     /// ([`CursorFormatUnsupported`](AlignmentFileError::CursorFormatUnsupported)), because a
     /// file opened as the wrong format would fail deep inside a decode with an error naming
-    /// neither the format nor this decision. *(This said "CRAM is not served yet" until
-    /// Milestone E served it.)*
+    /// neither the format nor this decision.
     ///
     /// # Three checks, in order: the argument, the accessor's description, its ability
     ///
@@ -743,8 +741,8 @@ pub(crate) fn group_crai_by_contig(
 
 /// Read just the SAM header, dispatching on the file's extension.
 ///
-/// The reader is opened and dropped here: the gate needs the header, and the
-/// readers a query will use come from the pool (step C1).
+/// The reader is opened and dropped here: the gate needs only the header, and
+/// each cursor opens its own readers.
 ///
 /// `pub(crate)` for the read-group pre-pass, which reads every input's header —
 /// and only its header — before any file is opened for reading.
@@ -1039,7 +1037,7 @@ mod tests {
 
     #[test]
     fn contig_list_is_empty_for_a_header_with_no_reference_sequences() {
-        // B2 compares this against the reference, so an empty list is rejected
+        // The open gate compares this against the reference, so an empty list is rejected
         // on length rather than on anything subtler.
         assert!(
             contig_list(&header(Some("coordinate"), &[], &[]))
@@ -1050,7 +1048,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The chromosomes a cursor may be made for (alignment cursor, A2)
+    // The chromosomes a cursor may be made for
     // -----------------------------------------------------------------
 
     /// The list carries the reference's names, lengths and **order** — the part the open
@@ -1118,7 +1116,7 @@ mod tests {
     /// **What `contigs()` holds is the file's claim, not the reference's** — and this is the
     /// test that can tell the two apart. The reference is the `.fai` arm, which carries no
     /// digests at all, while the file declares one per contig; if the field were populated
-    /// from the reference, as this module's doc comments claimed until the A2 review, every
+    /// from the reference, as this module's doc comments once claimed, every
     /// digest here would be `None`.
     #[test]
     fn the_contig_list_carries_the_digests_the_file_declared_not_the_reference_s() {
@@ -1186,7 +1184,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The cursor over a real BAM (alignment cursor, C3)
+    // The cursor over a real BAM
     // -----------------------------------------------------------------
 
     /// **The cursor tests run on a 200,000-base contig, and the reason is a defect this
@@ -1296,7 +1294,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The cursor over a real CRAM (alignment cursor, E2)
+    // The cursor over a real CRAM
     // -----------------------------------------------------------------
 
     /// A raw reference accessor over the CRAM fixture's FASTA, for the cursor's mismatch
@@ -1358,7 +1356,7 @@ mod tests {
         names
     }
 
-    /// **The parity oracle, now through cursors — E2.**
+    /// **The parity oracle, now through cursors.**
     ///
     /// A run of regions is asked of **one CRAM cursor**, in order, and each answer is compared
     /// against a scan of the whole file. This is the CRAM half of what
@@ -1659,7 +1657,7 @@ mod tests {
     /// The CRAM arm is the one that decides read groups itself — a CRAM stores the group as a
     /// container-level number rather than a per-record `RG` tag — so a stamp that went stale at
     /// a container boundary would attribute a whole library's reads to another group, silently,
-    /// with no error and no crash. B2 moved that stamp into `DecodedContainer::fill_raw_read`,
+    /// with no error and no crash. The stamp now lives in `DecodedContainer::fill_raw_read`,
     /// which makes this the property it is most important to pin.
     ///
     /// **Nothing pinned it before**, and the gap was a hole between two fixtures: the only
@@ -1854,8 +1852,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The composed chain, through a cursor — T9, T10, and what the reader
-    // pool's tests said before Milestone F deleted the pool
+    // The composed chain, through a cursor, and what the deleted reader
+    // pool's tests said
     // -----------------------------------------------------------------
 
     use noodles_sam::alignment::RecordBuf;
@@ -1923,7 +1921,7 @@ mod tests {
         names
     }
 
-    /// **T9 — the full step-1 filter runs, not just the cheap subset.**
+    /// **The full step-1 filter runs, not just the cheap subset.**
     ///
     /// A read that mismatches the reference at every base is filter #8's business, and #8 is
     /// the *reference-dependent* filter — the one a reader applying only flag/MAPQ checks
@@ -1931,7 +1929,7 @@ mod tests {
     /// `ReadFilter` is composed into the chain rather than a subset of it. This is the
     /// property that decided the rebuild over reusing production's reader.
     ///
-    /// Converted from the per-region query at Milestone F. The tally is read off the cursor,
+    /// Converted from the per-region query when it was deleted. The tally is read off the cursor,
     /// which is where it lives now: the filter lasts as long as the cursor, so nothing has to
     /// be folded back into the file when a region ends.
     #[test]
@@ -2010,7 +2008,7 @@ mod tests {
         );
     }
 
-    /// **T10 — a fatal mid-stream error is yielded once, and then the cursor refuses.** A
+    /// **A fatal mid-stream error is yielded once, and then the cursor refuses.** A
     /// truncated file must not look like a short region.
     ///
     /// The per-region query fused its iterator and the next query started afresh; a cursor
@@ -2171,7 +2169,7 @@ mod tests {
     /// **An accessor over a different reference is refused, and the refusal compares
     /// lengths — not just names.**
     ///
-    /// This is the check that replaced `ReadFilter::new`'s per-contig probe (B1). The probe
+    /// This is the check that replaced `ReadFilter::new`'s per-contig probe. The probe
     /// fetched a zero-length window on every `@SQ` contig, which proved each one *resolved*
     /// and nothing about how long it was, so an accessor whose contigs were the right names at
     /// the wrong sizes sailed through it and then made filter #8 compare every read against
@@ -2374,12 +2372,12 @@ mod tests {
     /// `AlignmentCursor::over_records` documents and cannot check, pinned for the three test
     /// call sites that build a cursor without going through `AlignmentFile::cursor`.
     ///
-    /// Before B1 this was false of *every* one of them — the accessors were built with
-    /// `InMemoryRefSeq::from_contigs`, which names contigs `contig0`, `contig1`, … against
-    /// files declaring `chr1`, `chr2` — and nothing noticed for the life of the fixture,
-    /// because the check of the day fetched a window per contig and a window resolves whatever
-    /// the contig is called. If these drift apart again, those three sites silently revert to
-    /// pre-B1 behaviour with every test through them still passing.
+    /// Before that probe was replaced this was false of *every* one of them — the accessors were
+    /// built with `InMemoryRefSeq::from_contigs`, which names contigs `contig0`, `contig1`, …
+    /// against files declaring `chr1`, `chr2` — and nothing noticed for the life of the fixture,
+    /// because the check of the day fetched a window per contig and a window resolves whatever the
+    /// contig is called. If these drift apart again, those three sites silently revert to the
+    /// probe's blindness with every test through them still passing.
     #[test]
     fn the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files() {
         use crate::ref_seq::ContigTable;
@@ -2396,7 +2394,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // BAM/CRAM parity (C5) — T8
+    // BAM/CRAM parity
     // -----------------------------------------------------------------
 
     use crate::read::input::test_fixtures::{indexed_cram, multi_container_cram};
@@ -2524,7 +2522,8 @@ mod tests {
     /// readers carry the file's contig table exactly and clear the comparison; the second is
     /// over a FASTA holding only the *other* contig, so only a fetch can tell. That is the
     /// stale-`.fai` case — a table naming a contig the bases do not have — and it is the one
-    /// that at A2 stops being an open-time refusal and becomes a fault mid-decode.
+    /// that, since the decode reads only per-slice windows, would otherwise surface as a fault
+    /// mid-decode instead of a refusal at open.
     ///
     /// **What it is worth, stated exactly, because it is less than it looks.** Removing the
     /// fetch fails this test and `a_cursor_refuses_an_accessor_that_cannot_serve_its_contig`
@@ -2617,8 +2616,8 @@ mod tests {
     /// **The oracle is the SAM the file was written from**, read here and compared read for
     /// read: it is the input samtools was given, so it is independent of anything ng or noodles
     /// does. The reference is 24 pseudo-random contigs rather than a run of one base, for the
-    /// reason A2's fixture is: against an all-`A` reference a read rebuilt at the wrong offset
-    /// comes out identical and no assertion can fail.
+    /// reason the per-slice-window test's fixture is: against an all-`A` reference a read rebuilt
+    /// at the wrong offset comes out identical and no assertion can fail.
     #[test]
     fn a_cram_block_spanning_several_contigs_rebuilds_the_reads_its_sam_holds() {
         use crate::ref_seq::WindowedRefSeq;
@@ -2796,12 +2795,13 @@ mod tests {
     /// **The windowed decode reconstructs the same reads, against a reference where a wrong
     /// window would not.**
     ///
-    /// This is A2's oracle, and the fixture is the whole point of it. `t8` below compares a CRAM
-    /// against its BAM twin too, but over the all-`A` reference every other CRAM fixture uses —
-    /// and a CRAM stores each read as its *differences from the reference*, so decoding against
-    /// the wrong offset of an all-`A` chromosome rebuilds exactly the same read, and the slice's
-    /// stored MD5 matches as well, every window of that reference having the same digest. So
-    /// `t8` cannot fail for a window that is off by one, and neither can any other test here.
+    /// This is the per-slice-window decode's oracle, and the fixture is the whole point of it. `t8`
+    /// below compares a CRAM against its BAM twin too, but over the all-`A` reference every other
+    /// CRAM fixture uses — and a CRAM stores each read as its *differences from the reference*, so
+    /// decoding against the wrong offset of an all-`A` chromosome rebuilds exactly the same read,
+    /// and the slice's stored MD5 matches as well, every window of that reference having the same
+    /// digest. So `t8` cannot fail for a window that is off by one, and neither can any other test
+    /// here.
     ///
     /// Against a reference whose bases vary, a one-base shift changes the reconstructed
     /// sequence. The BAM twin is the oracle because a BAM stores its bases literally and reads
@@ -3154,17 +3154,17 @@ mod tests {
         );
     }
 
-    /// **T8 — the same reads written as BAM and as CRAM produce the same
+    /// **The same reads written as BAM and as CRAM produce the same
     /// ordered stream.**
     ///
-    /// The two containers share nothing below the aligned-reads-reader seam: BAM reads one record at
-    /// a time from bgzf chunks, CRAM decodes whole containers against the reference and walks
-    /// a `.crai`. Everything above — the region narrowing, the filter, the order guard — is
-    /// the same code. So a disagreement here is a aligned-reads-reader bug, which is exactly what
-    /// this is looking for, and BAM is the oracle because it is the simpler reader and was
-    /// verified first against a linear scan.
+    /// The two containers share nothing below the aligned-reads-reader seam: BAM reads one record
+    /// at a time from bgzf chunks, CRAM decodes whole containers against the reference and walks a
+    /// `.crai`. Everything above — the region narrowing, the filter, the order guard — is the same
+    /// code. So a disagreement here is a aligned-reads-reader bug, which is exactly what this is
+    /// looking for, and BAM is the oracle because it is the simpler reader and was verified first
+    /// against a linear scan.
     ///
-    /// **Through cursors since Milestone F**, which is the point of converting it rather than
+    /// **Through cursors**, which is the point of converting it rather than
     /// deleting it: the two arms it compares are the two that survive.
     #[test]
     fn t8_a_cram_yields_the_same_ordered_reads_as_the_same_bam() {
@@ -3341,7 +3341,7 @@ mod tests {
     // by `containers_ending_before_the_region_are_skipped_rather_than_walked`, in
     // `aligned_reads_reader::cram` — and where it stops is now the layer above's business.
 
-    /// **T2b's sequencing half.** The digest check is deferred *on purpose*:
+    /// **The deferred digest check's sequencing half.** The digest check is deferred *on purpose*:
     /// the reference a file is opened against usually carries no digests yet
     /// (they arrive from a background genome pass), so waiting for them would
     /// block startup on a whole-genome read.
@@ -3401,7 +3401,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Grouping the `.crai` by contig — moved here at Milestone F
+    // Grouping the `.crai` by contig — moved here from the per-region CRAM source
     // -----------------------------------------------------------------
     //
     // These three tests came from the per-region CRAM source, which reached the grouping
@@ -3557,7 +3557,7 @@ mod tests {
     /// Range patterns fail at their edges, and a `z`-only test cannot see it.
     /// These six characters each sit one step outside a valid range.
     // -----------------------------------------------------------------
-    // The gate — `AlignmentFile::open` (T1, T2, T3, T12a)
+    // The gate — `AlignmentFile::open`
     // -----------------------------------------------------------------
     use tempfile::TempDir;
 
@@ -3635,7 +3635,7 @@ mod tests {
         );
     }
 
-    /// **T1 — the permutation hole, closed.**
+    /// **The permutation hole, closed.**
     ///
     /// `@SQ` lists the reference's contigs in the wrong order. Every `ref_id`
     /// still *resolves*, which is why the check this replaces let it through
@@ -3656,7 +3656,7 @@ mod tests {
         );
     }
 
-    /// **Why T1 needs an ordered comparison — the superseded probe, recorded.**
+    /// **Why the gate needs an ordered comparison — the superseded probe, recorded.**
     ///
     /// `ReadFilter::new`'s check asks only "does every `@SQ` index resolve in
     /// the reference?", fetching each contig and accepting if the fetch
@@ -3666,11 +3666,11 @@ mod tests {
     ///
     /// **This is documentation, not the mutation guard.** It does not call
     /// `AlignmentFile::open`, so gutting the gate's comparison would leave it
-    /// green; T1 is what catches that. The real mutation was performed against
-    /// the gate itself during B2 — the `first_disagreement` call was replaced
-    /// with a resolves-only length check and T1 duly failed — and this test is
-    /// the standing record of *what* the old check did, so the reason the gate
-    /// is stricter does not have to be taken on trust.
+    /// green; `t1_a_permuted_sq_list_is_rejected_naming_the_first_transposed_contig` is what
+    /// catches that. The real mutation was performed against the gate itself — the
+    /// `first_disagreement` call was replaced with a resolves-only length check and that test duly
+    /// failed — and this test is the standing record of *what* the old check did, so the reason the
+    /// gate is stricter does not have to be taken on trust.
     #[test]
     fn the_superseded_resolves_only_probe_cannot_see_order() {
         use crate::ref_seq::RefSeq;
@@ -3704,7 +3704,7 @@ mod tests {
         );
     }
 
-    /// **T2 — name, length and count mismatches**, each naming the right field
+    /// **Name, length and count mismatches**, each naming the right field
     /// and index.
     #[test]
     fn t2_name_length_and_count_mismatches_are_each_named() {
@@ -3732,11 +3732,11 @@ mod tests {
         }
     }
 
-    /// **T2, the digest half.** A wrong `@SQ M5` is caught at open **only**
+    /// **Contig mismatches, the digest half.** A wrong `@SQ M5` is caught at open **only**
     /// when the `ReferenceInfo` in hand carries digests — the `Fasta` arm. Under
     /// a `.fai`-only table the comparison is a wildcard and the same file opens
     /// cleanly, which is the behaviour production ships and what makes the
-    /// deferred `check_assembly` (D1) necessary rather than redundant.
+    /// deferred `check_assembly` necessary rather than redundant.
     #[test]
     fn t2_a_wrong_m5_is_caught_only_when_the_reference_carries_digests() {
         let wrong_digest = "ffffffffffffffffffffffffffffffff";
@@ -3758,7 +3758,7 @@ mod tests {
         );
     }
 
-    /// **T3 — `SO` wrong or missing**, rejected before anything else, and the
+    /// **`SO` wrong or missing**, rejected before anything else, and the
     /// message says which it was.
     #[test]
     fn t3_a_file_that_is_not_coordinate_sorted_is_rejected_at_open() {

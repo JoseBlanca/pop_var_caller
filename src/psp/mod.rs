@@ -7,13 +7,13 @@
 //! and that figure does not grow with the block size, the read depth or the length of the
 //! genome** (`doc/devel/ng/spec/psp_file_format.md` §1.1).
 //!
-//! The way it gets there is to untie two numbers production's `.psp` ties together. There,
-//! a block is at once *how far back the compressor may look for a repeated pattern* and
-//! *how much a reader must inflate before it can hand out its first record*, so shrinking a
-//! block to save memory costs compression and multiplies the index. Here the block stays
-//! large — for its ratio and for a small index — while a separate declared number caps the
-//! compressor's look-back, and the reader decodes incrementally instead of inflating a
-//! whole block.
+//! The way it gets there is to untie two numbers that the old caller's `.psp` (deleted on
+//! 2026-09-13) tied together. There, a block was at once *how far back the compressor may look
+//! for a repeated pattern* and *how much a reader must inflate before it can hand out its first
+//! record*, so shrinking a block to save memory cost compression and multiplied the index. Here
+//! the block stays large — for its ratio and for a small index — while a separate declared
+//! number caps the compressor's look-back, and the reader decodes incrementally instead of
+//! inflating a whole block.
 //!
 //! ```text
 //! +---------------------------+
@@ -31,18 +31,11 @@
 //! +---------------------------+
 //! ```
 //!
-//! **Words this module uses differently from production's `src/psp/`**, and a coder moving
-//! between the two will get them wrong: what production calls its *metadata section* is the
-//! **trailer** here, what production calls its *trailer* is the **footer** here, and *block*
-//! here always means a **psp block** — a span of reference and the records in it — never one of
-//! zstd's own internal subdivisions.
-//!
-//! **⚠ That collision reaches the method names, and it is sharpest on one pair.** Production has
-//! a `PspReader` too, and `PspReader::trailer()` means *the fixed tail* there and *the writer's
-//! closing payload* here — where the fixed tail is [`PspReader::footer`]. Two types of the same
-//! name with a method of the same name returning different sections of a file is the worst shape
-//! this vocabulary can take, and it is kept because spec §6.2 fixes both words. `seek_to` is the
-//! milder case: a genomic coordinate in production, a byte offset here.
+//! **Three section words, fixed by spec §6.2.** The **trailer** is the writer's closing payload;
+//! the **footer** is the fixed-size tail, returned by [`PspReader::footer`]; and *block* always
+//! means a **psp block** — a span of reference and the records in it — never one of zstd's own
+//! internal subdivisions. The old caller's `.psp` used *trailer* for the fixed tail and
+//! *metadata section* for the closing payload, which is why older reports read the other way.
 //!
 //! **This module is not a pipeline step.** It is infrastructure beside
 //! [`crate::ref_seq`], used by the locus generator to write and by the cohort merge to
@@ -257,10 +250,6 @@ fn read_header_bytes_from(mut file: File, path: &Path) -> Result<Vec<u8>, PspRea
 /// The variants are separate because **the instruction to whoever sees them differs**:
 /// rebuild the file, upgrade the reader, raise a limit, the data is damaged. Collapsing
 /// them into one error loses exactly that.
-///
-/// **Same name as production's `psp::errors::PspReadError`, a different type in a
-/// different module.** ng's surface is its own; the two must not be confused at a `use`
-/// site.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum PspReadError {
@@ -369,7 +358,7 @@ pub enum PspReadError {
         ///
         /// **Kept as a cause rather than flattened into `reason`**, so that a caller walking
         /// the chain reaches which field of which entry the index stopped at. Four different
-        /// causes reached this variant as one string until Milestone G.
+        /// causes once reached this variant as one string.
         ///
         /// **Typed rather than `Box<dyn Error>`**, so that a caller deciding whether a re-run
         /// would help can tell the footer from the block index by matching rather than by
@@ -383,12 +372,12 @@ pub enum PspReadError {
     ///
     /// **The cause is the walk's own error, not a string.** A record's
     /// [`Truncated`](RecordDecodeError::Truncated) means *the body stopped early*, which the
-    /// streaming reader answers by decompressing more and only turns into damage once the block
-    /// has no more to give; its [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade
-    /// the reader*, which is [`UnsupportedRecordEncoding`](Self::UnsupportedRecordEncoding)
-    /// here and must not arrive as damage. [`BlockReadError`] is where those distinctions are
-    /// already drawn, so this variant carries one rather than restating it (the C1 review, M13;
-    /// the D1 review, which asked that they not be flattened).
+    /// streaming reader answers by decompressing more and only turns into damage once the block has
+    /// no more to give; its [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade the
+    /// reader*, which is [`UnsupportedRecordEncoding`](Self::UnsupportedRecordEncoding) here and
+    /// must not arrive as damage. [`BlockReadError`] is where those distinctions are already drawn,
+    /// so this variant carries one rather than restating it, and two reviews asked that they not be
+    /// flattened.
     #[error("{}: block {block} is corrupt", path.display())]
     CorruptBlock {
         path: PathBuf,
@@ -413,8 +402,8 @@ pub enum PspReadError {
     /// runs out, and the two arrive at the same line. The refusal names the ceiling and the
     /// knob that raises it, which is what spec §7 asks of it.
     ///
-    /// ⚠ **The message named the ceiling without naming a way to raise it** until the G1
-    /// review pointed out that the sentence underneath said *raise the ceiling to read it*
+    /// ⚠ **The message named the ceiling without naming a way to raise it** until a review
+    /// pointed out that the sentence underneath said *raise the ceiling to read it*
     /// while no `PspReader` had one. `PspReader::with_a_record_buffer_ceiling` is that knob.
     #[error(
         "{}: a record in block {block} needs more than the {allowed_bytes} bytes this reader \
@@ -570,8 +559,8 @@ pub enum HeaderRefusal {
     /// **A refusal rather than a fallback**, and the distinction is the point: *absent* is what a
     /// file written before the parameter existed looks like and legitimately falls back to this
     /// build's level, where *present and unreadable* is **a setting recorded and then ignored**,
-    /// which is worse than one not recorded (spec goal 4). Until the G4 review they were the same
-    /// arm, and a file recording `"1"` was appended to at level 9 with nothing said.
+    /// which is worse than one not recorded (spec goal 4). Until a review caught it they were the
+    /// same arm, and a file recording `"1"` was appended to at level 9 with nothing said.
     #[error("the header records a compression level of {recorded}, which is not an integer")]
     UnreadableLevel { recorded: String },
 
@@ -593,8 +582,8 @@ pub enum HeaderRefusal {
     /// window log `header.rs`'s own validation refuses as
     /// [`PspWriteError::InvalidHeaderField`] before the compressor sees it.
     ///
-    /// ⚠ **The G3 review found it unreachable and this doc said so; G4 made it reachable and the
-    /// doc was not updated until G4's own review caught that.** A variant documented as
+    /// ⚠ **It was once unreachable and this doc said so; a later change made it reachable and the
+    /// doc was not updated until a review caught that.** A variant documented as
     /// unreachable, quietly reachable, is a path nothing protects.
     #[error(transparent)]
     Compressor(#[from] BlockCompressError),
@@ -630,9 +619,6 @@ impl PspReadError {
 }
 
 /// Everything that can go wrong writing a psp.
-///
-/// **Same name as production's `psp::errors::PspWriteError`, a different type in a
-/// different module** — see [`PspReadError`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum PspWriteError {
@@ -937,7 +923,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // A3 — read_header, from a file on disk
+    // read_header, from a file on disk
     // -----------------------------------------------------------------
 
     /// The same tomato-shaped header the encoder's own tests use, trimmed to what a file
@@ -1067,7 +1053,7 @@ mod tests {
     /// given rather than reporting a damaged ng file.
     #[test]
     fn a_production_psp_on_disk_is_refused_as_a_foreign_file() {
-        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen at promotion step C18.
+        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen while ng replaced it.
         const PRODUCTION_HEAD_MAGIC: [u8; 4] = *b"PSP\n";
         let mut productions = Vec::new();
         productions.extend_from_slice(&PRODUCTION_HEAD_MAGIC);

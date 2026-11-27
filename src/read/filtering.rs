@@ -46,7 +46,7 @@ use crate::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction};
 // same day, to `aligned_read.rs`, with the two raw types.
 // **No `noodles_sam as sam` here any more, and its absence is the point.** The last thing in
 // this module that knew what a SAM *header* was, was the deleted source trait's `header` — the
-// contig probe's input — and B1 took both. Since C3 the module names no noodles type at all: the
+// contig probe's input — and both are gone. The module names no noodles type at all now: the
 // two verdicts read a flag, a mapping quality and an `AlignedRead`, and nothing else.
 
 /// The filtering policy: which filters are active and their thresholds. Minimal
@@ -81,9 +81,8 @@ impl Default for ReadFilterConfig {
     fn default() -> Self {
         Self {
             min_mapq: Some(MapQual(DEFAULT_MIN_MAPQ)),
-            // `DEFAULT_MIN_READ_LENGTH` is production's (`src/bam/`, frozen) and is
-            // `u32`; ng's `Bp` is `u64` since B2 (spec §4). Widening at ng's own
-            // boundary is lossless, and production does not move.
+            // `DEFAULT_MIN_READ_LENGTH` (in `src/bam/`) is `u32`; `Bp` is `u64`
+            // (spec §4). Widening here is lossless.
             min_read_length: Some(Bp(u64::from(DEFAULT_MIN_READ_LENGTH))),
             drop_qc_fail: true,
             drop_duplicate: true,
@@ -210,13 +209,12 @@ impl ReadFilterCounts {
 /// Phase one of the cascade — the flag/MAPQ filters (#1–#6), decided on an
 /// undecoded record's `flag` and `mapq` alone. Reference-free and decode-free:
 /// `Keep` means "decode and continue to phase two", `Drop` is charged to the
-/// first filter that fires. Order is identical to production's
-/// `classify_pre_decode` (hit-rate-ordered: duplicate, low-MAPQ, supplementary,
-/// secondary, unmapped, QC-fail).
+/// first filter that fires. The order is the old caller's, by how often each filter
+/// fires: duplicate, low-MAPQ, supplementary, secondary, unmapped, QC-fail.
 ///
 /// `mapq` is already resolved: SAM's "unavailable" (`0xFF`) is mapped to
-/// `MapQual(0)` by the record source (Milestone C), so a non-zero `min_mapq`
-/// drops it — matching production. `flag` is the raw SAM bitfield
+/// `MapQual(0)` by the record source, so a non-zero `min_mapq` drops it — as the
+/// old caller did. `flag` is the raw SAM bitfield
 /// (`AlignedRead.flag`), tested against the reused `FLAG_*` constants.
 pub(in crate::read) fn verdict_on_raw_read(
     flag: u16,
@@ -305,13 +303,13 @@ pub(in crate::read) fn verdict_on_aligned_read(
     // only post-decode one that allocates work; skipped entirely when disabled.
     if let Some(max) = config.max_read_mismatch_fraction {
         let ref_span = cigar_ref_span(&read.cigar);
-        // PANIC-FREE: **ids stay `u32`, coordinates are now `u64`** (spec §4 / B2).
+        // PANIC-FREE: **ids stay `u32`, coordinates are now `u64`** (spec §4).
         // `ref_id` indexes the `u32` contig table, so that conversion is the only
         // one that can fail, and a value that did not fit would be a corrupt
         // record — failing loudly is the intended response under the fatal error
         // model, not a silent `as` truncation that would fetch the wrong window and
         // mis-verdict the read. The position and span now *widen* into the RefSeq
-        // boundary, which cannot fail at all: B2 moved that surface to `u64`, so the
+        // boundary, which cannot fail at all: that surface is `u64`, so the
         // `u32::try_from(read.pos)` this replaced — which could reject a legal
         // position on a >4 Gb contig — is simply gone.
         let contig = ContigId(u32::try_from(read.ref_id).expect("ref_id fits u32"));
@@ -766,14 +764,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The probe-free constructor and the buffer hand-off (read_input A3)
+    // The probe-free constructor and the buffer hand-off
     // -----------------------------------------------------------------
 
     // `mixed_batch` was here, and it went with `probe_free_constructor_filters_identically_to_
-    // _new` (2026-08-03, B1) — its only caller. It existed to feed the *same* records through
+    // _new` (2026-08-03) — its only caller. It existed to feed the *same* records through
     // both constructors and prove they agreed, and there is one constructor now.
 
-    // Two tests lived here and both went with `into_parts` at Milestone F:
+    // Two tests lived here and both went with `into_parts`, when the per-region query was deleted:
     // `into_parts_returns_the_buffers_with_their_allocations_and_the_tally` and
     // `with_validated_contigs_adopts_the_lent_buffers`. Each drove the lend-and-reclaim
     // protocol and nothing else, and nothing lends a filter its buffers any more — one filter

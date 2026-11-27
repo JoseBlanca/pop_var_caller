@@ -365,8 +365,8 @@ impl PspWriter {
         // **The compression level is recorded because it is a setting, and goal 4 is that
         // settings are recorded.** A reader needs nothing from it — zstd decodes any level — but
         // `append` must match bytes already in a file, and without this it would have no way to
-        // learn what those bytes were written at. `block.rs`'s own doc assigns this to F3 by
-        // name.
+        // learn what those bytes were written at. `block.rs`'s own doc assigns this to the writer
+        // by name.
         header.writer.parameters.insert(
             ZSTD_COMPRESSION_LEVEL_KEY.to_string(),
             crate::psp::header::ParameterValue::Integer(i64::from(
@@ -536,9 +536,9 @@ impl PspWriter {
     ///
     /// **A header that records no level gives this build's**, which is what a file written before
     /// the parameter existed looks like. **Every other shape is refused**, including one recorded
-    /// as a string or a float — ⚠ until the G4 review those fell into the same arm as *absent*,
-    /// so a file recording `"1"` was appended to at level 9 with nothing said, which is exactly
-    /// the file §2.4 says must not exist.
+    /// as a string or a float — ⚠ until a review caught it those fell into the same arm as
+    /// *absent*, so a file recording `"1"` was appended to at level 9 with nothing said, which is
+    /// exactly the file §2.4 says must not exist.
     fn build_the_compressor_the_header_records(
         header: &Header,
     ) -> Result<BlockCompressor, super::HeaderRefusal> {
@@ -722,11 +722,11 @@ impl PspWriter {
         // agree, and if they ever do not, every offset the footer holds is measured from a
         // different file than the one on disk.
         //
-        // **Carried forward from the F3 and F4 reviews, and re-measured here**: a defect that
+        // **Carried forward from two earlier reviews, and re-measured here**: a defect that
         // adds a fifth section between the trailer and the footer fails **82 tests with this
-        // assertion and 66 without it**, so it accounts for sixteen of them. ⚠ The F-era figure
+        // assertion and 66 without it**, so it accounts for sixteen of them. ⚠ The earlier figure
         // was *1 failing test to 7*, on a suite a third this size; a number measured on another
-        // tree is not a fact about this one, and the G4 review caught it still standing here.
+        // tree is not a fact about this one, and a review caught it still standing here.
         //
         // It is a `debug_assert` because it is arithmetic on numbers this function itself
         // produced — a release build gains nothing by re-deriving them. **What it buys is where
@@ -771,7 +771,7 @@ impl PspWriter {
     /// structures with rules of their own are read back with the very functions that will read
     /// them from disk.
     ///
-    /// This is the obligation F1 and F2 both routed here rather than solving in their codecs:
+    /// This is the obligation the index and footer codecs both route here rather than solving:
     /// neither could assert its rule at the encoder, because each module's own tests must be
     /// able to write the bytes that prove the reader refuses them. `finish` is the one place
     /// where the bytes being written are meant to be readable, so it is the one place the
@@ -1325,7 +1325,7 @@ mod tests {
     const SIGKILL: i32 = 9;
 
     /// **A writer killed with `SIGKILL` before `finish` leaves a file every reader refuses**, and
-    /// its header still reads — which is Milestone H2's oracle and spec §6.3's goal 3.
+    /// its header still reads — which is spec §6.3's goal 3.
     ///
     /// ⚠ **This is not the same test as
     /// [`a_writer_dropped_without_finishing_leaves_a_file_with_no_footer`].** Dropping a
@@ -1371,7 +1371,7 @@ mod tests {
             let mut writer = PspWriter::create(&psp_path, a_header(1_000)).expect("a header");
             // **It pushes until it is killed, rather than a fixed count**, and that is a
             // correction rather than a preference. The first version pushed 80,000 records and
-            // then slept, and the H2 review measured what that did: the whole workload takes
+            // then slept, and a review measured what that did: the whole workload takes
             // about 5 ms while the parent kills at about 12 ms, so in **25 runs out of 25** the
             // child had *finished* and was asleep when the signal arrived. A writer that has
             // stopped writing is not what this test is about, and it made the test a race —
@@ -1660,7 +1660,7 @@ mod tests {
     }
 
     /// **One sample gathered at 1, 2, 4, 8 and 16 workers gives byte-identical files** — spec §7's
-    /// byte-identity claim, and H3.
+    /// byte-identity claim.
     ///
     /// **What this can and cannot prove, stated plainly, because the difference decides what the
     /// test is worth.** ng's writer is serial: it is handed records in coordinate order and the
@@ -1929,8 +1929,8 @@ mod tests {
     /// `BufWriter`'s 8 KiB buffer, so nothing reaches the device until `into_inner` flushes
     /// inside `finish` — which pins exactly the step that surfaces.
     ///
-    /// ⚠ **F3 recorded this as untestable without a failing file descriptor and routed it to
-    /// H2.** It was testable here; the review found the route. Linux only — macOS has no
+    /// ⚠ **This was once recorded as untestable without a failing file descriptor.** It was
+    /// testable here; a review found the route. Linux only — macOS has no
     /// `/dev/full`, and the container this project builds in is Linux.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1992,7 +1992,7 @@ mod tests {
             .check_the_index_and_footer_read_back(&index_bytes, &footer)
             .expect_err("a reader would refuse that index");
         // **The index decoder's own account is kept.** Replacing the cause with `None` left the
-        // whole suite green until this looked at it (the G3 review).
+        // whole suite green until a review looked at it.
         match &refused {
             PspWriteError::WouldNotBeReadable {
                 source: Some(NotReadable::BlockIndex(_)),
@@ -2212,7 +2212,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Appending to a finished file (G4)
+    // Appending to a finished file
     // -----------------------------------------------------------------
 
     /// **A file appended to reads back as one file**: every record that was there and every
@@ -2402,8 +2402,8 @@ mod tests {
 
         let refused = PspWriter::append(&path).expect_err("there is no footer");
         // ⚠ **`Reopen { .. }` alone cannot tell what this test names from three other things** —
-        // it is satisfied by `NotAnNgPsp`, by `Damaged` and by `Io` too. That is G3's M2, in a
-        // test written after that finding was fixed.
+        // it is satisfied by `NotAnNgPsp`, by `Damaged` and by `Io` too. A review found that
+        // gap, and this test was written after it was fixed.
         assert!(
             matches!(
                 refused,
@@ -2555,8 +2555,8 @@ mod tests {
     /// **A footer that puts the block index inside the header is refused, and the file is left
     /// whole.**
     ///
-    /// ⚠ **This is the G4 review's Blocker, and it is G3's one operation over.** `append`
-    /// truncates at `index_offset`, so this rule is all that stands between a footer of nonsense
+    /// ⚠ **A review found this missing, as a blocking defect.** `append` truncates at
+    /// `index_offset`, so this rule is all that stands between a footer of nonsense
     /// and a psp reduced to a stump — and **the per-entry rule cannot carry it: on an empty index
     /// there are no entries to check.** A footer saying the index is at byte 4 and holds nothing
     /// passed `PspReader::open`, and `append` then cut a 3,742-byte psp down to 109 bytes and
@@ -2693,7 +2693,7 @@ mod tests {
     ///
     /// The two things built before a byte is written come from different halves of the header:
     /// the block cut rule from the manifest, and the compression level from the writer's own
-    /// recorded parameters. One sentence covers both, so it names the header — the G4 review
+    /// recorded parameters. One sentence covers both, so it names the header — a review
     /// found it naming the manifest for a failure that is not in one, which sends whoever reads
     /// it to the wrong section of a file they are already unsure about.
     ///
@@ -2793,7 +2793,7 @@ mod tests {
     }
 
     /// **An append stopped part way leaves a file no reader accepts**, at every stopping point
-    /// from the truncation onwards — the shape `replace_trailer` was given at G3, on the more
+    /// from the truncation onwards — the shape `replace_trailer` was given earlier, on the more
     /// destructive of the two operations.
     #[test]
     fn an_append_stopped_part_way_leaves_a_file_no_reader_accepts() {
@@ -2870,7 +2870,8 @@ mod tests {
     /// ways two blocks come to share a first position (`index.rs`).
     ///
     /// ⚠ **`continuing_after`'s doc claims both halves and nothing asserted either.** It is the
-    /// shape G1's Blocker was about, so it is worth pinning from the writer's side too.
+    /// shape a blocking defect found in review was about, so it is worth pinning from the writer's
+    /// side too.
     #[test]
     fn a_record_appended_into_the_old_last_cell_opens_a_second_block_for_it() {
         let (_dir, path) = a_finished_psp();

@@ -48,7 +48,7 @@
 //!   stopped at the previous region's end would lose every record past it, silently, for
 //!   every region after the first.
 //!
-//!   **The trap this names is specific and easy to fall into at Milestone C.** noodles'
+//!   **The trap this names is specific and easy to fall into.** noodles'
 //!   `query()` returns an iterator bounded by the interval it was given, which satisfies
 //!   every other word of this contract and breaks this one. A BAM arm must either query a
 //!   range that runs to the end of the chromosome, or re-query when it runs out — and either
@@ -70,8 +70,8 @@
 //!   has unpacked at most one block.
 //! - **Nothing is kept across regions.** What a cursor keeps is *its* reads — decoded and
 //!   filtered, held one level up — so a read is transformed once rather than once per region
-//!   that returns it (spec §5). A reader holds only its position, and (from Milestone C) the
-//!   single record the sorted early stop consumes without yielding.
+//!   that returns it (spec §5). A reader holds only its position, and the single record the
+//!   sorted early stop consumes without yielding.
 //! - **Records come out raw, and `read_group` is cleared rather than left stale.** The buffer
 //!   is reused, so a reader that left the previous record's group in place would attribute
 //!   this record to it silently; clearing turns that into a refusal at

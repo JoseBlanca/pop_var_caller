@@ -17,8 +17,8 @@
 //! carries**: [`prepare_passthrough`] is production's `--no-baq` arm copied here on
 //! 2026-09-12, deriving the same four values from the same flags and CIGAR and returning
 //! ng's read with its group attached. Until then ng minted production's read and converted
-//! it; that conversion survived as a test-only bridge for the parity oracles until promotion
-//! step C26 deleted it.
+//! it; that conversion survived as a test-only bridge for the parity oracles until it was
+//! deleted.
 //! Either way ng re-derives none of the per-field wiring, and the read-preparation parity
 //! fixture is what says so.
 //!
@@ -160,7 +160,7 @@ fn mate_role_of(flag: u16) -> MateRole {
 /// check is elided; a Phred score is `0..=93` by SAM's rule. Built at compile time, it is 2 KB
 /// that sits in the first-level cache, and the function compiles to one load. It replaced a
 /// multiply per base that took 2.94% of the walker's own time on `pileup_walker_multi_op/5000`
-/// (`ia/reviews/perf_pileup_2026-05-12.md`, H3).
+/// (a performance review of the old caller, 2026-05-12).
 #[inline]
 pub(crate) fn phred_to_ln_perr(q: u8) -> f64 {
     static LN_PERR_TABLE: [f64; 256] = {
@@ -313,7 +313,7 @@ pub struct PreparedRead {
     /// `doc/devel/reports/reviews/pileup_gatk_comparison_2026-05-08.md`.
     ///
     /// # Default
-    /// `None` *disables the G1 adaptor filter* for this read: no
+    /// `None` *disables the adaptor filter* for this read: no
     /// read base is treated as past the boundary. This is the
     /// safe choice when the upstream cannot trust its mate
     /// geometry — a false-positive filter would drop real
@@ -570,7 +570,7 @@ mod tests {
     /// in the op classification or in the order of the two checks fails here rather than
     /// surviving as a silent divergence.
     ///
-    /// Production's answers were recorded at commit `d9e7b076` (promotion step C26) and are
+    /// Production's answers were recorded at commit `d9e7b076` and are
     /// the third column. Its `ReadLengthError` was a distinct type with the same variants and
     /// fields as ng's, so its errors are recorded, and compared, through `Debug`.
     #[test]
@@ -619,7 +619,7 @@ mod tests {
 
     /// The `seq`/`bq_baq` check runs before the CIGAR check on **both** sides — the one
     /// ordering the table above cannot see, since it never breaks two invariants at once.
-    /// Production's answer on this read, recorded at commit `d9e7b076` (promotion step C26),
+    /// Production's answer on this read, recorded at commit `d9e7b076`,
     /// was the quality-length error.
     #[test]
     fn the_check_order_agrees_with_productions_when_both_invariants_break() {

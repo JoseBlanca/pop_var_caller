@@ -1,21 +1,16 @@
-//! Alignment-index pre-flight: detect `.crai` next to each input
-//! CRAM, and optionally build the index in place if it is missing.
+//! Alignment-index pre-flight: find the index next to each input
+//! BAM or CRAM, optionally build it in place if it is missing, and
+//! load it.
 //!
-//! Per-chromosome parallelism in the alignment-input subcommands
-//! requires an alignment index next to every input alignment file so
-//! each rayon worker can issue a contig-scoped `noodles`
-//! `Reader::query(...)`.
-//! This module is the gate that enforces the requirement: callers
-//! either pass `build_if_missing = false` (hard-error on the first
-//! input without an index, intended for non-interactive pipelines
-//! that should never silently create files next to user inputs), or
-//! `build_if_missing = true` (build missing indexes in place, one
-//! per missing input, with a single-line stderr progress message
-//! per build).
-//!
-//! Design and policy: see
-//! `doc/devel/implementation_plans/var_calling_from_bam_per_chromosome.md`
-//! §2 "Index pre-flight".
+//! The reader (`crate::read::input`) needs an index next to every
+//! alignment file, because it jumps to each region it reads rather
+//! than streaming the file from the start. This module is the gate
+//! that enforces the requirement: callers either pass
+//! `build_if_missing = false` (hard-error on the first input without
+//! an index, the default, so a run never silently creates files next
+//! to user inputs), or `build_if_missing = true`
+//! (`--build-index-if-missing`: build missing indexes in place, one
+//! per missing input, logging one progress line per build).
 //!
 //! Both CRAM (`.cram` + `.crai`) and BAM (`.bam` + `.csi`/`.bai`)
 //! inputs are accepted.
@@ -46,7 +41,7 @@ use crate::bam::errors::AlignmentIndexError;
 pub const BAM_INDEX_READ_PREFERENCE: &[&str] = &["csi", "bai"];
 
 /// On-disk format produced by [`preflight_alignment_indexes`]
-/// when `--build-map-file-index` is set on a BAM input. Always
+/// when `--build-index-if-missing` is set on a BAM input. Always
 /// `.csi`: at `CSI_DEPTH = 6` it addresses contigs up to ~2^32
 /// bp (~4.3 Gbp), well past the `.bai` 2^29 (~537 Mbp) cap that
 /// `.bai`'s 16 kbp bin grid imposes.
@@ -109,10 +104,9 @@ pub fn load_alignment_index(input: &Path) -> Result<AlignmentIndex, AlignmentInd
             path: input.to_path_buf(),
         }
     })?;
-    // Reuse `existing_index_for` so the `.csi`-preferred /
-    // `.bai`-fallback policy lives in exactly one place (M13 +
-    // Mi11). For BAM, this returns the actual on-disk path that
-    // exists; we then parse it with the matching index reader.
+    // Reuse `existing_index_for` so the `.csi`-preferred / `.bai`-fallback policy lives in exactly
+    // one place. For BAM, this returns the actual on-disk path that exists; we then parse it with
+    // the matching index reader.
     let index_path = existing_index_for(input, kind).ok_or_else(|| {
         AlignmentIndexError::MissingAlignmentIndex {
             path: input.to_path_buf(),
@@ -131,9 +125,9 @@ pub fn load_alignment_index(input: &Path) -> Result<AlignmentIndex, AlignmentInd
             Ok(AlignmentIndex::Crai(Arc::new(index)))
         }
         AlignmentFileKind::Bam => {
-            // `existing_index_for` picks `.csi` when both formats
-            // are present (Mi11 / M13); dispatch on the resolved
-            // path's extension.
+            // `existing_index_for` picks the newer of `.csi` and `.bai`
+            // when both are present (`.csi` on a tie); dispatch on the
+            // resolved path's extension.
             let ext = index_path.extension().and_then(|e| e.to_str());
             if ext == Some("csi") {
                 let index = noodles_csi::fs::read(&index_path).map_err(|source| {
@@ -183,7 +177,7 @@ pub fn preflight_alignment_indexes(
     build_if_missing: bool,
 ) -> Result<(), AlignmentIndexError> {
     // First pass: classify + find missing inputs. Done before any
-    // build so a `--build-map-file-index` run with one unbuildable
+    // build so a `--build-index-if-missing` run with one unbuildable
     // input does not partially build the others before failing.
     let mut missing: Vec<(usize, AlignmentFileKind)> = Vec::new();
     for (idx, input) in inputs.iter().enumerate() {
@@ -713,7 +707,7 @@ mod tests {
 
     /// **An index named by replacing the data file's extension is found**, as htslib finds it:
     /// Picard and GATK write `sample.bai` beside `sample.bam`. Not finding it, a run refused the
-    /// file as unindexed, or with `--build-map-file-index` spent a pass over it building a second
+    /// file as unindexed, or with `--build-index-if-missing` spent a pass over it building a second
     /// index next to the first.
     #[test]
     fn an_index_named_by_replacing_the_extension_is_found() {
@@ -762,7 +756,7 @@ mod tests {
         }
     }
 
-    // --- M12: load_alignment_index direct unit tests ----------------
+    // --- load_alignment_index direct unit tests ----------------
     //
     // The function is `pub`; integration tests only exercise one
     // configuration each. A regression that reversed the csi/bai

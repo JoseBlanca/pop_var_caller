@@ -1012,7 +1012,7 @@ mod tests {
         );
     }
 
-    // --- reading one header's @RG records (A4) ---
+    // --- reading one header's @RG records ---
 
     #[test]
     fn every_read_group_is_returned_in_header_order_with_its_tags() {
@@ -1099,7 +1099,7 @@ mod tests {
         }
     }
 
-    // --- filling in the names a file did not declare (A5) ---
+    // --- filling in the names a file did not declare ---
 
     fn declared(id: &str, sample: &str, library: Option<&str>) -> DeclaredReadGroup {
         DeclaredReadGroup {

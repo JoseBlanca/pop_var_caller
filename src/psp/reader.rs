@@ -88,8 +88,8 @@ pub fn reset_trailer_bytes_read() {
 /// **⚠ Two things this is not.** It is arithmetic on the spec's figures, not a measurement of
 /// this reader; and the budget it is carved out of does not account for the block index, which
 /// `open` also holds — at spec §3.3's ~14,000 entries for a whole genome and 24 bytes an entry
-/// that is about 336 kB, more than half the budget on its own. **Milestone H4 measures what an
-/// open sample actually costs**, and is where both of those are settled.
+/// that is about 336 kB, more than half the budget on its own. **Only a measurement of what an
+/// open sample actually costs settles both of those.**
 pub const DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES: u64 = 1 << 18;
 
 /// A finished psp, open: its header, its block index, and where everything in it is.
@@ -462,7 +462,7 @@ impl PspReader {
 ///
 /// **Shared between `open` and the trailer replacement**, which are the two operations that
 /// start from the footer. It was copied into the second and the copy carried the first's
-/// reasoning with it, which was already untrue of the copy — the G3 review's finding.
+/// reasoning with it, which was already untrue of the copy, as a review found.
 ///
 /// **A file too short to hold a footer is incomplete, not damaged** — it is what a writer killed
 /// before it finished leaves, which is the everyday case.
@@ -1023,11 +1023,11 @@ mod tests {
     /// record module, so anything that inflates a frame has to be reached through `walk`, which
     /// is one named seam a reviewer can hold in view — rather than from anywhere in this file.
     ///
-    /// **It is why the record walk is a file of its own.** Milestone G put `records` and its
-    /// siblings on this type, and the walk they hand back needs a `BlockStream` — so building it
-    /// here would have added the very import this test forbids.
+    /// **It is why the record walk is a file of its own.** `records` and its siblings are on this
+    /// type, and the walk they hand back needs a `BlockStream` — so building it here would have
+    /// added the very import this test forbids.
     ///
-    /// ⚠ **What survives G1 is the seam, not "no block code is reachable from here"**, which is
+    /// ⚠ **What this test keeps is the seam, not "no block code is reachable from here"**, which is
     /// what an earlier version of this comment claimed: `walk::walk_from` builds a `BlockStream`,
     /// and this file calls it. The weaker statement is the true one and is the one worth having.
     ///
@@ -1141,7 +1141,7 @@ mod tests {
     /// **Every truncation of a finished psp is refused, and none panics.** A file cut anywhere
     /// is either incomplete or damaged — never quietly readable.
     ///
-    /// **Every byte, not every sixteenth** (Milestone H2). A killed writer stops at whatever byte
+    /// **Every byte, not every sixteenth.** A killed writer stops at whatever byte
     /// the kernel had taken, and one cut in sixteen leaves fifteen of every sixteen stopping
     /// points unvisited — including most of the two- and four-byte fields a section boundary is
     /// made of. On this fixture that is **3,742 cuts against 234**, and the sweep took 0.19 s in

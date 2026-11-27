@@ -141,8 +141,10 @@ by document kind:
     functions, and the loop as the cursor owns it; companion to
     `spec/read_filtering_stages.md`.
   - [`alignment.md`](arch/alignment.md) — the alignment module's types & interfaces
-    (`BestPathAligner`, `MarginalAligner`, `AlignmentNormalizer`, `RepeatSpan`, `StutterModel`;
-    seeds `LogProb`); companion to `spec/alignment.md`. Called by two steps, not a step itself.
+    (`BestPathAligner`, `RepeatSpan`, `StutterModel`; seeds `LogProb`); companion to
+    `spec/alignment.md`. Called by two steps, not a step itself. The `MarginalAligner` and
+    `AlignmentNormalizer` traits it also designs were removed (2026-10-31 and 2026-11-27): indel
+    left-alignment is the function `alignment::indel_norm::left_align_indels`.
   - [`typed_regions.md`](arch/typed_regions.md) — step 3's types & interfaces (the
     typed-region generator); companion to `spec/typed_regions.md`.
   - [`typed_regions_cli.md`](arch/typed_regions_cli.md) — the `pop_var_caller_exp` /

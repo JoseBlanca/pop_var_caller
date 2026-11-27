@@ -27,6 +27,12 @@ the deliverable. See the spec for the "why" behind every decision here.*
 >
 > Read the superseded sections as the design record of a path that shipped, was measured, and
 > was replaced.
+>
+> **Later changes (2026-11-27).** The read every stream here carries is ng's `AlignedRead`
+> (`src/read/aligned_read.rs`), which replaced production's `MappedRead` when read groups landed
+> ([`read_groups.md`](../spec/read_groups.md) §8); `MappedRead` itself was deleted on
+> 2026-11-27. Production's `segment_reader.rs` and `segment_merge.rs`, cited below as the model,
+> were deleted on 2026-11-26. Paths under `src/ng/` are now under `src/` (promotion, 2026-09-13).
 
 ## Module home
 
@@ -292,7 +298,7 @@ Every row read at the cited line.
 | `GenomeRegion` (query type) | [`ng/types.rs:55`](../../../../src/ng/types.rs) | reuse as-is — contig + 1-based inclusive range |
 | `ContigId`, `Position` | [`ng/types.rs:11`, `:32`](../../../../src/ng/types.rs) | reuse as-is |
 | `GenomePosition` | does not exist yet | **new, in `ng::types`** — introduced by [`sample_reads.md`](sample_reads.md) §1.1; used here by the order guard |
-| `MappedRead` (item) | [`bam/alignment_input.rs:78`](../../../../src/bam/alignment_input.rs) — `flag:80`, `ref_id:82` (`usize`), `pos:84` (`u64`, 1-based), `source_file_index:102` | reuse as-is |
+| `MappedRead` (item) | production's `bam/alignment_input.rs` at design time; replaced by ng's `AlignedRead` ([`read/aligned_read.rs`](../../../../src/read/aligned_read.rs)) and deleted on 2026-11-27 | reuse as-is (at design time) |
 | index load | `load_alignment_index` [`bam/index_preflight.rs:120`](../../../../src/bam/index_preflight.rs) → `AlignmentIndex` (`:95`, `Crai`/`BamCsi`/`BamBai`, each `Arc`-wrapped) | call as-is; store the result on `AlignmentFile` |
 | index policy | `preflight_alignment_indexes` [`bam/index_preflight.rs:199`](../../../../src/bam/index_preflight.rs) (takes `build_if_missing`) | call as-is. (It also rejected mixed BAM+CRAM lists; ng passes one file at a time, so that check could not fire and was removed on 2026-11-26.) |
 | `@SQ` comparison | `ContigList::first_disagreement` [`fasta/mod.rs:69`](../../../../src/fasta/mod.rs) — `pub(crate)`, returns `Result<(), String>` | call as-is; the `String` becomes `ContigReconcile.detail` |

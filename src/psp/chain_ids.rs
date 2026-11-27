@@ -33,15 +33,15 @@
 //!
 //! - **The exception lists** — the ids of every observation except the residual one — stay in
 //!   the record's skippable body, because they carry no state. This module holds the half that
-//!   does. ([`record`](super::record), Milestone E3.)
+//!   does; [`record`](super::record) puts it in the record head.
 //! - **The residual observation's ids**, which are the live set minus every other
-//!   observation's. That is where the scheme is cheap and where it fails silently, and it is
-//!   Milestone E4's, with the count check spec [`psp_chain_id_encoding.md`] §5 names.
-//! - **Re-entry** is Milestone E2's oracle rather than a change to this encoding: an id may go
-//!   live, stop, and go live again, because a pair's mates rarely overlap — 83 % of ids on the
-//!   human sample and 91 % on tomato cover two stretches. Arrivals and departures already
-//!   express that; what E2 owes is a fixture that *contains* it and a test that counts it, and
-//!   nothing here may grow an assumption of one stretch per id in the meantime.
+//!   observation's. That is where the scheme is cheap and where it fails silently, and
+//!   [`record`](super::record) derives them, with the count check spec
+//!   [`psp_chain_id_encoding.md`] §5 names.
+//! - **Re-entry** needs no change to this encoding: an id may go live, stop, and go live again,
+//!   because a pair's mates rarely overlap — 83 % of ids on the human sample and 91 % on tomato
+//!   cover two stretches. Arrivals and departures already express that, the tests below hold
+//!   it, and nothing here may grow an assumption of one stretch per id.
 //!
 //! [`psp_file_format.md`]: ../../../../doc/devel/ng/spec/psp_file_format.md
 //! [`psp_record_encoding.md`]: ../../../../doc/devel/ng/spec/psp_record_encoding.md
@@ -62,8 +62,8 @@ const ARRIVAL_ID: &str = "chain-id arrival";
 ///
 /// **A count is refused when no record could hold that many entries**, the same guard
 /// [`FieldReader::read_count`] applies to observations: a declared 2⁶³ arrivals is not a buffer
-/// that stopped early, and reporting it as one would ask Milestone D's reader to grow its buffer
-/// to a terabyte instead of reporting damage.
+/// that stopped early, and reporting it as one would ask the streaming block reader to grow its
+/// buffer to a terabyte instead of reporting damage.
 const LEAST_BYTES_PER_ENTRY: usize = 1;
 
 /// The reads live at one record — **sorted ascending and without duplicates**, which is what
@@ -466,10 +466,9 @@ pub(super) fn as_a_read_set(ids: &mut Vec<ChainId>) {
 
 /// Write a record's live-set changes, and carry the set forward.
 ///
-/// **Nothing calls this yet.** Milestone E3 puts the bytes it writes into the record head, which
-/// is where they have to be: they carry state across records, so a reader that skipped a body
-/// holding them would have a stale set from that point on. E1 is the stream and its oracle; E3
-/// is where it sits in a record.
+/// **The record encoder puts the bytes it writes into the record head**, which is where they have
+/// to be: they carry state across records, so a reader that skipped a body holding them would
+/// have a stale set from that point on.
 ///
 /// One of these per sample being written. **The live set is the per-block state**, and
 /// [`start_block`](Self::start_block) is its whole reset — the same shape `RecordEncoder` and
@@ -493,8 +492,8 @@ pub struct LiveSetWriter {
 /// Everything the chain-id stream **restarts when a block does** (spec §3.2).
 ///
 /// **A struct for one field, and deliberately.** It is the same shape `RecordEncoder` and
-/// `BlockCursor` carry theirs in, for the same reason: Milestone E2's re-entry bookkeeping and
-/// E4's residual counts are the next things that might live for a block, and a field added beside
+/// `BlockCursor` carry theirs in, for the same reason: re-entry bookkeeping and the residual
+/// counts are the next things that might live for a block, and a field added beside
 /// this one and initialised once is one that silently never resets — a file that then reads back
 /// wrong from each block's first record, and plausibly wrong.
 ///
@@ -543,7 +542,7 @@ impl LiveSetWriter {
     /// **⚠ A writer that forgets to call this at a block boundary produces a file that is wrong
     /// from that block's first record and parses perfectly** — the reader restarts whether the
     /// writer did or not, so it reconstructs a set the writer never meant. The call site is
-    /// Milestone E3's, and so is the test that holds it.
+    /// the record encoder's, and so is the test that holds it.
     pub fn start_block(&mut self) {
         self.block = PerBlockState::at_block_start();
     }
@@ -703,7 +702,7 @@ impl LiveSetReader {
     /// **A stream that is internally inconsistent is corrupt input, not a panic** — a departure
     /// for a position past the end of the set, or an arrival for an id already live. Both are
     /// `Malformed` rather than `Truncated`: the bytes were there and cannot mean what they say,
-    /// so no quantity of further bytes changes the answer and Milestone D's reader must not
+    /// so no quantity of further bytes changes the answer and the streaming block reader must not
     /// fetch more and retry.
     ///
     /// **⚠ A fault's `bytes_in` counts from `bytes`'s own first byte**, not from the record's.
@@ -711,7 +710,7 @@ impl LiveSetReader {
     /// re-bases a body's faults into the record that holds it.
     ///
     /// **A slice rather than this module's byte cursor**, so that where the stream sits inside a
-    /// record stays E3's question and not a constraint the type imposes now.
+    /// record stays the record codec's question and not a constraint the type imposes now.
     ///
     /// # Errors
     ///
@@ -828,7 +827,7 @@ impl LiveSetReader {
     /// The arrivals, each an identifier.
     ///
     /// **An identifier already live is damage**: accepted, it would put a read in the set twice,
-    /// which Milestone E4's residual arithmetic then subtracts once — silently.
+    /// which the residual derivation then subtracts once — silently.
     fn read_arrivals(&mut self, reader: &mut FieldReader<'_>) -> Result<(), RecordDecodeError> {
         let arrivals = reader.read_count(ARRIVAL_COUNT, LEAST_BYTES_PER_ENTRY)?;
         let mut previous: Option<u64> = None;
@@ -839,7 +838,7 @@ impl LiveSetReader {
             // `derive_changes` puts an id in at most one of the two lists, so no writer produces
             // that; a stream that does is internally inconsistent, and honouring it would report
             // one departure and one arrival for a record where nothing changed, which is what
-            // Milestone E4's residual arithmetic counts.
+            // the residual derivation counts.
             if self.block.live.contains(id) {
                 return Err(reader.malformed(
                     ARRIVAL_ID,
@@ -1223,8 +1222,8 @@ mod tests {
     }
 
     /// **A departure naming a position the live set does not have is damage**, not a short read:
-    /// the bytes were there and cannot mean what they say, so Milestone D's reader must refuse
-    /// rather than fetch more bytes and try again.
+    /// the bytes were there and cannot mean what they say, so the streaming block reader must
+    /// refuse rather than fetch more bytes and try again.
     #[test]
     fn a_departure_past_the_live_set_is_damage() {
         let mut reader = LiveSetReader::new();
@@ -1248,7 +1247,7 @@ mod tests {
 
     /// **An arrival for a read already live is damage too.** It is the other way a differential
     /// stream can be internally inconsistent in a way a list cannot, and left unchecked it would
-    /// put an id in the set twice — which the residual arithmetic of Milestone E4 then subtracts
+    /// put an id in the set twice — which the residual derivation then subtracts
     /// once, silently.
     #[test]
     fn an_arrival_for_a_read_already_live_is_damage() {
@@ -1271,7 +1270,7 @@ mod tests {
     }
 
     /// **A stream cut short anywhere is `Truncated` and never `Malformed`** — at every cut, one
-    /// at a time. This is the line Milestone D's restartable reader branches on: a fault put in
+    /// at a time. This is the line the streaming block reader branches on: a fault put in
     /// the wrong class here makes a streaming reader either reject a good record or retry for
     /// ever on a bad one.
     #[test]
@@ -1537,7 +1536,7 @@ mod tests {
              arrives beside it with nothing saying it is the same read"
         );
 
-        // And a reader that starts *here*, with no history at all — Milestone F's index will hand
+        // And a reader that starts *here*, with no history at all — the block index hands
         // one exactly this. It must agree with the reader that came through the first block.
         let mut reader_starting_fresh = LiveSetReader::new();
         reader_starting_fresh.start_block();
@@ -1592,9 +1591,8 @@ mod tests {
     ///
     /// ⚠ **Both arms were unreached by all 214 `psp` tests** before this one — measured by
     /// replacing each with `panic!` and watching the suite stay green. Every other fixture
-    /// allocates ids in walk order, so an arrival was always the largest. Counting two-stretch
-    /// ids on a real corpus is Milestone E2's; making the arms reachable at all is this step's,
-    /// because they are E1's code.
+    /// allocates ids in walk order, so an arrival was always the largest. This test makes the
+    /// arms reachable; how often two-stretch ids occur on a real corpus is a separate count.
     #[test]
     fn an_id_that_goes_live_again_below_the_ids_allocated_since_reads_back() {
         let records = vec![
@@ -1619,8 +1617,8 @@ mod tests {
         );
     }
 
-    /// **The stream reports the bytes it used, not the buffer's length**, because Milestone E3
-    /// hands it the rest of the record head and the count is how the next field is found.
+    /// **The stream reports the bytes it used, not the buffer's length**, because the record
+    /// decoder hands it the rest of the record head and the count is how the next field is found.
     ///
     /// ⚠ Nothing could see this before: every fixture handed `read_changes` a `Vec` holding
     /// exactly one record's stream, so returning `bytes.len()` instead was the same number.
@@ -1684,7 +1682,7 @@ mod tests {
     /// could have returned anything.
     ///
     /// ⚠ Measured: replacing its body with `&[]` left all 228 `psp` tests green, because the
-    /// only test that read it asserted the list was *empty*. Milestone E4's residual arithmetic is
+    /// only test that read it asserted the list was *empty*. The residual derivation is
     /// specified against these two counts.
     #[test]
     fn changes_departed_names_the_reads_that_stopped_covering() {
@@ -1796,7 +1794,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(600))]
 
         /// **A `Truncated` fault must leave the reader exactly where it was**, because
-        /// Milestone D's reader answers it by re-parsing the record from its first byte (spec
+        /// the streaming block reader answers it by re-parsing the record from its first byte (spec
         /// `psp_file_format.md` §8).
         ///
         /// ⚠ **This found the Blocker on its first generated case** — `records = [[0], [1, 2]]` —
@@ -1848,7 +1846,7 @@ mod tests {
 
         /// **Any run of records round trips through one buffer**, over the whole `u64` range
         /// rather than identifiers allocated in order — and read back by advancing on the byte
-        /// count the reader returns, which is what Milestone E3 will do.
+        /// count the reader returns, which is what the record decoder does.
         #[test]
         fn any_run_of_records_round_trips_through_one_buffer(
             records in prop::collection::vec(prop::collection::vec(any::<u64>(), 0..8), 1..25),
@@ -1918,7 +1916,7 @@ mod tests {
 
             // **Cut into two blocks**, at a point the generator chose, so a read that is still
             // covering at the cut is restated and one whose next stretch begins after it arrives
-            // fresh. Milestone E3 stresses exactly this seam, and two of the three hand-written
+            // fresh. The record codec meets exactly this seam, and two of the three hand-written
             // re-entry tests use one block.
             let cut = records_in_the_first_block.min(records.len() - 1);
             let blocks = vec![records[..cut].to_vec(), records[cut..].to_vec()];
@@ -1940,7 +1938,7 @@ mod tests {
 
         /// **Damaged streams are refused, or leave the live set a set** — ascending and without
         /// duplicates. A decode that returns `Ok` having put an id in twice or out of order is
-        /// what silently breaks Milestone E4's residual subtraction.
+        /// what silently breaks the residual derivation.
         ///
         /// **The bytes are a real record's, damaged, rather than uniform noise**, and the reader
         /// is seeded with a live set first. Both matter, and the difference is measured: over 600
@@ -2019,8 +2017,8 @@ mod tests {
     ///
     /// No writer produces it — `derive_changes` puts an id in at most one of the two lists — so a
     /// stream that does is internally inconsistent. Honouring it would report one departure and
-    /// one arrival for a record where nothing changed, and those two counts are what Milestone
-    /// E4's residual arithmetic is specified against.
+    /// one arrival for a record where nothing changed, and those two counts are what the
+    /// residual derivation is specified against.
     #[test]
     fn an_id_that_departs_and_arrives_in_one_record_is_damage() {
         let mut reader = LiveSetReader::new();

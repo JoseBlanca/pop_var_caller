@@ -181,7 +181,7 @@ fn multi_base_ssr_insertion_shifts_to_leftmost_unit() {
     assert_eq!(r.cigar, vec![Match(1), Insertion(2), Match(5)]);
 }
 
-// --- build_cigar: canonical-form assembly (review M7) ----------------
+// --- build_cigar: canonical-form assembly ----------------
 //
 // The right-to-left emitter can produce an insertion before a deletion and
 // adjacent same-ops; `build_cigar` is what makes the output canonical, and
@@ -224,7 +224,7 @@ fn build_cigar_strips_leading_deletion_only_when_requested() {
 // --- left_align_indels: the in-place wrapper the reader calls ---------
 //
 // These drive `left_align_indels(&mut cigar, seq, ref_seq)` — the
-// `(&mut Vec<CigarOp>, seq, ref_seq)` drop-in for the reader's F3 site
+// `(&mut Vec<CigarOp>, seq, ref_seq)` entry the read preparer calls
 // (`read_start = 0`, end-deletions kept). They exercise the wrapper's
 // fast path and its debug mismatch-count invariant (which `left_align_cigar`
 // callers bypass), and pin the `seq`-vs-`ref_seq` argument order: a swapped

@@ -1,11 +1,13 @@
-//! Algorithm 4r — **unit-robust**: algorithm 4's recurrence and scoring, with two changes that
-//! attack the two ways a delimiter gets a tract boundary wrong, and **without banning flank
-//! gaps**.
+//! Algorithm 4r — **unit-robust**: the unit-slip delimiter's recurrence and scoring (algorithm
+//! 4), with two changes that attack the two ways a delimiter gets a tract boundary wrong, and
+//! **without banning flank gaps**. This is the STR generator's per-repeat delimiter. Algorithm
+//! 4 itself, and the variants 4n and 5 named below, were removed once this replaced them; they
+//! are described here as the alternatives this design was measured against.
 //!
 //! The scoring model is algorithm 4's, unchanged: a whole-unit slip priced from the shared
-//! [`StutterModel`] plus a flat per-base gap for everything out of frame (see
-//! `super::ssr_best_path_unit_slip` for the derivation). What changes is *where a per-base gap
-//! may open* and *when a crossed junction counts as an anchor*.
+//! [`StutterModel`] plus a flat per-base gap for everything out of frame (the derivation is in
+//! `doc/devel/ng/spec/alignment.md` §4.2). What changes is *where a per-base gap may open* and
+//! *when a crossed junction counts as an anchor*.
 //!
 //! # The two failures, and the two answers
 //!
@@ -32,7 +34,7 @@
 //!
 //! # Why the guard is a window and not a flank ban
 //!
-//! Algorithm 4n (`super::ssr_noise_robust`) closes the same door by banning per-base gaps in the
+//! Algorithm 4n (noise-robust) closed the same door by banning per-base gaps in the
 //! flank outright. That works on noise and **destroys real flank indels**: a read whose flank
 //! genuinely carries a 1 bp indel has no route to express it, so the gap reappears inside the
 //! tract and the tract is mismeasured — 4n scores 0.000 on the flank-indel axis of the synthetic
@@ -45,7 +47,7 @@
 //! # Demotion is one-way, and it never removes the last anchor
 //!
 //! Both changes can only ever make a span **less** of a claim, never more, and this algorithm goes
-//! one step further than algorithm 5 (`super::ssr_anchor_firm`): a read that algorithm 4 would
+//! one step further than algorithm 5 (firm-anchor): a read that algorithm 4 would
 //! report as one-sided is never demoted at all, and a `Between` is never demoted on *both* sides.
 //! The rule is that a **partial must not become [`RepeatSpan::Unanchored`]**. A lower bound is a
 //! usable fact — the allele is at least this long — while `Unanchored` is the read thrown away, so

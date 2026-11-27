@@ -408,9 +408,10 @@ pub(crate) fn left_align_cigar(
 /// that rolls to a read edge stays a first/last-op deletion the cursor
 /// rejects). No-op for reads with no indel.
 ///
-/// This is the drop-in replacement for the alignment-input cascade's F3
-/// pass: same `(&mut cigar, seq, ref_seq)` shape, but backed by the GATK
-/// `leftAlignIndels` port instead of the prior single-forward-pass shifter.
+/// The read preparer (`crate::read::left_align`) calls this. It keeps the
+/// `(&mut cigar, seq, ref_seq)` shape of the old caller's left-alignment pass,
+/// but is backed by the GATK `leftAlignIndels` port instead of that pass's
+/// single-forward-pass shifter.
 ///
 /// A debug-only invariant checks that left-alignment — a lossless
 /// re-placement of the same indels — leaves the read's reference-mismatch

@@ -1,4 +1,4 @@
-# Production's prepared reads for src/ng/read/left_align_parity.rs, frozen at promotion plan step C9.
+# Production's prepared reads for src/read/left_align_parity.rs, frozen before production was deleted.
 # Each row is what production's process_read(read, None, …) — its --no-baq arm, with
 # max_read_mismatch_fraction None and mismatch_bq_floor 0 — returned at commit d9e7b076 for one
 # fixture read on one of the test's two references: `uppercase` (CCTAAAAGGTTTTTACGCATGCGCG) or

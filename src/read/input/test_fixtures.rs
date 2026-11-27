@@ -43,7 +43,7 @@ pub(crate) const FIXTURE_CONTIGS: [(&str, usize); 2] = [("chr1", 100), ("chr2", 
 /// until 2026-08-03 — so every one of them was handing `AlignmentFile::cursor` an accessor
 /// whose table disagreed with the file's on **every name**. Nothing noticed, because the check
 /// of the day fetched a zero-length window per contig and a window resolves whatever the
-/// contig is called. B1 replaced that with a comparison of the two tables and 23 tests failed
+/// contig is called. A comparison of the two tables replaced it, and 23 tests failed
 /// at once; this is what they were fixed to.
 pub(crate) fn fixture_reference_bases() -> crate::ref_seq::InMemoryRefSeq {
     crate::ref_seq::InMemoryRefSeq::from_named_contigs(
@@ -665,7 +665,7 @@ pub(crate) fn multi_container_cram(
 /// declares a single `@RG`, which its cursor tests open as `ReadGroupResolution::Sole` — an arm
 /// that never asks a record which group it is in. So **no test reached the per-record read-group
 /// arm past a container boundary at all**, and a stamp that went stale from the second container
-/// onwards was invisible to the whole suite. Found by B2's review, 2026-08-03.
+/// onwards was invisible to the whole suite. Found in review, 2026-08-03.
 pub(crate) fn multi_container_cram_two_read_groups(
     contig_length: usize,
     read_count: usize,

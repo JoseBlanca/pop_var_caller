@@ -43,6 +43,12 @@ reader pool with a per-worker cursor; the rest of this document stands.***
 > the reasoning that chose pooling, which is worth reading beside
 > `alignment_cursor.md` §3's measurement that the pool was noise (3 lock acquisitions in
 > 25,446) and that the whole per-region query setup was 0.9 % of the walk.
+>
+> **Later changes (2026-11-27).** The read every stream here carries is ng's `AlignedRead`
+> (`src/read/aligned_read.rs`), which replaced production's `MappedRead` when read groups landed
+> ([`read_groups.md`](read_groups.md) §8); `MappedRead` itself was deleted on 2026-11-27. Production's
+> `segment_reader.rs` and `segment_merge.rs`, cited below as the model, were deleted on
+> 2026-11-26. Paths under `src/ng/` are now under `src/` (promotion, 2026-09-13).
 
 ## 1. What this is — scope and non-goals
 
