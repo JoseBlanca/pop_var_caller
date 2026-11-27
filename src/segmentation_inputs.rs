@@ -188,6 +188,26 @@ impl SegmentationInputs {
     /// end; the analysed regions last, because they are the one a user changes on purpose.
     #[must_use]
     pub fn first_difference(&self, other: &Self) -> Option<&'static str> {
+        if let Some(field) = self.first_difference_in_how_repeats_were_sorted(other) {
+            return Some(field);
+        }
+        if self.analysed_regions != other.analysed_regions {
+            return Some(Self::ANALYSED_REGIONS);
+        }
+        None
+    }
+
+    /// [`first_difference`](Self::first_difference) without the analysed regions: the setting,
+    /// the catalog and the criteria, in that order.
+    ///
+    /// **What a run over part of a psp compares**: `call-from-psps --regions` calls a part of the
+    /// ground its files cover, so its regions differ from theirs on purpose and are checked to lie
+    /// inside them instead; everything that decides where a segment ends must still be the same.
+    #[must_use]
+    pub fn first_difference_in_how_repeats_were_sorted(
+        &self,
+        other: &Self,
+    ) -> Option<&'static str> {
         if self.repeat_ground.setting_name() != other.repeat_ground.setting_name() {
             return Some("setting for repeat ground");
         }
@@ -200,9 +220,6 @@ impl SegmentationInputs {
             if ours.repeat_tract_criteria != theirs.repeat_tract_criteria {
                 return Some("set of repeat-tract criteria");
             }
-        }
-        if self.analysed_regions != other.analysed_regions {
-            return Some(Self::ANALYSED_REGIONS);
         }
         None
     }

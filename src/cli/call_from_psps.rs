@@ -8,13 +8,19 @@
 //! ([`calling_run`]), because two copies of that decision would be two
 //! places for the modes to drift apart while both kept running.
 //!
-//! # The ground is the files', not a flag's
+//! # The ground is the files', and `--regions` may only choose inside it
 //!
-//! **There is no `--regions` here** (spec §5.3). A psp records the ground its walk covered, and
-//! a cohort whose files disagree about it is refused rather than called over the ground they
-//! happen to share — so the analysed regions are read from the headers, and asking for them
-//! again on the command line would only let a person contradict the files. To call over less
-//! ground than the psps hold, walk less ground.
+//! A psp records the ground its walk covered, and a cohort whose files disagree about it is
+//! refused rather than called over the ground they happen to share — so the analysed regions are
+//! read from the headers (spec §5.3). **`--regions` cannot contradict them**: every base it asks
+//! for must lie in that ground, and a run asking for any other is refused before anything is
+//! called (`doc/devel/ng/impl_plan/call_from_psps_regions.md` §2), before the reference is read.
+//! A `--regions` inside that ground is called as the slice of the whole-ground run it owns: **a
+//! locus belongs to the run whose regions hold its first base**, so per-chromosome jobs joined
+//! with `bcftools concat` write each locus once. The psps are walked from the block that can hold
+//! the first wanted record ([`PspSummarySource::over_part`](crate::run::psp_source::PspSummarySource::over_part)).
+//! The hidden-duplication filter and refinement are fitted per run, so a per-chromosome job fits
+//! them on its chromosome (owner's decision, 2026-11-27).
 //!
 //! # What this run can say about each sample, and what it cannot
 //!
@@ -102,6 +108,14 @@ pub struct CallFromPspsArgs {
     /// has sent part of a VCF, and its exit status says it failed.
     #[arg(long)]
     pub output: PathBuf,
+
+    /// A BED file of the regions to call. Without it, every region the psps cover.
+    ///
+    /// A region the psps do not cover is refused before anything is called. A locus is written by
+    /// the run whose regions hold its first base, so runs over separate chromosomes, joined with
+    /// `bcftools concat`, write each locus once.
+    #[arg(long)]
+    pub regions: Option<PathBuf>,
 
     /// A parameters file, as `pvc estimate-parameters` writes it for these psps.
     ///
@@ -348,6 +362,35 @@ fn psps_named_by(args: &CallFromPspsArgs) -> Result<Vec<PathBuf>, CallFromPspsCl
     Ok(psps)
 }
 
+/// **The regions this run calls**: every region the psps cover, or the `--regions` asked for —
+/// which must lie inside them.
+///
+/// A `--regions` naming exactly what the psps cover is the same run as one without it.
+///
+/// # Errors
+///
+/// [`GroundError::Bed`] for a BED that will not read, and [`GroundError::RegionsOutsideThePsps`]
+/// for one reaching outside what the psps cover.
+fn ground_to_call(
+    args: &CallFromPspsArgs,
+    cohort: &OpenPspCohort,
+) -> Result<GenomeRegions, CallFromPspsCliError> {
+    let psps_ground = cohort.analysed_regions();
+    let Some(bed) = args.regions.as_deref() else {
+        return Ok(psps_ground.clone());
+    };
+    let first_psp = cohort
+        .paths()
+        .first()
+        .expect("a cohort of no psps was refused when it was opened");
+    Ok(run_ground::regions_inside_the_psps(
+        bed,
+        first_psp,
+        &cohort.contig_table(),
+        psps_ground,
+    )?)
+}
+
 /// The shared tail's errors, as this command words them.
 impl From<calling_run::RunTailError> for CallFromPspsCliError {
     fn from(error: calling_run::RunTailError) -> Self {
@@ -370,8 +413,9 @@ impl From<calling_run::RunTailError> for CallFromPspsCliError {
 /// Every way a run can be refused or can stop — see [`CallFromPspsCliError`]. **In order, and
 /// all of it before a block is decoded**: the ploidy, the allele cap and the two output paths;
 /// then the psps named, because the round width is chosen from how many there are; then that
-/// width and the locus-span bound; then the reference; then every check of §6.2, across the
-/// cohort and against this run.
+/// width and the locus-span bound; then the cohort's checks of §6.2 across its files, as it is
+/// opened; then `--regions` against the ground the psps were written over; then the reference;
+/// then the rest of §6.2, every file against this run.
 pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCliError> {
     // **Everything a person typed is judged before a byte is read**, the same order the other
     // two commands use.
@@ -421,7 +465,33 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
     let run_log = run_output::open_log(&log, args.calling.force)?;
 
-    // **The FASTA is read to the end before a psp is opened**: every file's contig table is
+    // **The cohort is opened first, because the cohort is what says what ground there is** (spec
+    // §5.3): the analysed regions come from the headers, and the files have already been forced to
+    // agree about them. **Before the reference**, so that a `--regions` reaching outside that
+    // ground is refused in seconds rather than after a whole-genome FASTA has been read: opening a
+    // psp reads its footer, index and header and decodes no block, and needs nothing from the
+    // reference — each file is compared with the reference when the caller is built.
+    let cohort =
+        OpenPspCohort::open(&paths).map_err(|source| CallFromPspsCliError::Run { source })?;
+    let analysed = ground_to_call(args, &cohort)?;
+    // **What the psps cover, named once for the log and the report**: a job over one chromosome
+    // of whole-genome psps says both what it called and what the files hold.
+    let what_the_psps_cover = {
+        let psps_ground = cohort.analysed_regions();
+        format!(
+            "{} ({})",
+            crate::run::report::describe(psps_ground, &cohort.contig_table()),
+            run_output::size_of_ground(psps_ground.iter().map(|region| region.len()).sum())
+        )
+    };
+    let regions_asked_for = args.regions.as_ref().map(|bed| {
+        format!(
+            "the regions of {}; the psps cover {what_the_psps_cover}",
+            bed.display()
+        )
+    });
+
+    // **The FASTA is read to the end before the caller is built**: every file's contig table is
     // compared against the reference's per-contig checksums, and a reference whose verification
     // has not been joined carries none.
     let cache = std::sync::Arc::new(ReferenceInfoCache::new());
@@ -462,12 +532,6 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     };
     let reference = OpenReference::new(info);
 
-    // **The cohort is opened before the segmentation is built, because the cohort is what says
-    // what ground there is** (spec §5.3): the analysed regions come from the headers, and the
-    // files have already been forced to agree about them.
-    let cohort =
-        OpenPspCohort::open(&paths).map_err(|source| CallFromPspsCliError::Run { source })?;
-    let analysed = cohort.analysed_regions().clone();
     // **What counts as a repeat is the psps' own**, recorded by the walk that wrote them: a run
     // over stored loci has to cut the genome the way that walk did, so it has no option that
     // could say otherwise (`doc/devel/ng/spec/command_line.md` §4.4).
@@ -494,7 +558,14 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         }
     };
     let satellite_bases_on_the_generic_path = segmentation.satellite_bases_on_the_generic_path();
-    say_what_this_run_does(args, &paths, cohort.read_groups(), &analysed, &log);
+    say_what_this_run_does(
+        args,
+        &paths,
+        cohort.read_groups(),
+        &analysed,
+        &what_the_psps_cover,
+        &log,
+    );
 
     let numbers = calling_run::run_parameters(
         args.parameters.as_deref(),
@@ -660,6 +731,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
             satellite_bases_on_the_generic_path,
+            regions_asked_for,
             started,
             log: &log,
         },
@@ -673,6 +745,7 @@ fn say_what_this_run_does(
     psps: &[PathBuf],
     read_groups: &ReadGroups,
     analysed: &GenomeRegions,
+    what_the_psps_cover: &str,
     log: &Path,
 ) {
     let samples: BTreeSet<&str> = read_groups
@@ -704,7 +777,10 @@ fn say_what_this_run_does(
             group.file.display()
         );
     }
-    tracing::debug!("input: ground the psps were written over, {bases} bases");
+    if let Some(bed) = &args.regions {
+        tracing::debug!("input: regions {}, {bases} bases", bed.display());
+    }
+    tracing::debug!("input: the psps cover {what_the_psps_cover}");
     tracing::debug!(
         "output: {}",
         calling_run::where_the_calls_went(&args.output)

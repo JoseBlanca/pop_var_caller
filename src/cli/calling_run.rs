@@ -2004,6 +2004,9 @@ pub struct RunTail<'a> {
     pub bounds: crate::run::report::BoundsTheRunCalledUnder,
     /// The satellite bases `--call-satellites` handed to the generic path.
     pub satellite_bases_on_the_generic_path: u64,
+    /// **For `call-from-psps --regions` only**: the BED the run called and what the psps cover,
+    /// as one phrase for the report. `None` for every other run.
+    pub regions_asked_for: Option<String>,
     /// When the run started, for the closing line.
     pub started: std::time::Instant,
     /// The run's log, named in the closing line.
@@ -2065,6 +2068,7 @@ pub fn finish_the_run<E: From<RunTailError>>(
         analysed,
         bounds,
         satellite_bases_on_the_generic_path,
+        regions_asked_for,
         started,
         log,
     } = tail;
@@ -2148,7 +2152,8 @@ pub fn finish_the_run<E: From<RunTailError>>(
         output,
         &called
             .report(contigs, read_groups, parameters_file, analysed, bounds)
-            .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
+            .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path)
+            .with_regions_asked_for(regions_asked_for),
         &filter_lines,
     );
     // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives

@@ -44,6 +44,7 @@ stops at once and says why. The common ones:
 | read groups or `SM` | no `@RG`, no `SM`, or the same read-group `ID` in two files | `samtools addreplacerg` |
 | the index | no index beside the alignment | `samtools index` |
 | open files | the limit is too low for this many alignments | `ulimit -n` with the value the message gives, or psp mode |
+| `call-from-psps --regions` | the BED asks for regions the psps do not cover | remove those regions from the BED (the message lists them), or write the psps again over regions that include them |
 | psp files that disagree | written over different `--regions`, catalogues or repeat settings, or the same sample twice | write them again with the same settings |
 | a stale psp | its summary for `estimate-parameters` is missing, or was written under other settings | write it again; the message names each stale sample and gives the `generate-psps … --force` command to use |
 | a parameters file | estimated on another reference, other samples or other read groups | estimate it again on this cohort |

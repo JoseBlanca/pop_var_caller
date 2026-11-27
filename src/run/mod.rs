@@ -656,6 +656,22 @@ pub enum RunError {
         field: &'static str,
     },
 
+    /// The run's regions reach outside the regions a psp covers.
+    ///
+    /// **Defensive**: `call-from-psps` refuses such a `--regions` before the reference is read,
+    /// naming every piece outside (`GroundError::RegionsOutsideThePsps`). This is the caller's own
+    /// check, for a run built some other way: a psp holds no record outside the regions its walk
+    /// covered, so calling there would report a stretch nobody looked at as one with nothing in it.
+    #[error(
+        "this run calls regions the psp for sample {sample} does not cover, starting at {first}"
+    )]
+    RegionsOutsideThePsp {
+        /// The sample whose file does not cover the run's regions.
+        sample: String,
+        /// The first piece outside, 1-based and inclusive, by contig index.
+        first: String,
+    },
+
     /// A psp's coordinate space is not the run's reference's.
     ///
     /// **Every record in a psp is written against the contig table its header carries**, in

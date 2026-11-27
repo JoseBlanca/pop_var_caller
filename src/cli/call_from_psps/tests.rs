@@ -75,19 +75,14 @@ fn a_run_that_names_neither_a_parameters_file_nor_the_defaults_is_refused() {
     assert!(rendered.contains("--defaults"), "and got: {rendered}");
 }
 
-/// **There is no `--regions` flag, and that is a design decision rather than an omission**
-/// (spec §5.3). A psp records the ground its walk covered and the cohort is refused unless
-/// every file agrees about it, so a flag here could only let a person contradict the files.
+/// **`--regions` parses, and is optional**: a run without it calls the psps' whole ground.
 #[test]
-fn the_ground_cannot_be_narrowed_by_a_flag() {
-    let mut argv = a_defaults_run();
-    argv.extend(["--regions", "some.bed"]);
+fn the_regions_flag_parses_and_is_optional() {
+    assert_eq!(args_of(&a_defaults_run()).regions, None);
 
-    let rendered = refusal_of(&argv).to_string();
-    assert!(
-        rendered.contains("--regions"),
-        "the flag is refused by name, and got: {rendered}",
-    );
+    let mut argv = a_defaults_run();
+    argv.extend(["--regions", "chr5.bed"]);
+    assert_eq!(args_of(&argv).regions, Some(PathBuf::from("chr5.bed")));
 }
 
 /// **The psp flag repeats and keeps the order it was given**, which is the order of the VCF's
@@ -188,8 +183,19 @@ fn a_directory_with_no_psp_is_refused_and_says_what_to_do() {
 /// **The psps are named one by one rather than by their directory**, so the run's sample order
 /// is the fixture's own — `zeta` then `alpha` — and a test can say which sample a line is about.
 fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
+    a_cohort_of_psps_walked_over(None)
+}
+
+/// The same, with the psps walked over the BED `walked` holds — or, given `None`, over every base
+/// of the fixture's two contigs, `chr1` of 100 bases and `chr2` of 200.
+fn a_cohort_of_psps_walked_over(walked: Option<&str>) -> (ACohortOnDisk, CallFromPspsArgs) {
     let cohort = a_cohort_on_disk();
     let psps = cohort.directory.path().join("psps");
+    let regions = walked.map(|bed_text| {
+        let bed = cohort.directory.path().join("walked.bed");
+        std::fs::write(&bed, bed_text).expect("the walked BED is written");
+        bed
+    });
     run_generate_psps(&GeneratePspsArgs {
         call_satellites: false,
         generic_path_only: false,
@@ -197,7 +203,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
         output_dir: psps.clone(),
-        regions: None,
+        regions,
         force: false,
         build_index_if_missing: false,
         min_copies: MinCopies::default(),
@@ -215,6 +221,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         catalog: Some(cohort.catalog.clone()),
         psps: vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")],
         output: cohort.directory.path().join("calls.vcf"),
+        regions: None,
         parameters: None,
         defaults: true,
         locus_builder_regions_len: None,
@@ -433,6 +440,120 @@ fn an_output_in_a_missing_directory_is_refused_by_the_command() {
         rendered.contains("no-such-directory"),
         "the message names the directory that is missing, and got: {rendered}",
     );
+}
+
+/// **A `--regions` reaching outside the ground the psps were written over stops the run before
+/// anything is called — and before the reference is read** (the owner's requirement,
+/// `doc/devel/ng/impl_plan/call_from_psps_regions.md` §2).
+///
+/// The psps are walked over `chr1:1-60`; the run asks for `chr1:41-80` and all of `chr2`. The
+/// refusal names both pieces outside in 1-based inclusive coordinates, says what the psps hold on
+/// each contig, and writes no VCF. **The reference named does not exist**, so a refusal that came
+/// after the reference was read would be a different one: this is what pins the order.
+#[test]
+fn regions_outside_the_psps_are_refused_before_the_reference_is_read() {
+    let (cohort, mut args) = a_cohort_of_psps_walked_over(Some("chr1\t0\t60\n"));
+    let asked = cohort.directory.path().join("asked.bed");
+    std::fs::write(&asked, "chr1\t40\t80\nchr2\t0\t200\n").expect("the BED is written");
+    args.regions = Some(asked.clone());
+    args.reference = cohort.directory.path().join("no-such-reference.fa");
+    args.output = cohort.directory.path().join("refused.vcf");
+
+    let refused = run_call_from_psps(&args).expect_err("two pieces lie outside the psps");
+
+    assert!(
+        matches!(
+            refused,
+            CallFromPspsCliError::Ground(GroundError::RegionsOutsideThePsps { .. })
+        ),
+        "got {refused:?}"
+    );
+    // **What `pvc` prints**: `main` renders the error with this chain and exits with status 1.
+    let rendered = crate::error_render::format_error_chain(&refused);
+    assert_eq!(
+        rendered,
+        format!(
+            "--regions {} asks for regions the psps do not cover, so nothing was called:
+  chr1:61-80   on chr1 the psps cover chr1:1-60
+  chr2:1-200   the psps cover nothing on chr2
+The psps cover chr1:1-60 (60 bases). Positions are 1-based, both ends included.
+Remove these regions from the BED, or write the psps again over regions that include them.",
+            asked.display()
+        ),
+    );
+    assert!(!args.output.exists(), "no VCF is written");
+    assert!(
+        !PathBuf::from(format!("{}.tmp", args.output.display())).exists(),
+        "nor begun"
+    );
+}
+
+/// **A `--regions` naming a contig the reference lacks is the BED reader's refusal**, the one
+/// every `--regions` gives, and no VCF is written.
+#[test]
+fn regions_naming_a_contig_the_reference_lacks_are_refused() {
+    let (cohort, mut args) = a_cohort_of_psps();
+    let asked = cohort.directory.path().join("asked.bed");
+    std::fs::write(&asked, "chr1\t0\t100\nchr7\t0\t10\n").expect("the BED is written");
+    args.regions = Some(asked);
+    args.output = cohort.directory.path().join("refused.vcf");
+
+    let refused = run_call_from_psps(&args).expect_err("there is no chr7");
+
+    let rendered = crate::error_render::format_error_chain(&refused);
+    assert!(
+        rendered.contains("BED line 2: contig `chr7` is not in the reference contig list"),
+        "and got: {rendered}"
+    );
+    assert!(!args.output.exists(), "no VCF is written");
+}
+
+/// **A `--regions` naming the whole of the psps' ground calls exactly what a run without it
+/// calls** — here written as overlapping, touching and overhanging lines, which the BED reader
+/// merges and clips to that ground.
+#[test]
+fn regions_equal_to_the_psps_ground_call_what_no_regions_calls() {
+    let (cohort, plain) = a_cohort_of_psps();
+    run_call_from_psps(&plain).expect("a cohort of stored samples calls");
+    let asked = cohort.directory.path().join("whole.bed");
+    std::fs::write(
+        &asked,
+        "chr2\t0\t999999\nchr1\t50\t100\nchr1\t0\t30\nchr1\t20\t50\n",
+    )
+    .expect("the BED is written");
+    let with_regions = CallFromPspsArgs {
+        regions: Some(asked),
+        output: cohort.directory.path().join("with_regions.vcf"),
+        ..plain.clone()
+    };
+
+    run_call_from_psps(&with_regions).expect("the whole ground calls");
+
+    let comparable = |path: &Path| -> Vec<String> {
+        std::fs::read_to_string(path)
+            .expect("the VCF reads")
+            .lines()
+            .filter(|line| !line.starts_with("##commandline") && !line.starts_with("##pvcLog"))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(comparable(&with_regions.output), comparable(&plain.output));
+}
+
+/// **A `--regions` covering part of what the psps cover calls that part.** Whether the calls are
+/// the right ones is `mode_equivalence`'s question, on a cohort that varies; the report's line is
+/// `run::report`'s.
+#[test]
+fn regions_inside_part_of_what_the_psps_cover_are_called() {
+    let (cohort, mut args) = a_cohort_of_psps();
+    let asked = cohort.directory.path().join("chr2.bed");
+    std::fs::write(&asked, "chr2\t0\t200\n").expect("the BED is written");
+    args.regions = Some(asked);
+    args.output = cohort.directory.path().join("chr2.vcf");
+
+    run_call_from_psps(&args).expect("part of what the psps cover calls");
+
+    assert!(args.output.is_file(), "the VCF is written");
 }
 
 /// **A `--ploidy` that disagrees with the parameters file is refused** — a file's numbers were

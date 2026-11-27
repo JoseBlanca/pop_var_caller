@@ -202,6 +202,78 @@ impl GenomeRegions {
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
+
+    /// **The bases of this set that `covering` does not hold**, as maximal spans in genomic
+    /// order — this set minus `covering`. Empty exactly when every base of this set lies in
+    /// `covering`.
+    ///
+    /// What `call-from-psps --regions` asks before it calls anything: the requested regions minus
+    /// the ground the psps were written over leaves the pieces no psp holds a record for.
+    ///
+    /// A span sticking out of `covering` at one end gives the piece that sticks out; a span
+    /// bridging a gap between two spans of `covering` gives the gap; a span on a contig
+    /// `covering` has nothing on comes back whole. Both sets must be over one contig table,
+    /// which every set of one run is. One pass over the two sorted lists.
+    pub fn parts_outside(&self, covering: &GenomeRegions) -> Vec<GenomeRegion> {
+        let mut outside = Vec::new();
+        // The first span of `covering` that can still overlap the current span. **Never moved past
+        // a span that might overlap the next one**: a covering span can reach beyond the end of
+        // one requested span into the next.
+        let mut first_candidate = 0;
+        for span in &self.spans {
+            let (contig, start, end) = (span.chrom_id, u64::from(span.start), u64::from(span.end));
+            while covering
+                .spans
+                .get(first_candidate)
+                .is_some_and(|candidate| {
+                    (candidate.chrom_id, u64::from(candidate.end)) < (contig, start)
+                })
+            {
+                first_candidate += 1;
+            }
+            // The first base of `span` not yet known to be covered or reported.
+            let mut next_base = start;
+            for candidate in covering.spans[first_candidate..]
+                .iter()
+                .take_while(|candidate| {
+                    candidate.chrom_id == contig && u64::from(candidate.start) <= end
+                })
+            {
+                let (covered_from, covered_to) =
+                    (u64::from(candidate.start), u64::from(candidate.end));
+                if covered_from > next_base {
+                    outside.push(Self::span_on(contig, next_base, covered_from - 1));
+                }
+                next_base = next_base.max(covered_to + 1);
+            }
+            if next_base <= end {
+                outside.push(Self::span_on(contig, next_base, end));
+            }
+        }
+        outside
+    }
+
+    /// The spans on one contig, as a set of their own — empty if there are none.
+    pub fn on_contig(&self, contig: ContigId) -> GenomeRegions {
+        let first = self
+            .spans
+            .partition_point(|span| span.chrom_id < contig.get());
+        let past = self
+            .spans
+            .partition_point(|span| span.chrom_id <= contig.get());
+        GenomeRegions {
+            spans: self.spans[first..past].to_vec(),
+        }
+    }
+
+    /// A span of ng's own type, 1-based and inclusive.
+    fn span_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(contig),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
 }
 
 /// Why a recorded list of spans could not be believed as a [`GenomeRegions`]
@@ -1733,6 +1805,189 @@ mod tests {
             GenomeRegions::from_normalized_spans(spans, &huge),
             Err(SpanSetError::NotNormalized { .. })
         ));
+    }
+
+    /// A set over [`two_contigs`] from `(contig index, first base, last base)` spans, 1-based and
+    /// inclusive, already in order.
+    fn regions_of(spans: &[(u32, u32, u32)]) -> GenomeRegions {
+        let spans = spans
+            .iter()
+            .map(|&(chrom_id, start, end)| Region {
+                chrom_id,
+                start,
+                end,
+            })
+            .collect();
+        GenomeRegions::from_normalized_spans(spans, &two_contigs()).expect("a normalized set")
+    }
+
+    /// The same spans as [`GenomeRegion`]s, the shape [`GenomeRegions::parts_outside`] answers in.
+    fn pieces(spans: &[(u32, u64, u64)]) -> Vec<GenomeRegion> {
+        spans
+            .iter()
+            .map(|&(contig, start, end)| GenomeRegions::span_on(contig, start, end))
+            .collect()
+    }
+
+    /// **Requested regions that lie inside the covering ground leave nothing outside**, however
+    /// they sit in it: strictly inside, flush with either end, or equal to it.
+    #[test]
+    fn regions_inside_the_covering_ground_leave_nothing_outside() {
+        let ground = regions_of(&[(0, 100, 500), (1, 1, 500)]);
+        for requested in [
+            regions_of(&[(0, 200, 300)]),
+            regions_of(&[(0, 100, 100), (0, 500, 500)]),
+            regions_of(&[(0, 100, 500), (1, 1, 500)]),
+            regions_of(&[(1, 40, 60)]),
+        ] {
+            assert_eq!(
+                requested.parts_outside(&ground),
+                Vec::new(),
+                "{requested:?}"
+            );
+        }
+    }
+
+    /// **A span sticking out at one end gives exactly the bases that stick out**, at the left
+    /// end, the right end, and both.
+    #[test]
+    fn a_span_overhanging_the_covering_ground_gives_the_overhang() {
+        let ground = regions_of(&[(0, 100, 500)]);
+        assert_eq!(
+            regions_of(&[(0, 50, 200)]).parts_outside(&ground),
+            pieces(&[(0, 50, 99)]),
+        );
+        assert_eq!(
+            regions_of(&[(0, 400, 700)]).parts_outside(&ground),
+            pieces(&[(0, 501, 700)]),
+        );
+        assert_eq!(
+            regions_of(&[(0, 1, 1000)]).parts_outside(&ground),
+            pieces(&[(0, 1, 99), (0, 501, 1000)]),
+        );
+    }
+
+    /// **The boundary is exact to the base**: a span ending on the ground's last base is inside;
+    /// one starting on the base after it is all outside; one starting one base before the ground
+    /// leaves that one base.
+    #[test]
+    fn the_edge_of_the_covering_ground_is_exact_to_the_base() {
+        let ground = regions_of(&[(0, 100, 500)]);
+        assert_eq!(
+            regions_of(&[(0, 450, 500)]).parts_outside(&ground),
+            Vec::new()
+        );
+        assert_eq!(
+            regions_of(&[(0, 501, 510)]).parts_outside(&ground),
+            pieces(&[(0, 501, 510)]),
+        );
+        assert_eq!(
+            regions_of(&[(0, 99, 120)]).parts_outside(&ground),
+            pieces(&[(0, 99, 99)]),
+        );
+    }
+
+    /// **A span bridging a gap between two covered spans gives the gap**, and one bridging
+    /// several gives each of them, with its own overhangs either side.
+    #[test]
+    fn a_span_bridging_gaps_in_the_covering_ground_gives_the_gaps() {
+        let ground = regions_of(&[(0, 100, 200), (0, 301, 400), (0, 600, 700)]);
+        assert_eq!(
+            regions_of(&[(0, 150, 350)]).parts_outside(&ground),
+            pieces(&[(0, 201, 300)]),
+        );
+        assert_eq!(
+            regions_of(&[(0, 50, 800)]).parts_outside(&ground),
+            pieces(&[(0, 50, 99), (0, 201, 300), (0, 401, 599), (0, 701, 800)]),
+        );
+    }
+
+    /// **A covered span reaching past one requested span into the next covers both**: the sweep
+    /// must not leave it behind after the first.
+    #[test]
+    fn one_covered_span_can_cover_several_requested_spans() {
+        let ground = regions_of(&[(0, 100, 500)]);
+        assert_eq!(
+            regions_of(&[(0, 120, 130), (0, 200, 600)]).parts_outside(&ground),
+            pieces(&[(0, 501, 600)]),
+        );
+    }
+
+    /// **A span on a contig the covering ground has nothing on comes back whole**, whether that
+    /// contig comes before, after or between the covered ones — and against no ground at all,
+    /// every span does.
+    #[test]
+    fn a_span_on_a_contig_with_no_covering_ground_comes_back_whole() {
+        let only_the_second = regions_of(&[(1, 1, 500)]);
+        assert_eq!(
+            regions_of(&[(0, 10, 20), (1, 5, 6)]).parts_outside(&only_the_second),
+            pieces(&[(0, 10, 20)]),
+        );
+        let only_the_first = regions_of(&[(0, 1, 1000)]);
+        assert_eq!(
+            regions_of(&[(0, 10, 20), (1, 5, 6)]).parts_outside(&only_the_first),
+            pieces(&[(1, 5, 6)]),
+        );
+        assert_eq!(
+            regions_of(&[(0, 10, 20), (1, 5, 6)]).parts_outside(&regions_of(&[])),
+            pieces(&[(0, 10, 20), (1, 5, 6)]),
+        );
+    }
+
+    proptest! {
+        /// **The sweep agrees with the set difference taken base by base**, on random sets over
+        /// two contigs: every base it reports is requested and not covered, every such base is
+        /// reported, and the pieces come out maximal and in order.
+        #[test]
+        fn parts_outside_is_the_set_difference_base_by_base(
+            requested in proptest::collection::vec((0usize..2, 1u32..450, 1u32..80), 0..8),
+            covering in proptest::collection::vec((0usize..2, 1u32..450, 1u32..80), 0..8),
+        ) {
+            let set_of = |raw: &[(usize, u32, u32)]| {
+                let bed: String = raw
+                    .iter()
+                    .map(|&(contig, start, len)| {
+                        format!("{}\t{}\t{}\n", ["chr1", "chr2"][contig], start - 1, start - 1 + len)
+                    })
+                    .collect();
+                if bed.is_empty() {
+                    return GenomeRegions { spans: Vec::new() };
+                }
+                GenomeRegions {
+                    spans: RegionSet::from_bed_reader(bed.as_bytes(), &two_contigs())
+                        .expect("a well-formed BED")
+                        .regions()
+                        .to_vec(),
+                }
+            };
+            let (requested, covering) = (set_of(&requested), set_of(&covering));
+            let bases = |set: &GenomeRegions| -> std::collections::BTreeSet<(u32, u64)> {
+                set.iter()
+                    .flat_map(|span| {
+                        (span.start.get()..=span.end.get()).map(move |base| (span.contig.get(), base))
+                    })
+                    .collect()
+            };
+            let expected: Vec<(u32, u64)> =
+                bases(&requested).difference(&bases(&covering)).copied().collect();
+
+            let outside = requested.parts_outside(&covering);
+
+            let reported: Vec<(u32, u64)> = outside
+                .iter()
+                .flat_map(|span| {
+                    (span.start.get()..=span.end.get()).map(move |base| (span.contig.get(), base))
+                })
+                .collect();
+            prop_assert_eq!(reported, expected);
+            for pair in outside.windows(2) {
+                prop_assert!(
+                    pair[0].contig != pair[1].contig || pair[0].end.get() + 1 < pair[1].start.get(),
+                    "pieces must be maximal and in order: {:?}",
+                    pair
+                );
+            }
+        }
     }
 
     proptest! {

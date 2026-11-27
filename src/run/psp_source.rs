@@ -324,6 +324,11 @@ pub struct PspSummarySource<'a> {
     last_region: Option<GenomeRegion>,
     /// What this sample contributed, for the run report.
     read: StoredSampleTallies,
+    /// **Where the run's wanted records begin, for a run over part of the file** — the merge's
+    /// latest eviction point, or the first base of the run's regions before the first. A record
+    /// ending before it is dropped unread. `None` for a run over the whole file, which keeps
+    /// every record it walks.
+    nothing_wanted_before: Option<GenomePosition>,
 }
 
 /// One stored record as the walk leaves it: summarised with its body kept, or dropped for its
@@ -429,7 +434,69 @@ impl<'a> PspSummarySource<'a> {
             depth_ceiling: None,
             last_region: None,
             read: StoredSampleTallies::default(),
+            nothing_wanted_before: None,
         })
+    }
+
+    /// Walk `psp` for a run over part of it: **from the block that can hold the first record
+    /// reaching `first_wanted`**, dropping every record that ends before the merge's current
+    /// position ([`ObservationSource::nothing_wanted_before`]).
+    ///
+    /// `reach` is the widest span any record in the file can have, so a record overlapping
+    /// `first_wanted` starts no earlier than `reach` bases before it; the walk enters the file at
+    /// the block that can hold a record starting there ([`PspReader::records_from`]). That costs
+    /// one binary search over the block index and at most one block read for nothing, and it is
+    /// what lets a job over one chromosome decompress that chromosome's blocks and no others.
+    ///
+    /// **Records between the run's regions are read and dropped, not skipped by a second seek**:
+    /// re-seeking mid-run would restart the walk under an arena the merge still points into.
+    ///
+    /// # Errors
+    ///
+    /// As [`over`](Self::over).
+    pub fn over_part(
+        psp: &'a mut PspReader,
+        read_groups: &[ReadGroupId],
+        first_wanted: GenomePosition,
+        reach: crate::types::Bp,
+    ) -> Result<Self, RunError> {
+        let sample = psp.header().sample.clone();
+        let layout = RecordLayout::from_manifest(&psp.header().manifest)
+            .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
+        let enter_at = GenomePosition {
+            contig: first_wanted.contig,
+            position: crate::types::Position(
+                first_wanted.position.get().saturating_sub(reach.0).max(1),
+            ),
+        };
+        let walk = psp
+            .records_from(enter_at)
+            .map_err(|source| source_failed(&sample, WalkProgress::NothingYet, source))?;
+        Ok(Self {
+            walk,
+            kept: Vec::new(),
+            released: 0,
+            sample: sample.into(),
+            reached: WalkProgress::NothingYet,
+            layout: std::sync::Arc::new(layout),
+            read_groups: read_groups.into(),
+            heads: Vec::new(),
+            live: HeldLiveSets::default(),
+            read_cap: None,
+            thinned: std::sync::Arc::new(std::sync::Mutex::new(ThinnedSoFar::default())),
+            sealed: std::collections::VecDeque::new(),
+            depth_ceiling: None,
+            last_region: None,
+            read: StoredSampleTallies::default(),
+            nothing_wanted_before: Some(first_wanted),
+        })
+    }
+
+    #[cfg(test)]
+    /// How many blocks this source's walk has begun to read — what a test of the seek counts.
+    #[must_use]
+    pub fn blocks_begun(&self) -> u64 {
+        self.walk.blocks_begun()
     }
 
     /// A failure of this sample's walk, named and located.
@@ -516,6 +583,18 @@ impl<'a> PspSummarySource<'a> {
     /// that will not decode, for the records deep enough that the ceiling has to count their
     /// reads.
     pub fn next_summary(&mut self) -> Option<Result<Summarised, RunError>> {
+        loop {
+            match self.next_summary_wanted_or_not()? {
+                Ok(Some(summarised)) => return Some(Ok(summarised)),
+                Ok(None) => {}
+                Err(failed) => return Some(Err(failed)),
+            }
+        }
+    }
+
+    /// The next record walked, as [`next_summary`](Self::next_summary) hands it over — or
+    /// `Ok(None)` for one that ends before [`Self::nothing_wanted_before`] and was dropped.
+    fn next_summary_wanted_or_not(&mut self) -> Option<Result<Option<Summarised>, RunError>> {
         let streamed = match self.walk.next_keeping(&mut self.kept)? {
             Ok(streamed) => streamed,
             Err(failed) => return Some(Err(self.refuse(failed))),
@@ -543,14 +622,31 @@ impl<'a> PspSummarySource<'a> {
             }
         }
         self.last_region = Some(region);
+        let ends_at = GenomePosition {
+            contig: region.contig,
+            position: region.end.max(region.start),
+        };
+        if self
+            .nothing_wanted_before
+            .is_some_and(|wanted_from| ends_at < wanted_from)
+        {
+            // **Dropped the way the depth ceiling drops a record**: its bytes leave the arena and
+            // its reads are not written into the held live sets, so the next kept record is
+            // stored whole ([`HeldLiveSets::skip`]).
+            if let Some(in_buffer) = &streamed.body {
+                self.kept.truncate(in_buffer.start);
+            }
+            self.live.skip();
+            return Some(Ok(None));
+        }
         if streamed.too_large_to_hold {
             // Nothing of it reached the arena, and its reads' changes are applied in the walk.
             self.live.skip();
             self.read.loci_too_large_to_read += 1;
-            return Some(Ok(Summarised::OverDepthCeiling {
+            return Some(Ok(Some(Summarised::OverDepthCeiling {
                 region: streamed.head.region,
                 next_body_at: self.released + self.kept.len(),
-            }));
+            })));
         }
         let in_buffer = streamed
             .body
@@ -563,10 +659,10 @@ impl<'a> PspSummarySource<'a> {
                 // stored as a step from, so it is stored whole ([`HeldLiveSets::skip`]).
                 self.kept.truncate(in_buffer.start);
                 self.live.skip();
-                return Some(Ok(Summarised::OverDepthCeiling {
+                return Some(Ok(Some(Summarised::OverDepthCeiling {
                     region: streamed.head.region,
                     next_body_at: self.released + self.kept.len(),
-                }));
+                })));
             }
             Err(failed) => return Some(Err(failed)),
         }
@@ -581,12 +677,12 @@ impl<'a> PspSummarySource<'a> {
             self.walk.live_changes(),
             self.walk.blocks_begun(),
         );
-        Some(Ok(Summarised::Kept(KeptRecord {
+        Some(Ok(Some(Summarised::Kept(KeptRecord {
             summary: LocusSummary::from(&streamed.head),
             chain_id_base: streamed.head.chain_id_base,
             body,
             ordinal,
-        })))
+        }))))
     }
 
     /// Whether the record just walked has a read group deeper than the run's depth ceiling.
@@ -988,6 +1084,15 @@ impl ObservationSource for PspSummarySource<'_> {
     /// order, so `body.end <= body_start` and `body.start < body_start` select the same prefix;
     /// the end form is used because it is the one that is true by definition rather than by the
     /// layout.
+    /// **Raise the floor below which records are dropped unread** — only on a source walking part
+    /// of its file ([`PspSummarySource::over_part`]); a source over the whole file keeps every
+    /// record, so a run without `--regions` is unchanged by construction.
+    fn nothing_wanted_before(&mut self, position: GenomePosition) {
+        if let Some(wanted_from) = &mut self.nothing_wanted_before {
+            *wanted_from = (*wanted_from).max(position);
+        }
+    }
+
     fn release_before(&mut self, body_start: usize) {
         // **A sealed stretch goes whole**, once every body in it lies before the edge; a round
         // still reading it keeps its own share until the round is done.
@@ -1314,7 +1419,7 @@ mod tests {
     use crate::locus_generation::{LocusKind, ReadWitness, SsrDetail, WitnessedLocusPositions};
     use crate::psp::PspWriter;
     use crate::psp::writer::tests_support::{a_header, a_record, a_sample};
-    use crate::types::{ContigId, Motif, Position};
+    use crate::types::{Bp, ContigId, Motif, Position};
     use std::path::{Path, PathBuf};
 
     /// **The map a single-sample run has: the identity.** The fixture header declares two read
@@ -1399,6 +1504,108 @@ mod tests {
         let (read, failed) = drain(&mut source);
         assert!(failed.is_none(), "the file is sound: {failed:?}");
         assert_eq!(read, written);
+    }
+
+    /// Every summary a source hands over until it is spent, by where each record starts.
+    fn starts_drawn(source: &mut PspSummarySource<'_>) -> Vec<GenomePosition> {
+        let mut starts = Vec::new();
+        while let Some(next) = source.next_summary() {
+            match next.expect("the file is sound") {
+                Summarised::Kept(kept) => starts.push(kept.summary.start_position()),
+                Summarised::OverDepthCeiling { region, .. } => starts.push(GenomePosition {
+                    contig: region.contig,
+                    position: region.start,
+                }),
+            }
+        }
+        starts
+    }
+
+    /// **A source over part of the file starts at the block holding its first wanted record,
+    /// and hands over only records ending at or after it** — so a job over the second contig
+    /// decompresses the second contig's blocks and none of the first's.
+    ///
+    /// The fixture holds twenty records a contig on a 1 kb grid, four blocks a contig. Wanting the
+    /// second contig from its first base reads its four blocks and the first contig's last one —
+    /// the one the index cannot rule out, since a block's records may run up to the next block's
+    /// first position.
+    #[test]
+    fn a_source_over_the_second_contig_reads_only_the_blocks_that_can_hold_it() {
+        let (_dir, path) = a_psp_of(&a_sample());
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let blocks_in_the_file = psp.block_index().len() as u64;
+        let first_wanted = GenomePosition {
+            contig: ContigId(1),
+            position: Position(1),
+        };
+        let mut source = PspSummarySource::over_part(&mut psp, &as_walked(), first_wanted, Bp(50))
+            .expect("the walk starts");
+
+        let starts = starts_drawn(&mut source);
+
+        let expected: Vec<GenomePosition> = a_sample()
+            .iter()
+            .filter(|record| record.region.contig == ContigId(1))
+            .map(|record| GenomePosition {
+                contig: record.region.contig,
+                position: record.region.start,
+            })
+            .collect();
+        assert_eq!(
+            starts, expected,
+            "the second contig's records and nothing else"
+        );
+        assert_eq!(blocks_in_the_file, 8);
+        assert_eq!(
+            source.blocks_begun(),
+            5,
+            "the second contig's four blocks and the one before them, of {blocks_in_the_file}"
+        );
+    }
+
+    /// **The floor moves with the merge and drops only what ends before it**: told nothing is
+    /// wanted before a position, the source hands over no record ending before it and every record
+    /// reaching it — and a source over the whole file ignores the hint.
+    #[test]
+    fn the_floor_drops_only_records_ending_before_it() {
+        let (_dir, path) = a_psp_of(&a_sample());
+        let first_wanted = GenomePosition {
+            contig: ContigId(0),
+            position: Position(1),
+        };
+        let floor = GenomePosition {
+            contig: ContigId(0),
+            position: Position(2_001),
+        };
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let mut part = PspSummarySource::over_part(&mut psp, &as_walked(), first_wanted, Bp(50))
+            .expect("the walk starts");
+        part.nothing_wanted_before(floor);
+        let starts = starts_drawn(&mut part);
+        let expected: Vec<GenomePosition> = a_sample()
+            .iter()
+            .filter(|record| {
+                GenomePosition {
+                    contig: record.region.contig,
+                    position: record.region.end.max(record.region.start),
+                } >= floor
+            })
+            .map(|record| GenomePosition {
+                contig: record.region.contig,
+                position: record.region.start,
+            })
+            .collect();
+        assert_eq!(starts, expected);
+
+        let mut psp = PspReader::open(&path).expect("a finished psp opens");
+        let mut whole = PspSummarySource::over(&mut psp, &as_walked()).expect("the walk starts");
+        whole.nothing_wanted_before(floor);
+        assert_eq!(
+            starts_drawn(&mut whole).len(),
+            a_sample().len(),
+            "a source over the whole file keeps every record whatever it is told"
+        );
     }
 
     /// **The sample a failure names is the file's own**, not something a caller passed beside

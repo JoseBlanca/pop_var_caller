@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::cli::run_output::size_of_ground;
 use crate::fasta::ContigList;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
@@ -30,11 +31,12 @@ use crate::repeat_catalog::{
     CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
     sibling_catalog_path,
 };
+use crate::run::report::{describe, name_of};
 use crate::run::{
     RepeatGround, RepeatGroundSetting, RepeatSorting, RunError, Segmentation, SegmentationInputs,
 };
 use crate::tandem_repeat::{PeriodRange, PeriodRangeError};
-use crate::types::Bp;
+use crate::types::{Bp, ContigId};
 
 /// **What this run counts as a repeat** — the six flags that say so, as the three subcommands
 /// that type spell them.
@@ -101,7 +103,7 @@ pub enum GroundError {
         reference.display()
     )]
     ContigTooLong {
-        /// The reference.
+        /// The file whose contig table it is: the reference, or a psp.
         reference: PathBuf,
         /// The contig.
         name: String,
@@ -193,6 +195,24 @@ pub enum GroundError {
     )]
     BothSettingsForRepeatGround,
 
+    /// `call-from-psps --regions` asked for ground the psps hold no records for.
+    ///
+    /// **Refused before anything is called, and before the reference is read**: a psp holds
+    /// records only for the ground its walk covered, so a run over more would report the rest
+    /// as if it had been looked at and found empty. The message lists each piece outside, what
+    /// the psps hold on that piece's contig, and the psps' whole ground.
+    #[error("{}", message_for_regions_outside_the_psps(.bed, .pieces, .unlisted, .psps_ground))]
+    RegionsOutsideThePsps {
+        /// The BED given to `--regions`.
+        bed: PathBuf,
+        /// The first pieces outside, at most [`PIECES_LISTED`], in genomic order.
+        pieces: Vec<RegionOutsideThePsps>,
+        /// How many more pieces there are past those listed.
+        unlisted: usize,
+        /// The ground the psps were written over, named and sized for one line.
+        psps_ground: String,
+    },
+
     /// A catalog was named for psps written with `--generic-path-only`, which read none and
     /// sorted no repeats. Reading one now could only disagree with them.
     #[error(
@@ -216,23 +236,7 @@ pub fn analysed_regions(
     request: &GroundRequest<'_>,
     contigs: &ContigList,
 ) -> Result<GenomeRegions, GroundError> {
-    // **The narrowing is refused, not taken.** `ContigBounds` carries a `u32`, and a contig
-    // past that would have its ground resolved against a wrong length with nothing to notice —
-    // the rule `typed_regions.rs`'s `ContigTooLong` records, and the reason the one precedent
-    // in this tree that casts is a test.
-    let mut bounds: Vec<ContigBounds<'_>> = Vec::with_capacity(contigs.entries.len());
-    for entry in &contigs.entries {
-        let length = u32::try_from(entry.length).map_err(|_| GroundError::ContigTooLong {
-            reference: request.reference.to_path_buf(),
-            name: entry.name.clone(),
-            length: entry.length,
-            limit: u64::from(u32::MAX),
-        })?;
-        bounds.push(ContigBounds {
-            name: &entry.name,
-            length,
-        });
-    }
+    let bounds = addressable_bounds(request.reference, contigs)?;
     match request.regions {
         Some(bed) => {
             GenomeRegions::from_bed_path(bed, &bounds).map_err(|source| GroundError::Bed {
@@ -242,6 +246,155 @@ pub fn analysed_regions(
         }
         None => Ok(GenomeRegions::whole_contigs(&bounds)),
     }
+}
+
+/// How many pieces outside the psps a refusal lists before it says how many more there are.
+pub const PIECES_LISTED: usize = 10;
+
+/// One piece of `--regions` that lies outside the psps' ground, with what the psps hold on its
+/// contig — both already written as a person reads them, 1-based and inclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionOutsideThePsps {
+    /// The piece, as `chr2:900001-1000000`.
+    pub piece: String,
+    /// What the psps hold on the piece's contig: `the psps cover nothing on chr3`, or
+    /// `on chr2 the psps hold chr2:1-900000`.
+    pub what_the_psps_hold_there: String,
+}
+
+/// **The regions `call-from-psps --regions` asks for, read from the BED and checked to lie inside
+/// the ground the psps were written over.**
+///
+/// The BED is resolved against the psps' own contig table, so this needs nothing from the
+/// reference and a bad BED is refused in seconds. It is read the way every `--regions` is read —
+/// sorted, with overlapping and touching lines merged, and a line running past its contig's end
+/// cut at that end — and then every base of it must lie in `psps_ground`. `first_psp` names the
+/// file the contig table came from, for the one refusal about the table itself.
+///
+/// # Errors
+///
+/// [`GroundError::Bed`] for a BED that will not read — a contig the psps' table does not have, a
+/// malformed line, or no interval at all; [`GroundError::RegionsOutsideThePsps`] for one that asks
+/// for any base the psps were not written over; and [`GroundError::ContigTooLong`] for a table a
+/// run cannot address.
+pub fn regions_inside_the_psps(
+    bed: &Path,
+    first_psp: &Path,
+    psps_contigs: &ContigList,
+    psps_ground: &GenomeRegions,
+) -> Result<GenomeRegions, GroundError> {
+    let bounds = addressable_bounds(first_psp, psps_contigs)?;
+    let requested =
+        GenomeRegions::from_bed_path(bed, &bounds).map_err(|source| GroundError::Bed {
+            path: bed.to_path_buf(),
+            source,
+        })?;
+    let outside = requested.parts_outside(psps_ground);
+    if outside.is_empty() {
+        return Ok(requested);
+    }
+    let pieces = outside
+        .iter()
+        .take(PIECES_LISTED)
+        .map(|piece| RegionOutsideThePsps {
+            piece: name_of(*piece, psps_contigs),
+            what_the_psps_hold_there: what_the_psps_hold_on(
+                piece.contig,
+                psps_contigs,
+                psps_ground,
+            ),
+        })
+        .collect();
+    let bases: u64 = psps_ground.iter().map(|region| region.len()).sum();
+    Err(GroundError::RegionsOutsideThePsps {
+        bed: bed.to_path_buf(),
+        pieces,
+        unlisted: outside.len().saturating_sub(PIECES_LISTED),
+        psps_ground: format!(
+            "{} ({})",
+            describe(psps_ground, psps_contigs),
+            size_of_ground(bases)
+        ),
+    })
+}
+
+/// What the psps hold on one contig, as the second column of the refusal writes it.
+fn what_the_psps_hold_on(contig: ContigId, contigs: &ContigList, ground: &GenomeRegions) -> String {
+    let contig_name = contigs
+        .entries
+        .get(contig.get() as usize)
+        .map_or("this contig", |entry| entry.name.as_str());
+    let on_this_contig = ground.on_contig(contig);
+    if on_this_contig.is_empty() {
+        return format!("the psps cover nothing on {contig_name}");
+    }
+    let on_this_contig = describe(&on_this_contig, contigs);
+    format!("on {contig_name} the psps cover {on_this_contig}")
+}
+
+/// The refusal's text: what was asked, each piece outside beside what the psps hold on its contig,
+/// the psps' whole ground, and what to do.
+fn message_for_regions_outside_the_psps(
+    bed: &Path,
+    pieces: &[RegionOutsideThePsps],
+    unlisted: &usize,
+    psps_ground: &str,
+) -> String {
+    let width = pieces
+        .iter()
+        .map(|piece| piece.piece.len())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![format!(
+        "--regions {} asks for regions the psps do not cover, so nothing was called:",
+        bed.display()
+    )];
+    lines.extend(pieces.iter().map(|piece| {
+        format!(
+            "  {:<width$}   {}",
+            piece.piece, piece.what_the_psps_hold_there
+        )
+    }));
+    if *unlisted > 0 {
+        lines.push(format!("  … and {unlisted} more"));
+    }
+    lines.push(format!(
+        "The psps cover {psps_ground}. Positions are 1-based, both ends included."
+    ));
+    lines.push(
+        "Remove these regions from the BED, or write the psps again over regions that include them."
+            .to_owned(),
+    );
+    lines.join("\n")
+}
+
+/// The contig table as the BED reader takes it, **refusing a contig longer than a run can
+/// address** rather than resolving against a wrong length.
+///
+/// `ContigBounds` carries a `u32`, and a contig past that would have its ground resolved against a
+/// wrong length with nothing to notice — the rule `typed_regions.rs`'s `ContigTooLong` records, and
+/// the reason the one precedent in this tree that casts is a test. `source` is the file the table
+/// came from, named by the refusal: the reference, or a psp.
+fn addressable_bounds<'a>(
+    source: &Path,
+    contigs: &'a ContigList,
+) -> Result<Vec<ContigBounds<'a>>, GroundError> {
+    contigs
+        .entries
+        .iter()
+        .map(|entry| {
+            let length = u32::try_from(entry.length).map_err(|_| GroundError::ContigTooLong {
+                reference: source.to_path_buf(),
+                name: entry.name.clone(),
+                length: entry.length,
+                limit: u64::from(u32::MAX),
+            })?;
+            Ok(ContigBounds {
+                name: &entry.name,
+                length,
+            })
+        })
+        .collect()
 }
 
 /// **The catalog a command reads**: the path it was given, or the file `repeat-catalog` writes
@@ -624,6 +777,183 @@ fn catalog_error_naming_the_flag(source: RepeatCatalogError, path: &Path) -> Gro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A contig table of three contigs, as a psp header would hand it over.
+    fn three_contigs() -> ContigList {
+        ContigList {
+            entries: [("chr1", 1_000), ("chr2", 500), ("chr3", 300)]
+                .into_iter()
+                .map(|(name, length)| crate::fasta::ContigEntry {
+                    name: name.to_owned(),
+                    length,
+                    md5: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// The psps' ground: `chr1:101-500` and `chr2:1-500`, nothing on `chr3`.
+    fn psps_ground(contigs: &ContigList) -> GenomeRegions {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let bed = directory.path().join("walked.bed");
+        std::fs::write(&bed, "chr1\t100\t500\nchr2\t0\t500\n").expect("the BED is written");
+        let bounds = addressable_bounds(Path::new("first.psp"), contigs).expect("addressable");
+        GenomeRegions::from_bed_path(&bed, &bounds).expect("the walked ground reads")
+    }
+
+    /// `--regions` given as `bed_text`, checked against [`psps_ground`].
+    fn checked(bed_text: &str) -> Result<GenomeRegions, GroundError> {
+        let contigs = three_contigs();
+        let ground = psps_ground(&contigs);
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let bed = directory.path().join("asked.bed");
+        std::fs::write(&bed, bed_text).expect("the BED is written");
+        regions_inside_the_psps(&bed, Path::new("first.psp"), &contigs, &ground)
+    }
+
+    /// **Regions inside the psps' ground are accepted as the BED reader reads them**: lines out of
+    /// order, overlapping and touching are merged, and a line running past its contig's end is cut
+    /// there — so a BED written as overlapping pieces of the whole ground is the whole ground.
+    #[test]
+    fn regions_inside_the_psps_ground_are_accepted_merged() {
+        let accepted = checked("chr2\t0\t9999\nchr1\t300\t500\nchr1\t100\t200\nchr1\t150\t300\n")
+            .expect("every base lies in the psps' ground");
+        let contigs = three_contigs();
+        assert_eq!(accepted, psps_ground(&contigs));
+
+        let inside = checked("chr1\t200\t210\n").expect("a piece inside");
+        assert_eq!(inside.len(), 1);
+    }
+
+    /// **A BED reaching outside the psps' ground is refused with every piece outside named, in
+    /// 1-based inclusive coordinates, beside what the psps hold on that contig** — the message a
+    /// person reads, whole.
+    #[test]
+    fn regions_outside_the_psps_ground_are_refused_naming_each_piece() {
+        let refused = checked("chr1\t50\t150\nchr1\t450\t600\nchr3\t0\t300\n")
+            .expect_err("three pieces lie outside");
+
+        let GroundError::RegionsOutsideThePsps {
+            pieces, unlisted, ..
+        } = &refused
+        else {
+            panic!("expected the regions-outside refusal, got {refused:?}");
+        };
+        assert_eq!(*unlisted, 0);
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|piece| piece.piece.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chr1:51-100", "chr1:501-600", "chr3:1-300"],
+        );
+        let rendered = refused.to_string();
+        let expected = "\
+--regions DIR/asked.bed asks for regions the psps do not cover, so nothing was called:
+  chr1:51-100    on chr1 the psps cover chr1:101-500
+  chr1:501-600   on chr1 the psps cover chr1:101-500
+  chr3:1-300     the psps cover nothing on chr3
+The psps cover 2 intervals, chr1:101-500 … chr2:1-500 (900 bases). Positions are \
+1-based, both ends included.
+Remove these regions from the BED, or write the psps again over regions that include them.";
+        let bed_path = match &refused {
+            GroundError::RegionsOutsideThePsps { bed, .. } => bed.parent().expect("a directory"),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            rendered.replace(&bed_path.display().to_string(), "DIR"),
+            expected
+        );
+    }
+
+    /// **A span bridging a gap in the psps' ground is refused for the gap**, and a contig with
+    /// several walked spans is described by its first and last.
+    #[test]
+    fn a_region_bridging_a_gap_in_the_psps_ground_is_refused_for_the_gap() {
+        let contigs = three_contigs();
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let walked = directory.path().join("walked.bed");
+        std::fs::write(&walked, "chr1\t0\t100\nchr1\t200\t300\n").expect("written");
+        let bounds = addressable_bounds(Path::new("first.psp"), &contigs).expect("addressable");
+        let ground = GenomeRegions::from_bed_path(&walked, &bounds).expect("reads");
+        let asked = directory.path().join("asked.bed");
+        std::fs::write(&asked, "chr1\t50\t250\n").expect("written");
+
+        let refused = regions_inside_the_psps(&asked, Path::new("first.psp"), &contigs, &ground)
+            .expect_err("the gap is outside");
+
+        let GroundError::RegionsOutsideThePsps { pieces, .. } = &refused else {
+            panic!("expected the regions-outside refusal, got {refused:?}");
+        };
+        assert_eq!(
+            pieces,
+            &vec![RegionOutsideThePsps {
+                piece: "chr1:101-200".to_owned(),
+                what_the_psps_hold_there:
+                    "on chr1 the psps cover 2 intervals, chr1:1-100 … chr1:201-300".to_owned(),
+            }],
+        );
+    }
+
+    /// **More than ten pieces outside are listed ten, then counted**, so a BED of thousands of
+    /// lines does not fill a terminal.
+    #[test]
+    fn pieces_past_the_tenth_are_counted_not_listed() {
+        let bed: String = (0..13)
+            .map(|piece| format!("chr3\t{}\t{}\n", piece * 20, piece * 20 + 10))
+            .collect();
+
+        let refused = checked(&bed).expect_err("every piece is on a contig the psps lack");
+
+        let GroundError::RegionsOutsideThePsps {
+            pieces, unlisted, ..
+        } = &refused
+        else {
+            panic!("expected the regions-outside refusal, got {refused:?}");
+        };
+        assert_eq!(pieces.len(), PIECES_LISTED);
+        assert_eq!(*unlisted, 3);
+        assert!(
+            refused.to_string().contains("\n  … and 3 more\n"),
+            "{refused}"
+        );
+    }
+
+    /// **A contig the psps' table — and so the reference — lacks is the BED reader's refusal**, as
+    /// for every other `--regions`, and so is a BED with no interval in it.
+    #[test]
+    fn a_bed_that_will_not_read_is_the_bed_readers_refusal() {
+        let unknown = checked("chr1\t100\t200\nchrUn\t0\t10\n").expect_err("no such contig");
+        let rendered = crate::error_render::format_error_chain(&unknown);
+        assert!(
+            matches!(
+                unknown,
+                GroundError::Bed {
+                    source: BedError::UnknownContig { line_number: 2, .. },
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("contig `chrUn` is not in the reference contig list"),
+            "{rendered}"
+        );
+
+        for empty in ["", "# only a comment\ntrack name=x\n"] {
+            let refused = checked(empty).expect_err("an empty BED asks for nothing");
+            assert!(
+                matches!(
+                    refused,
+                    GroundError::Bed {
+                        source: BedError::NoRegions,
+                        ..
+                    }
+                ),
+                "{refused:?}"
+            );
+        }
+    }
 
     /// **A run asking for repeats the file does not hold is told which flag to move.**
     ///

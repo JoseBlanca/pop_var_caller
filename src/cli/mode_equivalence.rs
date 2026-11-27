@@ -241,6 +241,7 @@ mod tests {
                 .map(|sample| psp_path_for(psps, sample))
                 .collect::<Vec<PathBuf>>(),
             output: output.to_path_buf(),
+            regions: None,
             parameters: None,
             defaults: true,
             locus_builder_regions_len: None,
@@ -1620,6 +1621,7 @@ mod tests {
             catalog: Some(catalog.to_path_buf()),
             psps: Vec::new(),
             output: output.to_path_buf(),
+            regions: None,
             parameters: None,
             defaults: true,
             locus_builder_regions_len: None,
@@ -1634,5 +1636,270 @@ mod tests {
             },
             advanced: crate::cli::calling_run::AdvancedCallingFlags::for_tests(),
         }
+    }
+
+    // ------------------------------------------------- `call-from-psps --regions` (step 5)
+
+    /// A BED in the cohort's directory, named `name` and holding `text`.
+    fn a_bed(cohort: &AVaryingCohort, name: &str, text: &str) -> PathBuf {
+        let bed = cohort.directory.path().join(name);
+        std::fs::write(&bed, text).expect("the BED is written");
+        bed
+    }
+
+    /// Call the psps in `psps` over `regions` (all they cover for `None`), with the
+    /// hidden-duplication filter at `hidden_dup_fdr`, into `output`, and hand back its lines.
+    ///
+    /// **The output is removed first**, for the reason the module gives: a run that did not write
+    /// it must fail on the read, not compare another run's file with itself.
+    fn called_over(
+        cohort: &AVaryingCohort,
+        psps: &Path,
+        output: &Path,
+        regions: Option<PathBuf>,
+        hidden_dup_fdr: f64,
+    ) -> Vec<String> {
+        let _ = std::fs::remove_file(output);
+        let mut args = psps_args(cohort, output, psps, &["one", "two"]);
+        args.regions = regions;
+        args.advanced.hidden_dup_fdr = hidden_dup_fdr;
+        run_call_from_psps(&args).expect("the stored cohort calls");
+        comparable(output)
+    }
+
+    /// The records of a VCF, without its header.
+    fn records_of(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|line| !line.starts_with('#'))
+            .cloned()
+            .collect()
+    }
+
+    /// Where each record is: its contig and position.
+    fn positions_of(lines: &[String]) -> Vec<(String, u64)> {
+        records_of(lines)
+            .iter()
+            .map(|line| {
+                let mut columns = line.split('\t');
+                let contig = columns.next().expect("a contig").to_owned();
+                let position = columns
+                    .next()
+                    .expect("a position")
+                    .parse()
+                    .expect("a number");
+                (contig, position)
+            })
+            .collect()
+    }
+
+    /// **Whole contigs, exact: `--regions` naming one contig of whole-genome psps writes the same
+    /// VCF, every line, as psps walked over that contig alone** — with the hidden-duplication
+    /// filter on and refinement on its default, so the fits each run makes for itself are compared
+    /// too (`call_from_psps_regions.md` §5.2).
+    ///
+    /// The second contig is chosen so the run must skip the whole of the first contig's records
+    /// in every file, which is the seek and the floor at work.
+    #[test]
+    fn regions_naming_one_contig_call_what_psps_walked_over_that_contig_call() {
+        use crate::cli::test_fixtures::{
+            SECOND_VARYING_CONTIG, a_two_contig_varying_cohort_on_disk,
+        };
+
+        let cohort = a_two_contig_varying_cohort_on_disk();
+        let (_, length) = VARYING_CONTIG;
+        let second = a_bed(
+            &cohort,
+            "second.bed",
+            &format!("{SECOND_VARYING_CONTIG}\t0\t{length}\n"),
+        );
+        let whole_psps = walked_into_psps(&cohort);
+        let second_psps = walked_into_psps_over(
+            &cohort,
+            crate::run::RepeatGroundSetting::StrPaths,
+            Some(second.clone()),
+            "psps-second",
+        );
+        let output = cohort.directory.path().join("calls.vcf");
+
+        let from_whole_psps = called_over(&cohort, &whole_psps, &output, Some(second), 0.01);
+        let from_second_psps = called_over(&cohort, &second_psps, &output, None, 0.01);
+
+        assert!(
+            records(&from_whole_psps) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the contig must produce calls or this comparison claims nothing:\n{}",
+            from_whole_psps.join("\n"),
+        );
+        assert!(
+            positions_of(&from_whole_psps)
+                .iter()
+                .all(|(contig, _)| contig == SECOND_VARYING_CONTIG),
+            "a run over one contig writes records on that contig only:\n{}",
+            from_whole_psps.join("\n"),
+        );
+        assert_eq!(from_whole_psps, from_second_psps);
+    }
+
+    /// **The partition by contig: one job a contig, joined in order, writes the records of one run
+    /// over both** — with the hidden-duplication filter off, since a job fits that filter on its
+    /// own contig only (`call_from_psps_regions.md` §5.3).
+    #[test]
+    fn one_job_a_contig_joined_in_order_writes_the_records_of_one_whole_run() {
+        use crate::cli::test_fixtures::{
+            SECOND_VARYING_CONTIG, a_two_contig_varying_cohort_on_disk,
+        };
+
+        let cohort = a_two_contig_varying_cohort_on_disk();
+        let (first_contig, length) = VARYING_CONTIG;
+        let psps = walked_into_psps(&cohort);
+        let output = cohort.directory.path().join("calls.vcf");
+        let first = a_bed(
+            &cohort,
+            "first.bed",
+            &format!("{first_contig}\t0\t{length}\n"),
+        );
+        let second = a_bed(
+            &cohort,
+            "second.bed",
+            &format!("{SECOND_VARYING_CONTIG}\t0\t{length}\n"),
+        );
+
+        let whole = called_over(&cohort, &psps, &output, None, 0.0);
+        let mut joined = records_of(&called_over(&cohort, &psps, &output, Some(first), 0.0));
+        joined.extend(records_of(&called_over(
+            &cohort,
+            &psps,
+            &output,
+            Some(second),
+            0.0,
+        )));
+
+        assert!(
+            records(&whole) >= 2 * WHAT_THE_FIXTURE_VARIES_AT,
+            "both contigs must produce calls:\n{}",
+            whole.join("\n"),
+        );
+        assert_eq!(joined, records_of(&whole));
+    }
+
+    /// **A cut inside a contig: every locus is written by exactly one of the two jobs** — none
+    /// twice, none lost — the rule the owner chose: a locus belongs to the job whose regions hold
+    /// its first base (`call_from_psps_regions.md` §5.2).
+    ///
+    /// Three cuts on the one-contig cohort: in ordinary sequence well clear of any variant; on the
+    /// first sample's substitution itself, which the first job's last base holds; and inside the
+    /// repeat tract, so the tract's record starts in the first job and reaches into the second.
+    ///
+    /// **What may differ near a cut, and why this asserts that nothing does.** The design allows,
+    /// within about one locus of the cut, a phase set split in two, an STR record widened over its
+    /// flank that one run would have merged with a generic record across the cut, and a window
+    /// depth measured without the records before the cut, which only the hidden-duplication filter
+    /// reads. None of the three can show here: no record of this fixture is phased (`PS` is `.`),
+    /// no generic record lies within a flank of the tract, and the filter is off. So every record
+    /// is compared whole — including the one lying on the cut after base 121, which the first job
+    /// owns because its regions hold the record's first base.
+    #[test]
+    fn a_cut_inside_a_contig_writes_every_locus_exactly_once() {
+        let cohort = a_varying_cohort_on_disk();
+        let (contig, length) = VARYING_CONTIG;
+        let psps = walked_into_psps(&cohort);
+        let output = cohort.directory.path().join("calls.vcf");
+        let whole = called_over(&cohort, &psps, &output, None, 0.0);
+        assert!(
+            records(&whole) >= WHAT_THE_FIXTURE_VARIES_AT,
+            "the fixture must produce calls:\n{}",
+            whole.join("\n"),
+        );
+
+        // The last base of the first job, 1-based.
+        for cut in [
+            60,
+            FIRST_SAMPLES_SUBSTITUTION as u64 + 1,
+            (TRACT.0 + TRACT.1) as u64 / 2,
+        ] {
+            let before = a_bed(&cohort, "before.bed", &format!("{contig}\t0\t{cut}\n"));
+            let after = a_bed(
+                &cohort,
+                "after.bed",
+                &format!("{contig}\t{cut}\t{length}\n"),
+            );
+            let mut joined = records_of(&called_over(&cohort, &psps, &output, Some(before), 0.0));
+            joined.extend(records_of(&called_over(
+                &cohort,
+                &psps,
+                &output,
+                Some(after),
+                0.0,
+            )));
+
+            assert_eq!(
+                positions_of(&joined),
+                positions_of(&whole),
+                "cut after base {cut}: every locus once, none twice and none lost",
+            );
+            assert_eq!(
+                joined,
+                records_of(&whole),
+                "cut after base {cut}: the two jobs' records, joined, are the whole run's",
+            );
+        }
+    }
+
+    /// **`--regions` naming everything the psps cover writes the VCF a run without it writes** —
+    /// on a cohort that produces records, with the filter on.
+    #[test]
+    fn regions_naming_everything_the_psps_cover_change_nothing() {
+        let cohort = a_varying_cohort_on_disk();
+        let (contig, length) = VARYING_CONTIG;
+        let psps = walked_into_psps(&cohort);
+        let output = cohort.directory.path().join("calls.vcf");
+        let everything = a_bed(
+            &cohort,
+            "everything.bed",
+            &format!("{contig}\t0\t{length}\n"),
+        );
+
+        let without = called_over(&cohort, &psps, &output, None, 0.01);
+        let with = called_over(&cohort, &psps, &output, Some(everything), 0.01);
+
+        assert!(records(&without) >= WHAT_THE_FIXTURE_VARIES_AT);
+        assert_eq!(with, without);
+    }
+
+    /// **A parameters file from a whole-genome run calls a one-contig job** (§6): the file binds to
+    /// the reference, the samples and the read groups, and nothing in it is compared with the
+    /// regions a calling run calls.
+    #[test]
+    fn a_whole_genome_parameters_file_calls_a_one_contig_job() {
+        use crate::cli::test_fixtures::{
+            SECOND_VARYING_CONTIG, a_two_contig_varying_cohort_on_disk,
+        };
+
+        let cohort = a_two_contig_varying_cohort_on_disk();
+        let (_, length) = VARYING_CONTIG;
+        let psps = walked_into_psps(&cohort);
+        let output = cohort.directory.path().join("calls.vcf");
+        called_over(&cohort, &psps, &output, None, 0.0);
+        let supplied = cohort.directory.path().join("whole.parameters.toml");
+        std::fs::rename(
+            crate::cli::calling_run::parameters_the_run_logged(
+                &output,
+                Some(&output.with_extension("log")),
+            ),
+            &supplied,
+        )
+        .expect("the whole run's parameters move");
+
+        let mut args = psps_args(&cohort, &output, &psps, &["one", "two"]);
+        args.regions = Some(a_bed(
+            &cohort,
+            "second.bed",
+            &format!("{SECOND_VARYING_CONTIG}\t0\t{length}\n"),
+        ));
+        args.parameters = Some(supplied);
+        args.defaults = false;
+
+        run_call_from_psps(&args).expect("the whole genome's parameters bind to a one-contig job");
+        assert!(records(&comparable(&output)) >= WHAT_THE_FIXTURE_VARIES_AT);
     }
 }

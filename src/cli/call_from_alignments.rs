@@ -762,6 +762,7 @@ pub fn run_call_from_alignments(
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
             satellite_bases_on_the_generic_path,
+            regions_asked_for: None,
             started,
             log: &log,
         },
