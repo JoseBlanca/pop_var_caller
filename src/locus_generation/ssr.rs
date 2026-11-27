@@ -42,7 +42,7 @@ pub mod bundle;
 /// §6.1): the bundle generator is the segment's generator run over the hull, and these four
 /// facts are everything in which the two differ while a read is measured.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MeasuredRepeat {
+struct MeasuredRepeat {
     /// The repeat's first base, 1-based.
     start: u64,
     /// The repeat's last base, 1-based inclusive.
@@ -61,7 +61,7 @@ pub struct MeasuredRepeat {
 
 /// Which kind of repeat ground a [`MeasuredRepeat`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeasuredGround {
+enum MeasuredGround {
     /// An STR segment, measured with its own delimiter.
     Segment,
     /// An STR bundle's hull, measured with the flat-gap delimiter.
@@ -73,7 +73,7 @@ pub enum MeasuredGround {
 /// (`reference_run_escapes_the_tract`). `None` where fixed sequence reaches the edge, which no
 /// run continues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EdgeRunPeriods {
+struct EdgeRunPeriods {
     pub left: Option<usize>,
     pub right: Option<usize>,
 }
@@ -148,7 +148,7 @@ impl From<&SsrSegment> for MeasuredRepeat {
 /// port to go subtly wrong, which is why the flank lengths are always **measured** from the
 /// clamped span, never assumed to be `flank_bp`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SsrLocus {
+struct SsrLocus {
     /// The repeat measured: its coordinates and what measuring a read across it needs.
     pub repeat: MeasuredRepeat,
     /// The tract plus its query margin, canonical `{A,C,G,T,N}` bases, **clamped at contig
@@ -316,8 +316,7 @@ impl SsrGeneratorCounts {}
 // ---------------------------------------------------------------------
 mod read_cap;
 
-pub(crate) use read_cap::seed_for_repeat;
-pub use read_cap::{CappedReads, Reservoir, fetch_capped_reads, seed_for_segment};
+use read_cap::{fetch_capped_reads, seed_for_segment};
 
 // ---------------------------------------------------------------------
 // D2a — the read-region mapping: CIGAR → the read-coordinate slice covering the locus
@@ -722,15 +721,15 @@ where
 }
 
 /// What one locus's reads came to: the tally, and how many reads the depth cap took away.
-pub(super) struct MeasuredReads {
-    pub(super) observations: Vec<SequenceObservation>,
-    pub(super) reads_without_observation: u32,
-    pub(super) reads_discarded_by_cap: u32,
+struct MeasuredReads {
+    observations: Vec<SequenceObservation>,
+    reads_without_observation: u32,
+    reads_discarded_by_cap: u32,
 }
 
 impl SsrLocus {
     /// The fetched bases as `(left flank, repeat, right flank)`.
-    pub(super) fn split_flanks(&self) -> (&[u8], &[u8], &[u8]) {
+    fn split_flanks(&self) -> (&[u8], &[u8], &[u8]) {
         let left = self.left_flank_len();
         let tract_len = self.repeat.tract_len() as usize;
         let bases = &*self.tract_with_margin_bases;
@@ -756,7 +755,7 @@ where
     /// # Panics
     ///
     /// When no region was begun: the `LocusGenerator` contract calls `begin_segment` first.
-    pub(super) fn claim_the_one_locus(&mut self) -> Option<GenomeRegion> {
+    fn claim_the_one_locus(&mut self) -> Option<GenomeRegion> {
         if self.produced {
             return None;
         }
@@ -768,7 +767,7 @@ where
     }
 
     /// The reference's name for `contig`, which the reservoir seed is taken over.
-    pub(super) fn contig_name(&self, contig: ContigId) -> Option<&str> {
+    fn contig_name(&self, contig: ContigId) -> Option<&str> {
         self.reference
             .contigs()
             .entries
@@ -777,7 +776,7 @@ where
     }
 
     /// Step (1): the repeat ± flank, clamped at the contig ends.
-    pub(super) fn fetch_locus(
+    fn fetch_locus(
         &mut self,
         region: GenomeRegion,
         repeat: impl Into<MeasuredRepeat>,
@@ -826,7 +825,7 @@ where
     /// relevance (overlap, which `SampleReads` applies) — not spanning — and depth-cap them;
     /// classify each against `locus` (delimit, recover, gate); tally the outcomes into the
     /// locus's observed sequences and the run-level counts.
-    pub(super) fn measure_reads(
+    fn measure_reads(
         &mut self,
         locus: &SsrLocus,
         region: GenomeRegion,

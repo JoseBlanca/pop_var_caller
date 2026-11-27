@@ -55,14 +55,14 @@ fn locus_seed(chrom: &str, start_0based: u32) -> u64 {
 /// positions are far below `2^32` (the largest chromosome is ~250 Mb), so the cast never
 /// truncates in practice and parity holds. `start() - 1` cannot underflow: `SsrSegment::new`
 /// enforces `1 <= start`.
-pub fn seed_for_segment(segment: &SsrSegment) -> u64 {
+pub(super) fn seed_for_segment(segment: &SsrSegment) -> u64 {
     seed_for_repeat(segment.chrom(), segment.start())
 }
 
 /// The reservoir seed for any repeat starting at 1-based `start` on the contig named `chrom` —
 /// [`seed_for_segment`]'s arithmetic, for an STR bundle's hull, which carries no contig name of
 /// its own. The same trap and the same discharge: the **name**, and the **0-based** start.
-pub(crate) fn seed_for_repeat(chrom: &str, start: u64) -> u64 {
+pub(super) fn seed_for_repeat(chrom: &str, start: u64) -> u64 {
     locus_seed(chrom, (start - 1) as u32)
 }
 
@@ -73,7 +73,7 @@ pub(crate) fn seed_for_repeat(chrom: &str, start: u64) -> u64 {
 /// deterministic and thread-count-invariant — an unbiased reduction would change the kept set
 /// and break that. The caller must `offer` admitted reads in a fixed total order —
 /// `SampleReads`' merge order (spec §4).
-pub struct Reservoir<T> {
+pub(super) struct Reservoir<T> {
     capacity: usize,
     held: Vec<T>,
     /// Admitted items offered so far (the `i` of Algorithm R).
@@ -125,7 +125,7 @@ impl<T> Reservoir<T> {
 
 /// The reads kept for one locus after depth-capping, and how many were fetched — the caller
 /// records `reads_discarded_by_cap = fetched - kept.len()`.
-pub struct CappedReads {
+pub(super) struct CappedReads {
     pub kept: Vec<AlignedRead>,
     pub fetched: u64,
 }
@@ -142,7 +142,7 @@ pub struct CappedReads {
 /// chromosome and stays open across every locus on it, so consecutive loci that share reads
 /// decode them once (`spec/alignment_cursor.md` §1). Making the cursor and moving it to the
 /// right chromosome is the caller's job; this only points it at the span.
-pub fn fetch_capped_reads<R: RawRefSeq>(
+pub(super) fn fetch_capped_reads<R: RawRefSeq>(
     reads: &mut SampleCursor<R>,
     query_span: GenomeRegion,
     seed: u64,

@@ -25,9 +25,9 @@
 //! alone, every motif of period 1 to 6 looked for ([`find_reference_runs`]), and carried on the
 //! locus ([`SsrBundleDetail`]).
 
+use super::read_cap::seed_for_repeat;
 use super::{
     EdgeRunPeriods, MeasuredRepeat, SsrGenerator, SsrGeneratorConfig, SsrGeneratorConfigError,
-    seed_for_repeat,
 };
 use crate::alignment::PerQualityEmission;
 use crate::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
