@@ -2480,23 +2480,7 @@ impl Period {
                     .par_iter()
                     .filter(|tract| !tract.samples.is_empty())
                     .map(|tract| {
-                        let one = StratumEvidence {
-                            stratum: evidence.stratum,
-                            tracts: vec![tract.clone()],
-                            read_span: evidence.read_span,
-                            groups: evidence.groups,
-                            read_groups: Arc::clone(&evidence.read_groups),
-                            tracts_over_guard_threshold: 0,
-                            reads_crossing_tracts_over_guard_threshold: 0,
-                            tracts_too_deep: 0,
-                            tracts_in_stutter_tail: 0,
-                            tracts_interrupted: 0,
-                            reads_crossing_interrupted_tracts: 0,
-                            reads_reaching_not_crossing: 0,
-                            guard_reads: 0,
-                            bases_compared: 0,
-                            mismatching_bases: 0,
-                        };
+                        let one = one_tract_of(evidence, tract);
                         let (_, shares, concentration) = numbers_of(point, &theta);
                         let counts = expected_counts_with_model(
                             &one,
@@ -2539,19 +2523,15 @@ impl Period {
         let mut penalty = vec![0.0; size * size];
         let mut add_curve = |curve: &CurveState, first_component: usize| {
             let strength = float::exp(curve.ln_smoothing);
-            let stencil = [1.0, -2.0, 1.0];
-            for bend in 0..curve.bends() {
-                for component in 0..curve.block {
-                    let weight = strength * curve.bend_weights[bend * curve.block + component];
-                    for (i, a) in stencil.iter().enumerate() {
-                        for (j, b) in stencil.iter().enumerate() {
-                            let row = (bend + i) * width + first_component + component;
-                            let column = (bend + j) * width + first_component + component;
-                            penalty[row * size + column] += weight * a * b;
-                        }
-                    }
-                }
-            }
+            curve.for_each_bend_entry(
+                strength,
+                &curve.bend_weights,
+                |row_point, column_point, component, value| {
+                    let row = row_point * width + first_component + component;
+                    let column = column_point * width + first_component + component;
+                    penalty[row * size + column] += value;
+                },
+            );
         };
         add_curve(&self.level_curve, 0);
         add_curve(&self.shorter_curve, 1);
@@ -2683,15 +2663,12 @@ impl Period {
                 }
                 let mut penalty = vec![0.0; points * points];
                 let strength = float::exp(self.between_curve.ln_smoothing);
-                let stencil = [1.0, -2.0, 1.0];
-                for bend in 0..self.between_curve.bends() {
-                    let weight = strength * self.between_curve.bend_weights[bend];
-                    for (i, a) in stencil.iter().enumerate() {
-                        for (j, b) in stencil.iter().enumerate() {
-                            penalty[(bend + i) * points + bend + j] += weight * a * b;
-                        }
-                    }
-                }
+                // One component: the between curve is built with a block of one.
+                self.between_curve.for_each_bend_entry(
+                    strength,
+                    &self.between_curve.bend_weights,
+                    |row, column, _, value| penalty[row * points + column] += value,
+                );
                 penalised_sandwich(&curvature, &spread, &penalty, points)
                     .map(|covariance| (0..points).map(|p| covariance[p * points + p]).collect())
             })
@@ -3202,17 +3179,10 @@ impl CurveData {
                 if n <= 0.0 {
                     return 0.0;
                 }
-                let eta = values[0];
-                let p = logistic(eta);
-                gradient[0] = y - n * p;
-                information[0] = n * p * (1.0 - p);
-                // y·η − n·ln(1 + e^η), computed stably.
-                let ln_one_plus = if eta > 0.0 {
-                    eta + float::ln_1p(float::exp(-eta))
-                } else {
-                    float::ln_1p(float::exp(eta))
-                };
-                y * eta - n * ln_one_plus
+                let (value, slope, info) = binomial_at_logit(y, n, values[0]);
+                gradient[0] = slope;
+                information[0] = info;
+                value
             }
             CurveData::MultipliedBinomial {
                 read_groups,
@@ -3866,22 +3836,41 @@ impl CurveState {
         for index in 0..size {
             matrix.add(index, index, RIDGE);
         }
+        // The band stores one triangle: the entries on or below the diagonal.
+        self.for_each_bend_entry(strength, weights, |row, column, component, value| {
+            if column <= row {
+                matrix.add(
+                    row * self.block + component,
+                    column * self.block + component,
+                    value,
+                );
+            }
+        });
+        matrix
+    }
+
+    /// **Every entry of `λ · (Dᵀ W D)`, the penalty on the curve's bends**, handed to
+    /// `add(row point, column point, component, value)`: for each bend — the second difference
+    /// `1, −2, 1` over three neighbouring points — and each component, the stencil times itself,
+    /// times the strength `λ` and the bend's weight. Bend by bend, component by component, row by
+    /// row, so a caller adding into a matrix adds in one fixed order.
+    fn for_each_bend_entry(
+        &self,
+        strength: f64,
+        weights: &[f64],
+        mut add: impl FnMut(usize, usize, usize, f64),
+    ) {
         let stencil = [1.0, -2.0, 1.0];
         for bend in 0..self.bends() {
             for component in 0..self.block {
                 let weight = strength * weights[bend * self.block + component];
                 for (i, a) in stencil.iter().enumerate() {
-                    for (j, b) in stencil.iter().enumerate().take(i + 1) {
-                        matrix.add(
-                            (bend + i) * self.block + component,
-                            (bend + j) * self.block + component,
-                            weight * a * b,
-                        );
+                    for (j, b) in stencil.iter().enumerate() {
+                        add(bend + i, bend + j, component, weight * a * b);
                     }
                 }
             }
         }
-        matrix
     }
 
     /// `Dᵀ W D · values`, without `λ`.
