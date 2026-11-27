@@ -3,7 +3,7 @@
 *Status: architecture draft (2026-08-21), companion to the spec
 [`../spec/calling_priors.md`](../spec/calling_priors.md) (the design and its rationale) and to the
 shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary + step traits) and
-[`module_layout.md`](module_layout.md) (the `src/ng/` tree). It is one of three coordinated calling
+[`module_layout.md`](module_layout.md) (the `src/` tree). It is one of three coordinated calling
 arch docs — the siblings are [`read_likelihoods.md`](read_likelihoods.md) and
 [`calling_em_loop.md`](calling_em_loop.md) — and §0 says which of the three owns each shared type.
 `ng_step_interfaces.md` §3 sketches step 8 as `genotype_log_prior(&self, genotype, freq, f)`; that
@@ -22,24 +22,24 @@ One owner per shared type; the other two documents point here or at the sibling,
 | `ExpectedHeterozygosity` scalar (the spec's `θ`) — seeds `types.rs` | **this doc** (§2.1) |
 | `CandidateAlleles` (the allele table), `GenotypeTable` + `AlleleId` (the genotypes and their indexing), `ExpectedAlleleCopies`, `CallingScratch`, `Phred` | [`calling_em_loop.md`](calling_em_loop.md) §2 |
 | the per-sample evidence views, the `Lg` row contract, the stutter distribution and its parameter context | [`read_likelihoods.md`](read_likelihoods.md) §2, §4 |
-| `LogProb`, `InbreedingF`, `Ploidy`, `ErrorRate` | exist in [`src/ng/types.rs`](../../../../src/ng/types.rs) — reconciled in §6, not re-minted |
+| `LogProb`, `InbreedingF`, `Ploidy`, `ErrorRate` | exist in [`src/types.rs`](../../../../src/types.rs) — reconciled in §6, not re-minted |
 
 The prior takes **flat slices**, never the loop's types: the leave-one-out builder takes `&[f64]`
 copy counts, the row function takes the genotype table's flat views (§3). **The reason is not the
-module tree** — the shared vocabulary lives in `calling/mod.rs` and every sub-module imports
+module tree** — the shared vocabulary lives at the `calling/` level (re-exported from `calling/mod.rs`) and every sub-module imports
 downward, so nothing forbids the import. It is the no-allocation contract (spec §8) plus the reason
 production's own primitive takes flat arrays: it avoids a back-reference into its caller
 ([`genetics.rs:127`](../../../../src/genetics.rs)).
 
 ## Module home
 
-`src/ng/calling/genotype_prior/` — step 8, inside the `calling/` folder that holds steps 6–9
+`src/calling/genotype_prior/` — step 8, inside the `calling/` folder that holds steps 6–9
 ([`module_layout.md`](module_layout.md); the four are one folder because keeping them apart forced a
 no-import rule between them). A folder of its own because the step has a real bake-off
 (marginalized against plug-in, spec §2):
 
 ```
-src/ng/calling/genotype_prior/
+src/calling/genotype_prior/
 ├── mod.rs                   – GenotypePriorModel trait, Concentration, the per-sample builder
 ├── dirichlet_multinomial.rs – the ported log-prior primitive + MarginalizedDirichletPrior
 ├── hardy_weinberg.rs        – PlugInWrightPrior, the comparator impl
@@ -47,7 +47,10 @@ src/ng/calling/genotype_prior/
 └── seed_ssr.rs              – STR starting point: geometric shape, total from gene diversity (spec §5.1)
 ```
 
-New scalar newtypes seed `src/ng/types.rs` beside the ones already there (its line 447 already
+*As built: `hardy_weinberg.rs` and its `PlugInWrightPrior` were removed in commit `0f9281c5`,
+because no `pvc` subcommand reached them; the folder holds the other four files.*
+
+New scalar newtypes seed `src/types.rs` beside the ones already there (its line 447 already
 reserves the diversity scalar's slot by name).
 
 ## 1. General — what every path shares
@@ -105,21 +108,21 @@ the shared vocabulary for an STR-path author to reach for. Precedent in the same
 `AlleleId::REFERENCE`. Report:
 [`ng_calling_prior_a1_fixes_2026-08-21.md`](../../reports/implementations/ng_calling_prior_a1_fixes_2026-08-21.md).
 
-`InbreedingF` already exists ([`types.rs:388`](../../../../src/ng/types.rs)) **but its constructor
+`InbreedingF` already exists ([`types.rs:388`](../../../../src/types.rs)) **but its constructor
 accepts `1.0` and the spec requires `[0, 1)`** — the ceiling is a property of the type, not of one
 estimator (spec §7). Tighten the constructor; the `F = 1` mathematical-limit test (spec §12 test 3)
 drives the mixture function on a raw value through a test-only path, not through the newtype.
 
 **Three things the tightening touches, and the third is the one that bites.**
 
-- **It cannot be done in `checked_probability`** ([`types.rs:326`](../../../../src/ng/types.rs)),
+- **It cannot be done in `checked_probability`** ([`types.rs:326`](../../../../src/types.rs)),
   which is shared with the other fraction newtypes and is right to admit `1.0` for them. Give
   `InbreedingF` its own half-open check and a `DomainError` variant that says so.
 - **An existing test asserts the current behaviour** —
-  [`types.rs:862`](../../../../src/ng/types.rs) requires `try_new(1.0)` to succeed. It moves to the
+  [`types.rs:862`](../../../../src/types.rs) requires `try_new(1.0)` to succeed. It moves to the
   rejection list beside `1.5`.
 - **The pre-pass builds one from a fitted value with `.expect(…)`**
-  ([`runs.rs:634`](../../../../src/ng/parameter_estimation/generic/runs.rs)) — a
+  (`373bd37d~1:src/ng/parameter_estimation/generic/runs.rs:634`) — a
   coverage-weighted posterior occupancy, which can in principle reach exactly `1.0` on a fully
   homozygous sample. **Tightening the newtype alone turns a legitimate fit into a panic.** The fitted
   path must clamp below the ceiling before constructing, not assert; a caller cannot recover from a
@@ -387,7 +390,7 @@ pub fn fill_locus_concentration(
 and a second argument is a second place for it to disagree. `FittedSpectrum` is a **borrowed view
 over the class weights** plus the regularizer's weight and the variable-site count — decided at
 implementation, 2026-08-22, and the answer to §8's open item. Neither `FrequencyDensity`
-([`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs)) nor a gather wrapper is
+([`joint/fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)) nor a gather wrapper is
 it: the first is a density over the *population's* allele frequency, and the projection matches a
 *panel's* allele counts.
 
@@ -560,19 +563,19 @@ Every row read on 2026-08-21.
 
 | ng name | existing code | action |
 |---|---|---|
-| `fill_random_mating_log_priors` (the port) | [`genetics.rs:127`](../../../../src/genetics.rs) | **port as-is**, one change: fill a caller slice, and put the per-allele `lgamma(α_a)` baseline in caller scratch, instead of returning `Vec` and allocating a second one (spec §8 no-alloc). Renamed from `dirichlet_multinomial_log_priors` at implementation: the file carries the distribution, the function carries which half of §3.2's mixture the values are, and it fills rather than returns. **Production has a second, private copy of the same mathematics** — `fill_log_indep_per_g_from` ([`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs)), which the SNP/indel engine runs and which already takes a caller's `out` and `lgamma_alpha`. It associates differently and disagrees with the shared primitive on 112 of 492 measured genotype values, by at most one unit in the last place; ng's port is bit-identical to the shared one. |
+| `fill_random_mating_log_priors` (the port) | [`genetics.rs:127`](../../../../src/genetics.rs) | **port as-is**, one change: fill a caller slice, and put the per-allele `lgamma(α_a)` baseline in caller scratch, instead of returning `Vec` and allocating a second one (spec §8 no-alloc). Renamed from `dirichlet_multinomial_log_priors` at implementation: the file carries the distribution, the function carries which half of §3.2's mixture the values are, and it fills rather than returns. **Production has a second, private copy of the same mathematics** — `fill_log_indep_per_g_from` (`d9e7b076:src/var_calling/posterior_engine.rs`), which the SNP/indel engine runs and which already takes a caller's `out` and `lgamma_alpha`. It associates differently and disagrees with the shared primitive on 112 of 492 measured genotype values, by at most one unit in the last place; ng's port is bit-identical to the shared one. |
 | `PROBABILITY_FLOOR`, `MIN_ALT_CONCENTRATION` | [`genetics.rs:18`](../../../../src/genetics.rs), [`genetics.rs:187`](../../../../src/genetics.rs) | import with their reasoning |
 | `seed_for_locus` | `alpha_from_diversity`, [`genetics.rs:214`](../../../../src/genetics.rs); `ALPHA_REF` [`:179`](../../../../src/genetics.rs) | **shape ported, source not** — the pair comes from the projection; `(1, θ)` is where a neutral panel lands |
-| the inbreeding mixture | [`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs) (`fill_log_prior_per_g_homogeneous`), STR port [`em.rs:290`](../../../../src/ssr/cohort/em.rs) | port as §3.2's two-branch form, inside `MarginalizedDirichletPrior` |
-| `sample_concentration` | `leave_one_out_alpha`, [`em.rs:278`](../../../../src/ssr/cohort/em.rs); SNP twin at [`posterior_engine.rs:3183`](../../../../src/var_calling/posterior_engine.rs) | port (identical arithmetic in both) |
-| `fill_ssr_seed`'s shape (`fill_seed_shape`) | `g0_pseudocounts`, [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass new** (spec §5.1) |
-| `SeedDecayPerRepeat::FALLBACK` | `DEFAULT_G0_FALLBACK_P`, [`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs) | import, **retyped** and renamed for what it decays |
-| `PlugInWrightPrior`'s pseudocounts — what it must NOT inherit | `DEFAULT_REF_PSEUDOCOUNT = 10`, [`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs) | the comparator runs on the same seed as the marginalized prior; `α_ref = 10` is the §2.3 trap, not a config |
+| the inbreeding mixture | `d9e7b076:src/var_calling/posterior_engine.rs:3799` (`fill_log_prior_per_g_homogeneous`), STR port `d9e7b076:src/ssr/cohort/em.rs:290` | port as §3.2's two-branch form, inside `MarginalizedDirichletPrior` |
+| `sample_concentration` | `leave_one_out_alpha`, `d9e7b076:src/ssr/cohort/em.rs:278`; SNP twin at `d9e7b076:src/var_calling/posterior_engine.rs:3183` | port (identical arithmetic in both) |
+| `fill_ssr_seed`'s shape (`fill_seed_shape`) | `g0_pseudocounts`, `d9e7b076:src/ssr/cohort/allele_freq_prior.rs:25` | **shape ported, total mass new** (spec §5.1) |
+| `SeedDecayPerRepeat::FALLBACK` | `DEFAULT_G0_FALLBACK_P`, `d9e7b076:src/ssr/cohort/param_estimation.rs:167` | import, **retyped** and renamed for what it decays |
+| `PlugInWrightPrior`'s pseudocounts — what it must NOT inherit | `DEFAULT_REF_PSEUDOCOUNT = 10`, `d9e7b076:src/var_calling/posterior_engine.rs:107` | the comparator runs on the same seed as the marginalized prior; `α_ref = 10` is the §2.3 trap, not a config |
 | `seed_from_population_moments` | — (production never fitted a population curve) | **new**; three multiplications and a divide, no optimiser. ⛔ *It was `project_spectrum_seed` over a two-parameter search until 2026-08-27* |
-| the seed's two inputs | joint route's `FrequencyDensity::expected_alternative_frequency` and `::expected_heterozygosity`, [`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs) | consume; two closed-form integrals of the same fitted curve, with no panel in either. ⛔ *It was `FittedSpectrum`, the density evaluated into a panel's allele-count classes, until 2026-08-27* |
-| `DEFAULT_SPECIES_DIVERSITY_FALLBACK` | `DEFAULT_DIVERSITY_PRIOR`, [`diversity.rs:78`](../../../../src/var_calling/diversity.rs) | import value + reasoning; carried as overridable, regime-reported |
-| `InbreedingF` | [`types.rs:412`](../../../../src/ng/types.rs) | **reuse**; the range was tightened to `[0, 1)` on 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A1; spec §7). §2.1 below describes the tree before that landed |
-| `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit `Provenance`'s own variants onto it. **It shipped with five, not the three §2.3 draws** — see the ⚠ there |
+| the seed's two inputs | joint route's `FrequencyDensity::expected_alternative_frequency` and `::expected_heterozygosity`, [`joint/fit.rs`](../../../../src/parameter_estimation/joint/fit.rs) | consume; two closed-form integrals of the same fitted curve, with no panel in either. ⛔ *It was `FittedSpectrum`, the density evaluated into a panel's allele-count classes, until 2026-08-27* |
+| `DEFAULT_SPECIES_DIVERSITY_FALLBACK` | `DEFAULT_DIVERSITY_PRIOR`, `d9e7b076:src/var_calling/diversity.rs:78` | import value + reasoning; carried as overridable, regime-reported |
+| `InbreedingF` | [`types.rs:412`](../../../../src/types.rs) | **reuse**; the range was tightened to `[0, 1)` on 2026-08-23 ([`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) A1; spec §7). §2.1 below describes the tree before that landed |
+| `SeedRegime` reporting | `Provenance` / `Estimate<T>`, [`parameter_estimation/mod.rs:60`](../../../../src/parameter_estimation/mod.rs) | same idea, prior-specific variants; do not force-fit `Provenance`'s own variants onto it. **It shipped with five, not the three §2.3 draws** — see the ⚠ there |
 | Wright biallelic formulas | [`genetics.rs:66`](../../../../src/genetics.rs) | **test oracle only** (spec §3.2) — plus the row basis of `PlugInWrightPrior` |
 | independent parity oracle | `pochhammer_ln` / `dm_log_prior_oracle`, [`genetics.rs:240`](../../../../src/genetics.rs) | carry the test across (spec §9) |
 
@@ -586,7 +589,7 @@ Every row read on 2026-08-21.
   [`ng_step_interfaces.md`](ng_step_interfaces.md) sketches. **What does not exist is the recipe**:
   no plan builds one, and the measurement the comparator is kept for also needs the loop and a
   specification for candidate selection. Production ships plug-in default
-  behind an env toggle ([`driver.rs:287`](../../../../src/ssr/cohort/driver.rs)); ng inverts that,
+  behind an env toggle (`d9e7b076:src/ssr/cohort/driver.rs:287`); ng inverts that,
   and the comparator exists so spec §2.2's measurement stays re-runnable. Why: spec §2, §5.3.
 - **The prior takes flat slices, not the loop's types — decided.** Nothing allocates per sample per
   pass, and the primitive keeps no back-reference into its caller — production's own reason. **Not**
@@ -601,7 +604,7 @@ Every row read on 2026-08-21.
 - **No `AlleleFreq` newtype — decided.** Nothing in the three calling docs consumes a frequency
   vector; minting one would re-open the §2 plug-in shape. Why: §3.3 above. **Note for whoever reads
   `types.rs` first:** its own comment names `AlleleFreq` among the constrained types still to come
-  ([`types.rs:447`](../../../../src/ng/types.rs)). That was written before this seam existed and is
+  ([`types.rs:447`](../../../../src/types.rs)). That was written before this seam existed and is
   an example, not an obligation — calling does not owe it, and a later step that genuinely needs a
   frequency should mint it for that use rather than to satisfy the comment.
 

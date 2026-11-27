@@ -18,7 +18,7 @@ every why.*
 | the per-sample evidence views (`GenericSampleEvidence`, `SsrSampleEvidence`), the `Lg` **row** contract, the stutter distribution and the scoring contexts | **this doc** (§2, §3, §4) |
 | `Concentration`, the seed builders, the per-sample concentration | [`calling_priors.md`](calling_priors.md) §2–§3 |
 | `CandidateAlleles`, `GenotypeTable` + `AlleleId`, `ExpectedAlleleCopies`, `CallingScratch` (which *holds* the `Lg` table), `Phred` | [`calling_em_loop.md`](calling_em_loop.md) §2 |
-| `LogProb`, `ErrorRate`, `Ploidy`, `Motif`, `SsrPeriod` | exist in [`src/ng/types.rs`](../../../../src/ng/types.rs) — reconciled, not re-minted |
+| `LogProb`, `ErrorRate`, `Ploidy`, `Motif`, `SsrPeriod` | exist in [`src/types.rs`](../../../../src/types.rs) — reconciled, not re-minted |
 
 Split worth stating twice: the likelihood owns the **row** — how one sample's `Lg` values are
 computed — and the loop owns the **table** that stores rows for all samples. One type each, no
@@ -26,13 +26,13 @@ overlap.
 
 ## Module home
 
-`src/ng/calling/likelihood/` — step 7, inside the `calling/` folder that holds steps 6–9
+`src/calling/likelihood/` — step 7, inside the `calling/` folder that holds steps 6–9
 ([`module_layout.md`](module_layout.md)). The only swappable seam is the STR emission (the SNP/indel
 closed form has no competing implementation, so it is a file with no trait ceremony —
 module_layout principle 1a):
 
 ```
-src/ng/calling/likelihood/
+src/calling/likelihood/
 ├── mod.rs          – the evidence views, the row contract, the parameter tiers, shared floors
 ├── generic.rs      – the SNP/indel closed form + contamination mixture + the partial rule
 ├── ssr.rs          – the STR row: emission cache, three-term mixture, censored tail
@@ -40,7 +40,7 @@ src/ng/calling/likelihood/
                       + ClassicEmissionOracle (Model B, test-only)
 ```
 
-The stutter distribution itself is **reused from `src/ng/alignment/stutter.rs`**, not duplicated
+The stutter distribution itself is **reused from `src/alignment/stutter.rs`**, not duplicated
 (§4.2) — the spec fixes ownership of the *definition* here (spec §7) while the built type stays
 where both consumers reach it.
 
@@ -66,11 +66,11 @@ to the loop's `GenotypeTable`. Contract, both paths:
 - an empty evidence row is all-zeros — the prior decides, no branch (spec §3.3);
 - a mis-shaped input (row length ≠ genotype count, a candidate with no stratum entry, a non-finite
   parameter) is a caller bug → assertion, structural ones held in release
-  ([`per_group_merger.rs:1963`](../../../../src/var_calling/per_group_merger.rs) is the precedent);
+  (`d9e7b076:src/var_calling/per_group_merger.rs:1963` is the precedent);
 - every probability is floored before a logarithm: `MIN_BASE_ERROR = 1e-12`
-  ([`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs)),
+  (`d9e7b076:src/var_calling/contamination_estimation.rs:1449`),
   geometric clamps `(0.01, 0.99)`
-  ([`alignment/stutter.rs:90`](../../../../src/ng/alignment/stutter.rs)) — imported as named
+  ([`alignment/stutter.rs:90`](../../../../src/alignment/stutter.rs)) — imported as named
   constants with their reasons.
 
 ### 1.2 Correction to `ng_step_interfaces.md` §3 step 7 — recorded, not applied there
@@ -110,7 +110,7 @@ same number the genotype prior already reads.
 ### 1.4 Provenance
 
 The model never branches on provenance; it **propagates** it: each scoring context carries the
-weakest `Provenance` ([`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs))
+weakest `Provenance` ([`parameter_estimation/mod.rs:60`](../../../../src/parameter_estimation/mod.rs))
 among the parameters that entered it, and the loop copies the per-locus weakest onto
 `LocusInference` (spec §8; [`calling_em_loop.md`](calling_em_loop.md) §2).
 
@@ -170,7 +170,7 @@ is one type rather than two. **The field is empty until C2 routes partials into 
 
 **Reconciliation note — the read-group requirement this placed on the merge has been met.** The built
 `SampleSupport`/`AlleleSupport`
-([`cohort_merge/build.rs`](../../../../src/ng/run/cohort_merge/build.rs)) pooled read groups into
+([`cohort_merge/build.rs`](../../../../src/run/cohort_merge/build.rs)) pooled read groups into
 one row per allele, and its own doc booked the split as owed to whoever brought the STR path
 through. Spec §2.3 made it a **generic-path** requirement too — summing must stop at the
 read-group boundary — and it landed there first:
@@ -199,14 +199,14 @@ drops is not merely skipped: its `q_sum` comes back from the fill, because those
 ### 2.2 STR path
 
 The evidence is the locus generator's own type, unchanged: `SequenceObservation`
-([`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs)) already keys on
+([`locus_generation/mod.rs:295`](../../../../src/locus_generation/mod.rs)) already keys on
 `(bases, witness, read_group)` and carries `num_obs` — the aggregation contract holds by
 construction. `SsrSampleEvidence<'a>` is a slice of them plus the locus's `SsrDetail`
-([`mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)); complete and partial observations are
+([`mod.rs:438`](../../../../src/locus_generation/mod.rs)); complete and partial observations are
 told apart by `ReadWitness`.
 
 **Correction, 2026-08-24, made while A1 was built. This sentence used to say the generator's
-`complete_observations()` ([`mod.rs:134`](../../../../src/ng/locus_generation/mod.rs)) "stays the
+`complete_observations()` ([`mod.rs:134`](../../../../src/locus_generation/mod.rs)) "stays the
 only unguarded access", and neither half of that is true.** It is not a guard — the field it reads,
 `SampleLocusObservations::observations`, is `pub`, so the iterator is a helpful name and not an
 enforcement — and it is no longer the only one: `SsrSampleEvidence` holds a bare slice, so A1
@@ -346,7 +346,7 @@ matters (corrected 2026-08-24 at B2).
 **What asks something of the pre-pass:** the calibration's numerator/denominator accumulator (two
 scalars per read group, per surviving route) — recorded there, consumed here as
 `ReadGroupErrorRateFit`
-([`generic/read_group_error_rate.rs:45`](../../../../src/ng/parameter_estimation/generic/read_group_error_rate.rs));
+(`373bd37d~1:src/ng/parameter_estimation/generic/read_group_error_rate.rs:45`);
 the minted-quantity function must be the same function the locus generator mints with (spec §3.2;
 test 10).
 
@@ -408,10 +408,10 @@ the cost is `observations × candidates`, not `× genotypes`, and that is the de
 optimisation (spec §8). The three-term mixture is §4.5.1's:
 `(1 − λ − c)·copy-mixture + λ·uniform + c·seed(o)`; with `contamination: None` it is the two-term
 form. `λ` is `DEFAULT_OUTLIER_WEIGHT = 0.01` — **inherited from production and declared
-inherited**, not fitted ([`em.rs:138`](../../../../src/ssr/cohort/em.rs) sets it) — and it is
+inherited**, not fitted (`d9e7b076:src/ssr/cohort/em.rs:138` sets it) — and it is
 spread over `reachable_length_count`, **a property of the candidate set and the cutoffs, computed
 per locus with no cohort in it** (spec §4.5's decided repair of production's cohort-wide `D`,
-[`em.rs:393`](../../../../src/ssr/cohort/em.rs)).
+`d9e7b076:src/ssr/cohort/em.rs:393`).
 
 ```rust
 /// §4.5.1's second half: the fraction (frozen, per read group) and the prior's seed
@@ -432,9 +432,9 @@ pub struct SsrContamination<'a> { pub fraction: f64, pub length_distribution: &'
 ### 4.2 The stutter distribution — reused, and two cutoffs replace one
 
 The distribution of spec §4.2 is **already built**:
-[`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs)'s `StutterModel`, constructed
-from `StutterRates` ([`:106`](../../../../src/ng/alignment/stutter.rs)), evaluated by
-`probability(bp_diff, period)` ([`:345`](../../../../src/ng/alignment/stutter.rs)), with the
+[`alignment/stutter.rs:177`](../../../../src/alignment/stutter.rs)'s `StutterModel`, constructed
+from `StutterRates` ([`:106`](../../../../src/alignment/stutter.rs)), evaluated by
+`probability(bp_diff, period)` ([`:345`](../../../../src/alignment/stutter.rs)), with the
 one-step-share trap already typed against (its constructor doc). Three changes, all in that file
 (ng code, not frozen production):
 
@@ -443,10 +443,10 @@ one-step-share trap already typed against (its constructor doc). Three changes, 
   alongside. *In frame / out of frame* is banned vocabulary in this doc set (spec §1.3), and the
   fields currently carry it (`in_up`, `out_geom`).
 - **Two named cutoffs replace the single `MAX_SLIP = 10`**
-  ([`alignment/stutter.rs:78`](../../../../src/ng/alignment/stutter.rs), whose own comment records
+  ([`alignment/stutter.rs:78`](../../../../src/alignment/stutter.rs), whose own comment records
   the follow-up): `MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base
   pairs) — both inherited from production's provisional 10
-  ([`param_estimation.rs:21`](../../../../src/ssr/cohort/param_estimation.rs)) and declared
+  (`d9e7b076:src/ssr/cohort/param_estimation.rs:21`) and declared
   inherited (spec §4.2).
 - **The truncated mass is computed and reported per candidate** (feeds
   `SsrScoringContext.truncated_mass_lost`; spec §12 test 5).
@@ -463,21 +463,21 @@ pub fn stutter_rates_for(slippage: &Slippage) -> StutterRates;
 ```
 
 The numbers come from the pre-pass at the `(read group, stratum)` grain — `Slippage`
-([`joint/ssr_fit.rs:83`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)) inside
-`StratumFit` ([`:281`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)), the **level**
+([`joint/ssr_fit.rs:83`](../../../../src/parameter_estimation/joint/ssr_fit.rs)) inside
+`StratumFit` ([`:281`](../../../../src/parameter_estimation/joint/ssr_fit.rs)), the **level**
 read off the fitted curve blend
-([`joint/slippage_curve.rs:574`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs)
+([`joint/slippage_curve.rs:574`](../../../../src/parameter_estimation/joint/slippage_curve.rs)
 `blend_level`, provenance in `LevelSource`
-[`:517`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs)). The lookup is by the
+[`:517`](../../../../src/parameter_estimation/joint/slippage_curve.rs)). The lookup is by the
 **candidate's** period and repeat count (spec §4.4).
 
 ### 4.3 The exact-reference shortcut and the ruler
 
 Not this module's: measuring a read's tract is the alignment module's
 ([`../spec/alignment.md`](../spec/alignment.md) §4.2), the reference-identical skip lives in the
-STR locus generator ([`ssr.rs:858`](../../../../src/ng/locus_generation/ssr.rs)), and the
+STR locus generator ([`ssr.rs:858`](../../../../src/locus_generation/ssr.rs)), and the
 substitution comparison this model composes is `FlatEmission`
-([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)) under the fitted rate —
+([`alignment/emission.rs:250`](../../../../src/alignment/emission.rs)) under the fitted rate —
 per §4.3, never per-read qualities.
 
 ## 5. Reconciliation with existing code
@@ -486,22 +486,22 @@ Every row read on 2026-08-21.
 
 | ng name | existing code | action |
 |---|---|---|
-| the shared copy-weighted mixture with outlier floor | `read_given_genotype`, [`likelihood.rs:75`](../../../../src/ssr/cohort/likelihood.rs) | shape ported for both paths; outlier spread made per-locus (spec §4.5) |
-| SNP/indel closed form | `standard_log_likelihood`, [`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs) | **shape ported, two terms changed**: coefficient dropped (spec §3.4), `÷3` divisor added (spec §3.5) |
-| contamination mixture | [`posterior_engine.rs:1475`](../../../../src/var_calling/posterior_engine.rs) (`compute_mixture_log_likelihoods`), c = 0 fallback [`:1509`](../../../../src/var_calling/posterior_engine.rs) | ported without the fallback branch — ng's two forms agree to ulp (spec §3.6) |
-| minted per-read error (worse of BQ/MAPQ; min-BQ over window) | [`open_record.rs:792`](../../../../src/pileup/walker/open_record.rs), [`:944`](../../../../src/pileup/walker/open_record.rs) | upstream mint, consumed as `q_sum`; the calibration scale on top is **new** |
-| `ReadGroupCalibration`'s fit input | [`generic/read_group_error_rate.rs:45`](../../../../src/ng/parameter_estimation/generic/read_group_error_rate.rs) `ReadGroupErrorRateFit` | consume; the two-scalar accumulator is asked of the pre-pass (spec §3.2) |
-| `StutterModel` / `StutterRates` | [`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs), [`:106`](../../../../src/ng/alignment/stutter.rs); production [`hipstr.rs:53`](../../../../src/ssr/cohort/read_model/hipstr.rs) | **reuse ng's**, with §4.2's three changes; do not port from the GPL HipSTR tree (spec §4.2's licence rule) |
-| stutter parameters at the (read group, stratum) grain | `Slippage` [`joint/ssr_fit.rs:83`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs), `StratumFit` [`:281`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs), `blend_level` [`joint/slippage_curve.rs:574`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs) | consume, provenance included |
-| placement enumeration (interrupted candidates) | [`ssr/cohort/stutter.rs`](../../../../src/ssr/cohort/stutter.rs) (whole-repeat only; part-repeat resized at tract end) | port with production's split, stated (spec §4.2) |
-| substitution comparison | `FlatEmission`, [`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs); production `pair_hmm.rs` | **compose**, never re-implement (spec §4.3, §7) |
-| the model seam | `ReadLikelihoodModel` + `ReadScoringContext`, [`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs), [`:45`](../../../../src/ssr/cohort/read_model/mod.rs) | shape ported as `SsrEmissionModel` + `SsrScoringContext`, grown by the censored method and the truncation report |
-| Model B comparator | [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs) | port **test-only**, exactly as production keeps it (spec §9) |
-| generic evidence | `CohortObservation` [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs), `SampleSupport` [`:858`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:973`](../../../../src/ng/run/cohort_merge/build.rs) | view over them; the `(allele × read group)` split **landed** in [`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1 — `SupportedAllele` carries `read_group` and the rows are one per pair, ascending |
-| STR evidence | `SequenceObservation`, [`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs) | reuse as-is; the read-group identity the contract needs is already there ([`:316`](../../../../src/ng/locus_generation/mod.rs)) |
-| contamination inputs | `ContaminationEstimate` [`joint/contamination.rs:430`](../../../../src/ng/parameter_estimation/joint/contamination.rs), per-read-group grain [`:238`](../../../../src/ng/parameter_estimation/joint/contamination.rs) | consume as `ContaminationView`; the three allele-class frequencies are asked of the pre-pass's side-pass (spec §3.6) |
-| numeric floors | `MIN_BASE_ERROR` [`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs); geometric clamps [`alignment/stutter.rs:90`](../../../../src/ng/alignment/stutter.rs) | import as named constants with reasons (spec §8) |
-| censored term (both paths) | — | **new**; production discards partials ([`locus_tally.rs:91`](../../../../src/ssr/pileup/locus_tally.rs)) |
+| the shared copy-weighted mixture with outlier floor | `read_given_genotype`, `d9e7b076:src/ssr/cohort/likelihood.rs:75` | shape ported for both paths; outlier spread made per-locus (spec §4.5) |
+| SNP/indel closed form | `standard_log_likelihood`, `d9e7b076:src/var_calling/per_group_merger.rs:1948` | **shape ported, two terms changed**: coefficient dropped (spec §3.4), `÷3` divisor added (spec §3.5) |
+| contamination mixture | `d9e7b076:src/var_calling/posterior_engine.rs:1475` (`compute_mixture_log_likelihoods`), c = 0 fallback `d9e7b076:src/var_calling/posterior_engine.rs:1509` | ported without the fallback branch — ng's two forms agree to ulp (spec §3.6) |
+| minted per-read error (worse of BQ/MAPQ; min-BQ over window) | `d9e7b076:src/pileup/walker/open_record.rs:792`, `d9e7b076:src/pileup/walker/open_record.rs:944` | upstream mint, consumed as `q_sum`; the calibration scale on top is **new** |
+| `ReadGroupCalibration`'s fit input | `373bd37d~1:src/ng/parameter_estimation/generic/read_group_error_rate.rs:45` `ReadGroupErrorRateFit` | consume; the two-scalar accumulator is asked of the pre-pass (spec §3.2) |
+| `StutterModel` / `StutterRates` | [`alignment/stutter.rs:177`](../../../../src/alignment/stutter.rs), [`:106`](../../../../src/alignment/stutter.rs); production `d9e7b076:src/ssr/cohort/read_model/hipstr.rs:53` | **reuse ng's**, with §4.2's three changes; do not port from the GPL HipSTR tree (spec §4.2's licence rule) |
+| stutter parameters at the (read group, stratum) grain | `Slippage` [`joint/ssr_fit.rs:83`](../../../../src/parameter_estimation/joint/ssr_fit.rs), `StratumFit` [`:281`](../../../../src/parameter_estimation/joint/ssr_fit.rs), `blend_level` [`joint/slippage_curve.rs:574`](../../../../src/parameter_estimation/joint/slippage_curve.rs) | consume, provenance included |
+| placement enumeration (interrupted candidates) | `d9e7b076:src/ssr/cohort/stutter.rs` (whole-repeat only; part-repeat resized at tract end) | port with production's split, stated (spec §4.2) |
+| substitution comparison | `FlatEmission`, [`alignment/emission.rs:250`](../../../../src/alignment/emission.rs); production `pair_hmm.rs` | **compose**, never re-implement (spec §4.3, §7) |
+| the model seam | `ReadLikelihoodModel` + `ReadScoringContext`, `d9e7b076:src/ssr/cohort/read_model/mod.rs:63`, `d9e7b076:src/ssr/cohort/read_model/mod.rs:45` | shape ported as `SsrEmissionModel` + `SsrScoringContext`, grown by the censored method and the truncation report |
+| Model B comparator | `d9e7b076:src/ssr/cohort/read_model/classic.rs` | port **test-only**, exactly as production keeps it (spec §9) |
+| generic evidence | `CohortObservation` [`cohort_merge/build.rs:815`](../../../../src/run/cohort_merge/build.rs), `SampleSupport` [`:858`](../../../../src/run/cohort_merge/build.rs), `AlleleSupport` [`:973`](../../../../src/run/cohort_merge/build.rs) | view over them; the `(allele × read group)` split **landed** in [`calling_prerequisites.md`](../impl_plan/calling_prerequisites.md) B1 — `SupportedAllele` carries `read_group` and the rows are one per pair, ascending |
+| STR evidence | `SequenceObservation`, [`locus_generation/mod.rs:295`](../../../../src/locus_generation/mod.rs) | reuse as-is; the read-group identity the contract needs is already there ([`:316`](../../../../src/locus_generation/mod.rs)) |
+| contamination inputs | `ContaminationEstimate` [`joint/contamination.rs:430`](../../../../src/parameter_estimation/joint/contamination.rs), per-read-group grain [`:238`](../../../../src/parameter_estimation/joint/contamination.rs) | consume as `ContaminationView`; the three allele-class frequencies are asked of the pre-pass's side-pass (spec §3.6) |
+| numeric floors | `MIN_BASE_ERROR` `d9e7b076:src/var_calling/contamination_estimation.rs:1449`; geometric clamps [`alignment/stutter.rs:90`](../../../../src/alignment/stutter.rs) | import as named constants with reasons (spec §8) |
+| censored term (both paths) | — | **new**; production discards partials (`d9e7b076:src/ssr/pileup/locus_tally.rs:91`) |
 
 ## 6. Design decisions — decided
 
@@ -532,8 +532,8 @@ Every row read on 2026-08-21.
 - `OPEN:` spec Q7 — what would switch STR contamination off; the seam keeps both builds one binary.
 - **Resolved 2026-08-21, and it is a blocker rather than a confirmation: the built merge discards
   partial observations.** Collation skips every observation whose witness is not `Complete`
-  ([`cohort_merge/build.rs:1351`](../../../../src/ng/run/cohort_merge/build.rs)) and projection
-  panics rather than pad one ([`:323`](../../../../src/ng/run/cohort_merge/build.rs)), so
+  ([`cohort_merge/build.rs:1351`](../../../../src/run/cohort_merge/build.rs)) and projection
+  panics rather than pad one ([`:323`](../../../../src/run/cohort_merge/build.rs)), so
   `SampleEvidence.partials` (§2.1) has no source today. **The merge must keep them, keyed and
   projected over the witnessed stretch** — now a named requirement in the spec's ownership table
   (spec §5.4 and §7, corrected 2026-08-21), and a dependency the censored term cannot be built

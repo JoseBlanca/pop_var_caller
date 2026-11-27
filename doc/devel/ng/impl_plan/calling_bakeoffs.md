@@ -84,14 +84,14 @@ scorer can carry inbreeding at all is the spec's recorded follow-up, not this pl
   mechanism built **from spec §4.1's description, never from HipSTR's GPL tree** (the licence
   rule, [`read_likelihoods.md`](../spec/read_likelihoods.md) §4.2).
 - Production's re-fit pieces to port: `refine_theta_locus`
-  ([`ssr/cohort/stutter.rs:184`](../../../../src/ssr/cohort/stutter.rs)) and the attribution
+  (`d9e7b076:src/ssr/cohort/stutter.rs:184`) and the attribution
   whose input changes to posteriors (`attribute_locus`,
-  [`em.rs:1192`](../../../../src/ssr/cohort/em.rs)); the pull-back target is the fitted curve's
+  `d9e7b076:src/ssr/cohort/em.rs:1192`); the pull-back target is the fitted curve's
   value at the cell — `blend_level` via the `StratumFits` gather
   ([`calling_prerequisites.md`](calling_prerequisites.md) F), not a cell's own estimate (spec
   Q2 preamble).
 - The STR simulator that produced the Model-A table
-  ([`sim.rs`](../../../../src/ssr/cohort/sim.rs)) — the harness's exact-truth rung.
+  (`d9e7b076:src/ssr/cohort/sim.rs`) — the harness's exact-truth rung.
 
 ## Branch and merge (sequential — no worktree)
 

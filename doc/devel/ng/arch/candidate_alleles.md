@@ -16,7 +16,7 @@ redefined.*
 
 ## Module home
 
-`src/ng/calling/allele_candidates/`, the folder
+`src/calling/allele_candidates/`, the folder
 [`module_layout.md`](module_layout.md) already reserves for step 6:
 
 - `mod.rs` — everything both paths share: the config, the verdict, the leftover, the remapping,
@@ -34,7 +34,7 @@ does not survive — there is no bake-off here and nothing to swap.
 ## 1. What the module does, as a contract
 
 **In:** one assembled `CohortObservation`
-([`cohort_merge/build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs)) and the run's
+([`cohort_merge/build.rs:922`](../../../../src/run/cohort_merge/build.rs)) and the run's
 selection config. **Out:** a `LocusSelection` — the narrowed table, the verdict, the per-sample
 leftover, and the remapping from the merge's allele indices to the new ids.
 
@@ -52,7 +52,7 @@ leftover, and the remapping from the merge's allele indices to the new ids.
   `CallingScratch` (§2.4).
 - **The reference is never a candidate for removal** and stays at `AlleleId::REFERENCE`;
   `CandidateAlleles` makes that structural already
-  ([`calling/mod.rs:101-118`](../../../../src/ng/calling/mod.rs)).
+  ([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)).
 
 ---
 
@@ -112,13 +112,13 @@ documented "Maximum number of alternate alleles to genotype"
 ([`GenotypeCalculationArgumentCollection.java:29`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/genotyper/GenotypeCalculationArgumentCollection.java))
 — so GATK genotypes over seven alleles. Production's constant counts a record's whole allele
 set (`enforce_max_alleles` compares `unified.alleles.len()` and protects the reference from
-pruning, [`per_group_merger.rs:1434`](../../../../src/var_calling/per_group_merger.rs)) and its
+pruning, `d9e7b076:src/var_calling/per_group_merger.rs:1434`) and its
 own doc comment nonetheless claims to match GATK's. **ng's cap is the tighter of the two by one
 allele** — 21 genotypes against 28 at diploid — and the GATK clause is dropped from the
 constant's documentation rather than repeated.
 
 **`MinAltReads::reached_by` is the predicate, unwrapped** — it already takes a numerator and a
-denominator ([`cohort_merge/mod.rs:466`](../../../../src/ng/run/cohort_merge/mod.rs)). Its
+denominator ([`cohort_merge/mod.rs:466`](../../../../src/run/cohort_merge/mod.rs)). Its
 argument is named `non_reference_reads` because the merge asks it of a sample's pooled
 non-reference reads; selection passes one allele's reads and a discovery round passes a narrower
 count still (spec §3.4). **No wrapper**: a second spelling of one rule is how two rules become
@@ -192,9 +192,9 @@ a real allele was taken from that sample.
 /// among the candidates, or nothing where selection dropped it.
 ///
 /// **The evidence builder cannot be written without this.** `CandidateAlleles` ids are dense
-/// and in admission order ([`calling/mod.rs:170-186`](../../../../src/ng/calling/mod.rs)),
+/// and in admission order ([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)),
 /// while `SupportedAllele::allele` indexes the merge's table
-/// ([`build.rs:1089`](../../../../src/ng/run/cohort_merge/build.rs)); after narrowing the two
+/// ([`build.rs:1089`](../../../../src/run/cohort_merge/build.rs)); after narrowing the two
 /// are different numbers and nothing else records the correspondence.
 pub struct AlleleRemap {
     to_candidate: Box<[Option<AlleleId>]>,
@@ -257,7 +257,7 @@ pub struct LocusSelection {
     /// **Parallel to `CohortObservation::per_sample`** — same length, same order, so entry `i`
     /// belongs to that entry's sample. Not indexed by the run's sample order, because
     /// `per_sample` holds only the covering samples and each names its own
-    /// ([`build.rs:929-941`](../../../../src/ng/run/cohort_merge/build.rs)).
+    /// ([`build.rs:929-941`](../../../../src/run/cohort_merge/build.rs)).
     unmatched: Vec<UnmatchedSupport>,
     remap: AlleleRemap,
 }
@@ -292,12 +292,10 @@ pub struct SelectionScratch {
 `AlleleSummary` is private to the module — one allele's fold across samples: the largest share of
 one sample's reads it took, how many samples cleared the bar, and its cohort read total.
 
-**Two of its three fields are readable from outside as scalars**, through
-`SelectionScratch::best_within_sample_share_of` and `SelectionScratch::cohort_reads_of` (step D1).
-They exist for `examples/ng_candidate_selection_probe.rs`, which reports the ranking's own keys and
-would otherwise have to recompute them — the duplicate rule that step deletes. **Two scalars rather
-than the type**, so the shape of the computation stays inside the module and nothing outside can
-hold or build a summary; the third field has no reader and is not exported.
+**None of its fields is readable from outside.** Two of them were once exported as scalars,
+`SelectionScratch::best_within_sample_share_of` and `SelectionScratch::cohort_reads_of`, for the
+measurement program `examples/ng_candidate_selection_probe.rs`; both went when that program was
+removed (commit `0f9281c5`; read it at `0f9281c5~1:examples/ng_candidate_selection_probe.rs`).
 
 **It does *not* carry the reads and mass it would contribute to the leftover**, which an earlier
 draft of this section asked for. Three reasons, and the third is the one that settles it:
@@ -379,13 +377,13 @@ pub fn select_generic(
 
 **Read-group rows are pooled here, and that is the one place pooling is correct.** The merge keys
 its rows on `(allele, read group)` because the likelihood must not pool them
-([`build.rs:1089`](../../../../src/ng/run/cohort_merge/build.rs)); the bar counts reads, and a read
+([`build.rs:1089`](../../../../src/run/cohort_merge/build.rs)); the bar counts reads, and a read
 is a read whichever lane it came from, so it sums over groups —
 `SampleSupport::pooled_support_for` is the existing method that does it
-([`:1070`](../../../../src/ng/run/cohort_merge/build.rs)).
+([`:1070`](../../../../src/run/cohort_merge/build.rs)).
 
 **Partial observations are not read.** They are held on their own axis with their own bases and
-witnessed stretch ([`PartialObservation`, `build.rs:1130`](../../../../src/ng/run/cohort_merge/build.rs)),
+witnessed stretch ([`PartialObservation`, `build.rs:1130`](../../../../src/run/cohort_merge/build.rs)),
 they count toward no bar, and they do not enter the leftover (spec §5.1).
 
 ### 3.2 What the caller does next
@@ -447,13 +445,13 @@ outstanding one.
 
 | this doc's name | existing code | how it converges |
 |---|---|---|
-| the support rule | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs); `required_of` [`:451`](../../../../src/ng/run/cohort_merge/mod.rs), `reached_by` [`:466`](../../../../src/ng/run/cohort_merge/mod.rs) | **the type itself, unchanged.** Only `DEFAULT_MIN_ALLELE_SUPPORT` is new, and it reuses `MinAltObs::DEFAULT` ([`:317`](../../../../src/ng/run/cohort_merge/mod.rs)) |
-| the input | [`CohortObservation`, `build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs); `SampleSupport` [`:965`](../../../../src/ng/run/cohort_merge/build.rs), `SupportedAllele` [`:1089`](../../../../src/ng/run/cohort_merge/build.rs), `AlleleSupport` [`:1245`](../../../../src/ng/run/cohort_merge/build.rs) | read, unchanged. `q_sum` on `AlleleSupport` is the leftover's only source |
-| pooling a sample's rows for one allele | [`SampleSupport::pooled_support_for`, `:1070`](../../../../src/ng/run/cohort_merge/build.rs) | called as-is (§3.1) |
-| the output table | [`CandidateAlleles`, `calling/mod.rs:86`](../../../../src/ng/calling/mod.rs); `new` [`:101`](../../../../src/ng/calling/mod.rs), `admit` [`:184`](../../../../src/ng/calling/mod.rs) | built and merged; selection seeds with `new` and fills with `admit`. **No new allele-table type is minted** |
-| the id | [`AlleleId`, `types.rs:304`](../../../../src/ng/types.rs), `AlleleId::REFERENCE` | reused; `AlleleRemap` holds `Option<AlleleId>` and never a sentinel |
-| the cap's value | [`DEFAULT_MAX_ALLELES_PER_RECORD`, `per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs) | the number is inherited and declared inherited; **the ranking is not ported** — production's is [`enforce_max_alleles`, `:1434`](../../../../src/var_calling/per_group_merger.rs) |
-| the leftover | [`pool_dropped_other_scalars`, `per_group_merger.rs:1555`](../../../../src/var_calling/per_group_merger.rs), consumed [`:1979`](../../../../src/var_calling/per_group_merger.rs) | same shape, plus the read count. **Do not repeat its contamination-path omission** ([`posterior_engine.rs:2429`](../../../../src/var_calling/posterior_engine.rs)) |
+| the support rule | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/run/cohort_merge/mod.rs); `required_of` [`:451`](../../../../src/run/cohort_merge/mod.rs), `reached_by` [`:466`](../../../../src/run/cohort_merge/mod.rs) | **the type itself, unchanged.** Only `DEFAULT_MIN_ALLELE_SUPPORT` is new, and it reuses `MinAltObs::DEFAULT` ([`:317`](../../../../src/run/cohort_merge/mod.rs)) |
+| the input | [`CohortObservation`, `build.rs:922`](../../../../src/run/cohort_merge/build.rs); `SampleSupport` [`:965`](../../../../src/run/cohort_merge/build.rs), `SupportedAllele` [`:1089`](../../../../src/run/cohort_merge/build.rs), `AlleleSupport` [`:1245`](../../../../src/run/cohort_merge/build.rs) | read, unchanged. `q_sum` on `AlleleSupport` is the leftover's only source |
+| pooling a sample's rows for one allele | [`SampleSupport::pooled_support_for`, `:1070`](../../../../src/run/cohort_merge/build.rs) | called as-is (§3.1) |
+| the output table | [`CandidateAlleles`, `calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs), with `new` and `admit` | built and merged; selection seeds with `new` and fills with `admit`. **No new allele-table type is minted** |
+| the id | [`AlleleId`, `types.rs:304`](../../../../src/types.rs), `AlleleId::REFERENCE` | reused; `AlleleRemap` holds `Option<AlleleId>` and never a sentinel |
+| the cap's value | `DEFAULT_MAX_ALLELES_PER_RECORD`, `d9e7b076:src/var_calling/per_group_merger.rs:57` | the number is inherited and declared inherited; **the ranking is not ported** — production's is `enforce_max_alleles`, `d9e7b076:src/var_calling/per_group_merger.rs:1434` |
+| the leftover | `pool_dropped_other_scalars`, `d9e7b076:src/var_calling/per_group_merger.rs:1555`, consumed `d9e7b076:src/var_calling/per_group_merger.rs:1979` | same shape, plus the read count. **Do not repeat its contamination-path omission** (`d9e7b076:src/var_calling/posterior_engine.rs:2429`) |
 | the consumer's field | `GenericSampleEvidence::unmatched_q_sum`, [`read_likelihoods.md`](read_likelihoods.md) §2.1 | filled by `unmatched[i].q_sum`; that struct gains the read count (§3.2) |
 | the superseded sketch | `AlleleCandidates` + `Admission` ([`ng_step_interfaces.md`](ng_step_interfaces.md) §2), `CandidateGenerator` (§4), the rename note (§6) | **superseded.** `AlleleCandidates` was already renamed to `CandidateAlleles`; `Admission`'s four variants become `SelectionVerdict`'s three (§2.2); the trait is dropped |
 
@@ -464,7 +462,7 @@ outstanding one.
 *Added 2026-08-24, at the owner's request that selection be fitted to the modules it feeds before
 this work merges. **The prior is built and merged; the calling loop is not**, so this section is
 what the loop's author has to get right rather than something anyone can compile against today.
-Nothing in `src/ng/` calls [`select_generic`](../../../../src/ng/calling/allele_candidates/generic.rs)
+Nothing in `src/` calls [`select_generic`](../../../../src/calling/allele_candidates/generic.rs)
 outside its own tests and the probe, so every claim below is about code that has never met.*
 
 **The prior takes flat slices and a count, never `CandidateAlleles`** — its own architecture
@@ -473,7 +471,7 @@ have to be got right by hand.
 
 **1. The count is the total, and this module's accessor is the other one.** The prior's
 `fill_locus_concentration(seed, class, allele_count, out)`
-([`seed_generic.rs:1181`](../../../../src/ng/calling/genotype_prior/seed_generic.rs)) wants the
+([`seed_generic.rs:1181`](../../../../src/calling/genotype_prior/seed_generic.rs)) wants the
 locus's allele count **including the reference**, and computes `allele_count - 1` itself. The
 right argument is `selection.alleles().len()`. `LocusSelection::alternative_allele_count()` is
 `len - 1` and **must not be passed to it** — at a locus with three alternatives it spreads four
@@ -482,7 +480,7 @@ locus in four, it is 0 and the prior asserts. *This document previously describe
 "the number the genotype prior divides its alternative concentration by", which is exactly the
 mistake; the accessor's own doc comment now carries the warning.*
 
-**2. `unmatched` is not in the run's sample order.** [`LocusSelection::unmatched`](../../../../src/ng/calling/allele_candidates/mod.rs)
+**2. `unmatched` is not in the run's sample order.** [`LocusSelection::unmatched`](../../../../src/calling/allele_candidates/mod.rs)
 is parallel to `CohortObservation::per_sample`, which holds **only the covering samples**, while
 `LocusInference::per_sample` is one entry per sample of the run in run order. Whatever joins them
 re-indexes through `SampleSupport::sample`. A zeroed `UnmatchedSupport` and a sample that does not
@@ -538,7 +536,8 @@ they assert; the two that pin *this* document's shapes rather than the spec's ru
 The regression anchor is spec §12's last entry: the human benchmark and the tomato panel through the
 calling loop with real candidates, which is the blocker
 [`../impl_plan/calling_loop.md`](../impl_plan/calling_loop.md) records. The measurement harness
-already exists — `examples/ng_candidate_selection_probe.rs` — and **calls this module rather than
+was `examples/ng_candidate_selection_probe.rs` (removed in commit `0f9281c5`; read it at
+`0f9281c5~1:examples/ng_candidate_selection_probe.rs`), and it **called this module rather than
 carrying a copy of it** (step D1, 2026-08-24), so the numbers the spec quotes are the shipped
 code's. It reproduced them: 4,177 and 7,478 built loci on HG002 at 30× and 300×, 53,935 on the
 tomato panel, every bar's kept-alternative total, every cap's binding count, and the leftover at

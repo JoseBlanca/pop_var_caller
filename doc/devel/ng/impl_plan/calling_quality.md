@@ -11,9 +11,9 @@ later, Q2 by the coder at the keyboard against a measured agreement (step B2).
 
 **Two of the three numbers are already built**, in step C3b of
 [`calling_loop.md`](calling_loop.md) (2026-08-25):
-[`quality/mod.rs`](../../../../src/ng/calling/quality/mod.rs) computes the per-sample genotype
+[`quality/mod.rs`](../../../../src/calling/quality/mod.rs) computes the per-sample genotype
 quality and the site quality before correction, and
-[`summarise_condition.rs`](../../../../src/ng/calling/inference/summarise_condition.rs) pools the
+[`summarise_condition.rs`](../../../../src/calling/inference/summarise_condition.rs) pools the
 nine-number artifact summary in the worker. What is missing is the arithmetic that turns the
 baseline into the quality a file carries, and the oracle that says the baseline is right.
 
@@ -21,7 +21,7 @@ baseline into the quality a file carries, and the oracle that says the baseline 
 
 ## Scope
 
-**In:** `src/ng/calling/quality/artifact_correction.rs` and `src/ng/calling/quality_parity.rs`;
+**In:** `src/calling/quality/artifact_correction.rs` and `src/calling/quality_parity.rs`;
 `ArtifactPenalties` and the two ramp constants of spec §10; the regularised-incomplete-beta
 two-sided binomial tail; the allele-balance penalty with its two guards; the strand and
 read-position penalty with its power ramp; the corrected quality, floored at zero; and the
@@ -94,18 +94,18 @@ differential against production's `refine_qual` over the same nine numbers.
   approximation**, so a port that reads it is not bit-identical to its source by construction; the
   two agree to about one part in `1e-13`. Spec §11 expected ng to write the Lanczos; it has
   something better, and D1 measures what the difference costs.
-- **`Phred`** ([`types.rs:429`](../../../../src/ng/types.rs)) refuses negatives, `NaN` and
+- **`Phred`** ([`types.rs:429`](../../../../src/types.rs)) refuses negatives, `NaN` and
   infinities at its one constructor, and normalises `-0.0`. Every penalty and the corrected quality
   cross into it.
 - **The production reuse target and oracle:**
-  [`qual_refine.rs`](../../../../src/vcf/qual_refine.rs) (`refine_qual` and the four functions
-  under it) and [`allele_balance.rs`](../../../../src/var_calling/allele_balance.rs).
+  `d9e7b076:src/vcf/qual_refine.rs` (`refine_qual` and the four functions
+  under it) and `d9e7b076:src/var_calling/allele_balance.rs`.
 - **Milestone A needs no change to production.** `run_em_columnar` is `pub(crate)` and the
   `EmOutputs` it returns carries `qual_phred`, which is `compute_qual_via_exact_af`'s return over
   the *input* likelihood table and the record-static pseudocounts
-  ([`posterior_engine.rs:2479`](../../../../src/var_calling/posterior_engine.rs)) — the same two
+  (`d9e7b076:src/var_calling/posterior_engine.rs:2479`) — the same two
   inputs ng's function takes, and neither of them moved by the EM.
-  [`loop_parity.rs`](../../../../src/ng/calling/loop_parity.rs) already drives that entry point and
+  [`loop_parity.rs`](../../../../src/calling/loop_parity.rs) already drives that entry point and
   its fixture shape is the one to copy.
 - **⚠ The prior the site quality reads is not the prior the frequency loop reads**, and a fixture
   built on the second tests nothing. Production carries two concentration pairs per record:
@@ -127,7 +127,7 @@ differential against production's `refine_qual` over the same nine numbers.
 ### Milestone A — the oracle for the baseline that already shipped
 
 **A1. The site quality against production's, at production's constants.**  ✅
-New `src/ng/calling/quality_parity.rs`, beside `loop_parity.rs` and `genotype_table_parity.rs` and
+New `src/calling/quality_parity.rs`, beside `loop_parity.rs` and `genotype_table_parity.rs` and
 named for the same reason. One fixture's genotype log-likelihood table, in the genotype order
 `genotype_table_parity` already pins, goes to both sides: to `run_em_columnar`, whose
 `EmOutputs.qual_phred` is production's answer, and to ng's `score_uncorrected_site_quality`. **ng
@@ -162,7 +162,7 @@ silently: an arm-one break is a numeric disagreement and an arm-two break is a d
 ### Milestone B — the types, and the tail (the numerical heart)
 
 **B1. The types and the two constants.**  ✅
-In a new `src/ng/calling/quality/artifact_correction.rs`, declared from `quality/mod.rs`:
+In a new `src/calling/quality/artifact_correction.rs`, declared from `quality/mod.rs`:
 `ArtifactPenalties { allele_balance: Phred, strand_and_read_position: Phred }` and the two
 `pub const`s `BIAS_RAMP_NO_POWER_BELOW = 3.0` / `BIAS_RAMP_FULL_POWER_AT = 7.0`, each with spec
 §6.2's provenance in its doc comment — read off the GIAB HG002 alternative-read distributions at
@@ -180,7 +180,7 @@ the compiler settles them where they are written.
 
 **B2. The two-sided binomial tail.**  ✅ *(its own commit, as required.)*
 The regularised incomplete beta and the tail built on it, ported from
-[`qual_refine.rs:305-457`](../../../../src/vcf/qual_refine.rs) (`betacf`, `reg_incomplete_beta`,
+`d9e7b076:src/vcf/qual_refine.rs:305-457` (`betacf`, `reg_incomplete_beta`,
 `binom_cdf_le`, `binom_sf_ge`, `binom_two_sided_p_beta`, `tail_phred`), reading ng's
 `crate::genetics::lgamma` instead of that file's private `ln_gamma`. **This settles spec §13's Q2 at
 its leaning: one implementation, the closed form.** Production keeps a discrete sum below 2,000

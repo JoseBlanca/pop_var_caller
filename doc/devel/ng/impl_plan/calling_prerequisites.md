@@ -46,7 +46,7 @@ read-likelihoods plan waits for this one.
   ([`read_likelihoods.md`](../spec/read_likelihoods.md) §5.4.2). Owned by whoever brings the STR
   path through the merge; the STR evidence calling consumes today comes straight from the locus
   generator, so nothing in the calling plans is blocked on it.
-- **Everything in `src/ng/calling/`** — the four calling plans named above.
+- **Everything in `src/calling/`** — the four calling plans named above.
 - **The choice between the pre-pass's two error-rate routes** — the histogram fit and the census
   fit both exist and which survives is that module's open comparison
   ([`parameter_prepass.md`](../spec/parameter_prepass.md) §4.1). Milestone D gives **both** routes
@@ -72,34 +72,34 @@ read-likelihoods plan waits for this one.
 
 - The cohort merge is built ([`cohort_merge.md`](cohort_merge.md) plan complete):
   `SampleSupport`/`SupportedAllele`/`AlleleSupport`
-  ([`build.rs:858`](../../../../src/ng/run/cohort_merge/build.rs),
-  [`:913`](../../../../src/ng/run/cohort_merge/build.rs),
-  [`:973`](../../../../src/ng/run/cohort_merge/build.rs)) and its test suite.
+  ([`build.rs:858`](../../../../src/run/cohort_merge/build.rs),
+  [`:913`](../../../../src/run/cohort_merge/build.rs),
+  [`:973`](../../../../src/run/cohort_merge/build.rs)) and its test suite.
 - The pre-pass's two error-rate routes exist: `ReadGroupErrorRateFit`
-  ([`generic/read_group_error_rate.rs:45`](../../../../src/ng/parameter_estimation/generic/read_group_error_rate.rs))
-  and the joint fit ([`joint/fit.rs`](../../../../src/ng/parameter_estimation/joint/fit.rs)).
+  (`373bd37d~1:src/ng/parameter_estimation/generic/read_group_error_rate.rs:45`)
+  and the joint fit ([`joint/fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)).
 - The contamination estimator exists at the read-group grain: `ContaminationEstimate`
-  ([`joint/contamination.rs:430`](../../../../src/ng/parameter_estimation/joint/contamination.rs),
-  grain enum [`:238`](../../../../src/ng/parameter_estimation/joint/contamination.rs)).
+  ([`joint/contamination.rs:430`](../../../../src/parameter_estimation/joint/contamination.rs),
+  grain enum [`:238`](../../../../src/parameter_estimation/joint/contamination.rs)).
 - The slippage pieces exist: `Slippage`
-  ([`joint/ssr_fit.rs:83`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)),
-  `StratumFit` ([`:281`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs)),
+  ([`joint/ssr_fit.rs:83`](../../../../src/parameter_estimation/joint/ssr_fit.rs)),
+  `StratumFit` ([`:281`](../../../../src/parameter_estimation/joint/ssr_fit.rs)),
   `blend_level` + `LevelSource`
-  ([`joint/slippage_curve.rs:574`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs),
-  [`:517`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs)).
+  ([`joint/slippage_curve.rs:574`](../../../../src/parameter_estimation/joint/slippage_curve.rs),
+  [`:517`](../../../../src/parameter_estimation/joint/slippage_curve.rs)).
 - The generic locus generator mints the per-read error the accumulator must match:
   `phred_to_ln_perr(bq).max(mq_log_err)` at
-  [`pileup/open_record.rs:2047`](../../../../src/ng/locus_generation/pileup/open_record.rs) and
-  [`pileup/fast_column.rs:211`](../../../../src/ng/locus_generation/pileup/fast_column.rs).
+  [`pileup/open_record.rs:2047`](../../../../src/locus_generation/pileup/open_record.rs) and
+  [`pileup/fast_column.rs:211`](../../../../src/locus_generation/pileup/fast_column.rs).
 
 ## Worktree, branch, merge
 
 - **Worktree** `../pop_var_caller-calling-prerequisites`, **branch** `ng-calling-prerequisites`,
   from `main`, plain `git worktree add` (repo convention).
-- **Runs in parallel with** `ng-calling-foundations`. The shared file is `src/ng/types.rs`, and the
+- **Runs in parallel with** `ng-calling-foundations`. The shared file is `src/types.rs`, and the
   overlap is avoided by region, not resolved by merge: this branch edits **only** the `InbreedingF`
-  block ([`types.rs:388`](../../../../src/ng/types.rs)), its boundary test
-  ([`types.rs:862`](../../../../src/ng/types.rs)), and inserts its new `DomainError` variant
+  block ([`types.rs:388`](../../../../src/types.rs)), its boundary test
+  ([`types.rs:862`](../../../../src/types.rs)), and inserts its new `DomainError` variant
   **immediately after the existing `InbreedingF` variant**; foundations appends its new scalars and
   variants **at the end** of their sections. Disjoint regions, no textual conflict expected.
 - **Merge order back:** whichever of the two finishes first merges to `main` first; the second
@@ -121,19 +121,19 @@ The ceiling is a property of the type, not of one estimator
 **A1. The half-open check.**  ✅
 `InbreedingF::try_new` rejects `1.0`: its own `[0, 1)` range test with a new `DomainError` variant
 that says so, **not** a change to the shared `checked_probability`
-([`types.rs:326`](../../../../src/ng/types.rs)), which the other fraction newtypes share and which
+([`types.rs:326`](../../../../src/types.rs)), which the other fraction newtypes share and which
 is right to admit `1.0` for them. Move the existing acceptance assertion at
-[`types.rs:862`](../../../../src/ng/types.rs) to the rejection list beside `1.5`. *Source:*
+[`types.rs:862`](../../../../src/types.rs) to the rejection list beside `1.5`. *Source:*
 calling_priors arch §2.1; spec §7.
 
 **A2. The fitted path clamps instead of panicking.**  ✅
-[`runs.rs:634`](../../../../src/ng/parameter_estimation/generic/runs.rs) builds an `InbreedingF`
+`373bd37d~1:src/ng/parameter_estimation/generic/runs.rs:634` builds an `InbreedingF`
 from a coverage-weighted posterior occupancy with `.expect(…)`; that occupancy can in principle
 reach exactly `1.0` on a fully homozygous sample, so after A1 the `expect` is a panic on a
 legitimate fit. Replace it: clamp the fitted value at **`0.99`** before constructing — production's
 own estimator ceiling, imported with its reasoning ("no sample ever reaches the caller carrying a
 prior that has ruled heterozygotes out",
-[`paralog/inbreeding.rs:25`](../../../../src/paralog/inbreeding.rs); spec §7). Test: a fit of
+`d9e7b076:src/paralog/inbreeding.rs:25`; spec §7). Test: a fit of
 exactly `1.0` constructs at `0.99` and does not panic. **Own commit, do not bundle** — a wrong
 clamp is a quietly different prior, not a crash; the oracle is A1's boundary tests plus the
 clamp test. *Depends:* A1. *Source:* calling_priors arch §2.1; spec §7.
@@ -146,13 +146,13 @@ clamp test. *Depends:* A1. *Source:* calling_priors arch §2.1; spec §7.
 Summing must stop at the read-group boundary: two reads showing the same sequence from two lanes
 have different error rates and must not be pooled ([`read_likelihoods.md`](../spec/read_likelihoods.md)
 §2.3). The merge's own doc already books the change as owed
-([`build.rs:958`](../../../../src/ng/run/cohort_merge/build.rs)).
+([`build.rs:958`](../../../../src/run/cohort_merge/build.rs)).
 
 **B1. The type change.**  ✅
-`SupportedAllele` ([`build.rs:913`](../../../../src/ng/run/cohort_merge/build.rs)) gains the
+`SupportedAllele` ([`build.rs:913`](../../../../src/run/cohort_merge/build.rs)) gains the
 read group: one row per `(allele, read group)`, rows in ascending `(allele, read group)` order —
 the shape that folds to today's where a sample has one group. `ReadGroupId` is already on
-`SequenceObservation` ([`locus_generation/mod.rs:316`](../../../../src/ng/locus_generation/mod.rs)).
+`SequenceObservation` ([`locus_generation/mod.rs:316`](../../../../src/locus_generation/mod.rs)).
 Compile-driven follow-through on every consumer of `supported`. *Source:* read_likelihoods spec
 §2.3; arch §2.1.
 
@@ -164,7 +164,7 @@ keeps two rows for one allele, with `num_reads` and `q_sum` split exactly as the
 one-group fixture is **byte-identical to today's output** — the existing merge test suite is the
 oracle and must pass unchanged apart from the row type. **Own commit, do not bundle** — pooling
 across the boundary is a quietly-wrong `q_sum`, not a crash. *Depends:* B1. *Source:*
-read_likelihoods spec §2.3; arch §2.1; [`build.rs:958`](../../../../src/ng/run/cohort_merge/build.rs).
+read_likelihoods spec §2.3; arch §2.1; [`build.rs:958`](../../../../src/run/cohort_merge/build.rs).
 
 > **Checkpoint B:** the axis exists, one-group samples are unchanged, two-group samples split.
 > Pause for review.
@@ -172,8 +172,8 @@ read_likelihoods spec §2.3; arch §2.1; [`build.rs:958`](../../../../src/ng/run
 ### Milestone C — the merge keeps partial observations (item 2)
 
 Today collation skips every observation whose witness is not `Complete`
-([`build.rs:1351`](../../../../src/ng/run/cohort_merge/build.rs)) and projection panics rather than
-pad one ([`build.rs:323`](../../../../src/ng/run/cohort_merge/build.rs)), so the likelihood's
+([`build.rs:1351`](../../../../src/run/cohort_merge/build.rs)) and projection panics rather than
+pad one ([`build.rs:323`](../../../../src/run/cohort_merge/build.rs)), so the likelihood's
 censored term has nothing to read. The requirement, verbatim from the corrected spec: **a partial
 observation must survive collation, keyed by the stretch it witnessed, and projected over that
 stretch rather than the whole locus span**
@@ -188,7 +188,7 @@ the evidence view's `PartialObservation` is consumed per read group like everyth
 No logic. *Depends:* B1. *Source:* read_likelihoods spec §5.4; arch §2.1 (`SampleEvidence.partials`).
 
 **C2. Collation keeps them; projection projects the stretch.**  ✅
-The `!= Complete → continue` at [`build.rs:1351`](../../../../src/ng/run/cohort_merge/build.rs)
+The `!= Complete → continue` at [`build.rs:1351`](../../../../src/run/cohort_merge/build.rs)
 routes partials into C1's rows instead of dropping them; the projection gains a
 witnessed-stretch variant instead of the panic (the panic stays for the code path that must never
 see one). Tests: a fixture with one partial read yields the row with hand-written stretch and
@@ -213,8 +213,8 @@ minted quantity is **the same function the locus generator mints with**, and the
 **D1. One mint function.**  ✅
 Hoist the per-read error mint — worse of the window's base quality and the mapping quality, in log
 space — into one named `pub(crate)` function beside its current home, and call it from both mint
-sites ([`pileup/open_record.rs:2047`](../../../../src/ng/locus_generation/pileup/open_record.rs),
-[`pileup/fast_column.rs:211`](../../../../src/ng/locus_generation/pileup/fast_column.rs)). Test:
+sites ([`pileup/open_record.rs:2047`](../../../../src/locus_generation/pileup/open_record.rs),
+[`pileup/fast_column.rs:211`](../../../../src/locus_generation/pileup/fast_column.rs)). Test:
 byte-identical `q_sum` on the existing pileup fixtures. *Source:* read_likelihoods spec §3.2,
 §12 test 10 ("checked by calling it from both sides on the same read").
 
@@ -229,19 +229,19 @@ observation's `q_sum` and throws the individual reads away, so `Σ ε` is not re
 would have meant a second accumulation at fold time and a new field on every observation. Taking
 `exp(Σ q_sum / Σ num_obs)` instead is the self-consistent choice rather than a concession: it is the
 quantity the model charges an observation, and the one production uses
-([`posterior_engine.rs:1536`](../../../../src/var_calling/posterior_engine.rs) — production has no
+(`d9e7b076:src/var_calling/posterior_engine.rs:1536` — production has no
 recalibration at all, so there is nothing there to copy but the quantity). **So the accumulator adds
 up numbers that already exist**, which is what "no new traversal" meant all along.
 
 **Neither route can call D1's function, and neither needs to.** The census route's per-position unit
-is a depth code and allele counts ([`joint/fit.rs:467`](../../../../src/ng/parameter_estimation/joint/fit.rs))
+is a depth code and allele counts ([`joint/fit.rs:467`](../../../../src/parameter_estimation/joint/fit.rs))
 with no quality in it, and the histogram route reads pooled observations rather than reads. The
 histogram route can supply both numbers from the observations it already walks; **the census route
 cannot supply either, whichever average is chosen**, so its accumulator waits on §4.1's comparison
 between the two routes — if it wins, its records gain a quality field; if the histogram route wins,
 nothing is owed.
 
-**Built:** [`generic/calibration.rs`](../../../../src/ng/parameter_estimation/generic/calibration.rs),
+**Built:** [`calibration.rs`](../../../../src/parameter_estimation/calibration.rs),
 accumulated in `GenericAccumulators::add_locus` over exactly the loci and read groups the
 error-rate histogram counts, exposed beside the histograms because nothing is fitted from it.
 **The sum is a fixed-point integer**, because the accumulator promises order-independent merging
@@ -282,13 +282,13 @@ calling loop re-estimates — so the classes disappear along with the ignorance 
   would have produced the number.
 - **The estimator could not have been ported.** Production fits its three-entry simplex from
   per-read posteriors that a read came from the contaminant
-  ([`var_calling/contamination_estimation.rs`](../../../../src/var_calling/contamination_estimation.rs)).
+  (`d9e7b076:src/var_calling/contamination_estimation.rs`).
   ng's contamination fit computes no such posterior — it works from marker read shares against
   ancestry-predicted dosages — so there was nothing to take shares of, and inventing an estimator is
   design this plan says in its own header it is not a place for.
 - **The census cannot answer the indel half cleanly anyway.** Its fifth allele code lumps insertions
   and deletions together with `N` and spanning deletions
-  ([`joint/census.rs`](../../../../src/ng/parameter_estimation/joint/census.rs),
+  ([`joint/census.rs`](../../../../src/parameter_estimation/joint/census.rs),
   `ObservedAllele::Other`), so an "insertion-or-deletion frequency" read off it is contaminated by
   two things that are not alleles.
 

@@ -18,9 +18,10 @@ every why.*
 | `CandidateAlleles` (the allele table), `GenotypeTable` + `AlleleId` + `GenotypeIdx` + `Genotype` (the candidate genotypes and their indexing), `ExpectedAlleleCopies`, `CallingScratch` (which holds the `Lg` **table**), `Phred`, `LocusInference`, and the two seam arguments `LocusEvidence` + `FrozenParameters` | **this doc** (§2) |
 | the `Lg` **row** contract, the evidence views, the stutter distribution and scoring contexts | [`read_likelihoods.md`](read_likelihoods.md) §1–§2, §4 |
 | `Concentration`, the seeds, the per-sample (leave-one-out) concentration | [`calling_priors.md`](calling_priors.md) §2–§3 |
-| `LogProb`, `InbreedingF`, `Ploidy` | exist in [`src/ng/types.rs`](../../../../src/ng/types.rs) |
+| `LogProb`, `InbreedingF`, `Ploidy` | exist in [`src/types.rs`](../../../../src/types.rs) |
 
-**The shared types live in `calling/mod.rs`, not in `inference/`** — one level up from all four
+**The shared types live at the `calling/` level, not in `inference/`** (one file per type family
+beside `calling/mod.rs`, which re-exports them) — one level up from all four
 sub-modules, so each imports downward and no no-import rule is needed between them
 ([`module_layout.md`](module_layout.md) principle 1b). The prior still takes flat copy-count slices
 and the likelihood flat `GenotypeTableView`s, for the no-allocation contract rather than for
@@ -28,13 +29,13 @@ dependency reasons.
 
 ## Module home
 
-`src/ng/calling/inference/` — step 9, inside the `calling/` folder that holds steps 6–9
+`src/calling/inference/` — step 9, inside the `calling/` folder that holds steps 6–9
 ([`module_layout.md`](module_layout.md)). A folder of its own because the step has a real bake-off
 (spec Q1's arms). **This doc also fixes what sits at the `calling/` level**, because the types it
 owns are the ones the other three sub-modules consume:
 
 ```
-src/ng/calling/
+src/calling/
 ├── mod.rs                     – the vocabulary all four sub-modules share (§2):
 │                                CandidateAlleles, ExpectedAlleleCopies, CallingScratch,
 │                                LocusEvidence, FrozenParameters, LocusInference
@@ -48,8 +49,17 @@ src/ng/calling/
     └── assignment.rs          – arms B/C: JointAssignmentPrior + the exhaustive/local scorers
 ```
 
-Two homes, and the split is deliberate. The **calling-only** vocabulary of §2 lives in
-`calling/mod.rs`. The **scalars other steps also name** seed `src/ng/types.rs`: `AlleleId(pub u16)`
+*As built, three things differ from this sketch. The shared vocabulary is in one file per type
+family beside `mod.rs` (`candidate_alleles.rs`, `locus_evidence.rs`, `frozen_parameters.rs`,
+`scratch.rs`, `locus_inference.rs`), with `mod.rs` holding only the module map and re-exports.
+There is no `discovery.rs`: allele discovery runs as a pre-pass inside candidate selection
+(`DiscoveryMode::BeforeTheLoop`, wired in `select_ssr`), so the loop has two levels, frequency and
+slippage, not three. And `assignment.rs` was never built; `inference/` holds `mod.rs`,
+`summarise_condition.rs` (its tests under `summarise_condition/tests/`),
+`repeat_tract_parameters.rs` and `slippage_refit.rs`.*
+
+Two homes, and the split is deliberate. The **calling-only** vocabulary of §2 lives at the
+`calling/` level, re-exported from `calling/mod.rs`. The **scalars other steps also name** seed `src/types.rs`: `AlleleId(pub u16)`
 (index into one locus's `CandidateAlleles`),
 `Phred(f32)` (validated ≥ 0, conversions named — the `ng_step_interfaces.md` §1 sketch, now
 real), and the opaque `Genotype(Box<[AlleleId]>)` multiset (output vocabulary; the loop's working
@@ -387,7 +397,7 @@ that discovered sequences enter `CandidateAlleles` through the same admission as
 
 Inside the merge's builder, on the region the builder owns — decided in the spec for the memory
 reason; it commutes either way (spec §9). The organiser's `CohortObservation` stream
-([`cohort_merge/organise.rs:271`](../../../../src/ng/run/cohort_merge/organise.rs)) is the input
+(`8bb94be9~1:src/run/cohort_merge/organise.rs:271`) is the input
 edge; `LocusInference` is what buffers instead.
 
 ## 8. Reconciliation with existing code
@@ -396,23 +406,23 @@ Every row read on 2026-08-21.
 
 | ng name | existing code | action |
 |---|---|---|
-| the loop internals (E-step / M-step / delta behind one seam; flat first pass) | `GenotypeEmModel` [`posterior_engine.rs:2635`](../../../../src/var_calling/posterior_engine.rs), `run_em_loop` [`:2733`](../../../../src/var_calling/posterior_engine.rs), `EmStepPhase` [`:2586`](../../../../src/var_calling/posterior_engine.rs) | **shape ported** into `SummariseConditionLoop`; ng needs no inner trait — the paths differ only in the sibling row builders |
-| convergence on expected copies over chromosomes | [`posterior_engine.rs:2704–2726`](../../../../src/var_calling/posterior_engine.rs) (the comment carries both halves of the reason) | port arithmetic + reasoning |
-| `DEFAULT_CONVERGENCE_THRESHOLD`, `DEFAULT_MAX_PASSES` | [`posterior_engine.rs:86`](../../../../src/var_calling/posterior_engine.rs), [`:96`](../../../../src/var_calling/posterior_engine.rs) | inherit, marked soft (spec Q4) |
-| emit-with-flag on non-convergence | [`posterior_engine.rs:26`](../../../../src/var_calling/posterior_engine.rs) (module doc: `DidNotConverge` retired for `converged = false` → `FILTER=EMNoConv`) | port rule + reasoning |
-| `GenotypeTable` | `GenotypeShape` + `shape_for` cache, [`posterior_engine/shape.rs:42`](../../../../src/var_calling/posterior_engine/shape.rs), [`:76`](../../../../src/var_calling/posterior_engine/shape.rs) | port; `nonzero_pairs` comes along if profiling asks |
-| `DEFAULT_MAX_CANDIDATE_ALLELES = 6` | Stage-5 `max_alleles` default, recorded at [`shape.rs:35`](../../../../src/var_calling/posterior_engine/shape.rs) | inherit, soft |
-| `CallingScratch` (lift out of the iteration) | [`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs) (allocator ~16% of cycles before the lift) | port with its measured reason |
-| the nested slippage rounds | [`em.rs:571–604`](../../../../src/ssr/cohort/em.rs) (re-fit → rebuild → rerun; break-before-rebuild order), config + defaults [`em.rs:60–75`](../../../../src/ssr/cohort/em.rs), [`:136–145`](../../../../src/ssr/cohort/em.rs) (`refit_max_rounds 3`, `theta_shrink 50`, `level_shrink 20`, `lambda 0.01`) | **shape ported, default not** — rounds ship at 0 (spec §5.1) |
-| the pull-back | `refine_theta_locus`, [`ssr/cohort/stutter.rs:181`](../../../../src/ssr/cohort/stutter.rs) | port; input changes to genotype posteriors |
-| read attribution | `attribute_locus`, [`em.rs:1189`](../../../../src/ssr/cohort/em.rs) (called-genotype input; the soft split its comment defers) | **shape ported, input not** — posteriors (spec §5.1) |
-| the frequency M-step + final calls | `run_pi_em` [`em.rs:816`](../../../../src/ssr/cohort/em.rs), `final_calls` [`:857`](../../../../src/ssr/cohort/em.rs) | one ng loop for both paths |
-| STR loop differential (not oracle) | π-convergence at `1e-6`, [`em.rs:137`](../../../../src/ssr/cohort/em.rs) | run ng under production's rule, require matching genotypes, then restore and report (spec §10) |
-| `CandidateAlleles` (generic input) | `CohortObservation.alleles`, [`cohort_merge/build.rs:815`](../../../../src/ng/run/cohort_merge/build.rs) | **built**: `select_generic` narrows it with the cap and the support bar ([`candidate_alleles.md`](candidate_alleles.md)) — call it, do not re-derive it |
-| `CandidateAlleles` (STR input) | `assemble_candidates` + `occupied`, [`candidate_set.rs:193`](../../../../src/ssr/cohort/candidate_set.rs), [`:221`](../../../../src/ssr/cohort/candidate_set.rs) | port the rung ladder when the STR path comes through the merge |
+| the loop internals (E-step / M-step / delta behind one seam; flat first pass) | `GenotypeEmModel` `d9e7b076:src/var_calling/posterior_engine.rs:2635`, `run_em_loop` `d9e7b076:src/var_calling/posterior_engine.rs:2733`, `EmStepPhase` `d9e7b076:src/var_calling/posterior_engine.rs:2586` | **shape ported** into `SummariseConditionLoop`; ng needs no inner trait — the paths differ only in the sibling row builders |
+| convergence on expected copies over chromosomes | `d9e7b076:src/var_calling/posterior_engine.rs:2704–2726` (the comment carries both halves of the reason) | port arithmetic + reasoning |
+| `DEFAULT_CONVERGENCE_THRESHOLD`, `DEFAULT_MAX_PASSES` | `d9e7b076:src/var_calling/posterior_engine.rs:86`, `d9e7b076:src/var_calling/posterior_engine.rs:96` | inherit, marked soft (spec Q4) |
+| emit-with-flag on non-convergence | `d9e7b076:src/var_calling/posterior_engine.rs:26` (module doc: `DidNotConverge` retired for `converged = false` → `FILTER=EMNoConv`) | port rule + reasoning |
+| `GenotypeTable` | `GenotypeShape` + `shape_for` cache, `d9e7b076:src/var_calling/posterior_engine/shape.rs:42`, `d9e7b076:src/var_calling/posterior_engine/shape.rs:76` | port; `nonzero_pairs` comes along if profiling asks |
+| `DEFAULT_MAX_CANDIDATE_ALLELES = 6` | Stage-5 `max_alleles` default, recorded at `d9e7b076:src/var_calling/posterior_engine/shape.rs:35` | inherit, soft |
+| `CallingScratch` (lift out of the iteration) | `d9e7b076:src/var_calling/posterior_engine.rs:1874` (allocator ~16% of cycles before the lift) | port with its measured reason |
+| the nested slippage rounds | `d9e7b076:src/ssr/cohort/em.rs:571–604` (re-fit → rebuild → rerun; break-before-rebuild order), config + defaults `d9e7b076:src/ssr/cohort/em.rs:60–75`, `d9e7b076:src/ssr/cohort/em.rs:136–145` (`refit_max_rounds 3`, `theta_shrink 50`, `level_shrink 20`, `lambda 0.01`) | **shape ported, default not** — rounds ship at 0 (spec §5.1) |
+| the pull-back | `refine_theta_locus`, `d9e7b076:src/ssr/cohort/stutter.rs:181` | port; input changes to genotype posteriors |
+| read attribution | `attribute_locus`, `d9e7b076:src/ssr/cohort/em.rs:1189` (called-genotype input; the soft split its comment defers) | **shape ported, input not** — posteriors (spec §5.1) |
+| the frequency M-step + final calls | `run_pi_em` `d9e7b076:src/ssr/cohort/em.rs:816`, `final_calls` `d9e7b076:src/ssr/cohort/em.rs:857` | one ng loop for both paths |
+| STR loop differential (not oracle) | π-convergence at `1e-6`, `d9e7b076:src/ssr/cohort/em.rs:137` | run ng under production's rule, require matching genotypes, then restore and report (spec §10) |
+| `CandidateAlleles` (generic input) | `CohortObservation.alleles`, [`cohort_merge/build.rs:815`](../../../../src/run/cohort_merge/build.rs) | **built**: `select_generic` narrows it with the cap and the support bar ([`candidate_alleles.md`](candidate_alleles.md)) — call it, do not re-derive it |
+| `CandidateAlleles` (STR input) | `assemble_candidates` + `occupied`, `d9e7b076:src/ssr/cohort/candidate_set.rs:193`, `d9e7b076:src/ssr/cohort/candidate_set.rs:221` | port the rung ladder when the STR path comes through the merge |
 | arm B's prior | [`genetics.rs:127`](../../../../src/genetics.rs) on cohort counts | reuse the sibling's port — one primitive, two callers |
 | arm C's prior | [`freebayes/src/Ewens.cpp`](../../../../freebayes/src/Ewens.cpp) (51 lines) | reimplement natively; store moves, not assignment copies (spec Q1) |
-| slippage-curve pull-back target | `SlippageCurve` / `blend_level`, [`joint/slippage_curve.rs:141`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs), [`:574`](../../../../src/ng/parameter_estimation/joint/slippage_curve.rs) | consume as the level's shrink target (spec Q2 preamble) |
+| slippage-curve pull-back target | `SlippageCurve` / `blend_level`, [`joint/slippage_curve.rs:141`](../../../../src/parameter_estimation/joint/slippage_curve.rs), [`:574`](../../../../src/parameter_estimation/joint/slippage_curve.rs) | consume as the level's shrink target (spec Q2 preamble) |
 | discovery mechanism | HipSTR's, described in full in spec §4.1 | build **from the spec's description**, not the GPL tree ([`read_likelihoods.md`](../spec/read_likelihoods.md) §4.2's licence rule) |
 
 ## 9. Design decisions — decided

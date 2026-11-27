@@ -19,13 +19,13 @@ and tomato regressions the sibling specs name as their definition of done stop b
 
 **In:**
 
-- `src/ng/run/cohort_merge/mod.rs` — a `const` path for `MinAltReadShare`, so
+- `src/run/cohort_merge/mod.rs` — a `const` path for `MinAltReadShare`, so
   `DEFAULT_MIN_ALLELE_SUPPORT` can be a `pub const`; and one doc-comment widening on
   `MinAltReads::reached_by` saying the numerator is the caller's.
-- `src/ng/calling/allele_candidates/mod.rs` — `CandidateSelectionConfig` with its two named
+- `src/calling/allele_candidates/mod.rs` — `CandidateSelectionConfig` with its two named
   defaults, `SelectionVerdict`, `UnmatchedSupport`, `AlleleRemap`, `LocusSelection`,
   `SelectionScratch`, the private per-allele fold and the ranking comparison.
-- `src/ng/calling/allele_candidates/generic.rs` — `select_generic`.
+- `src/calling/allele_candidates/generic.rs` — `select_generic`.
 - `examples/ng_candidate_selection_probe.rs` — rewritten to call the module instead of carrying
   its own copy of the rule (Milestone D; it is the measurement oracle).
 
@@ -74,17 +74,17 @@ and tomato regressions the sibling specs name as their definition of done stop b
 ## Preconditions (already in place)
 
 - **The merge, complete** ([`cohort_merge.md`](cohort_merge.md), 16 of 16): `CohortObservation`
-  ([`build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs)), `SampleSupport`
-  ([`:965`](../../../../src/ng/run/cohort_merge/build.rs)) with its `(allele, read group)` rows
-  ([`:1089`](../../../../src/ng/run/cohort_merge/build.rs)) and its partials
-  ([`:1130`](../../../../src/ng/run/cohort_merge/build.rs)), `AlleleSupport::q_sum`
-  ([`:1245`](../../../../src/ng/run/cohort_merge/build.rs)), and
-  `SampleSupport::pooled_support_for` ([`:1070`](../../../../src/ng/run/cohort_merge/build.rs)).
+  ([`build.rs:922`](../../../../src/run/cohort_merge/build.rs)), `SampleSupport`
+  ([`:965`](../../../../src/run/cohort_merge/build.rs)) with its `(allele, read group)` rows
+  ([`:1089`](../../../../src/run/cohort_merge/build.rs)) and its partials
+  ([`:1130`](../../../../src/run/cohort_merge/build.rs)), `AlleleSupport::q_sum`
+  ([`:1245`](../../../../src/run/cohort_merge/build.rs)), and
+  `SampleSupport::pooled_support_for` ([`:1070`](../../../../src/run/cohort_merge/build.rs)).
 - **The support rule**: `MinAltReads` with `required_of` and `reached_by`
-  ([`cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs)).
+  ([`cohort_merge/mod.rs:424`](../../../../src/run/cohort_merge/mod.rs)).
 - **The output table**: `CandidateAlleles` with `new`/`admit`/`bases_of`
-  ([`calling/mod.rs:86`](../../../../src/ng/calling/mod.rs)) and `AlleleId`
-  ([`types.rs:304`](../../../../src/ng/types.rs)).
+  ([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)) and `AlleleId`
+  ([`types.rs:304`](../../../../src/types.rs)).
 - **The measurement harness**: `examples/ng_candidate_selection_probe.rs`, and the benchmark
   inputs it reads — `benchmarks/giab/per_sample/bam/{30x,300x}` with the v4.2.1 truth VCFs, and
   `benchmarks/tomato1/`.
@@ -95,7 +95,7 @@ and tomato regressions the sibling specs name as their definition of done stop b
 ## Branch and merge
 
 - **Branch** `ng-candidate-alleles`, from `main`. No worktree — the convention for sequential work.
-- **Conflict surface, and it is one line.** `src/ng/calling/mod.rs` gains
+- **Conflict surface, and it is one line.** `src/calling/mod.rs` gains
   `pub mod allele_candidates;`, and [`calling_loop.md`](calling_loop.md) A1 also edits that file.
   Whichever lands second rebases over a one-line addition. Everything else in this plan is new
   files, plus one method and one doc comment in `cohort_merge/mod.rs`, which nothing else in
@@ -111,7 +111,7 @@ and tomato regressions the sibling specs name as their definition of done stop b
 
 **A1. The rule's constants, and a `const` path for the share.**  ✅
 `MinAltReadShare` gains a `const` constructor beside its fallible `new`
-([`cohort_merge/mod.rs:366-380`](../../../../src/ng/run/cohort_merge/mod.rs)) — its field is
+([`cohort_merge/mod.rs:366-380`](../../../../src/run/cohort_merge/mod.rs)) — its field is
 private, so `DEFAULT_MIN_ALLELE_SUPPORT` cannot be a `pub const` without one; it panics on a value
 outside `0..=1`, which is a compile-time failure for a `const` and so is the right severity.
 Then, in the new `calling/allele_candidates/mod.rs`: `CandidateSelectionConfig`,

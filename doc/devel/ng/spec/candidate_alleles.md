@@ -14,10 +14,11 @@ alternatives survive here), and [`calling_em_loop.md`](calling_em_loop.md) §4 (
 gap and whose discovery rounds re-enter through this document's admission rule).*
 
 *Production's nearest equivalents are
-[`per_group_merger.rs`](../../../../src/var_calling/per_group_merger.rs) (SNP/indel) and
-[`ssr/cohort/candidate_set.rs`](../../../../src/ssr/cohort/candidate_set.rs) (repeat tracts).
+`d9e7b076:src/var_calling/per_group_merger.rs` (SNP/indel) and
+`d9e7b076:src/ssr/cohort/candidate_set.rs` (repeat tracts).
 Everything said about those files is a record of what they do, not a proposal to change them —
-`src/ssr/` and `src/var_calling/` are frozen production.*
+`src/ssr/` and `src/var_calling/` were frozen production, deleted on 2026-09-13; the paths above name them at
+commit `d9e7b076`, the last that held them.*
 
 ---
 
@@ -64,7 +65,7 @@ blocker, twice).
   §6.3: a discovered sequence enters through this document's rule, not through one of its own.
 - **It does not prune after genotyping.** Dropping alleles no sample's best genotype used is the
   loop's, and it renumbers every allele id, so it needs a remapping this step never mints
-  ([`calling/mod.rs:170-186`](../../../../src/ng/calling/mod.rs)).
+  ([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)).
 - **It does not decide what the VCF says**, including whether a locus with no surviving
   alternative is emitted at all. That belongs to emission (steps 10–13).
 - **It does not re-ask a question the merge already asked.** The merge decides whether a locus is
@@ -81,7 +82,7 @@ Three terms, all used below before anything is built on them.
   because the merge admits only complete observations onto alleles.
 
   *Corrected 2026-08-24. This entry also cited
-  [`SampleLocusObservations::reads_compared_with_reference`](../../../../src/ng/locus_generation/mod.rs),
+  [`SampleLocusObservations::reads_compared_with_reference`](../../../../src/locus_generation/mod.rs),
   the locus generator's own count, as though the two were the same number. They are not: they
   differ by the reads the merge removed as evidence, which never reach a row. The sum of the rows
   is the definition — it is what [`../arch/candidate_alleles.md`](../arch/candidate_alleles.md)
@@ -105,12 +106,12 @@ Three terms, all used below before anything is built on them.
 **Input:** one assembled `CohortObservation` — the locus's span, its unified allele table with
 the reference at index 0, and per sample one row per `(allele, read group)` carrying a read count
 and five quality sums
-([`build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs),
-[`:965`](../../../../src/ng/run/cohort_merge/build.rs),
-[`:1089`](../../../../src/ng/run/cohort_merge/build.rs)).
+([`build.rs:922`](../../../../src/run/cohort_merge/build.rs),
+[`:965`](../../../../src/run/cohort_merge/build.rs),
+[`:1089`](../../../../src/run/cohort_merge/build.rs)).
 
 **Output:** `CandidateAlleles` — the surviving sequences with the reference at index 0, built and
-merged ([`calling/mod.rs:86`](../../../../src/ng/calling/mod.rs)) — plus the verdict of §6 and,
+merged ([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)) — plus the verdict of §6 and,
 per sample, the leftover of §5.
 
 **Decision: it runs inside the merge's builder, on the locus the builder has just assembled.**
@@ -144,9 +145,9 @@ floor = 2 reads          share = 10 in 100 of that sample's compared reads
 **This is the merge's own keep rule, asked one level down.** The merge asks each sample whether
 its *non-reference reads pooled* reach `max(floor, ceil(share × compared reads))` and builds the
 locus if any one does ([`cohort_merge.md`](cohort_merge.md) §4.3); the type that answers it is
-[`MinAltReads`](../../../../src/ng/run/cohort_merge/mod.rs), `required_of`
-([`:451`](../../../../src/ng/run/cohort_merge/mod.rs)) and `reached_by`
-([`:466`](../../../../src/ng/run/cohort_merge/mod.rs)). Selection asks the identical question of
+[`MinAltReads`](../../../../src/run/cohort_merge/mod.rs), `required_of`
+([`:451`](../../../../src/run/cohort_merge/mod.rs)) and `reached_by`
+([`:466`](../../../../src/run/cohort_merge/mod.rs)). Selection asks the identical question of
 each *allele* separately. **The type is reused rather than copied**, so the two rules cannot drift
 apart and a sweep of one is a sweep of both.
 
@@ -158,10 +159,10 @@ share half buys at depth.
 
 **Production's ordinary path admits every distinct byte sequence any sample showed**, with no
 count, fraction, quality or strand test — including buckets with zero observations
-([`per_group_merger.rs:1105-1128`](../../../../src/var_calling/per_group_merger.rs)). Its
+(`d9e7b076:src/var_calling/per_group_merger.rs:1105-1128`). Its
 `--min-alt-obs-per-sample`, default 2
-([`variant_caller.rs:380`](../../../../src/var_calling/variant_caller.rs),
-[`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs)), is a *record* survival test: if one
+(`d9e7b076:src/var_calling/variant_caller.rs:380`,
+`d9e7b076:src/var_calling/mod.rs:72`), is a *record* survival test: if one
 alternative has two reads, a second alternative with a single read rides into the genotyping beside
 it. bcftools has no SNP allele bar either — any base seen at base quality 1 or more becomes an
 `ALT` ([`bam2bcf.c:996-1002`](../../../../bcftools/bam2bcf.c)) — and GATK has none at generation
@@ -330,10 +331,10 @@ here.
 to the best six; the locus is never refused.**
 
 **Six is inherited from production**, whose `DEFAULT_MAX_ALLELES_PER_RECORD`
-([`per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs)) counts a record's
+(`d9e7b076:src/var_calling/per_group_merger.rs:57`) counts a record's
 whole allele set the same way — `enforce_max_alleles` compares `unified.alleles.len()` and
 protects the reference from pruning
-([`:1434`](../../../../src/var_calling/per_group_merger.rs)). ng's own documents already do their
+(`d9e7b076:src/var_calling/per_group_merger.rs:1434`). ng's own documents already do their
 arithmetic at that width — "21 at six alleles"
 ([`calling_em_loop.md`](calling_em_loop.md) §1.3). **It has never been measured and is soft.**
 §4.2 says how often it binds, which is the fact that decides whether its value matters.
@@ -344,7 +345,7 @@ documented "Maximum number of alternate alleles to genotype"
 ([`GenotypeCalculationArgumentCollection.java:29`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/genotyper/GenotypeCalculationArgumentCollection.java))
 — so GATK genotypes over seven alleles where ng genotypes over six, and **ng's cap is the tighter
 of the two by one allele**: 21 genotypes against 28 at diploid. Production's own comment makes
-the same equation ([`:53-57`](../../../../src/var_calling/per_group_merger.rs)) and ng inherited
+the same equation (`d9e7b076:src/var_calling/per_group_merger.rs:53-57`) and ng inherited
 it; *corrected 2026-08-24, checked against the vendored tree.*
 
 ### 4.1 Truncate, never refuse — and the ranking
@@ -352,7 +353,7 @@ it; *corrected 2026-08-24, checked against the vendored tree.*
 **Truncation, because refusal throws away the good alleles with the bad.** A locus carrying two
 obvious variants and six noise sequences is refused whole under production's repeat-tract rule
 (over 24 candidates, every sample no-called,
-[`candidate_set.rs:272-276`](../../../../src/ssr/cohort/candidate_set.rs)) and under HipSTR's
+`d9e7b076:src/ssr/cohort/candidate_set.rs:272-276`) and under HipSTR's
 (over 1,000 haplotypes, the locus is abandoned). GATK, bcftools' indel path and production's own
 ordinary path truncate instead, and **freebayes does not cap at all unless asked to** —
 `--use-best-n-alleles` defaults to 0, which its own usage text spells "use all"
@@ -436,7 +437,7 @@ sample.
 
 **This is not production's ranking, and the difference is what it does at scale.** Production
 ranks by the cohort's raw read total
-([`enforce_max_alleles`, `per_group_merger.rs:1434`](../../../../src/var_calling/per_group_merger.rs)),
+(`enforce_max_alleles`, `d9e7b076:src/var_calling/per_group_merger.rs:1434`),
 so at a thousand samples the alleles pushed into the leftover are the private ones: a real allele
 carried by one sample at 30× scores 15 reads, while a systematic mismapping artefact at 1% in 800
 samples scores 240. A within-sample share inverts that — 0.5 against 0.01. **Two other callers
@@ -467,11 +468,11 @@ two sentences above would conclude the opposite.
 
 **No second, harder ceiling is needed.** Production carries one at 64 alleles, where the group is
 refused outright, because its genotype enumeration uses a `u64` bitmask
-([`per_group_merger.rs:936-940`](../../../../src/var_calling/per_group_merger.rs)). ng has no
+(`d9e7b076:src/var_calling/per_group_merger.rs:936-940`). ng has no
 bitmask, and with the bar of §3 applied before the cap no locus reaches the loop above six. What
 remains is `admit`'s own refusal at 65,536 alleles, which exists so a discovered allele cannot
 wrap onto the reference's index
-([`calling/mod.rs:170-186`](../../../../src/ng/calling/mod.rs)) and is a backstop, not a policy.
+([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)) and is a backstop, not a policy.
 
 ### 4.2 How often it binds — measured
 
@@ -563,7 +564,7 @@ it, because nothing upstream drops anything. Selection is what creates the pool,
 it.**
 
 **It costs nothing to produce.** The merge already stores `q_sum` per `(sample, allele, read
-group)` ([`build.rs:1245`](../../../../src/ng/run/cohort_merge/build.rs)), so a sample's leftover
+group)` ([`build.rs:1245`](../../../../src/run/cohort_merge/build.rs)), so a sample's leftover
 is the sum over the alleles selection dropped. There is no new upstream producer and no second
 pass over anything.
 
@@ -588,11 +589,11 @@ genotype for a sample whose allele is missing from the table — is not one.
 
 **Production produces the same thing and shows the trap.** Its cap pools the dropped alleles'
 per-sample support into `other_scalars`, whose `q_sum` enters every genotype's likelihood
-([`pool_dropped_other_scalars`, `per_group_merger.rs:1555`](../../../../src/var_calling/per_group_merger.rs);
-consumed at [`:1979-1986`](../../../../src/var_calling/per_group_merger.rs)). **And when
+(`pool_dropped_other_scalars`, `d9e7b076:src/var_calling/per_group_merger.rs:1555`;
+consumed at `d9e7b076:src/var_calling/per_group_merger.rs:1979-1986`). **And when
 contamination is configured the loop recomputes likelihoods from the per-allele table and never
-reads it** ([`posterior_engine.rs:1480`](../../../../src/var_calling/posterior_engine.rs) and the
-substitution around [`:2429`](../../../../src/var_calling/posterior_engine.rs)), so the pool
+reads it** (`d9e7b076:src/var_calling/posterior_engine.rs:1480` and the
+substitution around `d9e7b076:src/var_calling/posterior_engine.rs:2429`), so the pool
 silently vanishes on that path. ng's own likelihood has the same contamination mixture
 ([`read_likelihoods.md`](read_likelihoods.md) §3.6) and so has the same omission available.
 Flagged as a trap, not as a change to production.
@@ -604,8 +605,8 @@ Flagged as a trap, not as a change to production.
 
 - **Partial reads.** A read that stopped inside the locus does not say what the sample carries, it
   says the sample carries *at least* this, and it is held on its own axis with its own bases and
-  witnessed stretch ([`SampleSupport::partials`](../../../../src/ng/run/cohort_merge/build.rs),
-  `PartialObservation` at [`:1130`](../../../../src/ng/run/cohort_merge/build.rs)). Selection does
+  witnessed stretch ([`SampleSupport::partials`](../../../../src/run/cohort_merge/build.rs),
+  `PartialObservation` at [`:1130`](../../../../src/run/cohort_merge/build.rs)). Selection does
   not read them, does not count them toward any bar, and does not fold them into the pool: they
   are not reads matching no candidate, they are reads matching a *set* of candidates, which
   [`read_likelihoods.md`](read_likelihoods.md) §5.3 scores. **Selection can empty that set** — a
@@ -613,7 +614,7 @@ Flagged as a trap, not as a change to production.
   knows the state is reachable; what to do about it is theirs.
 - **Reads that produced no observation, and reads removed as evidence.** Both are counted by the
   merge and neither carries a quality sum
-  ([`build.rs:1036-1052`](../../../../src/ng/run/cohort_merge/build.rs)), so neither can join a
+  ([`build.rs:1036-1052`](../../../../src/run/cohort_merge/build.rs)), so neither can join a
   pool of error mass. They were never in the allele table and selection did not drop them.
 - **The reference's own reads.** The reference allele is never dropped (§6.1).
 
@@ -625,7 +626,7 @@ Flagged as a trap, not as a change to production.
 
 It is placed before any sample's evidence is read and is exempt from both the bar and the cap. The
 type makes it impossible to build a table without it and impossible to move it
-([`calling/mod.rs:86-118`](../../../../src/ng/calling/mod.rs)); production, freebayes and GATK all
+([`calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs)); production, freebayes and GATK all
 force it to index 0 for the same reason — every downstream branch tests against it.
 
 ### 6.2 The verdict — two cases, and a deliberate absence
@@ -751,7 +752,7 @@ requires of itself ([`cohort_merge.md`](cohort_merge.md) §9). Selection is a pu
 one locus (§2), so the only exposure is the cap's ranking, and its final tie-break on the allele's
 bases closes it: no two distinct alleles can compare equal. **The ranking must not rest on a
 stable sort of equal keys** — production's does, which is deterministic but arbitrary
-([`per_group_merger.rs:1434`](../../../../src/var_calling/per_group_merger.rs)) — because the row
+(`d9e7b076:src/var_calling/per_group_merger.rs:1434`) — because the row
 order it would inherit is the order samples were walked in.
 
 ---
@@ -760,11 +761,11 @@ order it would inherit is the order samples were walked in.
 
 | what | existing code | how ng reuses it |
 |---|---|---|
-| the two-part support rule and its constants | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/ng/run/cohort_merge/mod.rs) | **the type itself, unchanged**, with a different numerator. The share moves from 2% to 10% for this rule only; the merge keeps its own (§3.3) |
-| the allele table and its reference invariant | [`CandidateAlleles`, `calling/mod.rs:86`](../../../../src/ng/calling/mod.rs) | built and merged; selection fills it through `admit` |
-| the evidence | [`CohortObservation`, `cohort_merge/build.rs:922`](../../../../src/ng/run/cohort_merge/build.rs) | read, not changed |
-| the cap's value | [`DEFAULT_MAX_ALLELES_PER_RECORD`, `per_group_merger.rs:57`](../../../../src/var_calling/per_group_merger.rs) | the number is inherited and declared inherited; the ranking is **not** ported (§4.1) |
-| pooling the dropped alleles' error mass | [`pool_dropped_other_scalars`, `per_group_merger.rs:1555`](../../../../src/var_calling/per_group_merger.rs) | the shape is the same; ng adds the read count (§5) and does not repeat the contamination omission |
+| the two-part support rule and its constants | [`MinAltReads`, `cohort_merge/mod.rs:424`](../../../../src/run/cohort_merge/mod.rs) | **the type itself, unchanged**, with a different numerator. The share moves from 2% to 10% for this rule only; the merge keeps its own (§3.3) |
+| the allele table and its reference invariant | [`CandidateAlleles`, `calling/candidate_alleles.rs`](../../../../src/calling/candidate_alleles.rs) | built and merged; selection fills it through `admit` |
+| the evidence | [`CohortObservation`, `cohort_merge/build.rs:922`](../../../../src/run/cohort_merge/build.rs) | read, not changed |
+| the cap's value | `DEFAULT_MAX_ALLELES_PER_RECORD`, `d9e7b076:src/var_calling/per_group_merger.rs:57` | the number is inherited and declared inherited; the ranking is **not** ported (§4.1) |
+| pooling the dropped alleles' error mass | `pool_dropped_other_scalars`, `d9e7b076:src/var_calling/per_group_merger.rs:1555` | the shape is the same; ng adds the read count (§5) and does not repeat the contamination omission |
 
 **There is no parity oracle for this path, and inventing one would be worse than saying so.**
 Production has no per-allele bar at all (§3.1), so there is nothing to be byte-identical with. The
@@ -787,7 +788,7 @@ repeat-tract path gets a differential instead
   records that selection can create the state.
 - **Whether the emitted depth counts the leftover's reads** — to emission. Production's does not,
   a documented convention that makes its `DP` not the position's depth
-  ([`posterior_engine.rs:877`](../../../../src/var_calling/posterior_engine.rs)); ng should decide
+  (`d9e7b076:src/var_calling/posterior_engine.rs:877`); ng should decide
   rather than inherit by accident.
 
 ---
@@ -871,6 +872,7 @@ repeat-tract path gets a differential instead
   cover it on hand-built multi-sample loci; what is missing is real data. *What would supply it:*
   HG003 and HG004 re-sliced to HG002's benchmark intervals, which is a benchmark-data task rather
   than a caller one.
-- **The measurement harness exists**: `examples/ng_candidate_selection_probe.rs` walks a real
-  cohort, applies the bar and the cap, and with `NG_SELECT_DUMP` writes a per-allele table for
+- **The measurement harness was** `examples/ng_candidate_selection_probe.rs`, removed in commit
+  `0f9281c5` (read it at `0f9281c5~1:examples/ng_candidate_selection_probe.rs`). It walked a real
+  cohort, applied the bar and the cap, and with `NG_SELECT_DUMP` wrote a per-allele table for
   truth scoring. Every number in §3.3, §4.2 and §5 came from it on 2026-08-24.

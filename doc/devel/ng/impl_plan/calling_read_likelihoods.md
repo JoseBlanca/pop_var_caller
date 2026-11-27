@@ -39,11 +39,11 @@ been the pre-pass's).
 
 ## Scope
 
-**In:** `src/ng/calling/likelihood/` — `mod.rs` (evidence views, the row contract, the parameter
+**In:** `src/calling/likelihood/` — `mod.rs` (evidence views, the row contract, the parameter
 tiers, shared floors, scratch shapes), `generic.rs` (the SNP/indel closed form + contamination
 mixture + the partial rule), `ssr.rs` (the STR row), `ssr_emission.rs` (`SsrEmissionModel`,
 `StutterSubstitutionEmission`, `ClassicEmissionOracle`); the three recorded changes to
-[`alignment/stutter.rs`](../../../../src/ng/alignment/stutter.rs) (ng code, not frozen
+[`alignment/stutter.rs`](../../../../src/alignment/stutter.rs) (ng code, not frozen
 production); the two doc repointings spec §7 asks for.
 
 **Out (later plans or upstream):**
@@ -72,12 +72,12 @@ production); the two doc repointings spec §7 asks for.
   model seam and the comparator are **ports** (spec §9's map); the stutter distribution is
   **reused from `alignment/stutter.rs`**, renamed — one built implementation with two consumers,
   never a second spelling. The substitution comparison is **composed** from `FlatEmission`
-  ([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)), never re-implemented.
+  ([`alignment/emission.rs:250`](../../../../src/alignment/emission.rs)), never re-implemented.
   HipSTR's GPL tree is **not a source to implement from**; the operative source is spec §4.2's
   own full statement of the distribution (the licence rule, spec §4.2).
 - **Verify against ground truth.** The generic row against production's
   `standard_log_likelihood`
-  ([`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs)) with the two
+  (`d9e7b076:src/var_calling/per_group_merger.rs:1948`) with the two
   recorded changes reconciled term-by-term; the STR emission against `ClassicEmissionOracle` —
   an independent implementation, ported test-only exactly as production keeps it.
 - **Isolate the silent steps.** The `m(a, g)` divisor, an inverted one-step share, the
@@ -95,30 +95,30 @@ production); the two doc repointings spec §7 asks for.
   route; the census route's waits on the comparison between the two routes), the `StratumFits`
   gather (F). **Item 4 is not owed by that plan** — see the note above.
 - The STR evidence needs no merge work: `SequenceObservation`
-  ([`locus_generation/mod.rs:295`](../../../../src/ng/locus_generation/mod.rs)) already keys on
+  ([`locus_generation/mod.rs:295`](../../../../src/locus_generation/mod.rs)) already keys on
   `(bases, witness, read_group)`; `complete_observations()`
-  ([`:134`](../../../../src/ng/locus_generation/mod.rs)) is where the split is spelled there.
+  ([`:134`](../../../../src/locus_generation/mod.rs)) is where the split is spelled there.
   *(Corrected 2026-08-24 at A1: this said that method "stays the only unguarded access", and it is
   neither a guard — the field it reads is `pub` — nor now the only one, since `SsrSampleEvidence`
   holds a bare slice and spells the split again. Arch §2.2 carries the full correction.)*
 - The pieces to reuse or port: `StutterModel`/`StutterRates`/`probability`
-  ([`alignment/stutter.rs:177`](../../../../src/ng/alignment/stutter.rs),
-  [`:106`](../../../../src/ng/alignment/stutter.rs),
-  [`:345`](../../../../src/ng/alignment/stutter.rs)), `MAX_SLIP = 10`
-  ([`:78`](../../../../src/ng/alignment/stutter.rs)), the geometric clamps
-  ([`:90`](../../../../src/ng/alignment/stutter.rs), made `pub` at A2 so the likelihood names them
+  ([`alignment/stutter.rs:177`](../../../../src/alignment/stutter.rs),
+  [`:106`](../../../../src/alignment/stutter.rs),
+  [`:345`](../../../../src/alignment/stutter.rs)), `MAX_SLIP = 10`
+  ([`:78`](../../../../src/alignment/stutter.rs)), the geometric clamps
+  ([`:90`](../../../../src/alignment/stutter.rs), made `pub` at A2 so the likelihood names them
   rather than spelling a second copy); production's seam and comparator
-  ([`read_model/mod.rs:63`](../../../../src/ssr/cohort/read_model/mod.rs),
-  [`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)); the placement enumeration
-  ([`ssr/cohort/stutter.rs`](../../../../src/ssr/cohort/stutter.rs)); `MIN_BASE_ERROR`
-  ([`contamination_estimation.rs:1449`](../../../../src/var_calling/contamination_estimation.rs)).
+  (`d9e7b076:src/ssr/cohort/read_model/mod.rs:63`,
+  `d9e7b076:src/ssr/cohort/read_model/classic.rs`); the placement enumeration
+  (`d9e7b076:src/ssr/cohort/stutter.rs`); `MIN_BASE_ERROR`
+  (`d9e7b076:src/var_calling/contamination_estimation.rs:1449`).
 
 ## Worktree, branch, merge
 
 - **Worktree** `../pop_var_caller-calling-read-likelihoods`, **branch**
   `ng-calling-read-likelihoods`, from `main` **after both phase-1 branches
   (`ng-calling-foundations`, `ng-calling-prerequisites`) have merged**.
-- **Runs in parallel with** `ng-calling-prior`. Conflict surface: `src/ng/calling/mod.rs` — one
+- **Runs in parallel with** `ng-calling-prior`. Conflict surface: `src/calling/mod.rs` — one
   `pub mod likelihood;` line plus re-exports, placed alphabetically. This branch adds nothing to
   `types.rs`; its floors are named constants in `likelihood/mod.rs` and the stutter edits stay in
   `alignment/stutter.rs`, which no other calling branch touches.
@@ -142,7 +142,7 @@ correction)*
 `(allele, read group)`, which prerequisites Milestone B made real; `PartialObservation` over
 Milestone C's kept rows, bases + witnessed positions intact. `SsrSampleEvidence` — a slice of
 `SequenceObservation` plus the locus's `SsrDetail`
-([`locus_generation/mod.rs:438`](../../../../src/ng/locus_generation/mod.rs)). *Source:* arch
+([`locus_generation/mod.rs:438`](../../../../src/locus_generation/mod.rs)). *Source:* arch
 §2.1, §2.2; spec §1.4, §2.3.
 
 **A2. Parameter views, floors, contract.**  ✅ *(shipped with three departures, all recorded in the
@@ -161,11 +161,11 @@ where the allele frequency is rather than frozen on this view (C2 below).
 
 **The scale is `fitted rate ÷ exp(Σ q_sum / Σ num_obs)`, a geometric mean** — the pre-pass's
 accumulator supplies the two sums
-([`generic/calibration.rs`](../../../../src/ng/parameter_estimation/generic/calibration.rs)), and
+([`calibration.rs`](../../../../src/parameter_estimation/calibration.rs)), and
 spec §3.2 records why that average and not the arithmetic one. Import `MIN_BASE_ERROR = 1e-12` and
 the geometric clamps as named constants with their reasons. The row contract in `mod.rs`'s docs: pure function, fills caller scratch, empty evidence
 row = all zeros (the prior decides, no branch), mis-shaped input = assertion held in release
-([`per_group_merger.rs:1963`](../../../../src/var_calling/per_group_merger.rs) is the precedent).
+(`d9e7b076:src/var_calling/per_group_merger.rs:1963` is the precedent).
 Scratch shells `GenericRowScratch`, `SsrRowScratch<S>`. *Depends:* A1. *Source:* arch §1.1, §2.3;
 spec §3.2, §3.6, §8.
 
@@ -205,7 +205,7 @@ geometric-mean substitution, and the reason the formula has this shape); order i
 (test 8); empty row = zeros; a hand-computed biallelic diploid case. **The production
 differential:** on the same inputs, ng's row plus the multinomial coefficient (computed in the
 test in closed form) minus the `÷3` effect equals `standard_log_likelihood`
-([`per_group_merger.rs:1948`](../../../../src/var_calling/per_group_merger.rs)) to
+(`d9e7b076:src/var_calling/per_group_merger.rs:1948`) to
 floating-point tolerance — every difference attributed to the two recorded changes (spec §3.4,
 §3.5), none unexplained. **Own commit, do not bundle.** *Depends:* B1. *Source:* spec §3.3; arch
 §3.
@@ -354,7 +354,7 @@ spec's §4.2 as the distribution's owner, its *in frame / out of frame* wording 
 
 **E2. Two named cutoffs + the reported truncation.**  ✅
 `MAX_WHOLE_REPEAT_SLIP = 10` (repeats) and `MAX_PART_REPEAT_SLIP = 10` (base pairs) replace the
-single `MAX_SLIP` ([`stutter.rs:78`](../../../../src/ng/alignment/stutter.rs)) — both inherited
+single `MAX_SLIP` ([`stutter.rs:78`](../../../../src/alignment/stutter.rs)) — both inherited
 from production's provisional 10 and declared inherited. The mass the cutoffs discard is
 **computed and reported per candidate** (feeds `SsrScoringContext.truncated_mass_lost`). Test:
 the reported loss equals one minus the truncated sum, to floating-point tolerance, across
@@ -390,7 +390,7 @@ the **candidate's** stratum, not the reference's, so contexts are per
 **F2. `StutterSubstitutionEmission` — Model A.**  ✅
 The stutter factor (E's distribution, via the reused `StutterModel`) times the substitution
 factor — **composed** from `FlatEmission`
-([`alignment/emission.rs:250`](../../../../src/ng/alignment/emission.rs)) under the fitted rate,
+([`alignment/emission.rs:250`](../../../../src/alignment/emission.rs)) under the fitted rate,
 over sequences the stutter factor has already made equal-length. Placement enumeration ported
 with production's split, stated: whole-repeat slips enumerate placements with equal weight,
 part-repeat changes resize at the tract's end in a single placement. Unreachable slips score
@@ -401,7 +401,7 @@ untied). *Depends:* F1, E3. *Source:* spec §4.2, §4.3; arch §4.1.
 
 **F3. `ClassicEmissionOracle` + the cross-model check.**  ✅
 Model B ported **test-only**, exactly as production keeps it
-([`classic.rs`](../../../../src/ssr/cohort/read_model/classic.rs)) — an independent
+(`d9e7b076:src/ssr/cohort/read_model/classic.rs`) — an independent
 implementation worth more as an oracle than as an alternative. Test: A and B agree on genotype
 *ordering* over a fixture grid of (observation, candidate) pairs at matched parameters — the
 independent-implementation check behind the whole path. *Depends:* F2. *Source:* spec §9; arch
@@ -446,7 +446,7 @@ calls. *Depends:* F2, G1. *Source:* spec §2.1, §4.5, §8; arch §4.1.
 **H2. The per-locus outlier spread + STR contamination.**  ✅
 `reachable_length_count` computed from the candidate set and the cutoffs alone — **no cohort in
 it**, the decided repair of production's cohort-wide `D`
-([`em.rs:393`](../../../../src/ssr/cohort/em.rs)); and the three-term form
+(`d9e7b076:src/ssr/cohort/em.rs:393`); and the three-term form
 `(1 − λ − c)·copy-mixture + λ·uniform + c·seed(o)` with `SsrContamination` (`None` ⇒ the
 two-term form), the seed's length distribution handed in from the prior's
 `seed_length_distribution` ([`calling_prior.md`](calling_prior.md) E2). Tests: **the per-sample

@@ -9,10 +9,11 @@ with what, and how their answers become a call.***
 
 *Reads on: [`cohort_merge.md`](cohort_merge.md) — the evidence this consumes;
 [`run_streaming.md`](run_streaming.md) §3.5 — the run this sits inside. Production's equivalent is
-[`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs) (SNP/indel) and
-[`ssr/cohort/em.rs`](../../../../src/ssr/cohort/em.rs) (STR). Everything said about those files is a
-record of what they do, not a proposal to change them — `src/ssr/` and `src/var_calling/` are frozen
-production.*
+`d9e7b076:src/var_calling/posterior_engine.rs` (SNP/indel) and
+`d9e7b076:src/ssr/cohort/em.rs` (STR). Everything said about those files is a
+record of what they do, not a proposal to change them — `src/ssr/` and `src/var_calling/` were frozen
+production, deleted on 2026-09-13; the paths above name them at commit `d9e7b076`, the last that
+held them.*
 
 ---
 
@@ -351,7 +352,7 @@ then switches to the Dirichlet posterior mean:
 > ([`AlleleFrequencyCalculator.java:188`](../../../../gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/genotyper/afcalc/AlleleFrequencyCalculator.java))
 
 Production does the same and marks it as a step of its own
-([`posterior_engine.rs:2586`](../../../../src/var_calling/posterior_engine.rs) — *"a flat genotype
+(`d9e7b076:src/var_calling/posterior_engine.rs:2586` — *"a flat genotype
 prior (likelihood only) so the cohort's reads set an honest initial frequency before the
 leave-one-out prior engages"*).
 
@@ -369,7 +370,7 @@ with new parameters, and the expected copies it inherits were converged under th
 them in would seed the new round at the old round's answer, which is the same self-reinforcing start
 the flat pass exists to prevent, with the seed replaced by the previous round. Production restarts
 its frequency loop from the seed on every re-fit round for the same reason
-([`em.rs:592-602`](../../../../src/ssr/cohort/em.rs)).
+(`d9e7b076:src/ssr/cohort/em.rs:592-602`).
 
 **At one sample the first pass has nothing to do**, because the cohort term is zero at every pass:
 the prior is the seed on pass 1 whether the first pass is flat or not, so a flat pass 1 followed by a
@@ -450,7 +451,7 @@ re-derived from a count and a rate.
 **What is true of both paths today: neither invents a sequence.** A coder coming from HipSTR will
 expect otherwise. Production's STR candidate assembly admits a repeat length only where some
 sample's reads reached it (`occupied`,
-[`candidate_set.rs:221`](../../../../src/ssr/cohort/candidate_set.rs)), including the ±1 neighbours
+`d9e7b076:src/ssr/cohort/candidate_set.rs:221`), including the ±1 neighbours
 it nominates for a sample that under-resolves. What the two paths really differ in is the *shape* of
 the selection, and that is what sets how large `A` gets:
 
@@ -460,7 +461,7 @@ the selection, and that is what sets how large `A` gets:
 - **the STR path selects with structure.** Sequences are pooled into **rungs** keyed by repeat
   count, each sample's peaks nominate which rungs to promote, and same-length spellings clear a
   recurrence bar to be promoted alongside the rung's representative
-  ([`candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs)). **That structure is not
+  (`d9e7b076:src/ssr/cohort/candidate_set.rs:194`). **That structure is not
   incidental** — [`calling_priors.md`](calling_priors.md) §5.1 lays the prior's mass over the rung
   ladder, and its Q3 asks how a rung's weight divides between two alleles of the same length. The
   ladder and the STR prior are one design.
@@ -473,7 +474,7 @@ is what ng builds behind the switch and a coder needs the mechanism, not a summa
 
 | | production's STR path | HipSTR |
 |---|---|---|
-| when the set is fixed | **before genotyping, once** ([`candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs)) | **grown during genotyping, to a fixpoint, then pruned** ([`seq_stutter_genotyper.cpp:568`](../../../../HipSTR/src/seq_stutter_genotyper.cpp)) |
+| when the set is fixed | **before genotyping, once** (`d9e7b076:src/ssr/cohort/candidate_set.rs:194`) | **grown during genotyping, to a fixpoint, then pruned** ([`seq_stutter_genotyper.cpp:568`](../../../../HipSTR/src/seq_stutter_genotyper.cpp)) |
 | what a candidate is | the tract sequence | the tract **plus five reference bases either side**, so an indel just outside the tract travels with the allele instead of being charged as noise (`LEFT_PAD`/`RIGHT_PAD`, [`HaplotypeGenerator.h:59`](../../../../HipSTR/src/SeqAlignment/HaplotypeGenerator.h)) |
 | how a sequence gets in | its repeat count is a clear peak in some sample — or a ±1 neighbour of one, where some sample reached that length — and it clears a bar within its length: minimum reads, minimum distinct samples, minimum share of that length's reads | any of three routes ([`HaplotypeGenerator.cpp:157`](../../../../HipSTR/src/SeqAlignment/HaplotypeGenerator.cpp)): **strong in one sample** — at least 2 reads and at least 20% of that sample's reads; or **common overall** — above 5% of samples or 5% of reads; or **named in a reference panel VCF**, which is the only way in with no read support at all |
 | **alleles hiding under stutter** | **never sought.** A repeat count that only ever appears as a slip product of a called allele cannot become a candidate | **sought explicitly, and this is the substantive difference.** After aligning and scoring, each read's alignment is retraced; where the trace says *this read slipped*, the tract sequence it implies is counted per sample. Any such sequence not already a candidate, with at least 2 reads and at least 15% of that sample's spanning reads, is admitted ([`seq_stutter_genotyper.cpp:863`](../../../../HipSTR/src/seq_stutter_genotyper.cpp)) |
@@ -769,10 +770,10 @@ measurement has to hold apart.
 | | ng as specified | production's STR caller | HipSTR |
 |---|---|---|---|
 | where the numbers start | the per-stratum fit | the per-stratum fit | six fixed constants, identical at every locus and on every dataset — there is no genome-wide fit at all ([`em_stutter_genotyper.cpp`](../../../../HipSTR/src/em_stutter_genotyper.cpp), `init_stutter_model`) |
-| how far the locus may pull them | not at all | part way — 50 pseudo-counts on the shape and 20 slipped reads on the level, so a tract with no slips collapses back to its stratum's value ([`stutter.rs:184`](../../../../src/ssr/cohort/stutter.rs)) | all the way — its pseudo-counts are one count and `log(1.1)`, there only to keep the geometric proper |
-| how many numbers move | none | three: direction split, fall-off, level ([`em.rs:572`](../../../../src/ssr/cohort/em.rs)) | six: those three for whole-repeat changes, and three more for part-repeat ones |
-| what the re-fit reads | — | each read attributed to the **called** genotype's nearest allele; a no-call contributes nothing ([`em.rs:1192`](../../../../src/ssr/cohort/em.rs)) | every read weighted by the **whole genotype posterior**, no genotype called |
-| loop shape | one loop | **nested** — an outer round re-fits, rebuilds the likelihood table, and runs the frequency loop to convergence; at most 3 rounds, settable to 0 ([`em.rs:140`](../../../../src/ssr/cohort/em.rs), reached through [`driver.rs:319`](../../../../src/ssr/cohort/driver.rs)) | **flat, and upstream of genotyping** — frequencies and slippage numbers re-estimated in the same M-step of one loop over read lengths, every pass, until the likelihood stops rising or all six parameters move by less than `1e-4`. Only the slippage numbers leave it; the frequencies it fitted are discarded and the genotyper uses a two-constant prior (§4.1) |
+| how far the locus may pull them | not at all | part way — 50 pseudo-counts on the shape and 20 slipped reads on the level, so a tract with no slips collapses back to its stratum's value (`d9e7b076:src/ssr/cohort/stutter.rs:184`) | all the way — its pseudo-counts are one count and `log(1.1)`, there only to keep the geometric proper |
+| how many numbers move | none | three: direction split, fall-off, level (`d9e7b076:src/ssr/cohort/em.rs:572`) | six: those three for whole-repeat changes, and three more for part-repeat ones |
+| what the re-fit reads | — | each read attributed to the **called** genotype's nearest allele; a no-call contributes nothing (`d9e7b076:src/ssr/cohort/em.rs:1192`) | every read weighted by the **whole genotype posterior**, no genotype called |
+| loop shape | one loop | **nested** — an outer round re-fits, rebuilds the likelihood table, and runs the frequency loop to convergence; at most 3 rounds, settable to 0 (`d9e7b076:src/ssr/cohort/em.rs:140`, reached through `d9e7b076:src/ssr/cohort/driver.rs:319`) | **flat, and upstream of genotyping** — frequencies and slippage numbers re-estimated in the same M-step of one loop over read lengths, every pass, until the likelihood stops rising or all six parameters move by less than `1e-4`. Only the slippage numbers leave it; the frequencies it fitted are discarded and the genotyper uses a two-constant prior (§4.1) |
 
 **Decision: ng builds the nested shape.** It is what makes the three settings one code path rather
 than three: frozen is that code at zero rounds, and HipSTR's setting is that code at zero pull-back.
@@ -787,7 +788,7 @@ whichever genotype won by a whisker and drop its no-call samples entirely. **It 
 production's comment says why it did not build it:** attributing every read under the full genotype
 posterior instead of to one called genotype multiplies the attribution work by the genotype count,
 unless a per-allele attribution is cached — *"the soft per-read responsibility split is the deferred
-refinement"* ([`em.rs:18`](../../../../src/ssr/cohort/em.rs)). The size is unmeasured and Q2
+refinement"* (`d9e7b076:src/ssr/cohort/em.rs:18`). The size is unmeasured and Q2
 should report it alongside the rest.
 
 **Two things the measurement must not bundle together.** *How many numbers move* and *how hard they
@@ -822,15 +823,15 @@ the cohort size across the range this caller commits to.
 **Why that quantity and not the frequencies the loop reports.** It is what the M-step produces and
 what the next E-step consumes, so its movement is what says the loop has not settled. Production
 tests exactly this — the change in expected counts, scaled by `1/(ploidy × n_samples)`
-([`posterior_engine.rs:2718-2722`](../../../../src/var_calling/posterior_engine.rs)) — and its own
+(`d9e7b076:src/var_calling/posterior_engine.rs:2718-2722`) — and its own
 comment gives both halves of the reason: the reported frequency estimate is *"a pseudocount-scaled
 readout that does NOT feed back"*, so testing it let a larger pseudocount damp the delta and stop the
 loop early; and dividing by the chromosome total *"keeps `q` on the same `[0, 1]` frequency scale …
 so `convergence_threshold` and its validation range carry over unchanged in meaning."*
 
 **The two constants are inherited and are marked soft.** Production uses a threshold of `1e-3` and a
-cap of 50 passes ([`posterior_engine.rs:86`](../../../../src/var_calling/posterior_engine.rs),
-[`:96`](../../../../src/var_calling/posterior_engine.rs)), and its own comment records that the EM
+cap of 50 passes (`d9e7b076:src/var_calling/posterior_engine.rs:86`,
+`d9e7b076:src/var_calling/posterior_engine.rs:96`), and its own comment records that the EM
 converges in 3 to 5 passes on the GATK reference data, so the cap is ten times the observed need
 rather than a tuned value. **ng inherits both, as named constants, and neither has been measured
 here.** What would set them is §12's Q4.
@@ -838,7 +839,7 @@ here.** What would set them is §12's Q4.
 **Where the slippage numbers are re-fitted, the outer rounds need their own stopping rule**, and it
 is not this one: they stop when every re-fitted number moves less than a threshold of its own, or
 when the round cap is reached. Production stops on both, with a cap of three
-([`em.rs:572`](../../../../src/ssr/cohort/em.rs)); HipSTR stops when the whole model's likelihood
+(`d9e7b076:src/ssr/cohort/em.rs:572`); HipSTR stops when the whole model's likelihood
 stops rising or every parameter moves less than `1e-4`. **ng inherits production's rule**, because
 its numbers are the ones being compared between rounds and a likelihood test would need the table
 rebuilt to be read. Both thresholds are inherited and neither has been measured here.
@@ -846,7 +847,7 @@ rebuilt to be read. Both thresholds are inherited and neither has been measured 
 **A locus that hits the cap is emitted with a flag, not dropped and not fatal.** Production learned
 this the explicit way: its error variant for non-convergence is retired in favour of emitting with
 `converged = false`, *"so a single hard site doesn't kill the whole cohort run"*
-([`posterior_engine.rs:26`](../../../../src/var_calling/posterior_engine.rs)). ng carries the same
+(`d9e7b076:src/var_calling/posterior_engine.rs:26`). ng carries the same
 rule and the same reasoning. **The flag must reach the output**, because a genotype from a loop that
 did not settle is a different claim from one that did, and nothing downstream can tell them apart
 otherwise.
@@ -919,7 +920,7 @@ the current and previous expected copies, `2 × alleles`; and one sample's poste
 by the locus's shape and the loop fills it, so what a pass costs does not include the allocator.
 Production lifted exactly these buffers out of its own iteration after a profile put the
 allocator's self-time at about 16% of cycles
-([`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs)).
+(`d9e7b076:src/var_calling/posterior_engine.rs:1874`).
 
 **A repeat tract allocates three vectors per locus, outside the passes, and the reason is a
 borrow.** They are the candidate table as the row sees it and the scoring contexts, both in the
@@ -998,14 +999,14 @@ thrown away the uncertainty the expected copies still carry.
 
 | what | production code | how ng reuses it |
 |---|---|---|
-| the loop's shape — E-step, M-step, convergence delta behind one seam | [`posterior_engine.rs:2635`](../../../../src/var_calling/posterior_engine.rs) | **shape ported.** The seam is what lets the two paths share a loop while differing in their emission, which is the same split [`read_likelihoods.md`](read_likelihoods.md) §2 makes |
-| the prior-free first pass | [`posterior_engine.rs:2586`](../../../../src/var_calling/posterior_engine.rs) | ported with its reasoning (§3) |
-| convergence on expected counts, and the emit-with-flag rule | [`posterior_engine.rs:26`](../../../../src/var_calling/posterior_engine.rs), [`:2657`](../../../../src/var_calling/posterior_engine.rs) | ported; both constants inherited and marked soft (§6) |
-| the frequency update | [`em.rs:816`](../../../../src/ssr/cohort/em.rs) | the STR path's version of the same M-step; ng writes one for both paths |
-| the final pass that produces calls | [`em.rs:857`](../../../../src/ssr/cohort/em.rs) | ported as §2's last step |
-| scratch lifted out of the iteration | [`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs) | ported, with its measured reason (§8) |
-| the outer round that re-fits the slippage numbers and rebuilds the likelihood table | [`em.rs:572`](../../../../src/ssr/cohort/em.rs) | **shape ported, default not** — ng builds the same nesting and ships with the round count at zero, so the setting is a configuration rather than a code path (§5.1) |
-| the re-fit itself — direction split, fall-off, pulled back toward the per-stratum value | [`stutter.rs:184`](../../../../src/ssr/cohort/stutter.rs) | **shape ported, input not** — ng weights each read by the genotype posteriors where production attributes it to the called genotype (§5.1) |
+| the loop's shape — E-step, M-step, convergence delta behind one seam | `d9e7b076:src/var_calling/posterior_engine.rs:2635` | **shape ported.** The seam is what lets the two paths share a loop while differing in their emission, which is the same split [`read_likelihoods.md`](read_likelihoods.md) §2 makes |
+| the prior-free first pass | `d9e7b076:src/var_calling/posterior_engine.rs:2586` | ported with its reasoning (§3) |
+| convergence on expected counts, and the emit-with-flag rule | `d9e7b076:src/var_calling/posterior_engine.rs:26`, `d9e7b076:src/var_calling/posterior_engine.rs:2657` | ported; both constants inherited and marked soft (§6) |
+| the frequency update | `d9e7b076:src/ssr/cohort/em.rs:816` | the STR path's version of the same M-step; ng writes one for both paths |
+| the final pass that produces calls | `d9e7b076:src/ssr/cohort/em.rs:857` | ported as §2's last step |
+| scratch lifted out of the iteration | `d9e7b076:src/var_calling/posterior_engine.rs:1874` | ported, with its measured reason (§8) |
+| the outer round that re-fits the slippage numbers and rebuilds the likelihood table | `d9e7b076:src/ssr/cohort/em.rs:572` | **shape ported, default not** — ng builds the same nesting and ships with the round count at zero, so the setting is a configuration rather than a code path (§5.1) |
+| the re-fit itself — direction split, fall-off, pulled back toward the per-stratum value | `d9e7b076:src/ssr/cohort/stutter.rs:184` | **shape ported, input not** — ng weights each read by the genotype posteriors where production attributes it to the called genotype (§5.1) |
 
 **Parity oracle, and it is one loop rather than two.** Production's **SNP/indel** loop is the oracle:
 given the same likelihood table, the same prior parameters and the same candidate set, ng must
@@ -1014,7 +1015,7 @@ calling documents records.
 
 **Production's STR loop cannot serve as one, and the reason is not a bug in either.** It converges on
 a different quantity at a different scale — the normalised frequencies `π`, at a tolerance of `1e-6`
-([`em.rs:137`](../../../../src/ssr/cohort/em.rs)) — where ng converges on expected copies over
+(`d9e7b076:src/ssr/cohort/em.rs:137`) — where ng converges on expected copies over
 chromosomes at `1e-3` (§6). Two loops that stop at different points on the same trajectory will
 disagree on any genotype near a boundary, for no reason either document records. **What the STR side
 gets instead is a differential:** run ng's loop against production's convergence rule and tolerance
@@ -1269,7 +1270,7 @@ is worth most there.
    With it on, **`builds` is the number of rounds that actually rebuilt**, which is one less than the
    number of rounds run whenever the last round detects convergence and leaves before rebuilding —
    production's loop breaks in exactly that order
-   ([`em.rs:575-580`](../../../../src/ssr/cohort/em.rs)). Assert against an instrumented build
+   (`d9e7b076:src/ssr/cohort/em.rs:575-580`). Assert against an instrumented build
    counter, not against a round count. **This is the test that catches the whole design being paid
    for twice**, and it fails silently in production terms — a loop that recomputes gives identical
    answers, only slower. **Run it at both settings**: a per-pass rebuild hides behind a per-round one
@@ -1277,7 +1278,7 @@ is worth most there.
 6. **A re-fit that changes nothing changes nothing.** With per-locus re-fitting switched on at a
    locus whose reads carry no slips, the re-fitted numbers come back equal to the per-stratum ones
    and the genotypes are bit-for-bit those of the frozen setting. This pins the collapse production
-   relies on ([`stutter.rs:184`](../../../../src/ssr/cohort/stutter.rs)) and catches a re-fit that
+   relies on (`d9e7b076:src/ssr/cohort/stutter.rs:184`) and catches a re-fit that
    drifts on an empty profile.
 7. **Nothing allocates inside the loop.** The allocation count over a locus is independent of the
    pass count, and — with re-fitting on — of the round count.

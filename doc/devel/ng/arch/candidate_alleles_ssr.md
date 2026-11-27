@@ -25,7 +25,7 @@ has no producer for one of its arguments until that lands.*
 
 ## Module home
 
-`src/ng/calling/allele_candidates/ssr.rs`, beside `generic.rs` under the shared `mod.rs`
+`src/calling/allele_candidates/ssr.rs`, beside `generic.rs` under the shared `mod.rs`
 ([`candidate_alleles.md`](candidate_alleles.md), *Module home*). One file, no trait: this is the
 second of the two path functions, not an impl of a seam.
 
@@ -35,7 +35,7 @@ second of the two path functions, not an impl of a seam.
 
 **`CohortObservation` carries no locus kind**, so nothing in it names the motif, and without a
 motif there is no period and no repeat count
-([`build.rs:922-936`](../../../../src/ng/run/cohort_merge/build.rs); spec §2). The entry point
+([`build.rs:922-936`](../../../../src/run/cohort_merge/build.rs); spec §2). The entry point
 therefore takes the detail as a separate argument, which is the honest shape today and the shape
 that survives when the merge fixes it:
 
@@ -177,12 +177,12 @@ by nobody here — [`candidate_alleles.md`](candidate_alleles.md) §3.1):
 2. the top `ploidy` nominated counts by support are **promoted**;
 3. if fewer than `ploidy` cleared it, each promoted count's `±1` neighbours are promoted too
    **where some sample's reads reached that length** — production's `occupied` test
-   ([`candidate_set.rs:221`](../../../../src/ssr/cohort/candidate_set.rs)), kept so that nothing
+   (`d9e7b076:src/ssr/cohort/candidate_set.rs:221`), kept so that nothing
    here invents a length;
 4. the cohort's promoted set is the **union** across samples.
 
 **Production's `is_clear_peak` is not called and is not ported**
-([`rung_ladder.rs:274-288`](../../../../src/ssr/cohort/rung_ladder.rs)); spec §4.1 measures what
+(`d9e7b076:src/ssr/cohort/rung_ladder.rs:274-288`); spec §4.1 measures what
 it costs. The `±1` rescue *is* ported, and it is the one part of production's nomination that
 survives.
 
@@ -191,7 +191,7 @@ survives.
 Every sequence on a promoted rung faces the shared support rule, asked of the **sequence**: no
 representative is privileged and no recurrence term applies (spec §5). That is the whole rule —
 production's `cohort_alleles` and its three sibling constants have no counterpart here
-([`candidate_set.rs:169-191`](../../../../src/ssr/cohort/candidate_set.rs)).
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:169-191`).
 
 ### 3.3 Periodicity
 
@@ -216,7 +216,7 @@ production's `cohort_alleles` and its three sibling constants have no counterpar
 `max_off_grid_share` of its spanning reads sit at a length that is not a whole number of motif
 units from the ladder's mode; the locus is `SelectionVerdict::NotPeriodic` only when no sample is
 periodic (spec §7). Production asks it of the cohort's reads pooled
-([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs)), and measures the
+(`d9e7b076:src/ssr/cohort/candidate_set.rs:114-145`), and measures the
 offset in **bases** while keying its ladder in **units** — ng measures both in units (spec §3).
 
 A `NotPeriodic` locus returns the reference tract alone, that verdict, an empty leftover and a
@@ -235,7 +235,7 @@ A `NotPeriodic` locus returns the reference tract alone, that verdict, an empty 
   heterozygous tracts.
 - **The depth gate, the three sibling constants and the cap of 24 are dropped**, so
   `SsrSelectionConfig` has three fields and production's `CandidateCfg` has seven
-  ([`candidate_set.rs:80-90`](../../../../src/ssr/cohort/candidate_set.rs)). — spec §6.
+  (`d9e7b076:src/ssr/cohort/candidate_set.rs:80-90`). — spec §6.
 - **Periodicity is per sample.** — spec §7.
 - **`repeat_counts` is returned, not recomputed downstream.** One producer for an integer two
   modules must agree on — the calling loop keys both the slippage lookup and the prior's length
@@ -243,7 +243,7 @@ A `NotPeriodic` locus returns the reference tract alone, that verdict, an empty 
   states the coupling, not the field. *(`modal_repeat_count` was returned for the same reason
   until 2026-08-27; nothing consumes it now — see §5.)*
 - **`ploidy` comes from `FrozenParameters`**, never a constant in this module. Production hard-
-  asserts diploid at its EM ([`em.rs:489`](../../../../src/ssr/cohort/em.rs)); ng does not, and a
+  asserts diploid at its EM (`d9e7b076:src/ssr/cohort/em.rs:489`); ng does not, and a
   polyploid run changes only how many rungs a sample promotes.
 - **The scratch is the shared `SelectionScratch`**, with the ladder's buffers added to it — one
   per-worker allocation for both paths. — [`candidate_alleles.md`](candidate_alleles.md) §2.4.
@@ -254,16 +254,16 @@ A `NotPeriodic` locus returns the reference tract alone, that verdict, an empty 
 
 | this doc's name | existing code | how it converges |
 |---|---|---|
-| `RepeatLadder` | [`Rungs` / `build_rungs`, `rung_ladder.rs:291`](../../../../src/ssr/cohort/rung_ladder.rs); the keying at [`:301-316`](../../../../src/ssr/cohort/rung_ladder.rs) | **shape ported**, keyed the same way. ng's holds table indices where production's holds cloned sequences ([`RungSeq`, `:40`](../../../../src/ssr/cohort/rung_ladder.rs)) — the merge already owns the bases |
-| the per-sample length histogram | [`sample_histogram`, `rung_ladder.rs:262`](../../../../src/ssr/cohort/rung_ladder.rs) | same fold, over the merge's rows instead of `seq_counts` |
-| nomination | [`assemble_candidates`, `candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs) (top-`ploidy` at [`:231-238`](../../../../src/ssr/cohort/candidate_set.rs)) | top-`ploidy` and the union ported; the predicate replaced (§3.1) |
-| the `±1` rescue and `occupied` | [`candidate_set.rs:239-258`](../../../../src/ssr/cohort/candidate_set.rs), [`:221`](../../../../src/ssr/cohort/candidate_set.rs) | **ported unchanged** |
-| the clear-peak test | [`is_clear_peak`, `rung_ladder.rs:274`](../../../../src/ssr/cohort/rung_ladder.rs) | **not ported.** Kept only in the differential oracle's test arm (below) |
-| same-length promotion | [`cohort_alleles`, `candidate_set.rs:169`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported**; replaced by §3.2 |
-| periodicity | [`is_periodic`, `candidate_set.rs:114`](../../../../src/ssr/cohort/candidate_set.rs) | shape ported, denominator moved per sample, offset measured in units |
-| the reference seeded first | [`candidate_set.rs:200-202`](../../../../src/ssr/cohort/candidate_set.rs) | ported; it is [`candidate_alleles.md`](candidate_alleles.md) §1's invariant, held by `CandidateAlleles::new` |
-| the depth gate, sibling constants, cap of 24 | [`CandidateCfg::dev_default`, `candidate_set.rs:80-90`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported** (§4) |
-| the motif and its period | [`Motif`, `types.rs:1107`](../../../../src/ng/types.rs), `period()` at [`:1138`](../../../../src/ng/types.rs) | reused; reached through `SsrDetail::motif` ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs)) |
+| `RepeatLadder` | `Rungs` / `build_rungs`, `d9e7b076:src/ssr/cohort/rung_ladder.rs:291`; the keying at `d9e7b076:src/ssr/cohort/rung_ladder.rs:301-316` | **shape ported**, keyed the same way. ng's holds table indices where production's holds cloned sequences (`RungSeq`, `d9e7b076:src/ssr/cohort/rung_ladder.rs:40`) — the merge already owns the bases |
+| the per-sample length histogram | `sample_histogram`, `d9e7b076:src/ssr/cohort/rung_ladder.rs:262` | same fold, over the merge's rows instead of `seq_counts` |
+| nomination | `assemble_candidates`, `d9e7b076:src/ssr/cohort/candidate_set.rs:194` (top-`ploidy` at `d9e7b076:src/ssr/cohort/candidate_set.rs:231-238`) | top-`ploidy` and the union ported; the predicate replaced (§3.1) |
+| the `±1` rescue and `occupied` | `d9e7b076:src/ssr/cohort/candidate_set.rs:239-258`, `d9e7b076:src/ssr/cohort/candidate_set.rs:221` | **ported unchanged** |
+| the clear-peak test | `is_clear_peak`, `d9e7b076:src/ssr/cohort/rung_ladder.rs:274` | **not ported.** Kept only in the differential oracle's test arm (below) |
+| same-length promotion | `cohort_alleles`, `d9e7b076:src/ssr/cohort/candidate_set.rs:169` | **not ported**; replaced by §3.2 |
+| periodicity | `is_periodic`, `d9e7b076:src/ssr/cohort/candidate_set.rs:114` | shape ported, denominator moved per sample, offset measured in units |
+| the reference seeded first | `d9e7b076:src/ssr/cohort/candidate_set.rs:200-202` | ported; it is [`candidate_alleles.md`](candidate_alleles.md) §1's invariant, held by `CandidateAlleles::new` |
+| the depth gate, sibling constants, cap of 24 | `CandidateCfg::dev_default`, `d9e7b076:src/ssr/cohort/candidate_set.rs:80-90` | **not ported** (§4) |
+| the motif and its period | [`Motif`, `types.rs:1107`](../../../../src/types.rs), `period()` at [`:1138`](../../../../src/types.rs) | reused; reached through `SsrDetail::motif` ([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) |
 | the prior's consumer | `fill_ssr_seed`, [`population_diversity.md`](../spec/population_diversity.md) §4 | **`modal_repeat_count` is no longer taken, corrected 2026-08-27.** That builder was rewritten in step E2e: a tract's prior is read from its stratum's fitted length spectrum, which is indexed by offset from the **reference** tract length, so what it takes beside `repeat_counts` is the reference repeat count — which every locus already knows. The cohort's commonest length is not an input to anything |
 | the junk term's denominator | `reachable_length_count`, [`read_likelihoods.md`](read_likelihoods.md) §4.1 | computed **from** the candidate set this returns; no field crosses, but widening the set changes it (spec §8) |
 
@@ -303,5 +303,6 @@ this document rather than to the spec:
 
 The regression anchor is spec §13's last entry: HG002 at 30× through the whole caller with real
 candidates, scoring at least the 98% adjacent-length and 86% same-length recall the spec measures.
-The harness exists — production's `ssr-pileup` into `examples/ssr_slip_dump`, scored against
+The harness was production's `ssr-pileup` into `examples/ssr_slip_dump.rs` (both removed; read the
+example at `6799e37c~1:examples/ssr_slip_dump.rs`), scored against
 `benchmarks/ssr_hg002/truth/`.

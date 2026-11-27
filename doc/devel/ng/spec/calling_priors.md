@@ -25,11 +25,12 @@ can be read before them.*
 calling; [`parameter_prepass.md`](parameter_prepass.md) and
 [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) — the frozen parameters this prior
 consumes and does not fit. Production's equivalent code is
-[`posterior_engine.rs`](../../../../src/var_calling/posterior_engine.rs) (SNP/indel) and
-[`ssr/cohort/em.rs`](../../../../src/ssr/cohort/em.rs) (STR); the shared mathematics already sits
+`d9e7b076:src/var_calling/posterior_engine.rs` (SNP/indel) and
+`d9e7b076:src/ssr/cohort/em.rs` (STR); the shared mathematics already sits
 in [`genetics.rs`](../../../../src/genetics.rs). Everything said about those files is a record of
-what they do, not a proposal to change them — `src/ssr/` and `src/var_calling/` are frozen
-production.*
+what they do, not a proposal to change them — `src/ssr/` and `src/var_calling/` were frozen
+production, deleted on 2026-09-13; the paths above name them at commit `d9e7b076`, the last that
+held them.*
 
 ---
 
@@ -180,8 +181,8 @@ P(het) : P(hom-alt)  =  2·α_ref : (1 + α_alt)
 ```
 
 Production's plug-in path regularised its frequency estimate with `α_ref = 10`, `α_alt = 0.01`
-([`posterior_engine.rs:107`](../../../../src/var_calling/posterior_engine.rs),
-[`:114`](../../../../src/var_calling/posterior_engine.rs)), which gave a prior ratio of 22:1 for
+(`d9e7b076:src/var_calling/posterior_engine.rs:107`,
+`d9e7b076:src/var_calling/posterior_engine.rs:114`), which gave a prior ratio of 22:1 for
 heterozygous **at the configuration that matters — one diploid sample's own two copies inside the
 estimate**, putting `p̂` near `1/12` and the Hardy–Weinberg ratio `2(1 − p̂)/p̂` near 22. *(Read off
 the pseudocounts alone, with no sample in them, `p̂` is about 1 in 10,000 and the ratio is near
@@ -274,9 +275,9 @@ an inbred panel. **ng corrects it deliberately (owner, 2026-08-22), and it is th
 port departs from what it was ported from.**
 
 This is otherwise production's mixture, from
-[`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs) and
-[`:3217`](../../../../src/var_calling/posterior_engine.rs), and the STR side's port of it
-([`ssr/cohort/em.rs:290`](../../../../src/ssr/cohort/em.rs)).
+`d9e7b076:src/var_calling/posterior_engine.rs:3799` and
+`d9e7b076:src/var_calling/posterior_engine.rs:3217`, and the STR side's port of it
+(`d9e7b076:src/ssr/cohort/em.rs:290`).
 
 **Why the mixture rather than the textbook Wright formulas.** The familiar
 `P(het) = 2pq(1 − F)`, `P(hom-alt) = p² + Fpq` is biallelic and diploid. It exists in production
@@ -349,7 +350,7 @@ population's diversity, not a stand-in for one. **`θ` is fitted at every cohort
 **The fallback is for having no estimate at all** — too few sites to fit, or a sample whose `F` is
 unknown. Then the pre-pass falls back to a species-range value; production's is `1e-3`, roughly
 human nucleotide diversity, marked as a weakly-informative fallback rather than a default for the
-estimate ([`diversity.rs:78`](../../../../src/var_calling/diversity.rs)). **Soft: that number is a
+estimate (`d9e7b076:src/var_calling/diversity.rs:78`). **Soft: that number is a
 human figure and a tomato panel is more diverse than a human one.** ng should carry the fallback as
 a named, overridable parameter and record which of the two produced the value in the run's output,
 because a run at the fallback and a run at a fitted `θ` are otherwise indistinguishable.
@@ -513,8 +514,8 @@ regularizer actually binds**, so the reported figure should be per class, not a 
 
 Production ran different pseudocounts for SNP alternatives and for indel alternatives in its
 plug-in path — `0.01` against `0.00125`, an 8:1 ratio inherited from GATK's per-class default
-([`posterior_engine.rs:114`](../../../../src/var_calling/posterior_engine.rs),
-[`:123`](../../../../src/var_calling/posterior_engine.rs)). The genetic argument behind it is real:
+(`d9e7b076:src/var_calling/posterior_engine.rs:114`,
+`d9e7b076:src/var_calling/posterior_engine.rs:123`). The genetic argument behind it is real:
 indels arise at a different rate from substitutions, so their spectra differ.
 
 **ng uses a single `θ` for both classes in the first version, and the reason is that the pre-pass
@@ -546,7 +547,7 @@ and never measured here.
   separately and requires be emitted so a consumer cannot confuse the two
   ([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3). **Today's production STR path
   uses a fixed `SFS_THETA = 0.01`**, freebayes' default, commented *"Fixed, not a per-run knob"*
-  ([`freebayes_emit.rs:42`](../../../../src/ssr/cohort/freebayes_emit.rs)) — a SNP-scale constant
+  (`d9e7b076:src/ssr/cohort/freebayes_emit.rs:42`) — a SNP-scale constant
   standing in for a quantity nobody measured. Not repeating that is the point of the separation.
 
 **§4.1's projection does not reach here, and the reason is the same separation.** The spectrum the
@@ -579,13 +580,13 @@ total:  the weights are scaled so that the prior's own implied gene diversity eq
 The **shape** is production's `G₀`, ported: a geometric decay in unit offset from the locus's modal
 length, floored at a tiny positive value so a far allele — a long heterozygous copy the candidate
 set nearly missed — keeps a non-zero prior and stays recoverable rather than falling into an
-absorbing zero ([`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs)). The
+absorbing zero (`d9e7b076:src/ssr/cohort/allele_freq_prior.rs:25`). The
 decay is fitted per group of loci by the pre-pass.
 
 The **total** is new here, and the reason is a defect production records against itself. `G₀` was
 designed as a regulariser for a *plug-in* frequency estimate, where its total mass means smoothing
 strength and nothing else. Its size is a by-product of the decay: at the fallback decay of `0.5`
-([`param_estimation.rs:167`](../../../../src/ssr/cohort/param_estimation.rs)) the weights over a
+(`d9e7b076:src/ssr/cohort/param_estimation.rs:167`) the weights over a
 mode and a few neighbours on each side sum to between 2 and 3. **Reused unchanged as a Dirichlet
 concentration, that number stops being a smoothing knob and becomes a claim about how polymorphic
 the locus is** — and how hard the prior will resist the reads. Whether 2.5 is the right claim for a
@@ -652,7 +653,7 @@ tell them apart ([`locus_generation_ssr.md`](locus_generation_ssr.md) §3). The 
 indexed by repeat count, so two such alleles land on the same rung.
 
 Production computes each candidate's offset from `sequence length / period`
-([`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs)), so both alleles
+(`d9e7b076:src/ssr/cohort/allele_freq_prior.rs:25`), so both alleles
 receive the rung's full weight independently — a locus with an interruption variant collects more
 total prior mass than one without, purely for having it. **Leaning: divide the rung's weight among
 the alleles that sit on it**, so the total is a property of the locus and not of how many spellings
@@ -669,7 +670,7 @@ flat concordance (96.5% → 96.1%), but tomato is an extreme selfer (`F_IS ≈ 0
 blind to `F`, so "recall against HipSTR" penalises any `F`-aware prior and cannot separate a
 conservative prior from a wrong one. Production therefore ships its marginalized STR prior behind
 an environment toggle with the plug-in prior still the default
-([`driver.rs:287`](../../../../src/ssr/cohort/driver.rs)). Report:
+(`d9e7b076:src/ssr/cohort/driver.rs:287`). Report:
 `doc/devel/reports/ssr_marginalized_prior_benchmark_2026-07-07.md`.
 
 **The single-sample half of that question has since been answered, and the answer is a zero.**
@@ -708,8 +709,8 @@ for sample s at this locus:
 The expectation is over the current genotype posteriors — no genotype is called to produce it,
 which is what lets it be used at low coverage. The `max(0, …)` guards floating-point noise only:
 the sample's own count is one non-negative addend of the total, so the true difference cannot be
-negative ([`em.rs:278`](../../../../src/ssr/cohort/em.rs),
-[`posterior_engine.rs:3200`](../../../../src/var_calling/posterior_engine.rs)).
+negative (`d9e7b076:src/ssr/cohort/em.rs:278`,
+`d9e7b076:src/var_calling/posterior_engine.rs:3200`).
 
 **Subtracting the sample's own contribution is not a refinement, it is what makes the prior a
 prior.** Without it, a sample's own reads would arrive twice — once through the likelihood and once
@@ -740,7 +741,7 @@ converges on the panel's own frequencies; there, the marginalized and plug-in pr
 
 **Cost note for the EM document.** Because `α'_s` differs per sample, the prior cannot be computed
 once per locus and shared, which is how production's homogeneous-`F` fast path works
-([`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs)); its
+(`d9e7b076:src/var_calling/posterior_engine.rs:3799`); its
 leave-one-out path runs per sample and carries a deferred perf item for a large-cohort shared
 approximation. That trade belongs to the EM document, not here.
 
@@ -837,23 +838,23 @@ bottlenecked outbred population it is the term with no number.
 heterozygotes fall to the probability floor and the two homozygotes stand in the ratio
 `α_ref : α_alt`, which production pins in a test
 (`dirichlet_prior_full_inbreeding_concentrates_on_homozygotes`,
-[`posterior_engine.rs:4341`](../../../../src/var_calling/posterior_engine.rs)). **What is capped is
+`d9e7b076:src/var_calling/posterior_engine.rs:4341`). **What is capped is
 the estimate, not the model:** production's inbreeding estimator clamps at `0.99`
-([`inbreeding.rs:25`](../../../../src/paralog/inbreeding.rs)), so no sample whose `F` was **fitted**
+(`d9e7b076:src/paralog/inbreeding.rs:25`), so no sample whose `F` was **fitted**
 reaches the caller carrying a prior that has ruled heterozygotes out.
 
 **A sample whose `F` was supplied does.** Production's second door is `--inbreeding-coefficient`,
 whose parser admits the closed `[0, 1]` and is pinned admitting `1.0`
-([`parsers.rs:166`](../../../../src/pop_var_caller/cli/parsers.rs), test at
-[`:392`](../../../../src/pop_var_caller/cli/parsers.rs)); the value goes to the engine as typed
-([`pipeline.rs:343`](../../../../src/var_calling/pipeline.rs)). The cap is a line inside one
+(`d9e7b076:src/pop_var_caller/cli/parsers.rs:166`, test at
+`d9e7b076:src/pop_var_caller/cli/parsers.rs:392`); the value goes to the engine as typed
+(`d9e7b076:src/var_calling/pipeline.rs:343`). The cap is a line inside one
 estimator, and the other route round it is a command-line flag. *(Corrected 2026-08-23 while
 building `InbreedingF`'s half-open check — the earlier text claimed the guarantee for every
 sample.)*
 
 **ng has no such second door today, and the point of the newtype is to keep it that way.** Every
 construction of `InbreedingF` from a raw number outside test code is the fitted path
-([`runs.rs:634`](../../../../src/ng/parameter_estimation/generic/runs.rs)); a supplied coefficient
+(`373bd37d~1:src/ng/parameter_estimation/generic/runs.rs:634`); a supplied coefficient
 arrives already built, so the checked constructor is the only way in. **The exposure is
 prospective:** whoever eventually gives ng a command line will reach for production's parser, whose
 range is closed, and a flag that admitted `1.0` would hand the prior a value no fit can produce.
@@ -863,7 +864,7 @@ ng should carry that ceiling in a validated newtype — `InbreedingF` in `[0, 1)
 conventions ([`ng_step_interfaces.md`](../arch/ng_step_interfaces.md)) — so it is a property of the
 type rather than a line inside one estimator that a second estimator can forget. **The trap for the
 coder:** production's cap lives in the estimator and its engine config accepts `1.0`
-([`posterior_engine.rs:4348`](../../../../src/var_calling/posterior_engine.rs) sets it), so porting
+(`d9e7b076:src/var_calling/posterior_engine.rs:4348` sets it), so porting
 the engine without the newtype ports a gap.
 
 **What the newtype's range buys, stated exactly, because it is easy to over-read.** Excluding the
@@ -897,7 +898,7 @@ plus one `logsumexp` for each homozygous genotype. **Nothing may allocate inside
 loop** — the caller hands in scratch sized by allele count and genotype count, and the prior fills
 it. Production lifted exactly these buffers out of its EM iteration for a measured reason: a
 profile put the allocator's own self-time at about 16% of cycles before the lift
-([`posterior_engine.rs:1874`](../../../../src/var_calling/posterior_engine.rs), and the profile
+(`d9e7b076:src/var_calling/posterior_engine.rs:1874`, and the profile
 report it cites). Memory is `O(alleles + genotypes)` of scratch per worker, independent of cohort
 size.
 
@@ -921,9 +922,9 @@ two callers.** ng ports it; nothing here needs inventing.
 | the SNP/indel starting concentration | `alpha_from_diversity`, [`genetics.rs:214`](../../../../src/genetics.rs) | **shape ported, source not** — production hard-codes `(1, θ)`; §4.1 reads the pair off the fitted spectrum instead, and `(1, θ)` is where that lands on a neutral panel |
 | the projection of a spectrum onto `(α_ref, α_alt)` | — | **new** (§4.1); production has nothing to port, because it never fitted a spectrum |
 | the alt floor | [`genetics.rs:187`](../../../../src/genetics.rs) | ported with its reasoning |
-| the inbreeding mixture | [`posterior_engine.rs:3799`](../../../../src/var_calling/posterior_engine.rs), [`:3217`](../../../../src/var_calling/posterior_engine.rs) | ported as §3.2's two-branch form |
-| leave-one-out concentration | [`em.rs:278`](../../../../src/ssr/cohort/em.rs) | ported; §6 is its contract |
-| the STR geometric seed | [`allele_freq_prior.rs:25`](../../../../src/ssr/cohort/allele_freq_prior.rs) | **shape ported, total mass not** — §5.1 |
+| the inbreeding mixture | `d9e7b076:src/var_calling/posterior_engine.rs:3799`, `d9e7b076:src/var_calling/posterior_engine.rs:3217` | ported as §3.2's two-branch form |
+| leave-one-out concentration | `d9e7b076:src/ssr/cohort/em.rs:278` | ported; §6 is its contract |
+| the STR geometric seed | `d9e7b076:src/ssr/cohort/allele_freq_prior.rs:25` | **shape ported, total mass not** — §5.1 |
 | the biallelic Wright formulas | [`genetics.rs:66`](../../../../src/genetics.rs) | **test oracle only**, not a code path (§3.2) |
 
 **Parity oracle.** Production's own test module computes each Dirichlet-multinomial log-prior a
