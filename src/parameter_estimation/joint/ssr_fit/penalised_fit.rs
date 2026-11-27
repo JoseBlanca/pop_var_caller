@@ -38,7 +38,7 @@ use super::tract_exclusion::{
     self, StratumTractsLeftOut, StutterTailOutcome, StutterTailRule, TractExclusion, TractsLeftOut,
 };
 use super::*;
-use crate::parameter_estimation::joint::linear_algebra;
+use crate::parameter_estimation::joint::linear_algebra::{self, BandCholesky, SymmetricBand};
 use crate::parameter_estimation::joint::slippage_curve::PenalisedPoint;
 use crate::parameter_estimation::progress;
 
@@ -3990,104 +3990,6 @@ fn penalised_sandwich(
     Some(linear_algebra::dense_product(&left, &inverse, size))
 }
 
-// ---------------------------------------------------------------------
-// A symmetric banded matrix and its Cholesky factor
-// ---------------------------------------------------------------------
-
-/// A symmetric matrix kept as its lower band: entry `(i, i − d)` for `d ≤ width`.
-#[derive(Clone)]
-struct SymmetricBand {
-    size: usize,
-    width: usize,
-    lower: Vec<f64>,
-}
-
-impl SymmetricBand {
-    fn zeros(size: usize, width: usize) -> Self {
-        Self {
-            size,
-            width,
-            lower: vec![0.0; size * (width + 1)],
-        }
-    }
-
-    /// Adds `value` at `(row, column)` (and so at `(column, row)`).
-    fn add(&mut self, row: usize, column: usize, value: f64) {
-        let (high, low) = if row >= column {
-            (row, column)
-        } else {
-            (column, row)
-        };
-        let distance = high - low;
-        debug_assert!(distance <= self.width, "outside the band");
-        self.lower[high * (self.width + 1) + distance] += value;
-    }
-
-    /// The lower-triangular factor `L` with `L Lᵀ` this matrix, or `None` when it is not positive
-    /// definite.
-    fn cholesky(mut self) -> Option<BandCholesky> {
-        let w = self.width;
-        let at = |lower: &[f64], i: usize, j: usize| lower[i * (w + 1) + (i - j)];
-        for i in 0..self.size {
-            let first = i.saturating_sub(w);
-            for j in first..=i {
-                let mut sum = at(&self.lower, i, j);
-                for k in first.max(j.saturating_sub(w))..j {
-                    sum -= at(&self.lower, i, k) * at(&self.lower, j, k);
-                }
-                let value = if i == j {
-                    if sum <= 0.0 || !sum.is_finite() {
-                        return None;
-                    }
-                    sum.sqrt()
-                } else {
-                    sum / at(&self.lower, j, j)
-                };
-                self.lower[i * (w + 1) + (i - j)] = value;
-            }
-        }
-        Some(BandCholesky {
-            size: self.size,
-            width: w,
-            lower: self.lower,
-        })
-    }
-}
-
-struct BandCholesky {
-    size: usize,
-    width: usize,
-    lower: Vec<f64>,
-}
-
-impl BandCholesky {
-    fn at(&self, i: usize, j: usize) -> f64 {
-        self.lower[i * (self.width + 1) + (i - j)]
-    }
-
-    fn ln_determinant(&self) -> f64 {
-        2.0 * (0..self.size)
-            .map(|i| float::ln(self.at(i, i)))
-            .sum::<f64>()
-    }
-
-    /// Overwrites `rhs` with the solution of `L Lᵀ x = rhs`.
-    fn solve(&self, rhs: &mut [f64]) {
-        for i in 0..self.size {
-            let known: f64 = (i.saturating_sub(self.width)..i)
-                .map(|k| self.at(i, k) * rhs[k])
-                .sum();
-            rhs[i] = (rhs[i] - known) / self.at(i, i);
-        }
-        for i in (0..self.size).rev() {
-            let known: f64 = ((i + 1)..(i + self.width + 1).min(self.size))
-                .map(|k| self.at(k, i) * rhs[k])
-                .sum();
-            rhs[i] = (rhs[i] - known) / self.at(i, i);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4129,50 +4031,6 @@ mod tests {
         assert_eq!(larger_change(0.5, f64::NAN), f64::INFINITY);
         assert_eq!(larger_change(f64::NAN, 0.5), f64::INFINITY);
         assert_eq!(larger_change(0.5, 0.25), 0.5);
-    }
-
-    /// **The banded Cholesky solves what a dense solve does**, on a random positive-definite
-    /// matrix of bandwidth four.
-    #[test]
-    #[allow(
-        clippy::needless_range_loop,
-        reason = "fills dense[i][j] and dense[j][i] together"
-    )]
-    fn the_banded_solve_is_the_dense_one() {
-        let (size, width) = (12, 4);
-        let mut band = SymmetricBand::zeros(size, width);
-        let mut dense = vec![vec![0.0; size]; size];
-        let mut state = 7_u64;
-        let mut uniform = || {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (state >> 11) as f64 / (1_u64 << 53) as f64
-        };
-        for i in 0..size {
-            for j in i.saturating_sub(width)..=i {
-                let value = if i == j {
-                    10.0 + uniform()
-                } else {
-                    uniform() - 0.5
-                };
-                band.add(i, j, value);
-                dense[i][j] = value;
-                dense[j][i] = value;
-            }
-        }
-        let rhs: Vec<f64> = (0..size).map(|i| i as f64 - 3.0).collect();
-        let mut solved = rhs.clone();
-        band.cholesky()
-            .expect("positive definite")
-            .solve(&mut solved);
-        for (row, expected) in dense.iter().zip(&rhs) {
-            let product: f64 = row.iter().zip(&solved).map(|(a, x)| a * x).sum();
-            assert!(
-                (product - expected).abs() < 1e-10,
-                "{product} against {expected}"
-            );
-        }
     }
 
     /// Binomial successes out of `trials` at each probability, with sampling noise from a fixed
