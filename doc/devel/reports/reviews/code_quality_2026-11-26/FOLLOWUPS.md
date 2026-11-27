@@ -12,3 +12,5 @@
 - fit/expectation.rs ~39 links crate::parameter_estimation::generic::noise_model (gone); `cargo doc -D warnings` also fails on calling/allele_candidates/generic.rs links (leftover_of, compare_best_first) (X1/X3).
 - S3 commit 3bc7f264 (one_position cut into inline(always) phases) is speed-gated: time it against its parent; revert alone if estimate-parameters moves.
 - calling/mod.rs doc: "Of the four sub-modules … three are here" and "three nested loops, two of which ship switched off" may be stale (X1). rustfmt --check flags calling/quality_parity.rs:344 (pre-existing).
+- doc/devel/ng/** links into src/ng/… in ~1,648 places; that tree is gone since 2026-09-13. After phase 5: rewrite src/ng/ → src/ and drop stale line anchors (found by X5).
+- ~250 plan step codes (C3, D2, …) remain in comments of locus_generation/pileup/{open_record,generator}.rs and witness.rs; X5 left them (B21 scope). Optional mechanical package.
