@@ -503,8 +503,10 @@ fn one_sample_column(record: &VcfRecord, column: &SampleColumn, ploidy: Ploidy) 
 /// correspond — a mismatch that is invisible unless the two alleles have different repeat
 /// counts.
 ///
-/// **Unphased always.** ng computes no phasing, so a `|` would claim something no step
-/// established.
+/// **Unphased always, here.** Calling knows nothing of phase, so this encoder writes `/`. Phase is
+/// set later, on the written line: the stage that phases from reads
+/// ([`crate::vcf::read_phase_stage`]) and the neighbour-evidence pass rewrite `/` to `|` and add
+/// `PS` where they are confident.
 fn genotype_field(call: &SampleCall, ploidy: Ploidy) -> String {
     match call.genotype() {
         Some(genotype) => join_with_separator(

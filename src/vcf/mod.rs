@@ -697,11 +697,11 @@ impl MapqPool {
 /// which of these it is. Production's third repeat-tract value, `notPeriodic`, went with the
 /// periodicity check that minted it (owner, 2026-10-22; `candidate_alleles_ssr.md` §7).
 ///
-/// **A loop that ran out of passes reaches the file as [`Self::EmDidNotConverge`] rather than
-/// as a separate flag.** The plan's step A1 lists `converged` among the record's contents; it is
-/// carried here instead, because spec §8 gives a record exactly one filter value and a boolean
-/// beside it would be a second spelling of the same fact — the shape that lets two fields
-/// disagree. Nothing is lost: the fact still reaches the output, which is what
+/// **A loop that ran out of passes reaches the file as [`Self::EmDidNotConverge`] rather than as a
+/// separate flag.** The VCF output plan (`impl_plan/vcf_output.md`) lists `converged` among the
+/// record's contents; it is carried here instead, because spec §8 gives a record exactly one filter
+/// value and a boolean beside it would be a second spelling of the same fact — the shape that lets
+/// two fields disagree. Nothing is lost: the fact still reaches the output, which is what
 /// `calling_em_loop.md` §6 requires of it.
 ///
 /// **Which refusals are written and which are dropped is not this module's decision.** The

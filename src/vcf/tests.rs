@@ -1,6 +1,6 @@
 //! What a record can and cannot be made to say.
 //!
-//! The two halves of Milestone A's checkpoint: every shape the format has to express is built
+//! Two halves: every shape the format has to express is built
 //! here (both kinds of locus, a no-call, a refused tract locus, a full-tract deletion at either
 //! end of a contig), and every shape it forbids is shown to be refused at construction or
 //! impossible to spell at all.
