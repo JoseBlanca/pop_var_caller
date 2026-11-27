@@ -1,5 +1,5 @@
-# Production's tract delimitations for src/ng/alignment/delimit_parity.rs, frozen at promotion plan
-# step C10. Each row is what production's ssr::pileup::alignment::delimit_read, with HmmModel::new(),
+# Production's tract delimitations for src/alignment/delimit_parity.rs, frozen before production
+# was deleted. Each row is what production's ssr::pileup::alignment::delimit_read, with HmmModel::new(),
 # returned at commit d9e7b076 for one case the tests build: the 3,000 generated cases of each of four
 # seeds (those with a non-empty read) and the six named ones.
 #

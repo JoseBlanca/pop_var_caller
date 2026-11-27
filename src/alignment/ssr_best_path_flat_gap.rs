@@ -2,33 +2,23 @@
 //! gap inside the repeat**. This is ng's tract delimiter, and the module's **only
 //! byte-parity oracle**.
 //!
-//! # Not the recommended delimiter — kept as the oracle and the baseline
+//! # Where it ships, and what it is not used for
 //!
-//! **`super::ssr_best_path_unit_slip` (algorithm 4) measured better and is the recommended
-//! STR delimiter.** On synthetic reads with known truth it was uniformly more accurate and
-//! free of the small reference-pull bias this flat-gap model carries (the D2 comparison,
-//! `doc/devel/reports/research/ssr_delimiter_3v4_comparison_2026-07-23.md`). So a new caller
-//! that just wants to measure a repeat should reach for algorithm 4, not this.
+//! **It ships as the STR-bundle hull delimiter** (`locus_generation/ssr/bundle.rs`), built with
+//! [`with_anchor_rule`](SsrFlatGapAligner::with_anchor_rule) so that a read ending inside the
+//! hull is not counted as spanning it. The flat-gap model needs only the hull's two flanks, not
+//! a motif, which is what a bundle of several repeats has to offer.
 //!
-//! Algorithm 3 is **retained deliberately, not deprecated**, for two reasons that outrank the
-//! measurement result:
+//! **It is not the per-repeat delimiter.** The STR generator measures a single repeat with
+//! [`SsrUnitRobustAligner`](super::ssr_unit_robust::SsrUnitRobustAligner), which prices a
+//! whole-unit slip from the stutter model. On synthetic reads with known truth that model was
+//! more accurate than this one and free of the small reference-pull bias described below
+//! (`doc/devel/reports/research/ssr_delimiter_3v4_comparison_2026-07-23.md`).
 //!
-//! - **It is the module's only byte-parity oracle.** This is a port of production's
-//!   `delimit_read`, held byte-identical to it over a 200,000-case soak (`delimit_parity`), and since promotion step
-//!   C10 against production's answers recorded for 12,000 of those cases.
-//!   Algorithm 4 has **no oracle of its own** — its correctness rests on the differential
-//!   cross-check *against this aligner* (`algorithm_4_agrees_with_algorithm_3_on_clean_reads`).
-//!   Removing or disabling algorithm 3 would delete the only thing that validates algorithm 4.
-//! - **Adoption is not settled here.** D2 measured which ruler is more accurate; whether to
-//!   *adopt* algorithm 4 turns on the genotype comparison, which spans this module and the
-//!   genotyping that composes it (spec §10.3) and has not run. The measurement points to 4;
-//!   the decision is downstream.
-//!
-//! So this is not disabled by a panic or removed: doing either would break the oracle and the
-//! validation of the algorithm it would be promoting. The steering belongs at the **selection
-//! site** — when the STR read preparer is wired up it should instantiate algorithm 4, and any
-//! future user-facing choice should omit algorithm 3 from its menu while keeping the type
-//! compilable for these tests.
+//! **It is also the module's only byte-parity oracle.** This is a port of the old caller's
+//! `delimit_read`, held byte-identical to it over a 200,000-case soak, and now checked against
+//! that caller's answers recorded for 12,000 of those cases (`delimit_parity`). A change here
+//! changes what the STR-bundle path measures, and that test is what says so.
 //!
 //! It is the same alignment as the affine aligner, but with two gap regimes along the
 //! reference: a **stiff** gap in the flanks and a **soft** one inside the tract. The
@@ -42,13 +32,13 @@
 //! resulting line-up say where the read's repeat starts and ends — which is how this
 //! aligner *measures* a read's repeat.
 //!
-//! # Unbanded, deliberately
+//! # Banded, and still byte-identical
 //!
-//! Production fills its whole matrix. This port does too, because **only an unbanded port
-//! can be shown byte-identical to it**, and that parity is this module's one hard oracle
-//! (spec §3, §10.3). Banding lands as its own separately-proved change in Milestone C, at
-//! which point the same fixture must produce the same output — which is what makes banding
-//! a performance change rather than a behaviour change.
+//! Production filled its whole matrix, and the port first did too, because **only an unbanded
+//! port could be shown byte-identical to it** (spec §3, §10.3). Banding was added afterwards as
+//! its own change: a cell is computed only within [`band_width`] of the diagonal, and the
+//! recorded parity cases still pass unchanged, which is what makes banding a performance change
+//! rather than a behaviour change.
 //!
 //! # A known inconsistency, reproduced on purpose
 //!
@@ -151,23 +141,23 @@ const UNREACHABLE: f64 = f64::NEG_INFINITY;
 ///    the alignment *geometry*, not the scoring model, so it keeps the spec's separation of
 ///    the ruler from the slip cutoff.
 ///
-///    `SPEC-FOLLOWUP(alignment §3/§9)`: the spec models the band as floor + a constant
-///    headroom and lists the amount as open; it should be amended to the three-term geometry
-///    band above. Owner to fold in (delegated 2026-07-23); recorded in the C1 impl report and
-///    `PROJECT_STATUS.md` so the deferral is tracked, not only in this comment.
+///    `SPEC-FOLLOWUP(alignment §3/§9)`: the spec models the band as floor + a constant headroom and
+/// lists the amount as open; it should be amended to the three-term geometry band above. Owner to
+/// fold in (delegated 2026-07-23); recorded in the banding implementation report and
+/// `PROJECT_STATUS.md` so the deferral is tracked, not only in this comment.
 ///
-/// 3. **`BAND_HEADROOM` — this constant.** With the floor and the run-off covered, what is
-///    left is a genuine score-neutral bow: an insertion balanced by a later deletion, net
-///    zero. Every such bow pays two gap events whose transition cost is strictly negative in
-///    every regime, so it is always *worse* than the direct path, never merely tied (even
-///    where emissions tie, at Q0 or a flat ε = 0.75, the gap transitions still cost). Bows are
-///    therefore self-limiting; production's banded forward allows just 2 (`FLANK_SLOP`). This
-///    takes **8**, generous because the delimiter's soft tract gap is cheaper than the
-///    marginal's flank gap so a bow reaches a little further, and because the cost of being
-///    too generous is a few wasted cells while the cost of being too narrow is a silently
-///    wrong measurement. Held at byte-parity across the whole 200,000-case soak while production ran
-///    beside it. **Do not lower it**: since promotion step C10 only 12,000 recorded cases check it,
-///    and a band one cell too narrow first showed near case 28,307 of one seed.
+/// 3. **`BAND_HEADROOM` — this constant.** With the floor and the run-off covered, what is left is
+///    a genuine score-neutral bow: an insertion balanced by a later deletion, net zero. Every such
+///    bow pays two gap events whose transition cost is strictly negative in every regime, so it is
+///    always *worse* than the direct path, never merely tied (even where emissions tie, at Q0 or a
+///    flat ε = 0.75, the gap transitions still cost). Bows are therefore self-limiting;
+///    production's banded forward allows just 2 (`FLANK_SLOP`). This takes **8**, generous because
+///    the delimiter's soft tract gap is cheaper than the marginal's flank gap so a bow reaches a
+///    little further, and because the cost of being too generous is a few wasted cells while the
+///    cost of being too narrow is a silently wrong measurement. Held at byte-parity across the
+///    whole 200,000-case soak while production ran beside it. **Do not lower it**: now that
+///    production is deleted only 12,000 recorded cases check it, and a band one cell too narrow
+///    first showed near case 28,307 of one seed.
 ///
 /// **No term is derived from the stutter model's slip cutoffs**
 /// ([`MAX_WHOLE_REPEAT_SLIP`](super::stutter::MAX_WHOLE_REPEAT_SLIP),
@@ -191,8 +181,8 @@ const GAP_OPEN_PROB: f64 = 2.9e-5;
 ///
 /// This is a **flat per-base tract gap**: content-agnostic by design, so an impure or
 /// out-of-frame read is still read out verbatim. Pricing whole-unit slips separately is
-/// algorithm 4's job, and which is better is the Milestone D comparison — not something to
-/// decide here (spec §4.2).
+/// [`SsrUnitRobustAligner`](super::ssr_unit_robust::SsrUnitRobustAligner)'s job, and which is
+/// better was settled by measurement, not here (spec §4.2).
 ///
 /// **Provisional development calibration, not a finding.**
 #[cfg_attr(
@@ -253,10 +243,10 @@ impl TransitionCosts {
         Self::default()
     }
 
-    // Accessors for the sibling algorithm 4 (`ssr_best_path_unit_slip`), which shares this
+    // Accessors for the sibling unit-robust aligner (`ssr_unit_robust`), which shares this
     // exact per-base gap model for its *out-of-frame* route and adds whole-unit slip states
     // on top. `pub(super)` because they are an internal seam between the two aligners, not
-    // part of the module's public surface; reading them changes nothing about algorithm 3.
+    // part of the module's public surface; reading them changes nothing about this aligner.
     pub(super) fn ln_match_to_match(&self) -> f64 {
         self.ln_match_to_match
     }
@@ -283,7 +273,7 @@ impl TransitionCosts {
 /// makes parity provable.
 ///
 /// **`resize` only grows; it never clears** — and that is safe because **every score-row
-/// cell in use is written every row**, in band or out. Banding (Milestone C) does not
+/// cell in use is written every row**, in band or out. Banding does not
 /// *skip* out-of-band cells, which would leave a larger previous read's values to leak in as
 /// a neighbour score; it writes them `UNREACHABLE`. So the invariant the old exhaustive fill
 /// gave for free — no cell is read before it is written this call — still holds.
@@ -324,10 +314,8 @@ impl ViterbiScratch {
 /// Where the traceback found the repeat, before it is classified.
 ///
 /// The raw readout: the two junction offsets in read coordinates, plus whether each flank
-/// actually held. **Step B2 turns this into a [`RepeatSpan`]** and adds the
-/// [`BestPathAligner`] implementation; this step lands the recurrence and the walk, which
-/// is the part whose failure is silent — a wrong recurrence is a wrong repeat length, not
-/// a panic.
+/// actually held. [`classify`](Self::classify) turns it into a [`RepeatSpan`]; the
+/// [`BestPathAligner`] implementation is built on that.
 ///
 /// [`RepeatSpan`]: super::RepeatSpan
 /// [`BestPathAligner`]: super::BestPathAligner
@@ -359,7 +347,7 @@ impl TractReadout {
     /// 3′ end somewhere inside the repeat.
     #[must_use]
     pub fn classify(&self) -> RepeatSpan {
-        // `delimit` guarantees this, but the type is public with public fields — B3's parity
+        // `delimit` guarantees this, but the type is public with public fields — the parity
         // harness needs the raw offsets — so a hand-built readout can reach here. An
         // inverted pair would become a `Between` whose measured length saturates to zero: a
         // *confident zero-unit allele*, which is far worse than a rejection.
@@ -436,7 +424,7 @@ pub struct SsrFlatGapAligner<E: Emission> {
     emission: E,
     costs: TransitionCosts,
     /// When a crossed junction counts as an anchor. `None` — production's positional test, what
-    /// [`new`](Self::new) builds — calls a flank anchored whenever the path crossed into it;
+    /// the test-only `new` builds — calls a flank anchored whenever the path crossed into it;
     /// `Some` adds the unit-robust aligner's evidence test on top (see
     /// [`with_anchor_rule`](Self::with_anchor_rule)).
     anchor: Option<AnchorRule>,
@@ -528,8 +516,7 @@ impl<E: Emission> SsrFlatGapAligner<E> {
         let insertion_emission = self.emission.insert_ln();
 
         // The band. A cell `(i, j)` is computed only when `|i − j| <= band`; every other cell
-        // is written `UNREACHABLE`, exactly as production's banded forward does
-        // ([src/ssr/cohort/pair_hmm.rs](../../../ssr/cohort/pair_hmm.rs)).
+        // is written `UNREACHABLE`, exactly as the old caller's banded forward pass did.
         //
         // Three terms — the forced floor `|read − reference|`, the run-off correction
         // `left_flank + right_flank`, and the score-neutral bow slop `BAND_HEADROOM` — each
@@ -828,9 +815,9 @@ impl<E: Emission> SsrFlatGapAligner<E> {
         Some(TractReadout {
             tract_start: tract_start as u64,
             tract_end: tract_end as u64,
-            // **A flank that does not exist cannot anchor.** B1 had this the other way round
-            // — "a flank that does not exist cannot fail to hold" — which was harmless while
-            // these were two raw bits, but B2 promotes them to a `RepeatSpan`, and
+            // **A flank that does not exist cannot anchor.** The first version had this the other
+            // way round — "a flank that does not exist cannot fail to hold" — which was harmless
+            // while these were two raw bits, but `classify` promotes them to a `RepeatSpan`, and
             // `Between` is the one variant that claims to *pin* the repeat's length.
             //
             // At a contig-edge locus with no right flank, the two cases that matter produce
@@ -846,8 +833,8 @@ impl<E: Emission> SsrFlatGapAligner<E> {
             // measurement, which is honest — with no flank in the frame there is nothing to
             // pin the tract's edge against.
             //
-            // **This is a real divergence from production, and B3 asserts it rather than
-            // glossing it.** An earlier version of this comment claimed parity was
+            // **This is a real divergence from production, and the parity test asserts it
+            // rather than glossing it.** An earlier version of this comment claimed parity was
             // "undisturbed"; that was too glib, and only looked true because the parity
             // fixture generated no zero-length flanks. It does now. Production still answers
             // `Region` at a flankless edge — its own off-end tests are guarded on the flank
@@ -996,8 +983,8 @@ mod tests {
     }
 
     /// The mirror: a read starting inside the repeat anchors only the right flank. The two
-    /// sides are recorded separately, which production's single `BorderOffEnd` cannot do —
-    /// the widening B2 builds on.
+    /// sides are recorded separately, which production's single `BorderOffEnd` could not do —
+    /// the widening [`RepeatSpan`](super::RepeatSpan) is built on.
     #[test]
     fn a_read_starting_inside_the_repeat_anchors_only_the_right_flank() {
         let (reference, geometry) = frame(b"ACGTACGT", b"CAGCAGCAGCAG", b"TTGGTTGGAT", b"CAG");
@@ -1132,9 +1119,9 @@ mod tests {
             "a fresh scratch disagreed with a reused one"
         );
 
-        // Also the shrinking direction: a long read first, then a short one. Sound today
-        // only because the fill is exhaustive — this is the ordering that breaks first when
-        // Milestone C makes the fill partial.
+        // Also the shrinking direction: a long read first, then a short one. With a banded
+        // fill this is the ordering that would break first if out-of-band cells were skipped
+        // rather than written `UNREACHABLE`.
         let mut shrinking = ViterbiScratch::new();
         let _ = run(&mut shrinking, b"ACGTACGTCAGCAGCAGCAGCAGCAGCAGTTGGTTGGAT");
         assert_eq!(
@@ -1219,7 +1206,7 @@ mod tests {
             ln_gap_close: 0.0,
             ln_gap_extend: 0.0,
         };
-        // ε = 0.75 is the crossover established in step A1: a match and a mismatch score
+        // ε = 0.75 is the crossover (`1 − ε` equals `ε / 3`): a match and a mismatch score
         // identically there, so no cell can be decided by sequence either.
         let aligner = SsrFlatGapAligner {
             emission: FlatEmission::try_new(0.75).expect("a valid test error rate"),
@@ -1291,8 +1278,8 @@ mod tests {
     }
 
     /// **Production's dropped `tract_start > tract_end` rejection is unreachable here**, and
-    /// this is what makes that claim checkable rather than asserted. It matters because step
-    /// B2 turns these offsets into a `RepeatSpan`, where an inverted pair would become a
+    /// this is what makes that claim checkable rather than asserted. It matters because
+    /// `classify` turns these offsets into a `RepeatSpan`, where an inverted pair would become a
     /// `Between(..)` whose measured length saturates to zero — a *confident zero-unit
     /// allele*, which is a far worse answer than a rejection.
     ///
@@ -1329,10 +1316,10 @@ mod tests {
         }
     }
 
-    /// The two flanks must be told apart, not merely counted. Both flanks were 8 bp in the
-    /// original fixtures, so **transposing `left_flank_len` and `right_flank_len` passed
-    /// every test** — the same blind-fixture pattern that hid two transpositions in step A3.
-    /// The frame is now deliberately asymmetric (8 bp left, 10 bp right).
+    /// The two flanks must be told apart, not merely counted. Both flanks were 8 bp in the original
+    /// fixtures, so **transposing `left_flank_len` and `right_flank_len` passed every test** — the
+    /// same blind-fixture pattern that hid two transpositions earlier in this port. The frame is
+    /// now deliberately asymmetric (8 bp left, 10 bp right).
     #[test]
     fn the_two_flanks_are_not_interchangeable() {
         let (reference, geometry) = frame(b"ACGTACGT", b"CAGCAGCAGCAG", b"TTGGTTGGAT", b"CAG");
@@ -1378,7 +1365,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // B2 — the RepeatSpan readout, the widening
+    // The RepeatSpan readout, the widening
     // -----------------------------------------------------------------
 
     /// Align through the public [`BestPathAligner`] surface.
@@ -1532,13 +1519,12 @@ mod tests {
 
     /// The public surface must report the offsets the algorithm actually found.
     ///
-    /// **Deliberately not written as `span == readout.classify()`** — that was the first
-    /// version, and it is a tautology: `align` *is* `delimit(..).map_or(Unanchored,
-    /// classify)`, so it compares `classify(x)` with `classify(x)` and passes under every
-    /// mutation of `classify`, including swapping `FromLeft` with `FromRight`. What is
-    /// checked instead is the part that is not definitionally true: that the wiring carries
-    /// B1's offsets through unchanged, and that the *case* follows from the anchoring flags
-    /// spelled out independently here.
+    /// **Deliberately not written as `span == readout.classify()`** — that was the first version,
+    /// and it is a tautology: `align` *is* `delimit(..).map_or(Unanchored, classify)`, so it
+    /// compares `classify(x)` with `classify(x)` and passes under every mutation of `classify`,
+    /// including swapping `FromLeft` with `FromRight`. What is checked instead is the part that is
+    /// not definitionally true: that the wiring carries the traceback's offsets through unchanged,
+    /// and that the *case* follows from the anchoring flags spelled out independently here.
     #[test]
     fn the_public_surface_reports_the_offsets_the_traceback_found() {
         let (reference, geometry) = frame(b"ACGTACGT", b"CAGCAGCAGCAG", b"TTGGTTGGAT", b"CAG");
@@ -1601,7 +1587,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // C1 — banding
+    // Banding
     // -----------------------------------------------------------------
 
     /// The band is three terms of **geometry**, and the floor term is the one the spec §3

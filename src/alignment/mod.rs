@@ -13,14 +13,21 @@
 //! alignments or probabilities, which is why it sits outside the step-per-module rule
 //! rather than breaking it (`doc/devel/ng/spec/alignment.md` §1).
 //!
-//! Landed so far: [`RepeatSpan`], the repeat-aware output shape; [`RepeatGeometry`]
-//! and [`RepeatContext`], which tell a repeat-aware algorithm where the repeat sits and how it
-//! slips; the [`BestPathAligner`] trait they meet at; and the two
-//! shared components, the [`emission`] scoring every aligner uses and the [`stutter`] model;
-//! and the first algorithm, [`ssr_best_path_flat_gap`] — the repeat-aware delimiter, which is
-//! this module's **only byte-parity oracle** against production (`delimit_parity`, test-only; since
-//! promotion step C10 against production's recorded answers). Still to come in
-//! `doc/devel/ng/impl_plan/alignment_best_path.md`: the affine aligner (E, gated).
+//! What it holds:
+//!
+//! - [`RepeatSpan`], the repeat-aware output shape; [`RepeatGeometry`] and [`RepeatContext`],
+//!   which tell a repeat-aware algorithm where the repeat sits and how it slips; and the
+//!   [`BestPathAligner`] trait they meet at.
+//! - Two shared components: the [`emission`] scoring every aligner uses, and the [`stutter`]
+//!   model.
+//! - Two repeat-aware delimiters. [`ssr_unit_robust`] measures a single repeat for the STR
+//!   generator; [`ssr_best_path_flat_gap`] delimits an STR bundle's hull, and is this module's
+//!   **only byte-parity oracle** against the old caller (`delimit_parity`, test-only, against
+//!   that caller's recorded answers).
+//! - [`indel_norm`], the indel left-alignment.
+//!
+//! The affine (non-repeat) aligner in `doc/devel/ng/impl_plan/alignment_best_path.md` is not
+//! built.
 
 #[cfg(test)]
 mod delimit_parity;
@@ -46,10 +53,9 @@ use std::ops::Range;
 /// the repeat's length, not the length. Those are different facts, and a caller that
 /// confuses them counts a truncated read as a short allele.
 ///
-/// This is where ng goes past production. Production's `Delimited`
-/// ([alignment.rs](../../../ssr/pileup/alignment.rs)) has a single `BorderOffEnd` variant
-/// covering every unanchored case, so it is **side-blind**: it cannot say *which* flank was
-/// missing, and the STR read preparer cannot otherwise tell a measurement from a bound
+/// This is where ng goes past the old caller, whose `Delimited` had a single `BorderOffEnd`
+/// variant covering every unanchored case, so it was **side-blind**: it could not say *which*
+/// flank was missing, and the STR read preparer cannot otherwise tell a measurement from a bound
 /// (arch §2.1, §5; spec §8).
 ///
 /// The offsets are read coordinates — `u64` and 0-based, indexing the read slice the
@@ -181,8 +187,11 @@ pub struct RepeatGeometry {
     pub left_flank_len: Bp,
     /// Bases of flank after the repeat ends. May be zero at a contig end.
     pub right_flank_len: Bp,
-    /// The repeat unit. Needed only by the algorithms that price whole-unit slips
-    /// (algorithm 4); the flat-gap delimiter needs the tract boundaries alone.
+    /// The repeat unit, **read from the tract's first base**: a tract `ACACAC` needs `AC`, not
+    /// `CA`. The unit-robust delimiter assigns `motif[0]` to the tract's first column and steps the
+    /// phase from there, so a rotated motif scores each tract base against the wrong unit base.
+    /// Needed only by the delimiter that prices whole-unit slips; the flat-gap delimiter needs the
+    /// tract boundaries alone.
     pub motif: Motif,
 }
 
@@ -231,15 +240,12 @@ impl RepeatGeometry {
 ///
 /// Borrowed rather than owned, so a caller that already holds a geometry and a model for a
 /// locus pays nothing to pass them to each of that locus's reads.
-///
-/// *(The plan lists this in step A2 with [`RepeatGeometry`]; it landed in A3, because it
-/// names a [`StutterModel`] and that type arrives there.)*
 #[derive(Debug, Clone, Copy)]
 pub struct RepeatContext<'a> {
     /// Where the repeat sits in the reference stretch.
     pub geometry: &'a RepeatGeometry,
-    /// How the repeat slips. **Only the algorithms that price whole-unit slips read this**
-    /// — algorithm 4. The flat-gap delimiter (algorithm 3) ignores it, which is the point:
+    /// How the repeat slips. **Only the delimiter that prices whole-unit slips reads this**
+    /// — [`ssr_unit_robust`]. The flat-gap delimiter (algorithm 3) ignores it, which is the point:
     /// its measurement is content-agnostic and must not be pulled toward tidy lengths.
     pub stutter: &'a StutterModel,
 }
@@ -638,10 +644,9 @@ mod tests {
         }
     }
 
-    // TODO(Milestone B): the `BestPathAligner` contract states four properties that no
-    // test can reach until an implementation exists. The step that writes algorithm 3 owes
-    // `align_breaks_ties_toward_match_then_deletion_then_insertion`,
-    // `align_assigns_a_junction_gap_to_the_block_on_its_five_prime_side`,
-    // `align_returns_unanchored_for_an_empty_reference`, and a debug-build test that the
-    // two documented preconditions are asserted.
+    // TODO: the `BestPathAligner` contract states four properties. Two are tested on the
+    // flat-gap delimiter (`ties_are_broken_toward_match_then_deletion_then_insertion`,
+    // `an_empty_reference_aligns_to_unanchored`). Still without a test: that a junction gap
+    // is assigned to the block on its five-prime side, and that the two documented
+    // preconditions are asserted in debug builds.
 }

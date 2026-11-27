@@ -39,8 +39,8 @@
 //! to be period-sized is treated as slippage whether or not its bases are the motif. The
 //! composition is caught downstream instead, as a base-error mismatch against the re-tiled
 //! candidate. The mis-routing is worst at period 1, where it catches roughly three of every
-//! four single-base insertions — which is why the algorithm-3-versus-4 comparison
-//! (Milestone D) must score an indel *of the repeat's own base* separately from an indel of
+//! four single-base insertions — which is why any comparison of the flat-gap and unit-slip
+//! delimiters must score an indel *of the repeat's own base* separately from an indel of
 //! a different base, or the two effects cancel in the average (the alignment spec §4.2).
 
 use std::num::{NonZeroU8, NonZeroU32};
@@ -54,13 +54,12 @@ use crate::float;
 ///
 /// # Inherited, not measured
 ///
-/// **The value is production's provisional 10, declared inherited rather than fitted.**
-/// Neither cutoff has a source in the parameters the pre-pass fits, and production's own
-/// comment calls its 10 "a provisional choice"
-/// ([`param_estimation.rs`](../../../../src/ssr/cohort/param_estimation.rs)). Copied rather
-/// than imported: ng is a from-scratch caller that does not depend on production (owner,
-/// 2026-07-16), and `the_copied_cutoffs_still_equal_productions` keeps the two equal rather
-/// than trusting this sentence.
+/// **The value is production's provisional 10, declared inherited rather than fitted.** Neither
+/// cutoff has a source in the parameters the pre-pass fits, and production's own comment (in its
+/// `ssr::cohort::param_estimation`) calls its 10 "a provisional choice". Copied rather than
+/// imported: ng is a from-scratch caller that does not depend on production (owner, 2026-07-16),
+/// and `the_copied_cutoffs_still_equal_productions` keeps the two equal rather than trusting this
+/// sentence.
 ///
 /// **What should eventually set it is the mass it discards**, which
 /// [`StutterModel::unreachable_mass`] now computes per candidate.
@@ -160,8 +159,8 @@ pub struct StutterRates {
 /// the model's side of the parameter boundary: it reads its seven numbers frozen. Production
 /// derives them per call from a per-locus stutter shape plus a per-read stutter level; ng's
 /// come from the parameter pre-pass, per read group per stratum (§4.2 of the same document).
-/// **The constructor that adapts a fit to these rates is `stutter_rates_for`, which plan
-/// step E3 lands**; until then a caller builds [`StutterRates`] itself.
+/// **The constructor that adapts a fit to these rates is
+/// [`stutter_rates_for`](crate::calling::likelihood::stutter_rates::stutter_rates_for).**
 ///
 /// # Contract: the same-length share is floored, so **do not test that the five sum to one**
 ///
@@ -773,7 +772,7 @@ struct Regime {
     one_step_share: f64,
     /// The largest size this regime scores, **on this regime's own scale** — repeats on the
     /// whole-repeat branch, re-indexed base pairs on the part-repeat one. Carried per regime
-    /// rather than read from one shared constant, which is the whole of what E2 changes.
+    /// rather than read from one shared constant.
     max_steps: u32,
 }
 
@@ -1234,7 +1233,7 @@ mod tests {
             assert!((model.probability(bp_diff, period(1)) - expected).abs() < 1e-15);
         }
         // Direction asymmetry survives at period 1 — the one-penalty model cannot express
-        // it at all, which is what Milestone D's comparison is about.
+        // it at all.
         assert!(model.probability(-1, period(1)) > model.probability(1, period(1)));
     }
 
@@ -1385,8 +1384,8 @@ mod tests {
         ///
         /// The sweep above walks three hand-built models over 2,178 points — three corners of
         /// a six-dimensional rate space. That was enough while every consumer used
-        /// hard-coded parameters, and it stops being enough at plan step E3, where
-        /// `stutter_rates_for` starts handing this type **fitted** numbers: a row the
+        /// hard-coded parameters, and it stopped being enough once
+        /// `stutter_rates_for` began handing this type **fitted** numbers: a row the
         /// pre-pass produced has never been through this suite.
         ///
         /// Two invariants, both of which the genotyping likelihood will rely on. Every value
@@ -1451,8 +1450,8 @@ mod tests {
         /// **The reported loss equals what an enumeration measures, for every row of rates**
         /// — not only the eleven the fixed sweep names.
         ///
-        /// The sweep is thorough where it looks, but it looks at two hand-built rows. The
-        /// consumer that arrives at plan step E3 hands this type **fitted** numbers, and a
+        /// The sweep is thorough where it looks, but it looks at two hand-built rows.
+        /// `stutter_rates_for` hands this type **fitted** numbers, and a
         /// fitted row has never been through a fixed list. This is also the shape of test
         /// that would have found the zero-repeat case without anyone thinking to write it.
         ///
@@ -1590,7 +1589,7 @@ mod tests {
     /// **The copied cutoffs must not drift from production's.** Both are inherited from its
     /// single provisional 10, and their docs say so; this makes that true rather than
     /// aspirational. Production's `ssr::cohort::param_estimation::MAX_SLIP` was 10 at commit
-    /// `d9e7b076`, frozen here at promotion step C18.
+    /// `d9e7b076`, frozen here before production was deleted.
     ///
     /// **ng carries two where production carries one**, named for the scale each counts in.
     /// Splitting the name is what makes them independently settable by whoever measures them;
