@@ -13,6 +13,12 @@ Code-facing companion: [`../arch/locus_generation_pileup.md`](../arch/locus_gene
 [the port](../impl_plan/locus_generation_pileup_port.md) →
 [the generator](../impl_plan/locus_generation_pileup_generator.md).*
 
+*Note (2026-11-27): this was written while the caller was built in `src/ng/` beside an older,
+frozen caller ("production"). The older caller was deleted on 2026-09-13 and these modules moved
+to the crate root, `src/`, so the rules below about what may sit outside `src/ng/` describe that
+period. Paths to code are given as they are now; a file that no longer exists is cited as
+`<commit>:<path>`, which `git show` opens.*
+
 ---
 
 ## 1. Scope — goals, non-goals, and what it does not do
@@ -29,7 +35,7 @@ the reads are read.
 
 1. Fill `GeneratorSet`'s `generic` slot, which today holds
    `GeneratorSlot::Unfilled(UnhandledReason::NotImplemented)`
-   ([locus_generation/mod.rs:377](../../../../src/ng/locus_generation/mod.rs#L377)) — so ng can
+   ([locus_generation/mod.rs](../../../../src/locus_generation/mod.rs)) — so ng can
    mint a SNP or indel locus at all, and the shared per-locus core downstream has a generic input.
 2. Get production's walker into an in-memory generator ng owns outright, **provably without
    changing what it computes** (§3), so that whatever ng later changes is a measured delta and not
@@ -79,7 +85,7 @@ GenomeRegion ─▶ SampleCursor::move_to_region ─▶ ReadPreparer ─▶ the 
 the opposite reading is alarming and wrong. `SampleCursor::next_read` hands back one
 `Result<AlignedRead, CursorError>` at a time and collects nothing. The walk pulls a read
 only when it reaches that read's start, and drops it once it passes the read's `alignment_end`
-([active_read_set.rs:149](../../../../src/pileup/walker/active_read_set.rs#L149)). **What is
+(`d9e7b076:src/pileup/walker/active_read_set.rs`). **What is
 resident is the reads overlapping the current position — order (local depth × read length), hard
 -bounded by `max_active_reads` — never the region's reads.** A 100 kb `Generic` region is walked
 with the same footprint as a 1 kb one; the region's length sets how long the walk runs, not how
@@ -99,7 +105,7 @@ means this generator pays almost none of that.** *(All three are merged into thi
 `REPOSITION_GAP = FILE_READ_CHUNK = 64 KiB` clear of the buffered one, in either direction. The
 pileup lands on the *extend* side by construction — a contiguous forward walk, which is the case the
 threshold exists to preserve — and on the *reposition* side only where it genuinely jumps: a
-coverage gap the walker skips ([driver.rs:549](../../../../src/pileup/walker/driver.rs#L549)), the
+coverage gap the walker skips (`d9e7b076:src/pileup/walker/driver.rs`), the
 STR or satellite regions lying between two `Generic` ones, or a BED-restricted run. Repositioning is
 the wanted answer in all three. Two margins make it comfortable rather than marginal: record
 widening cannot approach the threshold (`max_record_span` is 5000), and read preparation's fetches
@@ -109,8 +115,8 @@ hurt is rebuilding the accessor per segment (§8).
 
 **A locus per covered position, REF-only ones included.** Production emits a record at every
 position at least one read observed, including positions where every read matched the reference
-([walker/tests.rs:158](../../../../src/pileup/walker/tests.rs#L158)); uncovered positions emit
-nothing ([:466](../../../../src/pileup/walker/tests.rs#L466)). ng keeps that, because a cohort
+(`d9e7b076:src/pileup/walker/tests.rs`); uncovered positions emit
+nothing (`d9e7b076:src/pileup/walker/tests.rs`). ng keeps that, because a cohort
 merge must be able to tell "this sample is REF here" from "this sample has no coverage here", and
 because per-position depth is what the windowed statistics slide over
 ([locus_generation.md](locus_generation.md) §11).
@@ -133,7 +139,7 @@ fallback design to fall back to (§7).
 *overlapping* the region, including reads starting before it, so the walk emits records just outside
 the region's bounds. Drop those on the record's anchor position, exactly as production's region
 driver does (`(start..=end).contains(&record.pos)`,
-[pileup_to_psp.rs:271](../../../../src/pileup/per_sample/pileup_to_psp.rs#L271)). Because typed
+`d9e7b076:src/pileup/per_sample/pileup_to_psp.rs`). Because typed
 regions tile the genome gap-free and disjointly, every record is emitted by exactly one region — no
 duplicates, no holes.
 
@@ -208,7 +214,7 @@ clamp, so the halo then costs only what the boundary-crossing records actually n
 *What the halo does not change, because it is not a boundary effect:* the interior positions of a
 wide record get no locus of their own, in any region. An event inside an open record's footprint
 folds into that record rather than opening its own (`find_overlapping`,
-[open_record.rs:303](../../../../src/pileup/walker/open_record.rs#L303)), so "a locus per covered
+`d9e7b076:src/pileup/walker/open_record.rs`), so "a locus per covered
 position" has always meant "per position not already inside a wider record". That is production's
 behaviour and `locus_generation.md` §3 already records the overlapping-loci caveat it creates.
 
@@ -227,8 +233,8 @@ dependency — no `Write`, no `serde`, no encoder, no `psp::` import. (`column` 
 `max_snp_column_depth` and friends, and `errors.rs:42` names `.psp` in a message: vocabulary, not
 coupling.) The two real couplings are one-line policies, not machinery: `finalise()` sets
 `windowed_gc`/`windowed_coverage` to `f32::NAN` for the writer's seam to fill
-([open_record.rs:180](../../../../src/pileup/walker/open_record.rs#L180)), and it drops the REF
-bucket's chain ids ([:150](../../../../src/pileup/walker/open_record.rs#L150)). ng re-takes both
+(`d9e7b076:src/pileup/walker/open_record.rs`), and it drops the REF
+bucket's chain ids (`d9e7b076:src/pileup/walker/open_record.rs`). ng re-takes both
 (§6); neither is an obstacle.
 
 **It is, however, mostly sealed** — which is why there was never a middle route between copying it
@@ -236,8 +242,8 @@ and driving it whole. `walker/mod.rs:15-22` declares `active_read_set`, `chain_i
 `cigar_cursor`, `decompose`, `driver`, `open_record` and `errors` **private**; the re-exports are
 `run`, `PileupWalker`, `RunSummary`, `WalkerError` and `DEFAULT_MAX_ACTIVE_READS`; and two pieces
 this step cares about are private `fn`s *inside* those private modules (`base_in_adaptor`,
-[cigar_cursor.rs:85](../../../../src/pileup/walker/cigar_cursor.rs#L85);
-`resolve_mate_overlap_at_pos`, [driver.rs:648](../../../../src/pileup/walker/driver.rs#L648)). Not
+`d9e7b076:src/pileup/walker/cigar_cursor.rs`;
+`resolve_mate_overlap_at_pos`, `d9e7b076:src/pileup/walker/driver.rs`). Not
 all of it is sealed — `indel_norm` is `pub(crate)` and ng's read preparation already calls it, which
 is why it is absent from the copy inventory below. So `run` is the only copy-free way in: the
 black-box option, rejected next.
@@ -249,8 +255,8 @@ source in a `PileupRecord`: `read_witness` is gone by `finalise()`, which consum
 fold state, and `reads_without_observation` / `reads_discarded_by_cap` exist only as run-level
 totals on `RunSummary`, never per record. Worse, the thing `read_witness` exists to prevent is
 already baked in: a read covering only part of a record's footprint has the rest filled from the
-reference ([open_record.rs:522-531](../../../../src/pileup/walker/open_record.rs#L522),
-[:568-573](../../../../src/pileup/walker/open_record.rs#L568)), folded as if it had witnessed bases
+reference (`d9e7b076:src/pileup/walker/open_record.rs`,
+`d9e7b076:src/pileup/walker/open_record.rs`), folded as if it had witnessed bases
 it never saw (§6).
 
 **Chosen: copy the whole walker into ng, and touch production not at all (owner, 2026-07-28).**
@@ -259,7 +265,7 @@ looked reusable names `PreparedRead` in its signatures, so that type reaches all
 
 | what | where it lands |
 |---|---|
-| `driver.rs`, `open_record.rs`, `cigar_cursor.rs`, `decompose.rs`, `active_read_set.rs`, `chain_id_allocator.rs`, `errors.rs` (~5,500 lines) | **copied verbatim** into `src/ng/locus_generation/pileup/`, then changed. One rename on the way in — `driver.rs` → `genome_walk.rs`, the only one of the seven named for a role rather than for what it owns (arch, *Module home*) |
+| `driver.rs`, `open_record.rs`, `cigar_cursor.rs`, `decompose.rs`, `active_read_set.rs`, `chain_id_allocator.rs`, `errors.rs` (~5,500 lines) | **copied verbatim** into `src/locus_generation/pileup/`, then changed. One rename on the way in — `driver.rs` → `genome_walk.rs`, the only one of the seven named for a role rather than for what it owns (arch, *Module home*) |
 | `PreparedRead`, `MateRole`, `ReadLengthError` | **copied into ng** and extended there with `read_group` (§6) |
 | `CigarOp`, `PileupRecord`, `AlleleObservation`, `AlleleSupportStats` | reused as-is — already `pub`, and unchanged by ng |
 
@@ -292,10 +298,10 @@ to `crate::pileup::walker::run` and to the ng copy's `run` with the same `Walker
 same reference fetcher, and assert the two `Result<PileupRecord, WalkerError>` streams are equal
 element for element, plus `RunSummary`. "Byte-identical" is well defined here because the output
 type is still production's, and `PileupRecord`'s hand-written `PartialEq` compares the two `f32`s
-**by bits** ([pileup_record.rs:208](../../../../src/pileup_record.rs#L208)), so the `NaN`
+**by bits** (`d9e7b076:src/pileup_record.rs`), so the `NaN`
 placeholders compare equal and the comparison is total. Run it on the walker's own fixtures
 (`MockFasta`, `snp_read`, `paired_snp_reads`,
-[walker/tests.rs:32-152](../../../../src/pileup/walker/tests.rs#L25)) and at real scale on GIAB
+`d9e7b076:src/pileup/walker/tests.rs`) and at real scale on GIAB
 HG002 and a tomato CRAM, under the `PVC_PARITY_CASES` convention.
 
 *Stage 2 — the ng-shaped output is a projection plus a named list of divergences.* Once the copy
@@ -315,27 +321,27 @@ not.
 | a read that did not witness the whole footprint becomes an observation carrying a `Partial` witness, whose bases are what it saw, where production folded a reference-filled haplotype into REF | production fabricates the unwitnessed bases (§4, §6) | the divergent loci are enumerated and each hand-verified against the read's CIGAR; **this count is the deliverable** |
 | an allele supported from several read groups is several observations | the group joins the key (§6); `project` cannot split a production observation | observation counts reconcile: summing a locus's observations by `(bases, coverage)` must reproduce production's per-allele totals |
 | `reads_without_observation` / `reads_discarded_by_cap` are non-zero | production keeps neither per record | asserted against a hand-counted fixture, not against production |
-| production emits a REF bucket with `num_obs == 0`; ng emits no such observation | production creates `alleles[0]` at record open regardless ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)); ng derives observations from reads that folded | the projection drops zero-support observations before comparing, and that drop is asserted to be the only one |
+| production emits a REF bucket with `num_obs == 0`; ng emits no such observation | production creates `alleles[0]` at record open regardless (`d9e7b076:src/pileup/walker/open_record.rs`); ng derives observations from reads that folded | the projection drops zero-support observations before comparing, and that drop is asserted to be the only one |
 | observation **order** | production's is bucket-creation order; ng's is whatever the fold yields | ng **sorts** before emitting (below), so the comparison is against a sorted projection |
-| **production's stale widen**: a read folded before the record widened keeps a **reference tail** production appended on its behalf, where ng's observation says what the read witnessed | see below — it is the one class that is *production being wrong*, not the two walkers describing the same evidence differently | `stale_widen_shape` ([parity.rs:2107](../../../../src/ng/locus_generation/pileup/parity.rs#L2107)): every production observation ng does not have must be some ng observation's bases plus a reference tail, with the per-`bases` evidence unmoved |
+| **production's stale widen**: a read folded before the record widened keeps a **reference tail** production appended on its behalf, where ng's observation says what the read witnessed | see below — it is the one class that is *production being wrong*, not the two walkers describing the same evidence differently | `stale_widen_shape` ([parity.rs](../../../../src/locus_generation/pileup/parity.rs)): every production observation ng does not have must be some ng observation's bases plus a reference tail, with the per-`bases` evidence unmoved |
 
 **The sixth class, and the mechanism, because the obvious version of it is wrong.** It is tempting
 to say production's `widen` "re-folds nothing". It does not: `process_position` re-folds every
 **contributor** whose events overlap an affected record, subtract-then-add, and production's own
 comment argues that appending is equivalent to re-folding *"modulo the new bytes never being
 event-modified by this read"*
-([open_record.rs:405-410](../../../../src/pileup/walker/open_record.rs#L405)).
+(`d9e7b076:src/pileup/walker/open_record.rs`).
 
 **The reads that "modulo" excludes are the class.** `widen` appends the new reference bases to
-every allele's `seq` ([open_record.rs:416](../../../../src/pileup/walker/open_record.rs#L416)), and
+every allele's `seq` (`d9e7b076:src/pileup/walker/open_record.rs`), and
 records not affected at a step are deliberately not re-folded, because folding again would
-double-count ([open_record.rs:658-661](../../../../src/pileup/walker/open_record.rs#L658)). So a
+double-count (`d9e7b076:src/pileup/walker/open_record.rs`). So a
 read that is **not a contributor at the widening step** keeps that appended tail unrevised. Two
 kinds are: a read still live but silent there (an `N`, an adaptor mask, a ref skip), and a read
 that has already expired.
 
 ng answers each differently, and only the first is a function production lacks:
-`refold_live_reads` ([open_record.rs:1441](../../../../src/ng/locus_generation/pileup/open_record.rs#L1441))
+`refold_live_reads` ([open_record.rs](../../../../src/locus_generation/pileup/open_record.rs))
 re-places the **live non-contributors** — it skips contributors precisely because the fold loop is
 about to re-fold them — and an **expired** read cannot be reached by either walker, its cursor
 having gone with it, so ng leaves its observation saying what it saw where production leaves the
@@ -348,11 +354,11 @@ the count of reads production **credited with bases they never sequenced** — a
 those two as separate three-number measurements.
 
 **Observation order has to be specified, not left to the fold.** ng's observations are derived from a per-read map
-(`folded_reads` is an `AHashMap`, [open_record.rs:90](../../../../src/pileup/walker/open_record.rs#L90)),
+(`folded_reads` is an `AHashMap`, `d9e7b076:src/pileup/walker/open_record.rs`),
 whose iteration order is seeded per process — so emitting in fold order would make the output
 **non-deterministic run to run**, contradicting §7 and §13's byte-identity check. Sort by
 `(bases, read_witness, read_group)` before emitting. The STR generator already sorts for exactly
-this reason ([ssr.rs:1055-1075](../../../../src/ng/locus_generation/ssr.rs#L1055)); this is the same
+this reason ([ssr.rs](../../../../src/locus_generation/ssr.rs)); this is the same
 requirement on the same shared type.
 
 *What stage 1 cannot cover, and it is the important half:* it runs on the **unchanged** copy, so it
@@ -390,7 +396,7 @@ here is about the walk.
 
 *And one thing that is safely identical:* the walker's reference contract is already canonical —
 `MultiChromRefFetcher::fetch` returns "uppercase ASCII over `{A,C,G,T,N}`, canonicalised by the
-fetcher implementation" ([fasta/mod.rs:117](../../../../src/fasta/mod.rs#L117)) — which is exactly
+fetcher implementation" ([fasta/mod.rs](../../../../src/fasta/mod.rs)) — which is exactly
 ng's `RefSeq` view. The step-2 case divergence does **not** recur here, and the adapter from
 `RefSeq` to `MultiChromRefFetcher` is a shim with no semantic content.
 
@@ -480,8 +486,8 @@ subtract-then-add against `FoldedReadState`. It is the single thing most likely 
 rule, and it replaces both the fill and the widen-extension:
 
 - **The haplotype builder does not fill.** `apply_events_to_ref_into` emits reference bytes for every
-  offset no event covered ([:522-531](../../../../src/pileup/walker/open_record.rs#L522),
-  [:568-573](../../../../src/pileup/walker/open_record.rs#L568)); ng's emits only what the events
+  offset no event covered (`d9e7b076:src/pileup/walker/open_record.rs`,
+  `d9e7b076:src/pileup/walker/open_record.rs`); ng's emits only what the events
   cover, and reports the extent it covered. **Reads whose events tile the footprint come out byte
   for byte as before** — there are no gaps to fill — so the complete class stays parity-comparable
   and only the fabricating cases move.
@@ -494,7 +500,7 @@ rule, and it replaces both the fill and the widen-extension:
 - **The witnessed extent is stored in absolute reference coordinates**, not relative to the
   then-current footprint, on `FoldedReadState` — which today holds only
   `{allele_index, contribution, chain_id}`
-  ([open_record.rs:100-104](../../../../src/pileup/walker/open_record.rs#L100)). Coverage is then
+  (`d9e7b076:src/pileup/walker/open_record.rs`). Coverage is then
   resolved **once, at `finalise()`**, by comparing that extent against the *final* footprint. A read
   `Complete` when it folded becomes `Partial` after a widen with nothing about the read having
   changed, and no re-fold is needed to notice — the read may be long gone, since `expire_passed`
@@ -515,8 +521,8 @@ the two on different clocks is what lets bases stay immutable while coverage sta
 
 **One base still comes from the reference, and it is worth naming rather than glossing.** An
 insertion or deletion emits its **anchor** base from `ref_seq` when no `Match` already emitted it
-([open_record.rs:546](../../../../src/pileup/walker/open_record.rs#L546),
-[:556](../../../../src/pileup/walker/open_record.rs#L556)). Normally the `Match` is there and the
+(`d9e7b076:src/pileup/walker/open_record.rs`,
+`d9e7b076:src/pileup/walker/open_record.rs`). Normally the `Match` is there and the
 read's own base wins, so nothing is borrowed. The corner is a read whose base at the anchor was
 dropped — `N` or adaptor-masked — while its indel at that position was still emitted: it witnessed
 *the indel* but not *the anchor base's identity*, and the builder supplies the reference base for
@@ -527,7 +533,7 @@ change it.
 
 **This converges the two generators, which is the outcome to protect.** The STR path already carries
 witnessed-only bases — a read running off mid-tract yields `bases = b"CACA"`, not the full tract
-([ssr.rs:886-894](../../../../src/ng/locus_generation/ssr.rs#L886); it tags that `PartialLeft(4)`
+([ssr.rs](../../../../src/locus_generation/ssr.rs); it tags that `PartialLeft(4)`
 today, `Partial { offset_in_locus: 0, positions_covered: 4 }` after the reshape). Before this change the generic
 path would have filled the same shared field with reference-padded bases: **one field, two
 incompatible meanings.** After it, both mean "what the read witnessed", and that is now a
@@ -579,8 +585,8 @@ the paragraphs after it are where it is not.
 
 | `SampleLocusObservations` | from production |
 |---|---|
-| `region` | `pos ..= pos + alleles[0].seq.len() - 1` — `GenomeRegion` is 1-based **inclusive** ([types.rs:79](../../../../src/ng/types.rs#L79)), so the end is the last covered position, not one past it |
-| `reference_bases` | `alleles[0].seq` — the REF bucket's sequence *is* the record's reference bytes; there is no separate field ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)) |
+| `region` | `pos ..= pos + alleles[0].seq.len() - 1` — `GenomeRegion` is 1-based **inclusive** ([types.rs](../../../../src/types.rs)), so the end is the last covered position, not one past it |
+| `reference_bases` | `alleles[0].seq` — the REF bucket's sequence *is* the record's reference bytes; there is no separate field (`d9e7b076:src/pileup/walker/open_record.rs`) |
 | `observations` | every `AlleleObservation`, REF bucket included |
 | `kind` | `LocusKind::Generic` |
 | `SequenceObservation.{bases, num_obs, num_fwd, q_sum, mapq_sum, mapq_sum_sq, chain_ids}` | `AlleleObservation.seq` / `AlleleSupportStats.{num_obs, fwd, q_sum, mapq_sum, mapq_sum_sq}` / `chain_ids` |
@@ -588,16 +594,16 @@ the paragraphs after it are where it is not.
 **`read_witness` — the one that changes an answer, and the one production gets wrong.** Production
 folds a read into a record even when the read did not witness the whole footprint, filling what it
 did not witness from the reference
-([open_record.rs:522-531](../../../../src/pileup/walker/open_record.rs#L522),
-[:568-573](../../../../src/pileup/walker/open_record.rs#L568)). At a six-base deletion locus a read
+(`d9e7b076:src/pileup/walker/open_record.rs`,
+`d9e7b076:src/pileup/walker/open_record.rs`). At a six-base deletion locus a read
 that saw only the first two bases is counted as a full witness of a six-base reference haplotype it
 never saw, and `widen` extends the same fabrication retroactively to reads that have already left
 the active set.
 
 > **The fabrication primitive is "no event → reference base", and that is wider than "outside the
 > read's span".** A read emits no event at a position that is `N`
-> ([cigar_cursor.rs:272-274](../../../../src/pileup/walker/cigar_cursor.rs#L272)), adaptor-masked
-> ([:278-280](../../../../src/pileup/walker/cigar_cursor.rs#L278)), inside a ref-skip, or covered by
+> (`d9e7b076:src/pileup/walker/cigar_cursor.rs`), adaptor-masked
+> (`d9e7b076:src/pileup/walker/cigar_cursor.rs`), inside a ref-skip, or covered by
 > an indel the first/last-op rule dropped. Every one of those positions is *spanned* by the read's
 > alignment and *not witnessed* by it. **A coverage tag derived from the alignment span is therefore
 > blind to all four** — an adaptor-masked reverse-strand read would be tagged a complete witness of
@@ -685,26 +691,26 @@ side effect: it gives that counter a real population (below).
 
 **This is a change to a built ng module, and it is not small — a correction to an earlier estimate
 in this spec.** `ReadWitness` is not `#[non_exhaustive]` and has **six** exhaustive match sites, not
-one: `num_obs_along_locus` ([locus_generation/mod.rs:81-83](../../../../src/ng/locus_generation/mod.rs#L81)),
-the STR generator's complete/partial tally ([ssr.rs:1015](../../../../src/ng/locus_generation/ssr.rs#L1015))
-and its deterministic sort key ([ssr.rs:1072](../../../../src/ng/locus_generation/ssr.rs#L1072)),
+one: `num_obs_along_locus` ([locus_generation/mod.rs](../../../../src/locus_generation/mod.rs)),
+the STR generator's complete/partial tally ([ssr.rs](../../../../src/locus_generation/ssr.rs))
+and its deterministic sort key ([ssr.rs](../../../../src/locus_generation/ssr.rs)),
 plus four dump tools that `--all-targets` builds. The STR generator also **mints** coverage in four
-places ([ssr.rs:713](../../../../src/ng/locus_generation/ssr.rs#L713), `:716`, `:889`, `:910`) — and
+places ([ssr.rs](../../../../src/locus_generation/ssr.rs)) — and
 two of those pass `ReadWitness::PartialLeft`/`PartialRight` **as function values**, which a struct
 variant cannot be, so that helper is restructured rather than retyped. `locus_generation.md` §3 and
 `../arch/locus_generation.md` §1 carry the type and need the change folded in (§10).
 
 **The read group — carried, and part of the observation's identity (owner, 2026-07-27).** The
 read-group work merged on 2026-07-27 makes the group a first-class object: `AlignedRead` carries
-`read_group: ReadGroupId` ([aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36)),
+`read_group: ReadGroupId` ([aligned_read.rs](../../../../src/read/aligned_read.rs)),
 "the library it was prepared in", and the run's table maps that id to a `ReadGroup` holding the
-sample, the library and the experiment ([read_groups.rs:43](../../../../src/ng/read/input/read_groups.rs#L43)).
+sample, the library and the experiment ([read_groups.rs](../../../../src/read/input/read_groups.rs)).
 **Today it does not survive to here, and the fix is a type ng owns (owner, 2026-07-28).**
-Production's `PreparedRead` ([walker/mod.rs:236](../../../../src/pileup/walker/mod.rs#L236)) has no
+Production's `PreparedRead` (`d9e7b076:src/pileup/walker/mod.rs`) has no
 such field — checked after the merge — so the group dies at the preparation boundary. A read's
 library membership is a property of the read, exactly like its MAPQ or its strand; that the type
 lacks it is an accident of one written before read groups existed. **So ng copies `PreparedRead`
-into `src/ng/read/` and adds `read_group` there**, rather than editing production or having this
+into `src/read/` and adds `read_group` there**, rather than editing production or having this
 generator rebuild the group from a side channel.
 
 **Copying the type is what makes copying the walker the right call**, not an extra cost on top of it
@@ -749,7 +755,7 @@ A per-group count beside one merged observation gives the first and loses the se
 joins the dedup key: an observation is one distinct `(bases, read_witness, read_group)` combination.
 
 **At the finest grain — per `@RG` (owner, 2026-07-28).** `ReadGroupId`
-([types.rs:178](../../../../src/ng/types.rs#L178)) identifies one `@RG`, i.e. one lane; the run's
+([types.rs](../../../../src/types.rs)) identifies one `@RG`, i.e. one lane; the run's
 table carries the library and experiment each one belongs to. Carrying the *finest* grain is what
 lets the consumer choose: library, experiment, or the read group itself, none of them foreclosed
 here. The coarser ids do not exist anyway — the read-group work merged without a `LibraryId` or an
@@ -796,7 +802,7 @@ bases left of the anchor as right of it (`read_placed_left` in `src/locus_genera
 
 **`placed_left` is read**, and an earlier draft of this spec wrongly said nothing read it — the grep
 behind that claim was truncated and never reached `src/vcf/`.
-[vcf/qual_refine.rs:101,145,170](../../../../src/vcf/qual_refine.rs#L101) turns it into the
+`d9e7b076:src/vcf/qual_refine.rs` turns it into the
 read-position-bias term subtracted from QUAL, live via `final_qual` into the cohort VCF writer and
 the `--min-qual` gate.
 
@@ -813,7 +819,7 @@ a later consumer re-derives it at `finalise()` with no change to the fold.
 **`reads_without_observation` — new, and the obvious definition is empty.** Production keeps no
 per-record equivalent. "Reads considered, minus reads folded" is **identically zero**: contributors
 are exactly the reads with an event at the walker position
-([driver.rs:417-422](../../../../src/pileup/walker/driver.rs#L417)), every affected record's
+(`d9e7b076:src/pileup/walker/driver.rs`), every affected record's
 footprint contains that position, so no contributor's window is ever empty and the fold's
 `is_empty()` guard is unreachable. Considered *is* folded — worth knowing before anyone implements
 the obvious thing.
@@ -837,7 +843,7 @@ The quantity the locus type actually wants — *"the support counts are a subsam
 (`locus_generation.md` §3) — is: **reads that had events inside this footprint and were truncated at
 every position where they did, so folded nowhere.** Track the read ids truncated at any position of
 an open record's footprint and count, at `finalise`, those absent from `folded_reads`. **The cap
-truncates in the walk, before any record is identified** ([driver.rs:472-476](../../../../src/pileup/walker/driver.rs#L472)),
+truncates in the walk, before any record is identified** (`d9e7b076:src/pileup/walker/driver.rs`),
 so those ids have to be plumbed into the fold and registered per affected record — a signature
 change to the copied fold, not a local addition. Two cases have no clean answer and are recorded as
 such: a read truncated where no record is open is unattributable to any locus, and a truncated read
@@ -854,7 +860,7 @@ capped locus is reading a biased cross. Neither is a defect to fix here, but a m
 
 **`chain_ids` — carry, never for REF, and make it structural.** The memory lesson is already banked
 in the code being ported: `finalise()` skips `allele_index == 0`, so REF chain ids are never
-materialised ([open_record.rs:150-160](../../../../src/pileup/walker/open_record.rs#L150)); the
+materialised (`d9e7b076:src/pileup/walker/open_record.rs`); the
 ~96.6%-of-all-chain-ids / ~31%-of-peak-live-heap figure is what that fix removed, and stale `.psp`
 files written before it still carry the cost. So the port inherits the fix — **provided it is not
 lost in the flattening**. ng's `observations` is a flat list with no "index 0 is REF"
@@ -868,7 +874,7 @@ a cohort merge that does not exist yet — was rejected because the allocator ha
 `reference_bases`" named a unique observation while there was one observation per allele. It no longer does: observations
 now split by coverage and by read group, so a reference-matching read can sit in a partial observation whose
 bases are a *prefix* of `reference_bases` and never compare equal to it. Production's own rule is
-positional (`allele_index == 0`, [open_record.rs:158](../../../../src/pileup/walker/open_record.rs#L158))
+positional (`allele_index == 0`, `d9e7b076:src/pileup/walker/open_record.rs`)
 and equally unportable. **State it per read instead: a read contributes no chain id where it agreed
 with the reference across everything it witnessed.** That is decidable at fold time from what the
 read is, survives every split of the observations, and reduces to production's rule exactly when the observations
@@ -961,7 +967,7 @@ share one REF bucket — each distinct extent is its own observation, so the bas
 read starts rather than distinct alleles. And REF-only widening removes the property that makes a
 live read re-fold into its *existing* bucket: production appends the same bytes to every bucket
 precisely so the re-fold matches, a 25-line comment above the loop
-([open_record.rs:390-415](../../../../src/pileup/walker/open_record.rs#L390)) exists to prove it, and
+(`d9e7b076:src/pileup/walker/open_record.rs`) exists to prove it, and
 without it every widen leaves the old bucket behind at `num_obs == 0` and creates a new one. That
 matters because `find_allele_index` is a **linear scan with a full byte compare**, run once per
 (record, contributor) at every position of the footprint — and the comment above it, "records
@@ -972,11 +978,11 @@ positional `allele_index` on `FoldedReadState` is what makes eviction awkward.
 
 **Determinism.** No sampling anywhere: the depth cap truncates in admission order, and the
 mate-overlap map is `ahash` specifically so iteration is stable run to run
-([driver.rs:674](../../../../src/pileup/walker/driver.rs#L674)). Output is a deterministic function
+(`d9e7b076:src/pileup/walker/driver.rs`). Output is a deterministic function
 of (reference, config, reads).
 
 **Errors.** The walker's `WalkerError` variants are all fatal and terminal for the iterator
-([driver.rs:213](../../../../src/pileup/walker/driver.rs#L213)); they map onto
+(`d9e7b076:src/pileup/walker/driver.rs`); they map onto
 `LocusGenerationError` as a new variant, since none of the three existing ones
 (`TypedRegion`/`Reads`/`Reference`) covers a malformed read or an exhausted chain-id space. That
 is a widening of a `#[non_exhaustive]` enum in `locus_generation/mod.rs` — ng's own code, not
@@ -988,9 +994,9 @@ production's.
 
 - **Hoisting the chain-id allocator corrupts two counters, because `reset()` preserves them and
   `summary()` *assigns* them.** `reset()` deliberately keeps `counters` — they are file-scoped
-  ([chain_id_allocator.rs:179-185](../../../../src/pileup/walker/chain_id_allocator.rs#L179)) — and
+  (`d9e7b076:src/pileup/walker/chain_id_allocator.rs`) — and
   `RunSummary` takes them by assignment, not addition
-  ([driver.rs:249-254](../../../../src/pileup/walker/driver.rs#L249)). Production is safe because it
+  (`d9e7b076:src/pileup/walker/driver.rs`). Production is safe because it
   builds a fresh walker, hence a fresh allocator, per region. ng shares one across regions (above),
   so every region's summary reports the **run-to-date** total, and adding them up gives a triangular
   sum — `chain_allocations` and `mate_lookup_evictions` inflated by roughly the region count, in a
@@ -1004,7 +1010,7 @@ production's.
   at exactly the deletion loci this port exists to fix.
 - **`bases.len()` is not `positions_covered`.** An insertion's footprint is 1 reference position but
   contributes several bases; a deletion's is `deleted_len + 1` and contributes one
-  ([decompose.rs:55-61](../../../../src/pileup/walker/decompose.rs#L55)). The §13 consistency check
+  (`d9e7b076:src/pileup/walker/decompose.rs`). The §13 consistency check
   is *"no observation claims more positions than its events account for"*, **not** an equality — an
   implementer who makes it one will either fail it on every indel observation or "fix" it by deriving the
   extent from the byte length, which is the span-vs-events confusion all over again.
@@ -1019,13 +1025,13 @@ production's.
   two different fragments the same id, and a later phasing step chains them — so the allocator lives
   on the generator. But it is **not** just a counter: it also holds `pending_mates`, `active_count`
   and the eviction window
-  ([chain_id_allocator.rs:78-112](../../../../src/pileup/walker/chain_id_allocator.rs#L78)), and
+  (`d9e7b076:src/pileup/walker/chain_id_allocator.rs`), and
   production scopes all three per chromosome. Carried blindly across regions they misbehave in two
   ways — a pending first mate from one contig can pair with a read on another (the eviction test
   compares raw positions), and `active_count` never returns to zero if a walk is abandoned before it
   drains, ending the run in `ActiveReadsExhausted`. The fix is production's own idiom: call `reset()`
   at the end of each region walk, which clears `pending_mates` and `active_count` **and preserves
-  `next_id`** ([:179](../../../../src/pileup/walker/chain_id_allocator.rs#L179)). *This is a change
+  `next_id`** (`d9e7b076:src/pileup/walker/chain_id_allocator.rs`). *This is a change
   in the walk, not the fold* — worth saying, because the port's change set is otherwise concentrated
   in `open_record.rs`.
 - **A read overlapping two regions is admitted in both walks and gets two chain ids.** One fragment,
@@ -1044,10 +1050,10 @@ production's.
   that later gains the re-align mode *would* move starts.
 - **`PreparedRead::length()` is a precondition, not a validation.** The cursor indexes `seq` and
   `bq_baq` by CIGAR-derived offsets, so a CIGAR whose read-consuming length disagrees with `seq` is
-  checked once at admission ([driver.rs:396](../../../../src/pileup/walker/driver.rs#L396)) and
+  checked once at admission (`d9e7b076:src/pileup/walker/driver.rs`) and
   assumed thereafter.
 - **The walker skips uncovered gaps but walks covered ones base by base.** `advance` jumps to the
-  next read's start **only when the active set is empty** ([driver.rs:549](../../../../src/pileup/walker/driver.rs#L549)).
+  next read's start **only when the active set is empty** (`d9e7b076:src/pileup/walker/driver.rs`).
   A rewrite that jumps more eagerly loses every REF-only locus.
 - **`events_at` and `events_overlapping` are deliberately not the same query.** The first returns
   events *anchored* at a position; the second returns events whose *footprint intersects* a window,
@@ -1062,18 +1068,18 @@ Every row read at the cited line, 2026-07-26.
 
 | what | existing code | ng reuse |
 |---|---|---|
-| CIGAR cursor, decompose, active read set, chain-id allocator | [cigar_cursor.rs](../../../../src/pileup/walker/cigar_cursor.rs), [decompose.rs](../../../../src/pileup/walker/decompose.rs), [active_read_set.rs](../../../../src/pileup/walker/active_read_set.rs), [chain_id_allocator.rs](../../../../src/pileup/walker/chain_id_allocator.rs) | **copy** — each names `PreparedRead` in its signatures, so ng's own read type reaches all four (§3) |
-| the prepared read | `PreparedRead` / `MateRole` / `ReadLengthError` [walker/mod.rs:236](../../../../src/pileup/walker/mod.rs#L236) | **copy into `src/ng/read/`** and extend with `read_group` (§6); reverses [read_preparation.md](read_preparation.md) §3's reuse-as-is |
-| the walk loop and the open-record fold | [driver.rs](../../../../src/pileup/walker/driver.rs) (→ ng's `genome_walk.rs`), [open_record.rs](../../../../src/pileup/walker/open_record.rs) | **copy verbatim** into `src/ng/locus_generation/pileup/`, prove byte-identical, then change (§3) |
-| `PreparedRead`, `CigarOp`, `MateRole`, `WalkerConfig`, `WalkerError`, `RunSummary` | [walker/mod.rs:236,43,188,133](../../../../src/pileup/walker/mod.rs#L236) | already `pub` — reuse as-is, no copy |
-| the read input | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** ([read/input/mod.rs](../../../../src/ng/read/input/mod.rs)) | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. One cursor per **chromosome**, re-pointed per region (§2) |
-| `AlignedRead` → `PreparedRead` | `LeftAlignPreparer` ([read/left_align.rs:87](../../../../src/ng/read/left_align.rs#L87)) | call — this generator is step 2's only consumer |
-| the read group | `AlignedRead.read_group` ([aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36)), `ReadGroupId` ([types.rs:178](../../../../src/ng/types.rs#L178)), the run's table ([read_groups.rs:43](../../../../src/ng/read/input/read_groups.rs#L43)) | **carry** into the observation's identity (§6). `PreparedRead` does not hold it, so the generator keeps it beside the walk rather than through it |
+| CIGAR cursor, decompose, active read set, chain-id allocator | `d9e7b076:src/pileup/walker/cigar_cursor.rs`, `d9e7b076:src/pileup/walker/decompose.rs`, `d9e7b076:src/pileup/walker/active_read_set.rs`, `d9e7b076:src/pileup/walker/chain_id_allocator.rs` | **copy** — each names `PreparedRead` in its signatures, so ng's own read type reaches all four (§3) |
+| the prepared read | `PreparedRead` / `MateRole` / `ReadLengthError` `d9e7b076:src/pileup/walker/mod.rs` | **copy into `src/read/`** and extend with `read_group` (§6); reverses [read_preparation.md](read_preparation.md) §3's reuse-as-is |
+| the walk loop and the open-record fold | `d9e7b076:src/pileup/walker/driver.rs` (→ ng's `genome_walk.rs`), `d9e7b076:src/pileup/walker/open_record.rs` | **copy verbatim** into `src/locus_generation/pileup/`, prove byte-identical, then change (§3) |
+| `PreparedRead`, `CigarOp`, `MateRole`, `WalkerConfig`, `WalkerError`, `RunSummary` | `d9e7b076:src/pileup/walker/mod.rs` | already `pub` — reuse as-is, no copy |
+| the read input | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** ([read/input/mod.rs](../../../../src/read/input/mod.rs)) | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. One cursor per **chromosome**, re-pointed per region (§2) |
+| `AlignedRead` → `PreparedRead` | `LeftAlignPreparer` ([read/left_align.rs](../../../../src/read/left_align.rs)) | call — this generator is step 2's only consumer |
+| the read group | `AlignedRead.read_group` ([aligned_read.rs](../../../../src/read/aligned_read.rs)), `ReadGroupId` ([types.rs](../../../../src/types.rs)), the run's table ([read_groups.rs](../../../../src/read/input/read_groups.rs)) | **carry** into the observation's identity (§6). `PreparedRead` does not hold it, so the generator keeps it beside the walk rather than through it |
 | the reference | `RefSeq` (canonical) → `MultiChromRefFetcher` | a shim; the two contracts already agree on canonical bytes (§3) |
-| the region clamp | [pileup_to_psp.rs:271](../../../../src/pileup/per_sample/pileup_to_psp.rs#L271) | reuse the **rule**, not the code — the rest of that file is `.psp` machinery |
-| the parity harness shape | [alignment/delimit_parity.rs](../../../../src/ng/alignment/delimit_parity.rs), [read/left_align_parity.rs](../../../../src/ng/read/left_align_parity.rs) | model for §3's differential |
-| walker test fixtures | [walker/tests.rs:32-152](../../../../src/pileup/walker/tests.rs#L25) | `pub(crate)` under `#[cfg(test)]` — usable from ng's tests today |
-| the windowed-statistics look-ahead buffer | `SampleSummaryAccumulators` ([pileup_to_psp.rs:57](../../../../src/pileup/per_sample/pileup_to_psp.rs#L57)) | **do not port** — it exists to fill two `.psp`-only fields the ng type does not have |
+| the region clamp | `d9e7b076:src/pileup/per_sample/pileup_to_psp.rs` | reuse the **rule**, not the code — the rest of that file is `.psp` machinery |
+| the parity harness shape | [alignment/delimit_parity.rs](../../../../src/alignment/delimit_parity.rs), [read/left_align_parity.rs](../../../../src/read/left_align_parity.rs) | model for §3's differential |
+| walker test fixtures | `d9e7b076:src/pileup/walker/tests.rs` | `pub(crate)` under `#[cfg(test)]` — usable from ng's tests today |
+| the windowed-statistics look-ahead buffer | `SampleSummaryAccumulators` (`d9e7b076:src/pileup/per_sample/pileup_to_psp.rs`) | **do not port** — it exists to fill two `.psp`-only fields the ng type does not have |
 
 **Parity oracle:** production's `PileupWalker` on the same `PreparedRead` stream, stage 1 exact and
 stage 2 through a projection with two named divergence classes (§3).
@@ -1084,7 +1090,7 @@ stage 2 through a projection with two named divergence classes (§3).
 
 - **A second generic generator** — the active-region or haplotype-window definition of a locus
   ([ng_proposal.md](ng_proposal.md) §1 names it as a swappable axis). **Home:**
-  `src/ng/locus_generation/`, beside this one; the trait exists so they sit side by side.
+  `src/locus_generation/`, beside this one; the trait exists so they sit side by side.
 - **Consuming partial observations — the behaviour is decided, the work is step 7's (owner,
   2026-07-27).** ng adopts freebayes' partial-support scheme: match the bases the read actually has
   as a prefix or suffix of each candidate allele, count how many candidates it cannot tell apart
@@ -1220,7 +1226,7 @@ stage 2 through a projection with two named divergence classes (§3).
 
 **Not to fix here.** Two standard validation commands are red independently of this work, and every
 step of every ng plan currently has to except them by hand: `cargo test --all-targets
---all-features` panics in [benches/psp_writer_perf.rs:386](../../../../benches/psp_writer_perf.rs),
+--all-features` panics in `d9e7b076:benches/psp_writer_perf.rs`,
 and `cargo doc --no-deps` fails on 11 unresolved intra-doc links. Both are tracked under
 PROJECT_STATUS "Standing project-wide items".
 
@@ -1299,12 +1305,12 @@ in the order they should be built.
    wrong population.** It used to say "the reads `widen` extended after they had already left the
    active set". Those reads leave ng holding a `Partial` row, so the census files them under
    **class 1**, whose triple already counts them: class 6 is gated on there being *no* partial
-   witness ([parity.rs:1999-2000](../../../../src/ng/locus_generation/pileup/parity.rs#L1999)).
+   witness ([parity.rs](../../../../src/locus_generation/pileup/parity.rs)).
    The population the second triple is owed for is the other kind of non-contributor — a read
    **still live** at the widening step but silent there — where ng re-places the read and
    production keeps the reference tail. **Both numbers are still owed:** the census currently
    carries class 6 as a locus count only, with no reads and no reference bases
-   ([parity.rs:1699](../../../../src/ng/locus_generation/pileup/parity.rs#L1699)), so at the
+   ([parity.rs](../../../../src/locus_generation/pileup/parity.rs)), so at the
    default case count it can say production mis-folds reads at 264 loci and cannot say how many
    reads or how many bases moved.
 3. **A dump tool over a committed fixture** — `examples/ng_generic_loci_dump.rs`, following

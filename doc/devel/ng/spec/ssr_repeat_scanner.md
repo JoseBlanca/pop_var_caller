@@ -5,7 +5,7 @@ seam + satellite cap, 2026-07-14 — all open questions resolved, ready to imple
 yet — this settles the design.** The scanner is a general tandem-repeat detector with two
 interfaces: a low-level interval finder (`sequence + period range → repeat intervals`) and a
 memory-bounded, windowed **region seam** that streams a repeat/satellite/unique tiling of the
-reference (`RegionScanner`, §3.6). It lives at `src/ng/tandem_repeat.rs`. Its first consumer
+reference (`RegionScanner`, §3.6). It lives at `src/tandem_repeat.rs`. Its first consumer
 replaces the external `trf-mod` shell-out in Stage 0
 (`ssr-catalog`, [`../architecture/ssr_catalog.md`](../../architecture/ssr_catalog.md) §2–§3); the
 ng snp/str caller is the second, consuming the region seam. The algorithm knows nothing about
@@ -400,10 +400,10 @@ reuse. It lives in the **ng module tree**, the home of the new caller generation
 drives it (it is a shared primitive *in* that tree, not one of the pipeline steps):
 
 ```
-src/ng/tandem_repeat.rs     // the scanner: find_tandem_repeats + its types + #[cfg(test)] tests
+src/tandem_repeat.rs     // the scanner: find_tandem_repeats + its types + #[cfg(test)] tests
 ```
 
-**Decided (2026-07-14):** `src/ng/tandem_repeat.rs`, promoted to a `src/ng/tandem_repeat/`
+**Decided (2026-07-14):** `src/tandem_repeat.rs`, promoted to a `src/tandem_repeat/`
 directory only if it outgrows one file. It stays **policy-free**; the catalog consumes it
 cross-module from `src/ssr/catalog/`, a normal dependency (§6). Rejected `src/ssr/tandem_repeat.rs`
 (misrepresents scope — under the STR caller — and complicates reuse). *Supersedes an earlier draft
@@ -495,7 +495,7 @@ orchestrator (`catalog::run`) stops spawning `trf-mod` per contig and instead ca
   in: the **per-period copy floor** and **period-multiple redundancy elimination** (`IsRedundant`).
   This is *catalog policy* — it stays out of the use-agnostic scanner and the unchanged
   post-filter. With it, the scanner reproduces the golden catalog at **16/16 recall** (the parity
-  test `src/ng/scanner_parity.rs` — moved there from `src/ssr/catalog/` on 2026-07-16, see
+  test `src/scanner_parity.rs` — moved there from `src/ssr/catalog/` on 2026-07-16, see
   `typed_regions.md` §9); it is required whenever the production swap lands.
 - **The post-filter is unchanged, consuming `RepeatInterval` directly.** `postprocess::build_loci`
   currently takes `Vec<TrfRecord>` and reads only `start/end/period/score` — exactly
@@ -512,7 +512,7 @@ orchestrator (`catalog::run`) stops spawning `trf-mod` per contig and instead ca
 - **Catalog header provenance.** `CatalogHeader::trf_mod_version` (an external binary's version)
   is replaced by a **built-in-detector** field — `detector` (e.g. `"tandem-repeat-scanner
   <tool_version>"`) plus the scan weights — so the header stays self-describing. A small,
-  localised change to [`io.rs`](../../../../src/ssr/catalog/io.rs) and the few test constructors
+  localised change to `d9e7b076:src/ssr/catalog/io.rs` and the few test constructors
   that build a header; **outside** `postprocess.rs`, and the only format-visible change.
 
 **Validation of this consumer — golden-fixture *catalog* parity** (the real risk; mirrors the
@@ -603,7 +603,7 @@ empty input yields nothing. The *catalog* consumer gets the golden-catalog parit
 
 **Open questions**
 
-1. **Module placement (§4) — resolved:** `src/ng/tandem_repeat.rs` (a `src/ng/tandem_repeat/`
+1. **Module placement (§4) — resolved:** `src/tandem_repeat.rs` (a `src/tandem_repeat/`
    directory only if it grows). Rejected `src/ssr/tandem_repeat.rs` (misrepresents scope,
    complicates reuse); supersedes an earlier top-level `src/tandem_repeat.rs` lean.
 2. **Parity bar (§6) — resolved:** ≥ 99 % recall of golden loci with a reviewed, understood

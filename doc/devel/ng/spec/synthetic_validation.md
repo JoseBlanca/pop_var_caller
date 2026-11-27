@@ -2,11 +2,17 @@
 
 *Status: design spec (2026-07-29). **No code yet — this settles the design**, and it is
 written to be argued with. Companion arch and plan docs do not exist yet. Grounded in a
-source read of `src/ssr/cohort/sim.rs`, `src/ng/locus_generation/mod.rs`,
+source read of `src/ssr/cohort/sim.rs`, `src/locus_generation/mod.rs`,
 `examples/ssr_delimiter_comparison.rs`, `examples/ng_synthesize_stress_reads.rs`, and the
 ng blocks of `PROJECT_STATUS.md`.*
 
 *Naming: **STR** in prose, `ssr` in code.*
+
+*Note (2026-11-27): this was written while the caller was built in `src/ng/` beside an older,
+frozen caller ("production"). The older caller was deleted on 2026-09-13 and these modules moved
+to the crate root, `src/`, so the rules below about what may sit outside `src/ng/` describe that
+period. Paths to code are given as they are now; a file that no longer exists is cited as
+`<commit>:<path>`, which `git show` opens.*
 
 ---
 
@@ -78,11 +84,11 @@ the case that matters most.
 This is not hypothetical. The repo's existing cohort simulator says so in its own header:
 
 > *"§1 — the generative side of the same model the kernel scores"*
-> — [src/ssr/cohort/sim.rs:4](../../../../src/ssr/cohort/sim.rs)
+> — `d9e7b076:src/ssr/cohort/sim.rs`
 
 and it imports `MAX_SLIP`, `PerBaseError`, `StutterLevel`, `StutterShape` from
 `param_estimation` — the production parameter types
-([sim.rs:36](../../../../src/ssr/cohort/sim.rs)). **That is correct for what sim.rs is for**:
+(`d9e7b076:src/ssr/cohort/sim.rs`). **That is correct for what sim.rs is for**:
 it exists so the EM's "recover what we put in" milestones have a known input, and for that
 job sharing the parameterization is the point. It is not an independent oracle and does not
 claim to be.
@@ -128,7 +134,7 @@ sufficient depth and quality, the recovered allele either equals the injected on
 is wrong. No tolerances.
 
 The assertion surface today is `SampleLocusObservations`
-([src/ng/locus_generation/mod.rs:34](../../../../src/ng/locus_generation/mod.rs)) — see §8 on
+([src/locus_generation/mod.rs](../../../../src/locus_generation/mod.rs)) — see §8 on
 why that is the end of the line, and what changes when a genotyper lands. Per locus:
 
 - the injected allele appears in `observed_sequences`, with support equal to the number of
@@ -182,7 +188,7 @@ a coordinate-arithmetic bug with its own reproducer attached — there is nothin
 Over ≥10⁴ sites: does a reported confidence match the observed error rate? Does a point
 estimate carry bias? `examples/ssr_delimiter_comparison.rs` already establishes the right
 vocabulary for a *ruler* rather than a probability — accuracy, signed bias, spread
-([ssr_delimiter_comparison.rs:9-25](../../../../examples/ssr_delimiter_comparison.rs)).
+(`d9e7b076:examples/ssr_delimiter_comparison.rs`).
 
 **These never assert per case.** They emit a table; a drift is a finding for a human. Wiring a
 tolerance band into CI here is how a suite earns a reputation for flaking, and a suite with
@@ -234,9 +240,9 @@ harness that silently caps its own coverage reads as "we covered everything" whe
 
 Every case is a pure function of `(seed, axis-cell, index)`. Both existing generators use a
 dependency-free SplitMix64 for exactly this reason — "so the whole comparison is reproducible
-from its seed" ([ssr_delimiter_comparison.rs:34](../../../../examples/ssr_delimiter_comparison.rs))
+from its seed" (`d9e7b076:examples/ssr_delimiter_comparison.rs`)
 and "so the simulator's determinism does not rest on an external crate's stability"
-([sim.rs:46](../../../../src/ssr/cohort/sim.rs)). Reuse that shape; a failure that cannot be
+(`d9e7b076:src/ssr/cohort/sim.rs`). Reuse that shape; a failure that cannot be
 replayed from its seed is not a finding.
 
 ---
@@ -360,12 +366,12 @@ what it is for cannot be built yet.**
 
 | what | existing code | how it is reused |
 |---|---|---|
-| deterministic PRNG | `SplitMix64` in [sim.rs:46](../../../../src/ssr/cohort/sim.rs) and [ssr_delimiter_comparison.rs:34](../../../../examples/ssr_delimiter_comparison.rs) | copy the shape (dependency-free determinism), not the file |
+| deterministic PRNG | `SplitMix64` in `d9e7b076:src/ssr/cohort/sim.rs` and `d9e7b076:examples/ssr_delimiter_comparison.rs` | copy the shape (dependency-free determinism), not the file |
 | synthetic reference + indexed BAM writing | [ng_synthesize_stress_reads.rs](../../../../examples/ng_synthesize_stress_reads.rs) | the slow tier's IO scaffolding, lifted out of the example |
-| fast-tier read construction + truth scoring | [ssr_delimiter_comparison.rs](../../../../examples/ssr_delimiter_comparison.rs) | the accuracy/bias/spread vocabulary and the loop shape |
-| in-memory reference | `InMemoryRefSeq` ([src/ng/ref_seq.rs](../../../../src/ng/ref_seq.rs)) | the fast tier's reference, no FASTA on disk |
+| fast-tier read construction + truth scoring | `d9e7b076:examples/ssr_delimiter_comparison.rs` | the accuracy/bias/spread vocabulary and the loop shape |
+| in-memory reference | `InMemoryRefSeq` ([src/ref_seq.rs](../../../../src/ref_seq.rs)) | the fast tier's reference, no FASTA on disk |
 | shrinking + case generation | `proptest` ([Cargo.toml:126](../../../../Cargo.toml)) | the `Strategy` for a cell of the axis matrix |
-| the assertion target | `SampleLocusObservations` ([locus_generation/mod.rs:34](../../../../src/ng/locus_generation/mod.rs)) | asserted against, not reused |
+| the assertion target | `SampleLocusObservations` ([locus_generation/mod.rs](../../../../src/locus_generation/mod.rs)) | asserted against, not reused |
 
 **No parity oracle is named, because this is not a port.** Its correctness rests on §5
 (defect injection) instead — which is why §5 is not optional.
@@ -403,7 +409,7 @@ fast tier cannot reach crate internals); `examples/` (where both existing genera
 examples are run by hand and rot). **Leaning: `src/ng/validation/` for the generator and the
 fast tier, plus one thin `examples/` driver for the slow tier** — matching where
 `delimit_parity.rs` and `leftmost_property.rs` already sit. Note the cost, which C1 already
-paid: `src/ng/read/input/test_fixtures.rs` is `#[cfg(test)] pub(crate)`, and that is precisely
+paid: `src/read/input/test_fixtures.rs` is `#[cfg(test)] pub(crate)`, and that is precisely
 why no bench can reach the synthetic indexed-BAM builder (PROJECT_STATUS, M1).
 
 **Q2 — How hard is the independence rule?** §2 forbids importing the model. The stronger form

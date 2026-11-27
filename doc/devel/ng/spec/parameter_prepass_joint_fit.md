@@ -247,7 +247,7 @@ carry one at all.** A position segregating at one in a million looks like an inv
 cohort we can sequence. So the fit can trade a larger invariant share `p_invariant` for more Beta
 mass near zero (a smaller shape `a`) at almost no cost in likelihood. Run to convergence on 59
 tomato2 samples (§3.3.1), it puts `a` on its lower bound of 0.02
-([`fit.rs:2937`](../../../../src/parameter_estimation/joint/fit.rs#L2937)) and `p_invariant` at 0.842,
+([`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)) and `p_invariant` at 0.842,
 where the fit that stopped at 200 passes had reported 0.939. Across that move, the quantities the
 reads constrain stayed the same to three figures
 ([diagnosis](../../reports/implementations/snp_fit_convergence_diagnosis_2026-10-16.md) §3.1):
@@ -260,7 +260,7 @@ reads constrain stayed the same to three figures
 **The duplicated class (§2.2) has the same kind of pair.** Its share `δ` is the share of positions
 some sample carries an extra copy of, and the carrier Beta `Beta(carrier_a, carrier_b)` is the
 share of the panel carrying a given duplication
-([`DuplicatedPositions`, `fit.rs:218`](../../../../src/parameter_estimation/joint/fit.rs#L218)). A
+([`DuplicatedPositions`, `fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)). A
 duplication carried by one plant in a thousand has no carrier among four samples, and reads like an
 ordinary position. So `δ` trades against `carrier_a` the way `p_invariant` trades against `a`. On
 the 4 oracle samples (diagnosis §4.1; the converged fit's numbers from the stopping-rule report's
@@ -276,8 +276,8 @@ reference run, `tmp/snp_stop/runs/o4_d1e-4.judge.tsv`):
 
 **Calling reads only determined quantities, and does not change.** The prior's seed is built from
 `Hexp` and the mean alternative frequency `E[f] = p_fixed_alt + (1 − p_invariant − p_fixed_alt)·a/(a+b)`
-([`census_fit.rs:452`](../../../../src/run/census_fit.rs#L452),
-[`seed_generic.rs:250`](../../../../src/calling/genotype_prior/seed_generic.rs#L250)); the
+([`census_fit.rs`](../../../../src/run/census_fit.rs),
+[`seed_generic.rs`](../../../../src/calling/genotype_prior/seed_generic.rs)); the
 parameters file stores the seed, never the density
 ([`parameters_file.md`](parameters_file.md) §3.6). On 59 samples the 10-point move in `p_invariant`
 moved the seed by 2% (diagnosis §5.2). No number of the duplicated class reaches calling or the
@@ -381,16 +381,16 @@ samples every number of both groups has an error. The two rows read in part were
 
 - **`C`, the cohort's covariance**: the inverse information restricted to the cohort's eight numbers,
   every other parameter accounted for, from the final pass's information at the returned parameters
-  (the information `StandardErrors::of` reads, [`fit.rs:2059`](../../../../src/parameter_estimation/joint/fit.rs#L2059)).
+  (the information `StandardErrors::of` reads, [`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)).
   Column `k` is the solve against a unit slope on number `k`, by the same solve `newton_step` uses —
   `whole_matrix_solve` for a cohort that keeps the whole matrix, `arrow_solve` otherwise
-  ([`fit/standard_errors.rs:796`, `:838`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L796)),
+  ([`fit/standard_errors.rs`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs)),
   nothing held — so the same numbers are left out as for the errors. A new function
   `cohort_covariance` beside `newton_step`, returning `None` for a row or column not solved for.
 - **The gradients.** `σ` is linear in its group; `S`, `Hexp` and `E[f]` are differentiated by
   central differences, step `10⁻⁵ × |value|` on each number of the group, through the same functions
   that compute their values (`FrequencyDensity::expected_heterozygosity` and
-  `expected_alternative_frequency`, [`fit.rs:145`, `:176`](../../../../src/parameter_estimation/joint/fit.rs#L145)).
+  `expected_alternative_frequency`, [`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)).
   *Amended 2026-10-17 (code review of steps C–D):* the three are linear in the shares —
   `p_invariant`, `p_fixed_alt`, the duplicated share — with slopes set by the shapes alone, and
   those slopes are now exact (`∂S/∂p_fixed_alt = −P(f > 0.01)`, `∂E[f]/∂p_fixed_alt = 1 − a/(a+b)`,
@@ -479,7 +479,7 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
   what it means elsewhere in the file. Each table's comment says, in words, that the two marked
   numbers trade against each other and that the determined share is the one to quote.
 - **The run log's** line of errors at the returned values
-  (`StandardErrors::described`, [`fit/standard_errors.rs:479`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L479))
+  (`StandardErrors::described`, [`fit/standard_errors.rs`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs))
   takes the two reports, prints the verdict beside each marked number in place of its error, and adds
   each determined share and the trade costs:
   `invariant share 8.4159e-1 (not separately determined from shape a: the data fix the share
@@ -488,7 +488,7 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
   1.5427e-2 (not separately determined from carrier-frequency shape a: the data fix the share of
   positions duplicated in more than 1% of the panel, 1.21e-3 ± 3.4e-5, …)`.
 - **The format version goes from 3 to 4**
-  ([`parameters_file/mod.rs:217`](../../../../src/calling/parameters_file/mod.rs#L217)): every
+  ([`parameters_file/mod.rs`](../../../../src/calling/parameters_file/mod.rs)): every
   table refuses unknown keys, so a version-3 build must refuse a version-4 file rather than misread
   it. A version-4 build reads a version-3 file, whose tables are absent. Absent also means the run
   fitted no density (every rung of the seed other than `fitted_curve`) or, for `[duplicated_positions]`,
@@ -514,7 +514,7 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
   change without changing it" — one state, two wordings. A finite cost over a million is still
   printed as that: drawn cohorts gave genuine costs of 1.4 and 4.3 million.
 - **`P(f > 0.01)` needs the regularised incomplete Beta function, which the crate does not have.**
-  `libm` gives `lgamma` (`genetics::lgamma`, [`genetics.rs:55`](../../../../src/genetics.rs#L55)); the
+  `libm` gives `lgamma` (`genetics::lgamma`, [`genetics.rs`](../../../../src/genetics.rs)); the
   continued-fraction evaluation is about forty lines, beside it, through `crate::float` for `ln` and
   `exp` (clippy refuses std's), and must be tested against known values, including at shape 0.02
   and at 50, the two bounds. The central difference at a shape on its lower bound evaluates it just
@@ -522,10 +522,10 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
 - **A number on its bound keeps its value.** On 59 samples `a` is reported as 0.02, the bound; the
   mark says why that is not a measurement.
 - **The per-pass trace keeps the raw errors.** `PVC_JOINT_FIT_TRACE`'s `standard_error:` rows
-  ([`trace_the_returned_fit`, `fit.rs:2660`](../../../../src/parameter_estimation/joint/fit.rs#L2660))
+  ([`trace_the_returned_fit`, `fit.rs`](../../../../src/parameter_estimation/joint/fit.rs))
   are a diagnostic, not a report, and are not filtered by the mark.
 - **A calling run writes the file back**, beside its VCF, from the file it read
-  (`snp_indel_fit_starts` is carried the same way, [`cli/calling_run.rs:613`](../../../../src/cli/calling_run.rs#L613));
+  (`snp_indel_fit_starts` is carried the same way, [`cli/calling_run.rs`](../../../../src/cli/calling_run.rs));
   the two tables must be carried too, or a calling run silently drops them. *Amended 2026-10-18
   (the merge of main's command-line work):* a calling run no longer writes a file beside its VCF;
   it records its parameters as a block in its log (`command_line.md` §7), written through the
@@ -1062,12 +1062,12 @@ finding B2 and its addendum of 2026-10-17).
 **What is built.** Each pass over the kept positions computes every position's posteriors and then
 updates the three blocks above from them (expectation–maximisation); SQUAREM, a method that
 extrapolates along the direction the last two updates took, accelerates the loop
-(`maximise`, [`fit.rs:2341`](../../../../src/parameter_estimation/joint/fit.rs#L2341)). Once a cycle
+(`maximise`, [`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)). Once a cycle
 gains less than 10⁻⁴ log-likelihood units a position, every cycle's first pass also sums the
 information and each parameter's score — a **judging pass** — and **solved against each other they
 give a Newton step**: the move to the maximum of the quadratic model of the likelihood, kept inside
 each parameter's interval (`newton_step`,
-[`fit/standard_errors.rs:583`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L583)).
+[`fit/standard_errors.rs`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs)).
 Until this amendment that step was only used to judge convergence
 ([`fit_precision.md`](fit_precision.md) §2, §3.3).
 
@@ -1087,9 +1087,9 @@ stops — converged, or heading where an earlier start arrived ([`fit_precision.
 1. **The step.** `d` is the distances `newton_step` already returned for that verdict — one solve,
    not two — at the judged parameters `θ`. The target `θ*` is `θ + d`, each coordinate clamped into
    its interval, in the order `Parameters::coordinates` lists them
-   ([`fit.rs:2837`](../../../../src/parameter_estimation/joint/fit.rs#L2837)); a parameter not solved
+   ([`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)); a parameter not solved
    for moves 0. A try at fraction `f` is `θ + f·(θ* − θ)`, coordinate by coordinate, read back by
-   `Parameters::with_coordinates` ([`fit.rs:2863`](../../../../src/parameter_estimation/joint/fit.rs#L2863)).
+   `Parameters::with_coordinates` ([`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)).
    *Amended 2026-10-17 (the 59-sample run of step E3, and code review E6):* the numbers a golden-section search maximises — each
    library's two error rates and each sample's homozygote excess — are clamped not onto the ends of
    their interval but half the search's stopping width inside each end
@@ -1098,7 +1098,7 @@ stops — converged, or heading where an earlier start arrived ([`fit_precision.
    inbreeding coefficient. And the whole step, `f = 1`, is `θ*` itself, not `θ + 1·(θ* − θ)`, which
    can round a unit in the last place past an end.
    A coordinate the step does not move keeps its exact bits, as SQUAREM's jump keeps them
-   ([`fit.rs:2894`](../../../../src/parameter_estimation/joint/fit.rs#L2894)): that is how the
+   ([`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)): that is how the
    homozygote excess the fit holds at zero at one sample stays zero.
    *Amended 2026-11-08:* after a kept step, `d` is **blended with it** (point 6).
 2. **The first fraction tried** is the whole step for a start's first Newton step. *Amended
@@ -1158,7 +1158,7 @@ fits nothing (`--defaults`) is untouched.
   leaves the next cycle with nothing to judge or step from.
 - **Tries count against `max_passes`**, and a try is not started once the passes are spent.
 - **No slack.** A try is kept only if it rises. SQUAREM's jumps keep their own one-unit allowance
-  (`JUMP_SLACK`, [`fit.rs:2926`](../../../../src/parameter_estimation/joint/fit.rs#L2926)); the Newton
+  (`JUMP_SLACK`, [`fit.rs`](../../../../src/parameter_estimation/joint/fit.rs)); the Newton
   step must not inherit it, since a step that lost a unit could be retried from the same point
   forever.
 - **The progress line is printed for every cycle**, including one that ends in an accepted step;
@@ -1535,7 +1535,7 @@ principal-component decomposition wants — and the same matrix
 components come free with an object this route holds anyway. *Soft:* how many components a plant panel
 needs is not four by inheritance, and it is set by the panel rather than by us.
 
-**Built 2026-08-13** — `src/ng/parameter_estimation/joint/contamination.rs`, reading the records rather
+**Built 2026-08-13** — `src/parameter_estimation/joint/contamination.rs`, reading the records rather
 than a harness's own panel, with the shrinkage and the leverage refusal above. **Two things the
 implementation settled that this section had left implicit.**
 
@@ -2379,11 +2379,11 @@ depth* surviving as that rather than as a blank.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the sum over genotypes at one sample's locus | `src/ng/parameter_estimation/generic/noise_model.rs` (`NoiseModel`) | used as the innermost term of §3.1, unchanged. It is already the seam both paths implement |
-| the climb over mixture weights | `src/ng/parameter_estimation/fitting/mixture_weights.rs` | the three masses of the frequency density (§2.1.2) are mixture weights, so the same climb applies to them. **The Beta's two shape numbers are not weights** and need their own climb |
-| the two site classes | `src/ng/parameter_estimation/generic/` (`SiteNoise`) | the parameters are the same three; what changes is that the class becomes a per-locus latent variable (§2.2) |
-| alternating between coupled blocks | `src/ng/parameter_estimation/generic/coupled_fit.rs` | the same loop shape and the same termination handling, with three blocks instead of two (§3.3) |
-| provenance and evidence count | `src/ng/parameter_estimation/mod.rs` (`Provenance`, `Estimate`) | used as-is; every parameter here carries both, as in the per-sample route |
+| the sum over genotypes at one sample's locus | `373bd37d~1:src/ng/parameter_estimation/generic/noise_model.rs` (`NoiseModel`) | used as the innermost term of §3.1, unchanged. It is already the seam both paths implement |
+| the climb over mixture weights | `373bd37d~1:src/ng/parameter_estimation/fitting/mixture_weights.rs` | the three masses of the frequency density (§2.1.2) are mixture weights, so the same climb applies to them. **The Beta's two shape numbers are not weights** and need their own climb |
+| the two site classes | `373bd37d~1:src/ng/parameter_estimation/generic/` (`SiteNoise`) | the parameters are the same three; what changes is that the class becomes a per-locus latent variable (§2.2) |
+| alternating between coupled blocks | `373bd37d~1:src/ng/parameter_estimation/generic/coupled_fit.rs` | the same loop shape and the same termination handling, with three blocks instead of two (§3.3) |
+| provenance and evidence count | `src/parameter_estimation/mod.rs` (`Provenance`, `Estimate`) | used as-is; every parameter here carries both, as in the per-sample route |
 | the frequency spectrum | [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4 | **not a separate step under this route** — it is §2.1's outer integral, and the panel allele-count spectrum falls out of the same fit (§2.1.2). That section's `realSFS` reference belongs to the count form this route does not use, for the reason §2.1.1 gives |
 
 *The two companion documents carry their own reuse: the depth ladder

@@ -31,7 +31,7 @@ document's silent-failure traps are built and guarded.*
 
 **A chain id names the read that produced a piece of evidence.** One `u64` per read, or per read
 *pair* with its mates collapsed onto one id, allocated monotonically from zero and never reused
-(`src/ng/locus_generation/pileup/chain_id_allocator.rs:1-10`).
+(`src/locus_generation/pileup/chain_id_allocator.rs`).
 
 Until 2026-08-17 both callers stored the ids of the reads that **disagreed** with the reference and
 dropped the rest. Production drops them positionally — its REF bucket, `allele_index == 0` — and its
@@ -46,7 +46,7 @@ to admits no third case: *either we know the read covered the whole locus and it
 elongated with what it showed, or we know it did not and it is removed as evidence; being unable to
 decide is an error that must never happen* ([`cohort_merge.md`](cohort_merge.md), Preconditions).
 ng's mint therefore names every read it folds
-(`src/ng/locus_generation/pileup/open_record.rs`, `KeyedObservation::chain_ids`).
+(`src/locus_generation/pileup/open_record.rs`, `KeyedObservation::chain_ids`).
 
 So a column that carried about 3.4% of the ids now carries all of them, and it does so at **every
 position of the genome rather than at the positions where something varies.** The owner accepted
@@ -211,12 +211,12 @@ exactly what is unknown.
 - **Records are not positions, and one sample's records can overlap.** A record's footprint spans
   the event it holds, and the table keeps heterogeneous spans open at once — *"a wide deletion
   record may stay open while shorter records open and close around it"*
-  (`src/ng/locus_generation/pileup/open_record.rs:1463-1466`). The live-set stream is indexed by
+  (`src/locus_generation/pileup/open_record.rs`). The live-set stream is indexed by
   position; the id lists belong to records. The mapping between them is the part to get right
   before writing any bytes.
 - **Two classes of read are counted and never named**, and they must not leak into the residual:
   `reads_without_observation` and `reads_discarded_by_cap`
-  (`src/ng/locus_generation/mod.rs`, `SampleLocusObservations`). A read the depth cap discarded is
+  (`src/locus_generation/mod.rs`, `SampleLocusObservations`). A read the depth cap discarded is
   not in any observation, so if it is in the live set the residual gains an id nobody folded.
 - **The residual arithmetic fails silently.** If the reader derives one id too many, the reference
   observation gains a read that does not exist, and the merge will happily compose an allele for

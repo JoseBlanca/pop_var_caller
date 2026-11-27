@@ -112,8 +112,8 @@ results rather than merely produce the same set.
 **One type for every kind of locus**, not a per-kind payload. A microsatellite and a candidate SNP
 record the *same* thing — a table of distinct sequences the reads showed, each with its support.
 Production already stores exactly that on both sides: `Vec<AlleleObservation>` for the generic path
-([src/pileup_record.rs:138](src/pileup_record.rs#L138)) and `Vec<(sequence, count)>` for STR
-([src/ssr/cohort/types.rs:60](src/ssr/cohort/types.rs#L60)) — the same table, STR carrying only the
+(`d9e7b076:src/pileup_record.rs`) and `Vec<(sequence, count)>` for STR
+(`d9e7b076:src/ssr/cohort/types.rs`) — the same table, STR carrying only the
 count.
 
 ```rust
@@ -238,7 +238,7 @@ fields are populated. This is `ng_step_interfaces.md`'s "STR-awareness is a *typ
 now naming every kind rather than only repeat-or-not.
 
 **How it relates to the region's kind.** Region typing produces a `RegionKind`
-([src/ng/region_typing/mod.rs:170](src/ng/region_typing/mod.rs#L170)) — `SsrSegment`, `SsrBundle`,
+([src/region_typing/mod.rs](../../../../src/region_typing/mod.rs)) — `SsrSegment`, `SsrBundle`,
 `Generic`, `Satellite`. `LocusKind` is its output-side counterpart: the generator for each region
 kind mints loci of the matching locus kind. **Two enums, two stages, deliberately not merged**, and
 they differ in three ways worth stating:
@@ -328,7 +328,7 @@ filter (§11) must handle, not this step:
 - **Loci overlap on the generic path.** A multi-base deletion locus contains the per-position loci
   inside it, so composing one genome-wide profile by summing `num_obs_along_locus()` across loci would
   double-count the interior — the exact hazard production's walker guards against
-  ([pileup_to_psp.rs:96](src/pileup/per_sample/pileup_to_psp.rs#L96)). Whether a deletion read counts
+  (`d9e7b076:src/pileup/per_sample/pileup_to_psp.rs`). Whether a deletion read counts
   at its deleted positions (span coverage) or not (production's base coverage), and how overlapping
   loci compose, is unsettled and belongs to the paralog filter. This spec neither decides nor tests
   it — it defines only the per-locus quantity.
@@ -337,12 +337,12 @@ filter (§11) must handle, not this step:
 what *this* sample's reads showed; merging samples yields cohort loci carrying content no per-sample
 locus has — a region unioned across samples, alleles re-projected onto it. So the cohort type composes
 this one as `per_sample: Vec<Option<SampleLocusObservations>>`, production's shape
-([src/var_calling/types.rs:39](src/var_calling/types.rs#L39)); §12 weighs the alternative of one type
+(`d9e7b076:src/var_calling/types.rs`); §12 weighs the alternative of one type
 carrying N samples. This is also why per-sample regions may differ and that is fine: where some plants
 carry a five-base deletion the locus spans one base in a non-carrier and six in a carrier, and the
 merge groups by overlap and projects onto the union span
-([variant_grouping.rs:99](src/var_calling/variant_grouping.rs#L99),
-[per_group_merger.rs:262](src/var_calling/per_group_merger.rs#L262)). The only requirement it places
+(`d9e7b076:src/var_calling/variant_grouping.rs`,
+`d9e7b076:src/var_calling/per_group_merger.rs`). The only requirement it places
 on a generator: carry enough to be projected onto a wider span — for SNP/indel, the locus's own
 reference bases (microsatellites never vary this way).
 
@@ -350,19 +350,19 @@ reference bases (microsatellites never vary this way).
 what *this* sample's reads showed; merging samples yields cohort loci carrying content no per-sample
 locus has — a region unioned across samples, alleles re-projected onto it. So the cohort type composes
 this one as `per_sample: Vec<Option<SampleLocusObservations>>`, production's shape
-([src/var_calling/types.rs:39](src/var_calling/types.rs#L39)); §12 weighs the alternative of one type
+(`d9e7b076:src/var_calling/types.rs`); §12 weighs the alternative of one type
 carrying N samples. This is also why per-sample regions may differ and that is fine: where some plants
 carry a five-base deletion the locus spans one base in a non-carrier and six in a carrier, and the
 merge groups by overlap and projects onto the union span
-([variant_grouping.rs:99](src/var_calling/variant_grouping.rs#L99),
-[per_group_merger.rs:262](src/var_calling/per_group_merger.rs#L262)). The only requirement it places
+(`d9e7b076:src/var_calling/variant_grouping.rs`,
+`d9e7b076:src/var_calling/per_group_merger.rs`). The only requirement it places
 on a generator: carry enough to be projected onto a wider span — for SNP/indel, the locus's own
 reference bases (microsatellites never vary this way).
 
 **Owned, with no lifetimes** — this is what a cohort stage merges and an artifact writes. *Owned is
 necessary but not sufficient:* `chain_ids` are meaningful only beside their neighbours, since the
 merger resolves them *across* records to chain compound haplotypes
-([src/var_calling/per_group_merger.rs:1296](src/var_calling/per_group_merger.rs#L1296)). They are
+(`d9e7b076:src/var_calling/per_group_merger.rs`). They are
 kept here because phasing an STR allele against a neighbouring SNP is as real as phasing two SNPs —
 with one cost worth recording, learned the expensive way: in the production cohort path chain-ids were
 **~31% of peak live heap**, almost all of it REF observations the merger then skips. A generator that
@@ -519,7 +519,7 @@ are the point.
 ## 6. The public surface
 
 An iterator over a typed-region stream, mirroring `TypedRegionIterator`
-([src/ng/region_typing/mod.rs:789](src/ng/region_typing/mod.rs#L789)) — same lazy shape, same running
+([src/region_typing/mod.rs](../../../../src/region_typing/mod.rs)) — same lazy shape, same running
 counts, same in-stream fatal error.
 
 ```rust
@@ -606,11 +606,11 @@ not it has merged.
    `cursor` takes a factory `F: FnMut() -> R` and calls it once per file per **chromosome**
    (it was `reads_in_region`, once per file per *query*, until
    [`alignment_cursor.md`](alignment_cursor.md) replaced it)
-   (`src/ng/read/input/mod.rs:440`). A per-locus generator issues on the order of 10⁶ queries. Neither
+   (`src/read/input/mod.rs`). A per-locus generator issues on the order of 10⁶ queries. Neither
    accessor is cheap to construct: `WindowedRefSeq::new` holds no resident contig, so a fresh one per
    query re-reads its window at every locus and defeats the sliding buffer; and `ResidentRefSeq::new`
-   takes a `ContigList` by value ([src/ng/ref_seq.rs:367](src/ng/ref_seq.rs#L367)), which is a
-   `Vec<ContigEntry>` of `String` names ([src/fasta/mod.rs:60](src/fasta/mod.rs#L60)) — one `String`
+   takes a `ContigList` by value ([src/ref_seq.rs](../../../../src/ref_seq.rs)), which is a
+   `Vec<ContigEntry>` of `String` names ([src/fasta/mod.rs:60](../../../../src/fasta/mod.rs)) — one `String`
    allocation per contig, per query, per file. On a scaffold-rich assembly that is the dominant cost
    of the step.
    **Suggested fix, small:** `impl RefSeq for Arc<T> where T: RefSeq` (and the same for `RawRefSeq`).
@@ -624,7 +624,7 @@ not it has merged.
 4. **Reference and `@SQ` must match exactly — resolved (owner, 2026-07-22), and already enforced
    upstream.** The reads were mapped against this reference, so each file's `@SQ` list must equal the
    reference contig list — names, lengths, order — which read ingestion checks at file open
-   ([src/ng/read/input/open_bam.rs:243](src/ng/read/input/open_bam.rs#L243)). A contig in the
+   ([src/read/input/open_bam.rs](../../../../src/read/input/open_bam.rs)). A contig in the
    reference but absent from a sample's `@SQ` is therefore rejected there and never reaches this
    step, so there is no per-locus "zero reads vs. error" case for this step to handle. *This
    supersedes the earlier "zero reads" lean*, which assumed header subsets were ordinary; the
@@ -660,16 +660,16 @@ neither.
 
 | what | existing code | ng reuse |
 |---|---|---|
-| region stream | [src/ng/region_typing/mod.rs:789](src/ng/region_typing/mod.rs#L789) | consume as-is; mirror its iterator + counts shape |
+| region stream | [src/region_typing/mod.rs](../../../../src/region_typing/mod.rs) | consume as-is; mirror its iterator + counts shape |
 | read access | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** | reuse as-is (§8); the entry point changed at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F |
-| locus/cohort split | [src/var_calling/types.rs:39](src/var_calling/types.rs#L39) | model for `CohortLocus` composing `SampleLocusObservations` (§3) |
-| cross-sample reconciliation | [src/var_calling/variant_grouping.rs:99](src/var_calling/variant_grouping.rs#L99) | **not this step** — the merge groups by overlap (§3) |
+| locus/cohort split | `d9e7b076:src/var_calling/types.rs` | model for `CohortLocus` composing `SampleLocusObservations` (§3) |
+| cross-sample reconciliation | `d9e7b076:src/var_calling/variant_grouping.rs` | **not this step** — the merge groups by overlap (§3) |
 
 ---
 
 ## 11. Deferred, with a recommended home
 
-- **The pileup generator** for `Generic` regions — `src/ng/locus_generation/pileup/`, its own spec. It also owns
+- **The pileup generator** for `Generic` regions — `src/locus_generation/pileup/`, its own spec. It also owns
   the `chain_ids` question of §3 (carry cross-locus read identifiers, or drop compound haplotypes) and
   adds the read-position-bias fields (`placed_left`, `placed_start`) to `SequenceObservation` — generic-only,
   omitted from the shared type because a tract makes them degenerate (§3).
@@ -687,7 +687,7 @@ neither.
   Whether it would also emit observed sequences is open, and the reason to doubt it is the same
   reason the slot is empty — no clean flank means no trustworthy anchor. Routed to
   `NoLoci { NotImplemented }` with its bases counted, so the ground it covers stays visible in every
-  run report. **Home if it ever lands: `src/ng/locus_generation/`**, beside the STR generator.
+  run report. **Home if it ever lands: `src/locus_generation/`**, beside the STR generator.
 - **The cohort merge** — many samples' loci into cohort loci, by overlap (§3). **Home: the cohort
   spec.** Its one requirement on this step is that a locus carry enough to be projected onto a wider
   span.
@@ -710,7 +710,7 @@ neither.
   leaning to compose (§3).** The unified type buys one word for the concept in both stages, no
   parallel cohort hierarchy, and one serialization for both — and for a microsatellite-only caller it
   is plainly better, since tract regions never differ between samples; production's `CohortLocus`
-  ([src/ssr/cohort/types.rs:79](src/ssr/cohort/types.rs#L79)) is essentially that design. Against it:
+  (`d9e7b076:src/ssr/cohort/types.rs`) is essentially that design. Against it:
   a cohort locus carries merged content no per-sample locus has, so those fields would sit empty
   through the whole per-sample stage; where sample regions differ, one type must hold both the group
   span and each sample's own; and the sample axis is redundant in a stage whose stream has exactly

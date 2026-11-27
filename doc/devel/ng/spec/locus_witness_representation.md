@@ -419,7 +419,7 @@ before any number was trusted, because zero is also what a miswired probe report
   bytes to say "positions 0..40" for a case that is one run in every observation measured.
 - **Does every consumer of `positions_covered` survive the move to a set — resolved: yes, and the
   audit is small.** Grepping `positions_covered` and `offset_in_locus` across `src/` and
-  `examples/` finds them only inside `src/ng/locus_generation/` and `examples/ng_generic_loci_dump.rs`.
+  `examples/` finds them only inside `src/locus_generation/` and `examples/ng_generic_loci_dump.rs`.
   The paralog filter, named in an earlier draft of this question, does not read them: it is
   production code and ng's depth derivation is `num_obs_along_locus`, which iterates runs instead
   of one range and keeps its clamp. The dump's own invariant check

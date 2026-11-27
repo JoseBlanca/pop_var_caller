@@ -54,10 +54,10 @@ for.
 ### 1.1 The problem
 
 Production's `.psp` groups records into blocks of a target uncompressed size
-([`TARGET_BLOCK_BYTES`, `src/psp/writer.rs:72`](../../../../src/psp/writer.rs) — 1 MiB),
+(`TARGET_BLOCK_BYTES`, `src/psp/writer.rs` (`d9e7b076:src/psp/writer.rs`) — 1 MiB),
 stores each block **columnar** — all the records' positions in one buffer, all their depths in
 the next, and so on — and compresses each of those buffers as a separate zstd frame at level 9
-([`ZSTD_COMPRESSION_LEVEL`, `src/psp/block.rs:709`](../../../../src/psp/block.rs)). The
+(`ZSTD_COMPRESSION_LEVEL`, `src/psp/block.rs` (`d9e7b076:src/psp/block.rs`)). The
 block is therefore **both** the furthest back the compressor may look for a repeated
 pattern **and** the amount a reader must decode before it can hand out its first record.
 Shrinking it to save memory also costs bytes, which is the trade ng inherits if it ports
@@ -99,7 +99,7 @@ kilobytes, not megabytes*, at three thousand open samples.
 - **It does not decide what the header contains.** [`run_streaming.md`](run_streaming.md)
   §6.1 already does, and its list is binding because the census names a psp by digesting
   exactly those fields
-  ([`census_file.rs:89-98`](../../../../src/ng/parameter_estimation/joint/census_file.rs)).
+  ([`census_file.rs`](../../../../src/parameter_estimation/joint/census_file.rs)).
 - **It does not settle the chain ids' encoding.** That is
   [`psp_chain_id_encoding.md`](psp_chain_id_encoding.md)'s experiment; §6 here supplies
   numbers it was explicitly waiting for and states a leaning, nothing more.
@@ -110,13 +110,13 @@ kilobytes, not megabytes*, at three thousand open samples.
 ### 1.4 Vocabulary, defined once
 
 - A **record** is one sample's observations at one covered reference position:
-  [`SampleLocusObservations`](../../../../src/ng/locus_generation/mod.rs), which holds the
+  [`SampleLocusObservations`](../../../../src/locus_generation/mod.rs), which holds the
   region, the reference bases over it, a list of observed sequences with their support,
   and two counts of reads that produced no observation.
 - A **chain id** identifies the DNA fragment a piece of evidence came from. **One `u64` per read
   *pair*, not per read** — mates are collapsed onto a single id — allocated in order from zero and
   never reused
-  ([`chain_id_allocator.rs`](../../../../src/ng/locus_generation/pileup/chain_id_allocator.rs)).
+  ([`chain_id_allocator.rs`](../../../../src/locus_generation/pileup/chain_id_allocator.rs)).
   **The merge never uses its value; it only asks whether two records name the same fragment**
   ([`psp_chain_id_encoding.md`](psp_chain_id_encoding.md) §1.1), which is what leaves the stored form
   free to be anything that preserves equality. *An earlier draft of this document called these "read
@@ -129,7 +129,7 @@ kilobytes, not megabytes*, at three thousand open samples.
   [`psp_file_format.md`](psp_file_format.md) §2 has the table.
 - **Columnar** is how production lays a block out, and the word is the format's own: a psp header
   carries a `[[column]]` array with one entry per field
-  ([`src/psp/header.rs:24`](../../../../src/psp/header.rs)). Rather than writing record 1's fields,
+  (`d9e7b076:src/psp/header.rs`). Rather than writing record 1's fields,
   then record 2's fields, and so on, it gathers *all* the records' positions into one buffer — one
   **column** — all their depths into a second, all their allele sequences into a third, and
   compresses each column on its own.
@@ -316,8 +316,8 @@ measured 1.4 % of the file at three reads a position and 3.3 % at 279.
 
 **Why not the columns production uses for this.** Its two-phase decode leaves the heavy columns
 compressed while it reads the light ones
-([`TwoPhaseSegment`, `src/var_calling/sample_reader.rs:698-712`](../../../../src/var_calling/sample_reader.rs),
-then [`:789`](../../../../src/var_calling/sample_reader.rs)) — and *there* that saves memory, because
+(`TwoPhaseSegment`, `src/var_calling/sample_reader.rs` (`d9e7b076:src/var_calling/sample_reader.rs`),
+then `d9e7b076:src/var_calling/sample_reader.rs`) — and *there* that saves memory, because
 a block is inflated whole. **Here it would cost memory** and save nothing, because a reader never
 inflates a block and cannot seek inside one: a separate stream of cheap fields adds its own pass on
 top of the walk over the records rather than replacing it. §4.3 of the container spec has the
@@ -342,14 +342,14 @@ that never fires, and it is gone (the owner, 2026-08-25).
 **A genomic grid makes the block count arithmetic rather than a measurement**: one block per 100 kb
 of reference per chromosome. For tomato's 782 Mb across 13 chromosomes that is about **7,840
 blocks**, and at production's 24 bytes an entry
-([`BlockIndexEntry`, `src/psp/index.rs:42`](../../../../src/psp/index.rs)) an index of about
+(`BlockIndexEntry`, `src/psp/index.rs` (`d9e7b076:src/psp/index.rs`)) an index of about
 **190 kB per open sample** — under 40 kB if the entries are variable-length integers.
 
 That is the whole of the problem this section used to have. **The earlier design cut blocks by byte
 count at 32 KiB, which on a whole-genome sample gives roughly 500,000 blocks and a 5 MB index per
 open file** — worse than the 3.8 MB [`run_streaming.md`](run_streaming.md) §7.2 rejects when it
 measures production's flat vector, decoded whole at open
-([`decode_index`, `src/psp/index.rs:110`](../../../../src/psp/index.rs)). Small blocks were forced
+(`decode_index`, `src/psp/index.rs` (`d9e7b076:src/psp/index.rs`)). Small blocks were forced
 then because the block was also what a reader had to inflate; once the look-back window bounds that
 instead (§2), the block is sized for compression and for the index, and both want it large.
 
@@ -383,7 +383,7 @@ the design.** Confusing them is what made the earlier proposal (§2.2) reach for
 | dictionary | **none** | superseded — a 1 MB block warms its own context (§2.2) |
 
 **Level 9 is inherited, not derived** — it is what production uses
-([`src/psp/block.rs:709`](../../../../src/psp/block.rs)) and the sweep gives no reason to
+(`d9e7b076:src/psp/block.rs`) and the sweep gives no reason to
 move: level 19 costs four times the write for 8 % of the file.
 
 **Neither the psp block size nor the look-back window is a format change**, provided the window is written
@@ -402,7 +402,7 @@ the per-open-sample figure much — the window is what that is made of.
 
 [`run_streaming.md`](run_streaming.md) §11 question 4 asks whether an observation's
 reference bases should go in the file at all —
-[`SampleLocusObservations::reference_bases`](../../../../src/ng/locus_generation/mod.rs) is
+[`SampleLocusObservations::reference_bases`](../../../../src/locus_generation/mod.rs) is
 a `Box<[u8]>` per record, so written out it is a per-sample copy of the reference over the
 analysed ground.
 
@@ -679,15 +679,15 @@ coverage, 0.002 natural-log units in the summed log-error.
 **ng gives every read pair an identifier and records it at every position the pair covers.** This is the owner's ruling of
 2026-08-17 and it is already in the code: the fast single-base path pushes a chain id for
 every read with no reference test
-([`fast_column.rs:315`](../../../../src/ng/locus_generation/pileup/fast_column.rs)), and the
+([`fast_column.rs`](../../../../src/locus_generation/pileup/fast_column.rs)), and the
 general path's field carries the ruling in its own doc comment
-([`open_record.rs:494`](../../../../src/ng/locus_generation/pileup/open_record.rs)). The
+([`open_record.rs`](../../../../src/locus_generation/pileup/open_record.rs)). The
 cohort merge needs it to answer *was this read here at all* — when a cohort locus spans
 several of a sample's records, a read that agreed with the reference at one of them has to
 be distinguishable from a read that never reached it.
 
 Production names about 3.4 % of the reads it folds
-([`src/pileup/walker/open_record.rs:150-160`](../../../../src/pileup/walker/open_record.rs)),
+(`d9e7b076:src/pileup/walker/open_record.rs`),
 so **its files say nothing about what this costs.** Measured instead from the alignments
 themselves — one identifier per read pair, allocated in order, the reference stretches taken
 from each read's CIGAR, the resulting per-position live sets written three ways and
@@ -806,8 +806,8 @@ store**: no such store exists at 280 reads a record.
   that agree with the reference, "recorded so nobody re-adds them when the psp writer is
   built". That bullet is stale and following it produces a file the cohort merge cannot
   use.** The code names every read
-  ([`fast_column.rs:315`](../../../../src/ng/locus_generation/pileup/fast_column.rs),
-  [`open_record.rs:494`](../../../../src/ng/locus_generation/pileup/open_record.rs)), by the
+  ([`fast_column.rs`](../../../../src/locus_generation/pileup/fast_column.rs),
+  [`open_record.rs`](../../../../src/locus_generation/pileup/open_record.rs)), by the
   2026-08-17 ruling that post-dates the bullet. Fix the bullet when that document is next
   touched.
 - **⚠ Streaming the block is half the job; not accumulating the records is the other half,
@@ -889,10 +889,10 @@ not.
 |---|---|---|
 | variable-length integer codec | `src/psp/varint.rs` | as-is: LEB128 and zig-zag LEB128, already specified and tested |
 | plain-text header framing | `src/psp/header.rs` | the pattern — magic, length prefix, TOML, sentinel — so `head` still works on an ng psp |
-| the zstd seam | `new_column_compressor`, `zstd_compress_into` ([`src/psp/block.rs:718,730`](../../../../src/psp/block.rs)) | the shape: one long-lived compressor per writer, frame checksums on. The dictionary is new |
-| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` ([`src/var_calling/sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | **the idea, not the shape.** Its light/heavy split becomes a head on each record rather than separate columns, for the reason in §2.3 |
-| the eager whole-segment decode | [`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs) | the parity oracle's model: a simple decoder used only by tests, against which the real one is byte-compared |
-| the record | `SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | what is written and what must come back |
+| the zstd seam | `new_column_compressor`, `zstd_compress_into` (`d9e7b076:src/psp/block.rs`) | the shape: one long-lived compressor per writer, frame checksums on. The dictionary is new |
+| the two-phase read | `TwoPhaseSegment`, `set_variable_rows` (`d9e7b076:src/var_calling/sample_reader.rs`) | **the idea, not the shape.** Its light/heavy split becomes a head on each record rather than separate columns, for the reason in §2.3 |
+| the eager whole-segment decode | `d9e7b076:src/var_calling/sample_reader.rs` | the parity oracle's model: a simple decoder used only by tests, against which the real one is byte-compared |
+| the record | `SampleLocusObservations` ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) | what is written and what must come back |
 
 **Parity oracle:** the same shape production uses — a deliberately simple whole-file decoder
 used only by tests, and the real reader compared against it record for record.
@@ -932,14 +932,14 @@ A tomato accession at about three reads a position gives the same shape: 2.788 +
 
 **Three floating-point fields are 70 % of the compressed file.** They are stored at full
 IEEE precision — two `f32`s and an `f64`
-([`src/psp/registry.rs:366,382,406`](../../../../src/psp/registry.rs)) — and the bottom
+(`d9e7b076:src/psp/registry.rs`) — and the bottom
 bits of a window's mean coverage or a sum of log error probabilities are arithmetic noise,
 which is the one thing a compressor cannot shrink. §6 is about that, and it is worth more
 than every layout decision in this document put together.
 
 **One field measured here says nothing about ng, and it is the one that matters most at
 depth.** Production stores the names of about 3.4 % of the reads it folds
-([`src/pileup/walker/open_record.rs:150-160`](../../../../src/pileup/walker/open_record.rs)),
+(`d9e7b076:src/pileup/walker/open_record.rs`),
 ng stores all of them, and §7 measures that field separately.
 
 ---
@@ -1028,7 +1028,7 @@ will pass while a chain-id list is being corrupted.
    and-chain scheme must not be built.**
 5. **How much do the numbers move on a multi-library sample?** — OPEN. Both corners here are
    one read group, and the read group joins an observation's identity
-   ([`src/ng/locus_generation/mod.rs:245`](../../../../src/ng/locus_generation/mod.rs)), so a
+   ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)), so a
    multi-library sample has more, smaller observations per record. *Leaning:* somewhat worse,
    not structurally different. **Settled by:** running the probe on a multi-library sample.
 

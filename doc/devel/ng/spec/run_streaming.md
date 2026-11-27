@@ -212,7 +212,7 @@ segment before merging it; the merge pulls, the sources produce lazily, and a co
 dropped the moment the caller has consumed it.
 
 The repo already has this shape in its read layer: `MergedCursors`
-([`src/ng/read/input/sample_cursor.rs:178`](../../../../src/read/input/sample_cursor.rs)) is an
+([`src/read/input/sample_cursor.rs`](../../../../src/read/input/sample_cursor.rs)) is an
 argmin k-way merge over a sample's per-file cursors, holding one head per stream with the sort keys
 beside the heads, and it is the model for `k_way_merge`. *(The architecture doc calls this shape
 `MergedRegionReads` ([`sample_reads.md`](../arch/sample_reads.md) §4); that name is from a
@@ -353,7 +353,7 @@ sees only the answers, is where the decision is taken either way.
 does, since 2026-09-04.** The rule that admits a position asks each sample for a *share* of its own
 reads as well as a flat count —
 `max(floor reads, share × that sample's reads compared against the reference over the locus)`
-([`src/ng/run/cohort_merge/mod.rs`](../../../../src/run/cohort_merge/mod.rs)) — so a cheap read
+([`src/run/cohort_merge/mod.rs`](../../../../src/run/cohort_merge/mod.rs)) — so a cheap read
 that returns only the non-reference count cannot answer it. Named here because this document is
 where the requirement comes from; the encoding is where it had to be met, and
 [`psp_head_compared_reads.md`](psp_head_compared_reads.md) is where it was: the record head carries
@@ -439,7 +439,7 @@ quiet generic ground or from a tract, so the bound does not depend on how the ge
 which is exactly what the segment pool could not promise.
 
 **The merge has its own parallelism, and it is off unless measured to pay.** `merge_cohort_in_parallel`
-(`src/ng/run/cohort_merge/parallel.rs`) cuts
+(`d9e7b076:src/ng/run/cohort_merge/parallel.rs`) cuts
 each analysed region into fixed-width **building regions** — 200 bases by default — works a round
 of them concurrently, and releases their loci by region index. It is byte-identical to the
 single-threaded merge at any region width and any number in flight. **Its measured gain is poor,
@@ -448,7 +448,7 @@ a round of builders runs, and nothing is released until every builder in that ro
 so a barrier fires every `regions_in_flight × regions_len` bases — 3,200 on a sixteen-thread
 machine at the 200-base default width, because regions-in-flight has **no constant default** and
 takes one per worker thread
-([`cohort_merge/mod.rs:592`](../../../../src/run/cohort_merge/mod.rs)) — with a serial phase
+([`cohort_merge/mod.rs`](../../../../src/run/cohort_merge/mod.rs)) — with a serial phase
 between rounds. It stays available and off; §11 question 7 names what would turn it
 on and what to try first.
 
@@ -477,19 +477,19 @@ not a reason to assume it carries over (§11, question 7).
 ### 4.1 A run is given a set of segments to analyse
 
 A run analyses a **set of segments**, held in `GenomeRegions`
-([`src/ng/region_typing/mod.rs:77`](../../../../src/region_typing/mod.rs)), which wraps the
+([`src/region_typing/mod.rs`](../../../../src/region_typing/mod.rs)), which wraps the
 same `RegionSet` production's `--regions` runs on. Its own doc states the rule — *"'Whole genome'
 is not a special case — it is the region set whose every region covers an entire contig"* — and
-`whole_contigs` ([`:87`](../../../../src/region_typing/mod.rs)) is the default rather than a
+`whole_contigs` ([`mod.rs`](../../../../src/region_typing/mod.rs)) is the default rather than a
 bypass; a BED loads through `from_bed_path`
-([`:100`](../../../../src/region_typing/mod.rs)). No code in this design tests "is this the
+([`mod.rs`](../../../../src/region_typing/mod.rs)). No code in this design tests "is this the
 whole genome".
 
 ### 4.2 Segments, and what a BED edge does to one
 
 The typed-region generator cuts the reference into segments — `TypedRegion`
-([`src/ng/region_typing/mod.rs:144`](../../../../src/region_typing/mod.rs)) with a
-`RegionKind` ([`:168`](../../../../src/region_typing/mod.rs)): an STR tract, a bundle, a
+([`src/region_typing/mod.rs`](../../../../src/region_typing/mod.rs)) with a
+`RegionKind` ([`mod.rs`](../../../../src/region_typing/mod.rs)): an STR tract, a bundle, a
 satellite, or the generic stretch between them. The segmentation is a function of the reference,
 the repeat catalog, the routing criteria and the analysed regions — **no sample's reads** — so it
 is identical in every sample of a run.
@@ -497,8 +497,8 @@ is identical in every sample of a run.
 What a BED edge does to a segment is already the generator's decision, not this design's: a
 finding (STR tract, bundle, satellite) is emitted whole even where it crosses the edge, and only
 a `Generic` stretch is clipped to the requested span (`clips_at_a_bed_edge`,
-[`src/ng/region_typing/mod.rs:471`](../../../../src/region_typing/mod.rs), emission rule
-[`:482-488`](../../../../src/region_typing/mod.rs);
+[`src/region_typing/mod.rs`](../../../../src/region_typing/mod.rs), emission rule
+[`mod.rs`](../../../../src/region_typing/mod.rs);
 [`typed_regions.md`](typed_regions.md) §2.5: the BED chooses what you are shown, never what
 things are). So a BED edge is a segment boundary before this design sees it.
 
@@ -533,7 +533,7 @@ small a *step*, which holds whether the loop is serial or not.
 **A measured average of 391 bases (613,682 generic segments on human chromosome 1) does not apply
 here, and the owner ruled so.** That figure was taken at the *catalog's*
 admission floor, `CATALOG_MIN_COPIES = [5, 5, 4, 4, 4, 3]`
-([`src/ng/repeat_catalog/criteria.rs:16`](../../../../src/repeat_catalog/criteria.rs)), which
+([`src/repeat_catalog/criteria.rs`](../../../../src/repeat_catalog/criteria.rs)), which
 admits a five-base homopolymer — in random sequence a run of five or more identical bases begins
 about one position in 341, against a measured 391. **That is agreement in the wrong direction and
 should not be read as confirmation**: the calculation counts homopolymers only, while the catalog
@@ -541,7 +541,7 @@ admits periods 2 to 6, all of which also cut generic ground — so it should ove
 under-predict segment length, not the reverse. At the floor a caller actually routes on —
 the copy number at which a repeat starts to stutter, `[8, 6, 6, 6, 5, 4]`, measured over 2,457
 tomato libraries
-([`src/ng/region_typing/segment_criteria.rs:402-414`](../../../../src/region_typing/segment_criteria.rs))
+([`src/region_typing/segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs))
 — the same arithmetic gives one homopolymer run every ~22,000 bases, so a generic segment at the
 routing floor is probably kilobases long. Probably: it is unmeasured, and open question 1 (§11)
 names the measurement — a filter over the stored catalog file, not a genome scan.
@@ -594,7 +594,7 @@ census configuration. **Yields:** the sample's observations, in genome order, re
 to a psp. **`finish()`** — called after the iterator is exhausted — hands over the census the
 gatherer accumulated: concretely, `CensusWriter::finish()` returning the sample's
 `SampleCensusEvidence`
-([`src/ng/parameter_estimation/joint/census.rs:1928,2378,1378`](../../../../src/parameter_estimation/joint/census.rs)).
+([`src/parameter_estimation/joint/census.rs,2378,1378`](../../../../src/parameter_estimation/joint/census.rs)).
 
 **The walk stage is a loop over samples**, one gatherer each, and **the loop is serial: one
 sample is finished — psp and census both on disk — before the next is begun** (owner's ruling,
@@ -642,9 +642,9 @@ it is the only thing that would ever make a sample's observations arrive out of 
 
 **The census is fed from inside the gatherer, on the same stream it yields.** Every observation
 the gatherer yields passes the census accumulator (`CensusWriter::add_locus`,
-[`census.rs:2087`](../../../../src/parameter_estimation/joint/census.rs)) at the ordered yield
+[`census.rs`](../../../../src/parameter_estimation/joint/census.rs)) at the ordered yield
 point, and every segment the loop completes is marked walked (`mark_walked`,
-[`census.rs:2106`](../../../../src/parameter_estimation/joint/census.rs)) whether or not it
+[`census.rs`](../../../../src/parameter_estimation/joint/census.rs)) whether or not it
 produced observations. Two consequences:
 
 - **The psp and the census cannot see different evidence.** There is one stream: what the
@@ -753,10 +753,10 @@ merge — and not a second cut through the genome. Which axis is worth building 
   built from by digesting exactly these things: *"a digest of the pileup's header — its reference,
   its analysed regions, its read filters and the command line that produced it"*, together with the
   psp's record count
-  ([`census_file.rs:76-98`](../../../../src/parameter_estimation/joint/census_file.rs)). A psp
+  ([`census_file.rs`](../../../../src/parameter_estimation/joint/census_file.rs)). A psp
   whose header omits them cannot be named, and a census built from it cannot be told from a census
   built from different reads — which is the whole point of naming it
-  ([`Freshness`, `:106-127`](../../../../src/parameter_estimation/joint/census_file.rs) turns the
+  ([`Freshness`](../../../../src/parameter_estimation/joint/census_file.rs) turns the
   comparison into *use it*, *rebuild it*, or *refuse*).
 - ~~How many records the file holds~~ — **dropped from the header (owner's ruling,
   2026-09-03).** The identity's second half travels *beside* the header rather than inside it:
@@ -777,7 +777,7 @@ accepted behaviour.
 takes the psp header's bytes and a record count and says only this: two psps with the same header
 and the same record count get the same identity and no others do — *"which bytes exactly is the
 pileup writer's business"*
-([`census_file.rs:91-98`](../../../../src/parameter_estimation/joint/census_file.rs)). So the
+([`census_file.rs`](../../../../src/parameter_estimation/joint/census_file.rs)). So the
 encoding spec (§10) is free to lay the header out as it likes, and is not free to leave out any of
 what §6.1 lists: the analysed regions, the catalog identity, the routing criteria, the read filters
 and the command line.
@@ -854,7 +854,7 @@ Three things follow:
 - **Block sizing becomes wholly the encoding spec's trade** — including a cap on how much a block
   decodes to, which matters at the top of the depth range: the densest stretch of a 300× sample
   would otherwise decode to an unbounded payload. Production's 1 MiB mid-window force-flush
-  ([`src/psp/writer.rs:72,289-296`](../../../../src/psp/writer.rs)) shows the shape of that cap.
+  (`src/psp/writer.rs-296` (`d9e7b076:src/psp/writer.rs`)) shows the shape of that cap.
 - **One property survives the hand-over, because an oracle depends on it:** where a block is cut
   must be a function of the observation stream alone — a stream that is identical at every worker
   count — so that the psp stays byte-identical across worker counts (§12.1). A cut that depended on
@@ -954,8 +954,8 @@ and the answer is below: **480 kB, inside the budget with 4% to spare**.
 **Why there is a budget at all.** Everything in the calling stage multiplies by the sample count,
 and the per-open-file state is the easiest cost to get wrong because it looks like bookkeeping.
 Production's psp index is the counter-example ng would otherwise copy: a flat vector of one 24-byte
-entry per block (`BlockIndexEntry`, [`src/psp/index.rs:42`](../../../../src/psp/index.rs)), decoded
-whole at open (`decode_index`, [`:110`](../../../../src/psp/index.rs)). At a 5 kb block over an
+entry per block (`BlockIndexEntry`, `d9e7b076:src/psp/index.rs`), decoded
+whole at open (`decode_index`, `d9e7b076:src/psp/index.rs`). At a 5 kb block over an
 800 Mb genome that is 160,000 entries — **3.8 MB per open file, 11.5 GB across three thousand
 samples** — before any data is read. That is over budget by sevenfold even at the looser figure.
 
@@ -1019,7 +1019,7 @@ under-count rather than a crash.
 
 - **The calling scratch is per worker and reused across loci, and a pool of per-locus callers makes
   a missed reset non-deterministic.** `CallingScratch`
-  ([`src/ng/calling/mod.rs`](../../../../src/calling/mod.rs)) is every buffer a locus's calling
+  ([`src/calling/scratch.rs`](../../../../src/calling/scratch.rs)) is every buffer a locus's calling
   fills, allocated once per worker and cleared between loci. The code already records that a
   dropped `clear()` is invisible to the existing tests because it only shows in one locus order
   ([`inference/repeat_tract_parameters.rs`](../../../../src/calling/inference/repeat_tract_parameters.rs),
@@ -1031,35 +1031,35 @@ under-count rather than a crash.
   loci differ in kind.
 - **A locus generator holds state across segments, so it cannot be shared between workers.** The
   iterator that owns the generators documents a load-bearing drop order
-  ([`src/ng/locus_generation/mod.rs:917-942`](../../../../src/locus_generation/mod.rs)). One
+  ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)). One
   generator set per source, and a source belongs to one worker: in a caller that is one set per
   sample for the run, and in a gatherer splitting one sample across workers, one set per worker,
   reused across *its own* consecutive segments and never shared.
 - **The reference accessor is `Send` but deliberately not `Sync`.** `WindowedRefSeq` holds an
   open per-contig reader; the input layer takes a *factory* rather than a shared accessor for
   exactly this reason
-  ([`src/ng/read/input/mod.rs:606-611`](../../../../src/read/input/mod.rs)). One accessor per
+  ([`src/read/input/mod.rs`](../../../../src/read/input/mod.rs)). One accessor per
   worker per file; wrapping a shared one in a lock serialises the walk's hottest path.
 - **Whether `SampleReads` is `Sync` is unverified.** Its cursor is owned and `Send` (test
   `a_sample_cursor_is_send_in_both_arms`,
-  [`src/ng/read/input/mod.rs:1441`](../../../../src/read/input/mod.rs)), so the intended
+  [`src/read/input/mod.rs`](../../../../src/read/input/mod.rs)), so the intended
   shape — one shared `SampleReads` per sample, one cursor per worker via `cursor(&self, ...)`
-  ([`:623`](../../../../src/read/input/mod.rs)) — needs `SampleReads: Sync`. Confirm at
+  ([`mod.rs`](../../../../src/read/input/mod.rs)) — needs `SampleReads: Sync`. Confirm at
   implementation time before building the pool on it.
 - **Read-filter tallies live in the cursor, not the file.** They belong to a cursor from the
-  moment it is made ([`src/ng/read/input/mod.rs:620-622`](../../../../src/read/input/mod.rs)),
+  moment it is made ([`src/read/input/mod.rs`](../../../../src/read/input/mod.rs)),
   so per-worker cursors give per-worker tallies. Sum them when the gatherer or caller finishes,
   or drop rates under-report by a factor of the worker count — silently, since every number stays
   plausible.
 - **Dropping the walk's pieces in the wrong order loses the tallies too.**
   `SampleLocusObservationsIterator` releases its generators before its reads, and the comment
   records that no test can fail if that breaks
-  ([`src/ng/locus_generation/mod.rs:917-942`](../../../../src/locus_generation/mod.rs)). A
+  ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)). A
   task that dismantles the pieces itself must keep the order.
 - **A backward jump is legal and costs a seek plus a block decode.** The read cursor answers
   segments in any order, and a test asserts backwards-walked segments return what a linear scan
-  returns ([`src/ng/read/input/cursor.rs:92-96`](../../../../src/read/input/cursor.rs), test
-  at [`:1207`](../../../../src/read/input/cursor.rs)); the psp reader's coarse index (§7.2)
+  returns ([`src/read/input/cursor.rs`](../../../../src/read/input/cursor.rs), test
+  at [`cursor.rs`](../../../../src/read/input/cursor.rs)); the psp reader's coarse index (§7.2)
   has the same character. So a work-stealing pool is correct however it steals, and slow unless
   each worker's own sequence of segments stays monotonic — schedule for that.
 - **Every read is named at every position it covers, reference-matching reads included — and the
@@ -1067,8 +1067,8 @@ under-count rather than a crash.
   about 31% of its peak live heap, so dropping them looks like free money. **They are not
   droppable.** Both generic paths record the ids of every read folded at a position, whether it
   departed from the reference or agreed with it — the owner's ruling of 2026-08-17
-  ([`open_record.rs:472-473`](../../../../src/locus_generation/pileup/open_record.rs),
-  [`fast_column.rs:120-126`](../../../../src/locus_generation/pileup/fast_column.rs)) — because
+  ([`open_record.rs`](../../../../src/locus_generation/pileup/open_record.rs),
+  [`fast_column.rs`](../../../../src/locus_generation/pileup/fast_column.rs)) — because
   a cohort locus can span several of one sample's records and the merge needs to know which reads
   are the same read across them. The psp encoding plan lists this under *"one thing that is settled
   and must not be reopened"*
@@ -1102,7 +1102,7 @@ the consuming thread and needs no lock.
 **callers in flight** on the calling side (§3.5), and the within-sample walk's worker count, which
 is off by default (§5.2). **The cohort merge owns two more of its own** — the building region's
 width and how many are in flight
-([`cohort_merge/mod.rs:531,592`](../../../../src/run/cohort_merge/mod.rs)) — which §3.5 and
+([`cohort_merge/mod.rs,592`](../../../../src/run/cohort_merge/mod.rs)) — which §3.5 and
 §12.2 both treat as settings, so five in total and not three. Block size is the encoding spec's trade (§6.3) — it reaches this design
 only as one reader's working set, the multiplicand in §7.1. Any other tuning constant that appears in
 the implementation is a defect, not a lever. **None of the three has a proposed default**, because
@@ -1132,7 +1132,7 @@ measured yet (§11, questions 2 and 7).
   traversal. **It belongs with the psp reader**, since a walker's cheap answer is free and only a
   file reader has anything to gain, and it cannot be settled before the encoding is.
 - ~~**The cohort merge's reconciliation**~~ — **written, 2026-08-17:
-  [`cohort_merge.md`](cohort_merge.md), and built since** (`src/ng/run/cohort_merge/`). It settles
+  [`cohort_merge.md`](cohort_merge.md), and built since** (`src/run/cohort_merge/`). It settles
   how per-sample observations whose spans differ become one cohort locus — every member
   projected onto the locus span and unified into one allele table (its §4.2) — and discharges the
   confirmation this entry asked for, that the merge frontier stays bounded while spans are
@@ -1179,7 +1179,7 @@ measured yet (§11, questions 2 and 7).
    at four threads and worse at eight.
 4. **Should an observation's reference bases be stored in the psp?** — OPEN.
    `SampleLocusObservations::reference_bases` is a `Box<[u8]>` per observation
-   ([`src/ng/locus_generation/mod.rs:44-46`](../../../../src/locus_generation/mod.rs));
+   ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs));
    written out, it is a per-sample copy of the reference — megabytes per sample at 7.4 million
    generic observations, multiplied by the cohort. *Leaning:* do not store it; re-fetch when a
    block is decoded, since the calling stage holds the reference anyway. **Settled by:** measuring
@@ -1415,17 +1415,17 @@ Each oracle is a property of the run, not of one type — which is why they live
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the segments the loops run over | `TypedRegion`, `RegionKind` ([`src/ng/region_typing/mod.rs:144,168`](../../../../src/region_typing/mod.rs)) | consumed as-is; the segments a source is asked for, one at a time, are these |
-| the analysed regions | `GenomeRegions` ([`src/ng/region_typing/mod.rs:77,87,100`](../../../../src/region_typing/mod.rs)) | reused whole — it wraps production's `RegionSet`, so ng and production agree on what a BED means; its value is recorded in the psp header |
-| what a BED edge does to a segment | `clips_at_a_bed_edge` and the emission rule ([`src/ng/region_typing/mod.rs:471,482-488`](../../../../src/region_typing/mod.rs)) | taken as given — findings whole, generic clipped; nothing here re-decides it |
-| one sample's observations | `SampleLocusObservations` ([`src/ng/locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs)) | the item of every stream in §3, unchanged |
-| the walker behind a source | `SampleLocusObservationsIterator` ([`src/ng/locus_generation/mod.rs:915`](../../../../src/locus_generation/mod.rs)) | one per task, fed that segment's segments |
-| per-segment reads | `SampleReads` and `cursor()` ([`src/ng/read/input/mod.rs:398,623`](../../../../src/read/input/mod.rs)) | one shared `SampleReads` per sample, one owned cursor per worker (`Send` proven; `Sync` to confirm — §8) |
-| the streaming merge's shape | `MergedCursors` ([`src/ng/read/input/sample_cursor.rs:178`](../../../../src/read/input/sample_cursor.rs)) | the model for `k_way_merge`: argmin over per-stream heads, keys beside the heads, frontier-sized residency. *(`arch/sample_reads.md` §4 calls this `MergedRegionReads`, a name from a superseded design that is not in the tree.)* |
-| the census accumulator | `CensusWriter::add_locus`, `mark_walked`, `finish` ([`src/ng/parameter_estimation/joint/census.rs:2087,2106,2378`](../../../../src/parameter_estimation/joint/census.rs)) | fed inside the gatherer, at the ordered yield point (§5.2) |
-| the census file | `write_census`, `open_census` ([`src/ng/parameter_estimation/joint/census_file.rs:200,426`](../../../../src/parameter_estimation/joint/census_file.rs)) | written by the walk stage's per-sample loop from `finish()`'s result |
-| psp block index | `BlockIndexEntry`, `decode_index` ([`src/psp/index.rs:42,110`](../../../../src/psp/index.rs)) | **a model of what not to build** — §7.2 rejects the flat per-block index at ng's sample counts |
-| block cutting | `PspWriter`'s grid and force-flush ([`src/psp/writer.rs:297-301,72,289-296`](../../../../src/psp/writer.rs)) | neither carries as a rule: block sizing is wholly the encoding spec's, and the force-flush is now a legal shape for capping a block's decoded size (§6.3) |
+| the segments the loops run over | `TypedRegion`, `RegionKind` ([`src/region_typing/mod.rs,168`](../../../../src/region_typing/mod.rs)) | consumed as-is; the segments a source is asked for, one at a time, are these |
+| the analysed regions | `GenomeRegions` ([`src/region_typing/mod.rs,87,100`](../../../../src/region_typing/mod.rs)) | reused whole — it wraps production's `RegionSet`, so ng and production agree on what a BED means; its value is recorded in the psp header |
+| what a BED edge does to a segment | `clips_at_a_bed_edge` and the emission rule ([`src/region_typing/mod.rs,482-488`](../../../../src/region_typing/mod.rs)) | taken as given — findings whole, generic clipped; nothing here re-decides it |
+| one sample's observations | `SampleLocusObservations` ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) | the item of every stream in §3, unchanged |
+| the walker behind a source | `SampleLocusObservationsIterator` ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) | one per task, fed that segment's segments |
+| per-segment reads | `SampleReads` and `cursor()` ([`src/read/input/mod.rs,623`](../../../../src/read/input/mod.rs)) | one shared `SampleReads` per sample, one owned cursor per worker (`Send` proven; `Sync` to confirm — §8) |
+| the streaming merge's shape | `MergedCursors` ([`src/read/input/sample_cursor.rs`](../../../../src/read/input/sample_cursor.rs)) | the model for `k_way_merge`: argmin over per-stream heads, keys beside the heads, frontier-sized residency. *(`arch/sample_reads.md` §4 calls this `MergedRegionReads`, a name from a superseded design that is not in the tree.)* |
+| the census accumulator | `CensusWriter::add_locus`, `mark_walked`, `finish` ([`src/parameter_estimation/joint/census.rs,2106,2378`](../../../../src/parameter_estimation/joint/census.rs)) | fed inside the gatherer, at the ordered yield point (§5.2) |
+| the census file | `write_census`, `open_census` ([`src/parameter_estimation/joint/census_file.rs,426`](../../../../src/parameter_estimation/joint/census_file.rs)) | written by the walk stage's per-sample loop from `finish()`'s result |
+| psp block index | `BlockIndexEntry`, `decode_index` (`d9e7b076:src/psp/index.rs`) | **a model of what not to build** — §7.2 rejects the flat per-block index at ng's sample counts |
+| block cutting | `PspWriter`'s grid and force-flush (`src/psp/writer.rs-296` (`d9e7b076:src/psp/writer.rs`)) | neither carries as a rule: block sizing is wholly the encoding spec's, and the force-flush is now a legal shape for capping a block's decoded size (§6.3) |
 
 **The parity oracle for the whole document is §12.3** — direct mode against psp mode, one cohort,
 parameters held fixed.

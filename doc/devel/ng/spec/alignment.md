@@ -1,6 +1,6 @@
 # ng — the read alignment module
 
-*Status: design spec, 2026-07-23. Defines `src/ng/alignment/` — the algorithms that line a read up
+*Status: design spec, 2026-07-23. Defines `src/alignment/` — the algorithms that line a read up
 against a reference sequence. This module knows only about alignment: what an alignment is, how to
 compute one, and how to score one. It has no knowledge of which caller step calls it or why.
 Grounded in the frozen production code (`src/ssr/pileup/alignment.rs`, `src/ssr/cohort/`), which ng
@@ -162,7 +162,7 @@ splitting the regimes.
 Because the flanks stay anchored, the two flank-to-tract boundary columns of the resulting line-up
 say where the read's repeat starts and ends — which is how this aligner measures a read's repeat.
 Production's tract delimiter is this algorithm
-([alignment.rs:171](../../../../src/ssr/pileup/alignment.rs#L171)); the details below are what an
+(`d9e7b076:src/ssr/pileup/alignment.rs`); the details below are what an
 implementation has to get right, and each one is load-bearing.
 
 **Which reference columns count as inside the tract.** A gap is priced at the tract rate when it
@@ -223,7 +223,7 @@ The **two-penalty** model is closer to the biology. Two things must be right for
 - **Gaining and losing must be priced separately.** Stutter is markedly asymmetric — contractions
   are more common than expansions. HipSTR carries separate expansion and contraction probabilities
   and fits them per locus, and the fitted values are contraction-biased. Production's scoring model
-  already does this ([hipstr.rs](../../../../src/ssr/cohort/read_model/hipstr.rs) derives its
+  already does this (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs` derives its
   expansion and contraction mass from a separate direction split, with a test asserting a one-unit
   contraction outscores a one-unit expansion). A two-penalty delimiter must inherit that asymmetry;
   a symmetric one would be a step backwards from production's scoring. **The parameters and the
@@ -278,7 +278,7 @@ toward the answer the model already expects, quietly rounding interruptions away
 being neutral about what it measures. That is the hypothesis to test, not a reason to skip the test.
 There is directly relevant prior evidence: production built a two-penalty pair-HMM for the
 **scoring** job and eliminated it, because "even self-affinity-normalized it collapsed on
-out-of-frame reads" ([read_model/](../../../../src/ssr/cohort/read_model/) records the comparison and
+out-of-frame reads" (`d9e7b076:src/ssr/cohort/read_model` records the comparison and
 its outcome). That was a different job, so it does not settle this one — but it sets the bar, and it
 names the out-of-frame route as the part most likely to break.
 
@@ -335,7 +335,7 @@ traceback, and they are banded for performance.
 
 The probability that one sequence produced another, summed over the ways it could have, with gaps
 allowed only near the ends. It scores with a **single flat error rate**, not per-base qualities
-([pair_hmm.rs](../../../../src/ssr/cohort/pair_hmm.rs) is production's).
+(`d9e7b076:src/ssr/cohort/pair_hmm.rs` is production's).
 
 Two cases, and the common one is degenerate:
 
@@ -393,7 +393,7 @@ and where the parameters come from.
 A section survives here at all because **two consumers share the distribution**: the two-penalty
 best-path aligner in this module (§4.2), and the genotyping likelihood outside it. It is HipSTR's
 model, and there is **one** implementation of it —
-[`alignment/stutter.rs`](../../../../src/ng/alignment/stutter.rs), which both callers read.
+[`alignment/stutter.rs`](../../../../src/alignment/stutter.rs), which both callers read.
 
 **The vocabulary is [`read_likelihoods.md`](read_likelihoods.md) §1.3's.** A read's length change is
 either **a whole-repeat change** — a whole number of repeats: slippage, the common event, its size
@@ -442,7 +442,7 @@ part-repeat share, and it should be recorded as one rather than mistaken for a f
 **The follow-up this section is a named home for, and what it costs any comparison run before it
 lands.** One of the seven parameters is a placeholder rather than an estimate: **the part-repeat
 share is a fixed 5% of the whole-repeat share**
-([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)). A real part-repeat estimator —
+(`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`). A real part-repeat estimator —
 **binning part-repeat reads separately in the parameter pre-pass, as HipSTR does** — is a known and
 unfinished follow-up, and **any comparison involving part-repeat reads inherits that weakness**,
 this module's algorithm comparisons included.
@@ -540,7 +540,7 @@ algorithm runs is resolved at **compile time**, through generic type parameters 
 specializes, never through a trait object (`Box<dyn …>`): a virtual call plus its indirection on
 every read is a cost this path cannot carry. This matches how the existing read-likelihood models
 are already swapped — concrete types behind a generic
-([`read_model/`](../../../../src/ssr/cohort/read_model/)).
+(`d9e7b076:src/ssr/cohort/read_model`).
 
 Every algorithm takes a **reusable scratch buffer** for its matrices, owned by the caller and reused
 across reads. Allocating a matrix per read is the other cost this path cannot carry.
@@ -646,10 +646,10 @@ wanting per-base qualities would take them the same way.
 
 | what | existing code | ng reuse |
 |---|---|---|
-| repeat-aware best-path | `delimit_read`, `ViterbiScratch` ([ssr/pileup/alignment.rs](../../../../src/ssr/pileup/alignment.rs)) | the model for §4.2; its output must additionally report which flank anchored ([`read_preparation_ssr.md`](read_preparation_ssr.md) §3) |
-| repeat-aware marginal | `align_subst` ([pair_hmm.rs](../../../../src/ssr/cohort/pair_hmm.rs)) | §5.1 — **this function alone**. **Returns a plain probability; this interface returns its logarithm** (§7) — convert at the boundary |
-| the stutter distribution | `HipstrModel` ([ssr/cohort/read_model/](../../../../src/ssr/cohort/read_model/)) | owned by [`read_likelihoods.md`](read_likelihoods.md) §4.2 — the *genotyping* model, **not an algorithm in this module**. It composes the row above; §5.2 points there and keeps only what that document does not carry, because the two-penalty best-path aligner (§4.2) needs the same parameters |
-| emission models | Dindel per-base-quality table; flat error rate ([alignment.rs](../../../../src/ssr/pileup/alignment.rs), [pair_hmm.rs](../../../../src/ssr/cohort/pair_hmm.rs)) | the swappable emission component (§3) |
+| repeat-aware best-path | `delimit_read`, `ViterbiScratch` (`d9e7b076:src/ssr/pileup/alignment.rs`) | the model for §4.2; its output must additionally report which flank anchored ([`read_preparation_ssr.md`](read_preparation_ssr.md) §3) |
+| repeat-aware marginal | `align_subst` (`d9e7b076:src/ssr/cohort/pair_hmm.rs`) | §5.1 — **this function alone**. **Returns a plain probability; this interface returns its logarithm** (§7) — convert at the boundary |
+| the stutter distribution | `HipstrModel` (`d9e7b076:src/ssr/cohort/read_model`) | owned by [`read_likelihoods.md`](read_likelihoods.md) §4.2 — the *genotyping* model, **not an algorithm in this module**. It composes the row above; §5.2 points there and keeps only what that document does not carry, because the two-penalty best-path aligner (§4.2) needs the same parameters |
+| emission models | Dindel per-base-quality table; flat error rate (`d9e7b076:src/ssr/pileup/alignment.rs`, `d9e7b076:src/ssr/cohort/pair_hmm.rs`) | the swappable emission component (§3) |
 | left-alignment | freebayes `LeftAlign.cpp` (vendored, read-only reference) | §6 — the algorithm is standard; implement from the description, not by transliteration |
 | affine best-path | — | new (§4.1); optional fast-core swap |
 | affine marginal | — | **not built** (§5.3) |

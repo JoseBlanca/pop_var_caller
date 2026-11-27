@@ -12,7 +12,7 @@ spec under [`ng_proposal.md`](ng_proposal.md); its code-facing companion is
 distilled), which sits under the shared arch docs
 [`../arch/ng_step_interfaces.md`](../arch/ng_step_interfaces.md) (shared types +
 step traits) and [`../arch/module_layout.md`](../arch/module_layout.md) (the
-`src/ng/` tree).*
+module tree).*
 
 *Naming follows the project convention: **STR** in prose, `ssr` in code
 identifiers (`str` is a Rust primitive). Read filtering is generic — it has no
@@ -87,11 +87,11 @@ alignment record into locus evidence — and they share the same reference acces
 filtering's output (`MappedRead`) is read preparation's input.
 
 ```
-src/ng/read/
+src/read/
 ├── mod.rs         – module declarations + the ReadPreparer trait (step 2, added later)
 ├── filtering.rs   – step 1: the fixed filtering prelude  (this spec)  (+ #[cfg(test)])
 └── …              – step 2 impls land here as siblings: left_align_baq.rs, ssr_delimit.rs, …
-                      (the alignment algorithms they call live in src/ng/alignment/)
+                      (the alignment algorithms they call live in src/alignment/)
 ```
 
 This is a deliberate, documented deviation from the "one folder per step" rule in
@@ -103,7 +103,7 @@ side by side within `read/`.
 ### 2.2 The shared vocabulary — seeding `types.rs`
 
 Per `module_layout.md` principle 3, the cross-step domain newtypes begin in one
-`src/ng/types.rs` and split into concept modules (`units`, `locus`, …) as they grow.
+`src/types.rs` and split into concept modules (`units`, `locus`, …) as they grow.
 This spec seeds `types.rs` with **only the newtypes read filtering actually touches** —
 not the whole vocabulary from `ng_step_interfaces.md` §1.
 
@@ -522,7 +522,7 @@ pair-HMM read preparation. Neither is a per-read filtering decision.
   `compute_adaptor_boundary` and carried on `MappedRead.adaptor_boundary`. Filtering
   preserves it. But *applying* it — masking the bases past the boundary — is a per-base
   operation done at pileup-walker time in production
-  ([`decompose.rs`](../../../../src/pileup/walker/decompose.rs)), so in ng it lands in
+  (`d9e7b076:src/pileup/walker/decompose.rs`), so in ng it lands in
   `pileup/`, where a read's content is turned into locus evidence.
 
 - **Mate-overlap quality reconciliation → `pileup/` (generic) / pair-HMM prep (STR).**

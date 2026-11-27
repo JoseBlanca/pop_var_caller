@@ -10,9 +10,9 @@ and nothing else. What is recorded at each is
 *Types and interfaces: [`../arch/parameter_prepass_joint_loci.md`](../arch/parameter_prepass_joint_loci.md).*
 
 ***Both halves are built.*** *The repeat catalog ships the per-stratum sampler this document asked for
-([`repeat_catalog.md`](repeat_catalog.md), `src/ng/repeat_catalog/`), so §3 records why the rule is
+([`repeat_catalog.md`](repeat_catalog.md), `src/repeat_catalog/`), so §3 records why the rule is
 that one and what using it obliges a consumer to do, rather than proposing it. **The generic rule (§2)
-landed 2026-08-12** in `src/ng/parameter_estimation/joint/loci.rs`, with the unambiguous-base mask §2
+landed 2026-08-12** in `src/parameter_estimation/joint/loci.rs`, with the unambiguous-base mask §2
 now requires and the measurements in §2 and §4.5 behind it
 (`examples/ng_joint_loci_probe.rs`).*
 
@@ -40,9 +40,9 @@ analysed regions, the repeat catalog, a seed, and a couple of caps. It touches n
 built and tested with no alignment file in sight: run it twice and compare the lists.
 
 **Both sides are built.** The STR side is two calls on the repeat catalog
-([`repeat_catalog.md`](repeat_catalog.md), `src/ng/repeat_catalog/`), which ships the per-stratum
+([`repeat_catalog.md`](repeat_catalog.md), `src/repeat_catalog/`), which ships the per-stratum
 sampler; the generic side is the hash rule §2 states in full, in
-`src/ng/parameter_estimation/joint/loci.rs`. What this document holds is the policy — which caps,
+`src/parameter_estimation/joint/loci.rs`. What this document holds is the policy — which caps,
 which seed, what has to travel with a sample, and what the stratification obliges a consumer to do
 afterwards (§3.5).
 
@@ -104,7 +104,7 @@ this section summarises rather than restates so that the STR rule beside it can 
   is `threshold = 2^64 · n / selectable_length`. **Nothing about that range is measured or discovered — it
   is the output width of the hash we chose**, and the one property it rests on is that the hash
   spreads uniformly across it. Use the same `xxh3` the STR sampler already uses
-  (`src/ng/repeat_catalog/strata.rs`, `hash_locus`), so both halves of this document rest on one
+  (`src/repeat_catalog/strata.rs`, `hash_locus`), so both halves of this document rest on one
   assumption rather than two. Two mechanics worth having in advance: compute the threshold in 128 bits,
   since `2^64 · n` overflows a `u64`; and where `n >= analysed_length` it saturates and every position
   is kept, which is the right answer rather than a case to guard. The realised count is binomial around
@@ -186,7 +186,7 @@ decision, not two: **pay for the pass, and then take the best rule it buys.**
 loci whose value is smallest.** Everything is kept where a stratum holds fewer than `cap`.
 
 **This is `sample_loci_per_stratum(criteria, region, cap, seed)` on the repeat catalog**
-([`repeat_catalog.md`](repeat_catalog.md) §5.3, `src/ng/repeat_catalog/strata.rs`), which lands with
+([`repeat_catalog.md`](repeat_catalog.md) §5.3, `src/repeat_catalog/strata.rs`), which lands with
 that spec rather than with this one. **So this document's consumer holds no selection logic of its
 own**: it states a policy, a cap and a seed, and receives the loci. What follows is why the rule is
 that one — the reasoning belongs here because it is this consumer's requirement that shaped it.

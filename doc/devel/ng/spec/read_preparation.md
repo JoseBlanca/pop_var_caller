@@ -4,11 +4,11 @@
 preparation is a **generic-path-only** step (§1 says why), so there is no shared preamble and no STR
 sibling; the former `read_preparation_generic.md` and `read_preparation_ssr.md` are short redirects
 here. **What is built, and what v1 is:** the left-alignment transform ships (`AlignmentNormalizer` +
-three impls in `src/ng/alignment/`); **BAQ is deferred sine die** (§10 — not of interest now); the
+three impls in `src/alignment/`); **BAQ is deferred sine die** (§10 — not of interest now); the
 **re-align mode's aligner (algorithm 2, affine) and its trigger are both unbuilt/gated** (§4, §10); and
 the **`PreparedRead`-producing preparer is not built**. So **v1 read preparation is pass-through +
 left-alignment** — nothing else. Grounded in the production `process_read` fold
-([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs)). The code-facing companion
+(`d9e7b076:src/pileup/per_sample/read_processor.rs`). The code-facing companion
 is [`../arch/read_preparation.md`](../arch/read_preparation.md) (types, trait signatures, the
 reconciliation table). Naming: **STR** in prose, `ssr` in code.*
 
@@ -18,8 +18,9 @@ reconciliation table). Naming: **STR** in prose, `ssr` in code.*
 > ng's `AlignedRead` (`src/read/aligned_read.rs`), not production's `MappedRead`, which was deleted
 > on 2026-11-27. And it calls the left-aligner `alignment::indel_norm::left_align_indels`
 > directly: the `AlignmentNormalizer` trait, its implementations and `left_align_structured.rs`
-> were removed on 2026-10-31 and 2026-11-27. Links into production's deleted tree
-> (`src/pileup/`) no longer resolve, and `src/ng/` paths are now under `src/`.
+> were removed on 2026-10-31 and 2026-11-27. Files of production's deleted tree
+> (`src/pileup/`) are cited as `d9e7b076:src/pileup/...`, which `git show` opens, and `src/ng/` paths
+> are now under `src/`.
 
 ---
 
@@ -34,7 +35,7 @@ every spanning read against `flank + tract + flank` with the repeat-aware delimi
 ([`alignment.md`](alignment.md) §4.2), so canonicalizing the CIGAR the mapper produced would be work
 whose result nothing reads. The mapper's CIGAR survives there only as **coordinate arithmetic** — the
 read's footprint and the reference-window-to-read-offset mapping used to slice out the bases over the
-locus window ([ssr.rs](../../../../src/ng/locus_generation/ssr.rs) `read_footprint` / `ref_to_read`);
+locus window ([ssr/read_region.rs](../../../../src/locus_generation/ssr/read_region.rs) `read_footprint` / `ref_to_read`);
 the measurement itself comes from the re-alignment, which never consults it. Left-aligning first would
 therefore *shift which bases get sliced out* and gain nothing. So **the STR path has no read
 preparation** — it goes filtering → observation generation
@@ -75,8 +76,8 @@ indels has nothing to shift, so canonicalizing it is provably a no-op. (With BAQ
 pass-through is the whole of "do nothing" — there is no quality-capping step left to decide about.)
 **v1 does not implement it as a branch:** the ported normalizer already early-returns on a CIGAR with
 no indel, before it touches the reference and without allocating
-([indel_norm.rs](../../../../src/pileup/walker/indel_norm.rs) `left_align_indels`;
-[left_align_structured.rs](../../../../src/ng/alignment/left_align_structured.rs) — "the caller does
+(`d9e7b076:src/pileup/walker/indel_norm.rs` `left_align_indels`;
+`d9e7b076:src/ng/alignment/left_align_structured.rs` — "the caller does
 **not** need to pre-filter no-indel reads"). A mode enum here would only duplicate that scan.
 
 **Canonicalize is about spelling.** The same indel can be written at several equivalent reference
@@ -100,7 +101,7 @@ undecided (§4). It is the expensive, rare mode and the only route by which a mi
 ## 3. The output — `PreparedRead` (reused from production)
 
 Every mode yields the **existing production `PreparedRead`**
-([pileup/walker/mod.rs](../../../../src/pileup/walker/mod.rs)), **reused as-is** — it already *is* the
+(`d9e7b076:src/pileup/walker/mod.rs`), **reused as-is** — it already *is* the
 transform's output, field for field, exactly as step 1 reuses `MappedRead`. Copied verbatim from
 production, **not redefined** — the types are production's raw integers, not ng's newtypes, which is
 what "reuse" means here:
@@ -114,7 +115,7 @@ what "reuse" means here:
 > the prepared read has to carry `read_group: ReadGroupId`. Production's `PreparedRead` has no such
 > field, and **production is frozen**, so the group would die at the preparation boundary. An earlier
 > draft proposed adding the field to production's type (preceded by relocating `ReadGroupId` to a
-> crate-visible home); that is **withdrawn**. ng copies the type into `src/ng/read/` and extends it
+> crate-visible home); that is **withdrawn**. ng copies the type into `src/read/` and extends it
 > there, which edits production zero times and makes the *next* field free — ng's read type will
 > change again (BAQ if it returns, the re-align mode), and each of those would otherwise have been a
 > fresh edit to frozen code.
@@ -159,7 +160,7 @@ absorbing a wrong value.
 Living inside `pileup/walker/` is a misplacement — preparation produces it, the pileup only consumes
 it — but production is frozen, so this is **recorded, not acted on**. The same debt is already on
 record for `CigarOp`, with the same resolution: porting ng back is the moment to move both
-([alignment/mod.rs](../../../../src/ng/alignment/mod.rs) — `Alignment`, "Reusing production's
+([alignment/mod.rs](../../../../src/alignment/mod.rs) — `Alignment`, "Reusing production's
 `CigarOp`").
 
 ---
@@ -188,16 +189,16 @@ Production runs one per-read fold, `process_read`, whose stages are
   **only the CIGAR**; bases, qualities and the placement start are untouched. (The default normalizer is
   `StructuredLeftAligner` — the GATK line-up, at one remove: it wraps production's `left_align_indels`,
   which is itself a port of GATK's `AlignmentUtils.leftAlignIndels`
-  ([indel_norm.rs](../../../../src/pileup/walker/indel_norm.rs), module note). Production calls it with
+  (`d9e7b076:src/pileup/walker/indel_norm.rs`, module note). Production calls it with
   end-deletion stripping *off*, so the alignment's start never moves —
-  [left_align_structured.rs](../../../../src/ng/alignment/left_align_structured.rs), "It does not move
+  `d9e7b076:src/ng/alignment/left_align_structured.rs`, "It does not move
   `reference_offset`".) **Built.** `bq_baq` is filled by copying the read's raw
   qualities through uncapped (§3), production's `--no-baq` behaviour.
 
 **Most reads never touch the reference, and that is a design point, not an optimisation.**
 Left-alignment is the *only* consumer of the reference in this step — it needs it intrinsically, since
 a gap may slide left only across bases that match **both the reference and the read**
-([indel_norm.rs](../../../../src/pileup/walker/indel_norm.rs), module note; the shift core is handed
+(`d9e7b076:src/pileup/walker/indel_norm.rs`, module note; the shift core is handed
 `[ref_bases, read_seq]`). Everything else in the `PreparedRead` is read off the record: `alignment_end`
 from the CIGAR, `mate_role` and strand from the flag, `mq_log_err` from MAPQ, `qname`, the adaptor
 boundary. So **fetch only when the read's CIGAR carries an indel**; a read without one is built
@@ -205,14 +206,14 @@ straight from the record, with no fetch and no scratch touched.
 
 Production *does* fetch for every read, and the reason does not carry over: `F1` needed the same window
 on every read, so it fetched once and shared
-([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs) — "F3 + F1 both need the
+(`d9e7b076:src/pileup/per_sample/read_processor.rs` — "F3 + F1 both need the
 read's raw reference slice"). **ng moved `F1` to step 1**, which leaves left-alignment alone here.
 
 **Three mechanical details the trait does not show, each a wrong answer if missed:**
 
 - **The reference window is production's exact one** — `[pos, pos + cigar_ref_span(cigar))`, so the
   first reference byte is the read's first aligned base
-  ([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs)). The normalizer takes the
+  (`d9e7b076:src/pileup/per_sample/read_processor.rs`). The normalizer takes the
   whole stretch *plus* an offset into it, so with that window the offset is `0`. **ng fetches it
   uppercased** (`RefSeq::fetch_into`), unlike production — see below.
 - **The normalizer works on an `Alignment`, not on a CIGAR** — `normalize(&mut Alignment, read,
@@ -220,7 +221,7 @@ read's raw reference slice"). **ng moved `F1` to step 1**, which leaves left-ali
   it back out.
 - **Check the fetched length; do not trust it.** `left_align_cigar` fails *safe* on a window that does
   not cover the read's footprint: it returns the CIGAR untouched rather than corrupting it
-  ([indel_norm.rs](../../../../src/pileup/walker/indel_norm.rs), the under-provisioned-input guard). So
+  (`d9e7b076:src/pileup/walker/indel_norm.rs`, the under-provisioned-input guard). So
   a short buffer silently skips normalization instead of failing — which under ng's fatal fetch model
   (§7) should never arise, and therefore must be enforced by the fetch rather than left to that guard.
 
@@ -228,7 +229,7 @@ read's raw reference slice"). **ng moved `F1` to step 1**, which leaves left-ali
 filtering in step 1, *before* preparation's left-alignment. The verdict does not move because a gap
 only shifts across bases the read and the reference share, so the match/mismatch tally is unchanged —
 ng's step-1 code makes the same argument
-([filtering.rs](../../../../src/ng/read/filtering.rs) `verdict_post_decode`). **That is an argument,
+([filtering.rs](../../../../src/read/filtering.rs) `verdict_post_decode`). **That is an argument,
 not a proof, and it is worth marking as one:** production's `left_align_indels` does carry a
 mismatch-count invariant, but it is `#[cfg(debug_assertions)]` — out of the build we run — and it
 counts raw, case-sensitive mismatches, whereas `F1` counts only mismatches above a BQ floor over
@@ -264,7 +265,7 @@ the whole reason it exists: `prepare_read` takes `&self`, and `RefSeq::fetch_int
 caller-owned `Vec<u8>` ([ref_seq.md](ref_seq.md)), so without a scratch every indel-bearing read
 allocates one. It is **not** the normalizer's buffers: `AlignmentNormalizer` has no `Scratch` — those
 algorithms fill no matrix, and one that wants a buffer owns it as a field
-([alignment/mod.rs](../../../../src/ng/alignment/mod.rs)) — and the default normalizer is a unit
+([alignment/mod.rs](../../../../src/alignment/mod.rs)) — and the default normalizer is a unit
 struct. The re-align mode's alignment matrices join the scratch when that mode lands.
 
 ```rust
@@ -293,7 +294,7 @@ pub trait ReadPreparer {
 
 - **The read arrives by value.** Its `seq`, `qual` and `cigar` buffers *move* into the `PreparedRead`
   rather than being cloned per read — production takes it by value for exactly this reason
-  ([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs), the `--no-baq` arm), and
+  (`d9e7b076:src/pileup/per_sample/read_processor.rs`, the `--no-baq` arm), and
   step 1 already yields owned `MappedRead`s, so by-value costs the caller nothing.
 - **The result is a `Result` around an `Option`,** because the step has two kinds of bad news and §7
   forbids confusing them. A per-read decline is `Ok(None)` and the run continues; a failed reference
@@ -320,14 +321,14 @@ no business treating a base differently because a masking tool lowercased it, an
 on uppercase sequences so that no such discrimination is possible.
 
 **What that fixes.** Production hands `F3` the *raw* bytes, and its shift loop compares raw bytes with
-no case folding ([norm_seqs.rs](../../../../src/norm_seqs.rs) `next_base_on_left_is_same`), while read
+no case folding (`d9e7b076:src/norm_seqs.rs` `next_base_on_left_is_same`), while read
 bases are uppercased at decode ([alignment_input.rs](../../../../src/bam/alignment_input.rs)). So on a
 soft-masked reference the read shows `A`, the reference shows `a`, they compare unequal, and the shift
 loop never advances: **left-alignment silently does nothing in soft-masked regions** — which is to say,
 in repeats and low-complexity sequence, exactly where indel placement is ambiguous and left-alignment
 is the point. Production's own reason for raw bytes is not a design one — the module note says it
 "mirrors exactly what the old serial path did" and is kept for **byte-identity**
-([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs), module note) — and the
+(`d9e7b076:src/pileup/per_sample/read_processor.rs`, module note) — and the
 sibling filter in the same fold, `F1`, *does* fold case
 ([alignment_input.rs](../../../../src/bam/alignment_input.rs) `read_exceeds_mismatch_fraction`), which
 is what marks the left-aligner's case-sensitivity as an oversight rather than an intent.
@@ -362,8 +363,8 @@ buffer).
 one `process_read` and moved it *off* the serial path precisely to shrink the serial floor to the
 coordinate merge plus the walker; it is called inside a rayon `map_init` whose per-worker state is the
 raw-reference cache and the BAQ engine
-([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs) module note;
-[baq_stream.rs](../../../../src/pileup/per_sample/baq_stream.rs)). ng follows that shape: preparation
+(`d9e7b076:src/pileup/per_sample/read_processor.rs` module note;
+`d9e7b076:src/pileup/per_sample/baq_stream.rs`). ng follows that shape: preparation
 runs per read on the workers, **one `Scratch` per worker**, and the walker only *consumes*
 `PreparedRead`s. Read preparation **composes** with the gatherer, it does not fuse into it — which
 keeps the bake-off surface alive.
@@ -413,7 +414,7 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
 
 - **How to run it.** In-process, against `process_read(read, None /* no BAQ */, &mut raw_ref, &cfg)` —
   *since promotion step C9 (2026-09-13) its answers are recorded in
-  `src/ng/read/testdata/left_align_production_prepared.tsv` and the test reads that file* —
+  `src/read/testdata/left_align_production_prepared.tsv` and the test reads that file* —
   with **`max_read_mismatch_fraction: None`**. ng moved `F1` to step 1, so leaving it on makes
   production drop reads ng keeps and the two keep-sets diverge for reasons that have nothing to do
   with preparation.
@@ -424,7 +425,7 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
 - **Where parity stops, deliberately — two places.**
   - *A failed reference fetch.* Zero span, unknown contig, repository miss, `pos == 0`, a window past
     the contig end: production **skips `F3`/`F1` and emits the read un-left-aligned**
-    ([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs), `fetch_raw_slice` +
+    (`d9e7b076:src/pileup/per_sample/read_processor.rs`, `fetch_raw_slice` +
     "Reference-fetch failure is not an error"). ng makes that fatal (§7). The fixture must exclude
     those reads or assert ng's abort; it cannot assert byte-parity on them.
   - *A soft-masked (or non-ACGT) reference.* ng uppercases, production does not (§6), so on lowercase
@@ -436,11 +437,11 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
 
 | what | existing code | status / ng reuse |
 |---|---|---|
-| indel left-alignment | `AlignmentNormalizer` + `StructuredLeftAligner`/`RepeatedLeftAligner`/`FixpointLeftAligner` ([src/ng/alignment/](../../../../src/ng/alignment/)) | **built** — the preparer calls a normalizer; parity-checked vs production's `left_align_indels` |
-| the per-read prep fold | `process_read` ([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs)) | model for `LeftAlignPreparer` — its **F3 stage only** (G2/F1 are step-1 filters; BAQ is deferred, §10) |
-| building the `PreparedRead` | `prepare_passthrough` (the `--no-baq` path, [baq_engine.rs](../../../../src/pileup/per_sample/baq_engine.rs)) | **`pub`, and it does all of it** — `alignment_end`, `mate_role`, `qname`, `mq_log_err`, adaptor boundary, and the raw-`qual`→`bq_baq` copy. Whether v1 *calls* it or ports it is **open** (§11) |
-| ↳ its inner wiring | `mapped_to_prepared` ([baq_engine.rs](../../../../src/pileup/per_sample/baq_engine.rs)) | **private** — not callable from ng; reachable only through `prepare_passthrough` above |
-| the prepared read | `PreparedRead` ([pileup/walker/mod.rs](../../../../src/pileup/walker/mod.rs)) | **copy into `src/ng/read/` and extend with `read_group`** — reversed 2026-07-28 (§3 fold-in); production is frozen and the group must survive the preparation boundary. Its misplacement inside `pileup/walker/` is unchanged and still deferred to the port-back |
+| indel left-alignment | `AlignmentNormalizer` + `StructuredLeftAligner`/`RepeatedLeftAligner`/`FixpointLeftAligner` ([src/alignment/](../../../../src/alignment/)) | **built** — the preparer calls a normalizer; parity-checked vs production's `left_align_indels` |
+| the per-read prep fold | `process_read` (`d9e7b076:src/pileup/per_sample/read_processor.rs`) | model for `LeftAlignPreparer` — its **F3 stage only** (G2/F1 are step-1 filters; BAQ is deferred, §10) |
+| building the `PreparedRead` | `prepare_passthrough` (the `--no-baq` path, `d9e7b076:src/pileup/per_sample/baq_engine.rs`) | **`pub`, and it does all of it** — `alignment_end`, `mate_role`, `qname`, `mq_log_err`, adaptor boundary, and the raw-`qual`→`bq_baq` copy. Whether v1 *calls* it or ports it is **open** (§11) |
+| ↳ its inner wiring | `mapped_to_prepared` (`d9e7b076:src/pileup/per_sample/baq_engine.rs`) | **private** — not callable from ng; reachable only through `prepare_passthrough` above |
+| the prepared read | `PreparedRead` (`d9e7b076:src/pileup/walker/mod.rs`) | **copy into `src/read/` and extend with `read_group`** — reversed 2026-07-28 (§3 fold-in); production is frozen and the group must survive the preparation boundary. Its misplacement inside `pileup/walker/` is unchanged and still deferred to the port-back |
 | the re-align aligner | general/affine best-path aligner ([`alignment.md`](alignment.md) §4.1) | **not built — gated** (algorithm 2, `alignment_best_path.md` Milestone E); its trigger is open too (§4) |
 | reference | `RefSeq` — the canonical (uppercased) view ([ref_seq.md](ref_seq.md)) | reuse as-is. **Not** production's raw view: ng uppercases so masking cannot change an alignment (§6). One view, where production carries two |
 
@@ -453,7 +454,7 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
   caps its quality at that confidence (`bq = min(base_quality, BAQ)`), de-weighting bases in ambiguous
   indels. When/if it returns it is a **config toggle** on the preparer (production's `--no-baq` is the
   off-position, which is v1), not a second implementation — reuse `BaqEngine::process`
-  ([baq_engine.rs](../../../../src/pileup/per_sample/baq_engine.rs)). It would reintroduce an
+  (`d9e7b076:src/pileup/per_sample/baq_engine.rs`). It would reintroduce an
   `Ok(None)` decline reason (§7); it needs no *extra* reference view, since v1 already fetches the
   canonical one (§6). Its home is a later config mode on `LeftAlignPreparer`.
 - **The re-align mode (algorithm 2, affine aligner + its trigger) — gated** (§4). Not out of scope, but
@@ -504,7 +505,7 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
   explains nothing we have observed — including the indel deficit, which was measured on GRCh38.
 - **Reusing production: call it where it fits, decided case by case (owner, 2026-07-25).** ng may call
   a production function when it fits ng's need as-is — the default normalizer already does
-  ([left_align_structured.rs](../../../../src/ng/alignment/left_align_structured.rs) wraps
+  (`d9e7b076:src/ng/alignment/left_align_structured.rs` wraps
   `left_align_indels`). What is **not** allowed is contorting ng's code to avoid a port. So each reuse
   is judged on its own; there is no blanket rule either way.
 

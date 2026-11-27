@@ -21,7 +21,7 @@ only about how the work is divided and where each piece lives.
 ## 1. What this is
 
 Today one type, `ReadFilter`, does three jobs in one loop
-([`filtering.rs:895-951`](../../../../src/ng/read/filtering.rs#L895)): it rejects reads on their
+([`filtering.rs`](../../../../src/read/filtering.rs)): it rejects reads on their
 flag and mapping quality, converts the survivors into ng's own read type, then rejects some of
 *those* on their length, their CIGAR and how well they match the reference. Only two of the
 three are filtering.
@@ -33,7 +33,7 @@ types carry the distinction themselves:
   and a mapping quality readable without unpacking anything else;
 - an **aligned read** (`AlignedRead`) is the converted one: sequence uppercased, CIGAR in ng's
   own operations, adaptor boundary worked out
-  ([`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67)).
+  ([`aligned_read.rs`](../../../../src/read/aligned_read.rs)).
 
 The conversion turns one into the other, and the question this document answers is **which
 filters run on which side of it, and who owns the loop.**
@@ -97,14 +97,14 @@ mapping quality. **The other three read fields that only the conversion produces
 | #9 bad CIGAR | the CIGAR | the aligned read — the conversion turns noodles' CIGAR into ng's `CigarOp` |
 | #8 high mismatch fraction | CIGAR, sequence, base qualities, position, contig, plus a reference fetch | the aligned read, for the same two reasons |
 
-Cited: `verdict_pre_decode` ([`filtering.rs:210-238`](../../../../src/ng/read/filtering.rs#L210)),
-`verdict_post_decode` ([`filtering.rs:269-322`](../../../../src/ng/read/filtering.rs#L269)), and
-the two conversions ([`aligned_read.rs:102`](../../../../src/ng/read/aligned_read.rs#L102),
-[`:107`](../../../../src/ng/read/aligned_read.rs#L107)).
+Cited: `verdict_pre_decode` ([`filtering.rs`](../../../../src/read/filtering.rs)),
+`verdict_post_decode` ([`filtering.rs`](../../../../src/read/filtering.rs)), and
+the two conversions ([`aligned_read.rs`](../../../../src/read/aligned_read.rs),
+[`aligned_read.rs`](../../../../src/read/aligned_read.rs)).
 
 **Converting is not free, and that is what fixes the order.** Building an aligned read copies the
 name, uppercases the sequence, rebuilds the CIGAR as ng's own operations and works out the
-adaptor boundary ([`aligned_read.rs:67-120`](../../../../src/ng/read/aligned_read.rs#L67)). So:
+adaptor boundary ([`aligned_read.rs`](../../../../src/read/aligned_read.rs)). So:
 reject on what the raw aligned read already carries, convert what survives, then reject on what
 the conversion produced. **A read dropped by the first six never pays for a conversion.**
 
@@ -122,8 +122,8 @@ did not choose spend it in opposite directions.
 once per region that serves it. Not twice: consecutive regions overlap by about 93 % because the
 caller widens each one by 5,000 bases against regions averaging 390, so a read is returned by
 **about a dozen** consecutive regions
-([`input/cursor.rs:12`](../../../../src/ng/read/input/cursor.rs#L12),
-[`:245`](../../../../src/ng/read/input/cursor.rs#L245)). Twelve conversions per surviving read.
+([`input/cursor.rs`](../../../../src/read/input/cursor.rs),
+[`cursor.rs`](../../../../src/read/input/cursor.rs)). Twelve conversions per surviving read.
 On CRAM it is worse again — keeping raw reads means keeping a whole decoded container, which
 [`alignment_cursor.md`](alignment_cursor.md) §5 already rules out.
 
@@ -147,7 +147,7 @@ anything failing.
 **A rationale considered and rejected, recorded so nobody re-proposes it.** *"Splitting the
 pieces lets us convert fewer reads."* It does not. The conversion already sits after the cheap
 filters and before the expensive ones
-([`filtering.rs:920`](../../../../src/ng/read/filtering.rs#L920), *"Decode only the pre-decode
+([`filtering.rs`](../../../../src/read/filtering.rs), *"Decode only the pre-decode
 survivors"*), and this design does not move it. Reads dropped by #1–#6 already pay no
 conversion; reads dropped by #7/#8/#9 pay one and always will, because those filters read what
 the conversion produces. Not one conversion is saved. The reasons to do this are §5's.
@@ -156,24 +156,24 @@ the conversion produces. Not one conversion is saved. The reasons to do this are
 
 **The raw aligned read is one reused buffer, so a filter cannot return one.** The reader fills a
 caller-owned buffer in place and the whole pass allocates exactly one
-([`filtering.rs:366-382`](../../../../src/ng/read/filtering.rs#L366)). A filter shaped
+([`filtering.rs`](../../../../src/read/filtering.rs)). A filter shaped
 `fn(RawAlignedRead) -> Option<RawAlignedRead>` would clone a noodles `RecordBuf` per read —
 measured elsewhere in this codebase at ~680 bytes across seven allocations
-([`aligned_reads_reader/container.rs:13-17`](../../../../src/ng/read/input/aligned_reads_reader/container.rs#L13)).
+([`aligned_reads_reader/container.rs`](../../../../src/read/input/aligned_reads_reader/container.rs)).
 A filter takes a **borrow** and returns a **verdict**, and the verdict carries the drop reason
 because the tally is keyed on it.
 
 **A drop must be charged to a read group, and the first filter runs before any aligned read
 exists.** Already solved, and easy to undo by accident: the raw aligned read carries its read
 group, stamped by the region narrowing
-([`region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs)), and the
+([`region_raw_aligned_reads.rs`](../../../../src/read/input/region_raw_aligned_reads.rs)), and the
 `read_group` accessor exists for the tally rather than for any filter
-([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
+([`filtering.rs`](../../../../src/read/filtering.rs)).
 
 **The second filter's order is #7 → #9 → #8, not the numbering order.** The cheap checks run
 first so a doomed read never pays the reference fetch, and a read failing both #9 and #8 is
 charged to the root cause rather than the symptom
-([`filtering.rs:240-268`](../../../../src/ng/read/filtering.rs#L240)). Pinned by
+([`filtering.rs`](../../../../src/read/filtering.rs)). Pinned by
 `a_walk_charges_every_drop_reason_by_hand_count` (`input/cursor.rs`), whose fixture's last
 record fails both.
 
@@ -190,7 +190,7 @@ an alignment file — but say so in the type's doc rather than leave it to be di
 
 **The three-way stop collapses to a boolean.** `FilterState::EndOfInput` exists **only** because
 the filter is a separate type that cannot tell why its source stopped. Its own doc says so
-([`filtering.rs:635-645`](../../../../src/ng/read/filtering.rs#L635)): a long-lived filter reaches
+([`filtering.rs`](../../../../src/read/filtering.rs)): a long-lived filter reaches
 `EndOfInput` at the end of *every* region, because the region narrowing reports a region boundary
 the only way it can, and repositioning has to undo that. The cursor is the thing that *causes*
 region ends, so once it owns the loop it never has to ask. `FilterState`,
@@ -386,16 +386,16 @@ foresee. **Built at B1 (2026-08-03); the corrections are marked ⚠ below.**
 **Three different checks are involved, and it helps to keep them apart.**
 
 1. **The reference itself is sound.** `read_reference_info`
-   ([`reference_info.rs:239`](../../../../src/ng/reference_info.rs#L239)) builds the contig
+   ([`reference_info.rs`](../../../../src/reference_info.rs)) builds the contig
    table, checks the FASTA against its `.fai`, and rejects duplicate names. Everything that opens
    a reference goes through it, and this design does not touch that.
 2. **The alignment file agrees with the reference.** `AlignmentFile::open` compares the file's
    `@SQ` list against that contig table with `ContigList::first_disagreement` — names, lengths
    and, where both sides carry one, digests
-   ([`open_bam.rs:206-211`](../../../../src/ng/read/input/open_bam.rs#L206)).
+   ([`open_bam.rs`](../../../../src/read/input/open_bam.rs)).
 3. **The accessor handed to `cursor()` is over that same reference.** Nothing checks this
    directly. What stands in for it is a loop that asks the accessor for a zero-length window on
-   every contig in the header ([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)) —
+   every contig in the header ([`filtering.rs`](../../../../src/read/filtering.rs)) —
    which proves each contig *resolves* and nothing about its length.
 
 **Check 3 is the weak one and the expensive one.** It opens every contig in turn and discards
@@ -404,7 +404,7 @@ contigs have the right names at the wrong lengths, or the right names in the wro
 
 > ⚠ **The cost this section first claimed was wrong, and the measurement is ~8× smaller.** It
 > read "roughly 52 µs per open with a shared index" off
-> [`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622) and multiplied by 2,580 for
+> [`ref_seq.rs`](../../../../src/ref_seq.rs) and multiplied by 2,580 for
 > **~130 ms per cursor**. That 52 µs is the cost of **constructing a `WindowedRefSeq`** — and
 > the same comment breaks it down: **34 µs of it is cloning the 2,580-entry contig table.** The
 > loop constructed no accessors; it called `fetch_into` on the one it was given, so it never
@@ -419,7 +419,7 @@ contigs have the right names at the wrong lengths, or the right names in the wro
 
 **The fix: ask the accessor which table it is over, and compare.** Every accessor already answers
 that — `ContigTable::contigs()`, implemented by all three of them
-([`ref_seq.rs:257`](../../../../src/ng/ref_seq.rs#L257)) — and `ContigList` is comparable, with
+([`ref_seq.rs`](../../../../src/ref_seq.rs)) — and `ContigList` is comparable, with
 `first_disagreement` for the message. So the cursor's constructor does what the open gate does,
 against the accessor instead of the reference:
 
@@ -549,16 +549,16 @@ No new logic. Every rule exists and is being re-homed or renamed.
 
 | what | existing code | action |
 |---|---|---|
-| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs:215`](../../../../src/ng/read/filtering.rs#L215) | **keep**, renamed for the vocabulary |
-| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:274`](../../../../src/ng/read/filtering.rs#L274) | **keep**, renamed; the #7/#9/#8 order unchanged |
-| the conversion | `RawAlignedRead::decode` [`aligned_read.rs:71`](../../../../src/ng/read/aligned_read.rs#L71) → `decode_record` [`aligned_read.rs:118`](../../../../src/ng/read/aligned_read.rs#L118) | **reuse as-is**, called by the cursor |
-| the loop | `ReadFilter::next` [`filtering.rs:776`](../../../../src/ng/read/filtering.rs#L776) | **move** into `AlignmentCursor::next_read` |
-| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:127`](../../../../src/ng/read/filtering.rs#L127), [`:564`](../../../../src/ng/read/filtering.rs#L564) | **reuse as-is**, owned by the cursor |
-| the errors | `ReadFilterError` [`filtering.rs:477`](../../../../src/ng/read/filtering.rs#L477) | **reuse as-is** — its three variants already name the three pieces |
-| the raw read and its buffer contract | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs:56`](../../../../src/ng/read/aligned_read.rs#L56) | **renamed and moved** to `aligned_read.rs` |
-| the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; its `RecordSource` impl becomes inherent methods at C3 |
-| the three-way stop | `FilterState` [`filtering.rs:549`](../../../../src/ng/read/filtering.rs#L549) | **delete** — a `failed` flag on the cursor replaces it (§5) |
-| the source trait and its doubles | `RecordSource` [`filtering.rs:338`](../../../../src/ng/read/filtering.rs#L338), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
+| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs`](../../../../src/read/filtering.rs) | **keep**, renamed for the vocabulary |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs`](../../../../src/read/filtering.rs) | **keep**, renamed; the #7/#9/#8 order unchanged |
+| the conversion | `RawAlignedRead::decode` [`aligned_read.rs`](../../../../src/read/aligned_read.rs) → `decode_record` [`aligned_read.rs`](../../../../src/read/aligned_read.rs) | **reuse as-is**, called by the cursor |
+| the loop | `ReadFilter::next` [`filtering.rs`](../../../../src/read/filtering.rs) | **move** into `AlignmentCursor::next_read` |
+| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs`](../../../../src/read/filtering.rs), [`filtering.rs`](../../../../src/read/filtering.rs) | **reuse as-is**, owned by the cursor |
+| the errors | `ReadFilterError` [`filtering.rs`](../../../../src/read/filtering.rs) | **reuse as-is** — its three variants already name the three pieces |
+| the raw read and its buffer contract | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs`](../../../../src/read/aligned_read.rs) | **renamed and moved** to `aligned_read.rs` |
+| the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; its `RecordSource` impl becomes inherent methods at C3 |
+| the three-way stop | `FilterState` [`filtering.rs`](../../../../src/read/filtering.rs) | **delete** — a `failed` flag on the cursor replaces it (§5) |
+| the source trait and its doubles | `RecordSource` [`filtering.rs`](../../../../src/read/filtering.rs), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
 
 *Line citations refreshed at B2 (2026-08-03). They had drifted by up to 120 lines across
 Milestones A and B, and **Milestone C executes against this table** — `RecordSource` alone had

@@ -84,7 +84,7 @@ That is what makes the two things the consumer wants possible from a file: **seg
 
 ### 2.1 The pass that already reads the whole FASTA
 
-**`src/ng/reference_info.rs` streams the reference from byte zero**, reconstructing each contig's
+**`src/reference_info.rs` streams the reference from byte zero**, reconstructing each contig's
 geometry and computing per-contig and whole-reference MD5s "in one buffer" (`reference_info.rs:17-21`).
 It is the only place in ng that reads the entire file, and it already has the pattern this work needs:
 `read_reference_verifying_or_creating_fai` writes a sibling `.fai` when one is missing "so the next run
@@ -97,7 +97,7 @@ must never cost a second read of the reference**, and every decision in this sec
 that.
 
 **`RefSeq` is not that place**, despite being the surface every consumer fetches bases through
-(`src/ng/ref_seq.rs`). Its three implementations serve `(contig, range)` requests — a whole resident
+(`src/ref_seq.rs`). Its three implementations serve `(contig, range)` requests — a whole resident
 contig, a sliding window, or a synthetic map. None of them reads the file end to end, and a windowed
 walk deliberately never holds more than its buffer.
 
@@ -652,10 +652,10 @@ a default would change the bytes without changing the content, and would move un
 
 | what | existing code | how it is reused |
 |---|---|---|
-| detection | `src/ng/tandem_repeat.rs` — `find_tandem_repeats` | used as-is, one call per contig (§2.3). It takes a slice and a period range and is already documented as the interface "for consumers that resolve overlaps themselves (the STR catalog)". `scan_windowed` and `WindowCursor` are the fallback of §2.3, not the plan |
-| the whole-FASTA pass | `src/ng/reference_info.rs` | gains the observer seam of §2.2; nothing else changes |
+| detection | `src/tandem_repeat.rs` — `find_tandem_repeats` | used as-is, one call per contig (§2.3). It takes a slice and a period range and is already documented as the interface "for consumers that resolve overlaps themselves (the STR catalog)". `scan_windowed` and `WindowCursor` are the fallback of §2.3, not the plan |
+| the whole-FASTA pass | `src/reference_info.rs` | gains the observer seam of §2.2; nothing else changes |
 | the sibling-file pattern | `reference_info.rs` — `sibling_fai_path`, `write_fai`, `read_reference_verifying_or_creating_fai` | the same shape: a derived file beside the reference, written atomically, created on request, validated before use |
-| motif and purity | `src/ng/region_typing/segment_criteria.rs` — the slicing and recomputation inside `classify` | the two computations are lifted so both `classify` and the builder use one implementation; **neither is re-derived here** |
+| motif and purity | `src/region_typing/segment_criteria.rs` — the slicing and recomputation inside `classify` | the two computations are lifted so both `classify` and the builder use one implementation; **neither is re-derived here** |
 | classification, at read time | the same module — `classify`, `prefilter`, `SsrSegmentCriteria` | used as-is by §5's reader, fed intervals from the file instead of from a live scan |
 | the parity oracle | `region_typing::partition_resident` | §10.1's differential |
 

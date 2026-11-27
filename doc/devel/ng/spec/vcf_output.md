@@ -1,7 +1,7 @@
 # ng — the VCF a run writes: one file for SNPs, indels and repeat tracts
 
 *Design spec, 2026-08-30. **No code yet — this settles the format.** One document, one module:
-`src/ng/vcf/` (the writer's stream wiring — which stage feeds it — stays in the run's own
+`src/vcf/` (the writer's stream wiring — which stage feeds it — stays in the run's own
 documents; see §1.2).*
 
 *Reads on: [`calling_quality.md`](calling_quality.md) §3.5 (the one quality field this file's QUAL
@@ -13,9 +13,9 @@ written beside this one). Read by: whoever builds emission — steps 11a and 11b
 emitted record *looks like*.*
 
 *Production's equivalents are two separate writers producing two separate files:
-[`src/vcf/header.rs`](../../../../src/vcf/header.rs) +
-[`record_encode.rs`](../../../../src/vcf/record_encode.rs) (the SNP/indel file) and
-[`src/ssr/cohort/vcf_out.rs`](../../../../src/ssr/cohort/vcf_out.rs) (the repeat-tract file).
+`d9e7b076:src/vcf/header.rs` +
+`d9e7b076:src/vcf/record_encode.rs` (the SNP/indel file) and
+`d9e7b076:src/ssr/cohort/vcf_out.rs` (the repeat-tract file).
 Everything said about them is a record of what they do, not a proposal to change them — `src/vcf/`,
 `src/ssr/` and `src/var_calling/` are frozen production.*
 
@@ -180,7 +180,7 @@ In emission order:
 - **Every FILTER, INFO and FORMAT id the file can carry is declared, including `PASS`.** The tract
   writer's choice to leave `PASS` undeclared is legal VCF but gratuitous; declared costs one line.
 - **Sample names are the run's sample order** and must match the merge's — production's header
-  builder rejects a mismatch and duplicates ([`header.rs:41-48`](../../../../src/vcf/header.rs)),
+  builder rejects a mismatch and duplicates (`d9e7b076:src/vcf/header.rs`),
   and ng keeps both refusals.
 - **No warning lines.** Production's tract file writes `##ssrCallWarning=` (the apparent-F_IS
   notice). In ng that finding is a property of the *fit*, and the parameters file is where a
@@ -216,7 +216,7 @@ full-tract deletion on the tract path), every allele is prefixed with the refere
 immediately to the **left** of the span and POS moves one left. When the span starts at position 1
 of the contig, the padding base is instead the reference base to the **right**, appended — the
 VCF 4.4 rule for events at position 1. **Production's tract writer instead invents the letter `N`
-there** ([`vcf_out.rs:405-435`](../../../../src/ssr/cohort/vcf_out.rs)) — a base the reference
+there** (`d9e7b076:src/ssr/cohort/vcf_out.rs`) — a base the reference
 does not contain, at an unshifted POS; not ported. Generic alleles arrive already left-aligned
 ([`cohort_merge.md`](cohort_merge.md) §4.2 — unification depends on it), so the anchor here is
 presentation, not normalisation.
@@ -227,7 +227,7 @@ record moved one left can land on the POS of the generic locus that owns the anc
 one generic and one tract record can meet this way (loci are disjoint within each path), and the
 **generic record is written first** — its span genuinely starts there; the tract's starts one
 base later. Production's generic writer enforces *strictly* increasing POS
-([`writer.rs:216-227`](../../../../src/vcf/writer.rs)) and could, because it never shared a file
+(`d9e7b076:src/vcf/writer.rs`) and could, because it never shared a file
 with the tract records; ng's writer relaxes exactly this far and no further — a third record at
 the same POS is a bug.
 
@@ -321,7 +321,7 @@ written on a bundle record and keeps its integer type. The counts are each allel
 
 - **`GT`** — allele indices in canonical non-decreasing order, `/`-joined, ploidy from the run's
   parameters. Decoding through the shared genotype-order table
-  ([`genotype_table.rs`](../../../../src/ng/calling/genotype_table.rs)) — the same enumeration
+  ([`genotype_table.rs`](../../../../src/calling/genotype_table.rs)) — the same enumeration
   `GP` would use if it is ever added, and the same at any ploidy.
 - **`GQ`** — the number [`calling_quality.md`](calling_quality.md) §4 defines, integer-rounded,
   cap 99.
@@ -524,10 +524,10 @@ with depth.
   ([`run_streaming.md`](run_streaming.md) §10) and writes as it reads, enforcing §5's ordering
   rule. Bytes go to `{output}.tmp`, then flush, bgzf EOF block where applicable, fsync file and
   parent directory, atomic rename — production's sink, ported
-  ([`sink.rs`](../../../../src/vcf/sink.rs)). bgzf when the name ends `.vcf.gz`/`.vcf.bgz`,
+  (`d9e7b076:src/vcf/sink.rs`). bgzf when the name ends `.vcf.gz`/`.vcf.bgz`,
   plain text otherwise.
 - **Record encoding may be parallelised** (production formats records off-thread and writes in
-  order, [`writer.rs:401-425`](../../../../src/vcf/writer.rs)); an implementation detail with one
+  order, `d9e7b076:src/vcf/writer.rs`); an implementation detail with one
   format consequence — formatting must be a pure function of the record, which the determinism
   rule already requires.
 
@@ -537,13 +537,13 @@ with depth.
 
 | what | production code | how ng reuses it |
 |---|---|---|
-| header building over noodles, metadata validation (dup samples, dup contigs, contig overflow) | [`header.rs`](../../../../src/vcf/header.rs) | ported; declarations replaced by §4/§6–§8's set |
-| GT decode through the genotype-order table; AC/AN tally with the range assertion | [`record_encode.rs:485-514,614-625`](../../../../src/vcf/record_encode.rs) | ported unchanged over ng's table |
-| INFO omission rules for the MQ family | [`record_encode.rs:429-474`](../../../../src/vcf/record_encode.rs) | ported; `MQDiffT` left behind (§6) |
-| tract record shape: full-sequence alleles, anchor on empty allele, `REPCN` | [`vcf_out.rs:372-505`](../../../../src/ssr/cohort/vcf_out.rs) | shape ported into the one record shape; the `N` anchor fallback replaced by the position-1 right-anchor rule (§5); `REPCN` re-ordered to match GT (§7) |
-| dense no-call row (`./.` placeholder per absent sample) | [`vcf_out.rs:447-450`](../../../../src/ssr/cohort/vcf_out.rs) | ported as §7's no-call spelling, minus the tract file's "DP also `.`" — ng writes evidence it has |
-| ordered writer, atomic tmp-rename sink, suffix-switched bgzf | [`writer.rs`](../../../../src/vcf/writer.rs), [`sink.rs`](../../../../src/vcf/sink.rs) | ported; strict-increasing POS relaxed to §5's one legal tie |
-| one function for the gated and written QUAL | [`record_encode.rs:260-278`](../../../../src/vcf/record_encode.rs) | **the property, not the mechanism**: ng writes the stored corrected quality and recomputes nothing ([`calling_quality.md`](calling_quality.md) §3.5) |
+| header building over noodles, metadata validation (dup samples, dup contigs, contig overflow) | `d9e7b076:src/vcf/header.rs` | ported; declarations replaced by §4/§6–§8's set |
+| GT decode through the genotype-order table; AC/AN tally with the range assertion | `record_encode.rs-625` (`d9e7b076:src/vcf/record_encode.rs`) | ported unchanged over ng's table |
+| INFO omission rules for the MQ family | `d9e7b076:src/vcf/record_encode.rs` | ported; `MQDiffT` left behind (§6) |
+| tract record shape: full-sequence alleles, anchor on empty allele, `REPCN` | `d9e7b076:src/ssr/cohort/vcf_out.rs` | shape ported into the one record shape; the `N` anchor fallback replaced by the position-1 right-anchor rule (§5); `REPCN` re-ordered to match GT (§7) |
+| dense no-call row (`./.` placeholder per absent sample) | `d9e7b076:src/ssr/cohort/vcf_out.rs` | ported as §7's no-call spelling, minus the tract file's "DP also `.`" — ng writes evidence it has |
+| ordered writer, atomic tmp-rename sink, suffix-switched bgzf | `d9e7b076:src/vcf/writer.rs`, `d9e7b076:src/vcf/sink.rs` | ported; strict-increasing POS relaxed to §5's one legal tie |
+| one function for the gated and written QUAL | `d9e7b076:src/vcf/record_encode.rs` | **the property, not the mechanism**: ng writes the stored corrected quality and recomputes nothing ([`calling_quality.md`](calling_quality.md) §3.5) |
 
 **Not reused, by name:** the tract file's EM-deconvolved `AD` (§7); its `N` anchor (§5); its
 `##ssrCallWarning` line (§4); the generic file's silent-drop-only FILTER philosophy (§8 — the
@@ -616,7 +616,7 @@ its size is unmeasured**, and measuring it is what should settle this question r
 default chosen now.
 
 **The one caller in this survey that does floor is ours** — the production repeat-tract path
-no-calls below `GQ` 15 ([`vcf_out.rs:294`](../../../../src/ssr/cohort/vcf_out.rs)) — and it is worth
+no-calls below `GQ` 15 (`d9e7b076:src/ssr/cohort/vcf_out.rs`) — and it is worth
 being precise about what that is: it sits inside a false-positive-suppression pass that also scales
 `GQ` down for allele-imbalanced heterozygotes, so the floor is one term of an artifact filter rather
 than a principled statement about when a genotype is unknown. **Settled by:** running the tomato

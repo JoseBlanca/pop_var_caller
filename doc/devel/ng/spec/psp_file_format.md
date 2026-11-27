@@ -94,7 +94,7 @@ moving between them will get it wrong.
 | **psp block** | a run of consecutive records over one span of reference, compressed as one unit | block |
 | **block index** | one entry per psp block, so a reader can seek | block index |
 | **trailer** | a payload the writer supplies when it closes the file; may be empty | **metadata section** |
-| **footer** | fixed-size, at the very end; offsets and magic. Its presence means the file is complete | **trailer** — 32 bytes there ([`src/psp/trailer.rs:28`](../../../../src/psp/trailer.rs)); this one is wider, §3.3 |
+| **footer** | fixed-size, at the very end; offsets and magic. Its presence means the file is complete | **trailer** — 32 bytes there (`d9e7b076:src/psp/trailer.rs`); this one is wider, §3.3 |
 
 **⚠ zstd has its own "block", and it is not ours.** Three things end up called a block or a frame,
 so this document uses all three names in full wherever either could be meant:
@@ -129,7 +129,7 @@ Two more terms this document needs:
   be read for each other.*
 - A **chain id** identifies the DNA fragment a piece of evidence came from: **one `u64` per read
   *pair*, not per read**, mates collapsed onto a single id, allocated in order and never reused
-  ([`chain_id_allocator.rs`](../../../../src/ng/locus_generation/pileup/chain_id_allocator.rs)).
+  ([`chain_id_allocator.rs`](../../../../src/locus_generation/pileup/chain_id_allocator.rs)).
 - **the record head** — the fixed fields at the front of every record that let a reader decide
   whether it wants the record without building it: the position offset, the reference span, the
   non-reference read count, the reads compared with the reference, and the body's length (§4.3).
@@ -163,7 +163,7 @@ there and carries on.
 
 ### 3.1 The header — plain text, and it stays that way
 
-Production's shape is kept as it is ([`src/psp/header.rs:1-38`](../../../../src/psp/header.rs)):
+Production's shape is kept as it is (`d9e7b076:src/psp/header.rs`):
 a 4-byte magic, an 8-byte little-endian length for the TOML body, the body, and a sentinel line.
 The length is authoritative and the sentinel is a cross-check.
 
@@ -183,7 +183,7 @@ The header carries what is known *before* any record is written:
 **One further field is wanted by the cohort merge and is not this document's to add.**
 [`cohort_merge.md`](cohort_merge.md) asks the header to record the **observation reach ceiling** —
 the widest reference span any observation in the file can have, the generator's `max_record_span`
-([`src/ng/locus_generation/pileup/generator.rs:93`](../../../../src/ng/locus_generation/pileup/generator.rs))
+([`src/locus_generation/pileup/generator.rs`](../../../../src/locus_generation/pileup/generator.rs))
 — and routes it to [`run_streaming.md`](run_streaming.md) §6.1, which owns the header's contents. It
 is flagged there and not yet written.
 
@@ -221,7 +221,7 @@ writer bookkeeping for a decision that never fires, and it is gone (the owner, 2
 described it as present until 2026-08-26; the removal had been agreed and was not finished here.*
 
 **A flat vector, decoded whole at open.** This is production's shape
-([`BlockIndexEntry`, `src/psp/index.rs:42`](../../../../src/psp/index.rs)) and it was going to have
+(`BlockIndexEntry`, `src/psp/index.rs` (`d9e7b076:src/psp/index.rs`)) and it was going to have
 to change: at production's 5 kb blocks a whole-genome sample has about 156,000 entries and a 3.8 MB
 index per open file, which [`run_streaming.md`](run_streaming.md) §7.2 rejects. **A large block
 removes the problem rather than solving it.** Measured on a tomato accession: 154 blocks at 1 MB
@@ -232,7 +232,7 @@ document asks for must not be built.**
 The **footer** is fixed-size, at the very end, and carries the offsets and lengths of the index and
 the trailer, the block count, a checksum over the index, and a magic placed last so a four-byte read
 at end-of-file rejects a truncated or foreign file before anything else is touched. Production's
-32-byte layout ([`src/psp/trailer.rs:26-45`](../../../../src/psp/trailer.rs)) is the model; it needs
+32-byte layout (`d9e7b076:src/psp/trailer.rs`) is the model; it needs
 two more offsets for the trailer, so it will be wider.
 
 **A file with no valid footer is refused** — goal 3. It is the only signal that distinguishes a
@@ -277,7 +277,7 @@ this document — but a reader must still be able to read any file, so every suc
 **The genomic block size is how much reference a block covers**, and it is the rule that cuts one —
 not a count of bytes. **Default 100 kb** (the owner, 2026-08-25). Production has the same idea under
 another name (`block_window_bp`, default 5,000,
-[`src/psp/writer.rs:92,119`](../../../../src/psp/writer.rs)).
+`d9e7b076:src/psp/writer.rs`).
 
 **It is a grid on the coordinate, not a running total.** A block ends when a position crosses into
 the next multiple of the genomic block size. That distinction is the whole point: a grid makes every
@@ -763,8 +763,8 @@ The header carries, for each field of a record: its name, its cardinality, its e
 encoding's parameters. Encodings come from a **fixed, named menu** — plain variable-length integer,
 zig-zag variable-length integer, fixed-point-with-a-declared-step, difference-from-previous-with-
 reset, raw bytes. Production has the shape of this already (its `[[column]]` array,
-[`src/psp/header.rs:24`](../../../../src/psp/header.rs), typed by
-[`src/psp/registry.rs`](../../../../src/psp/registry.rs), which already distinguishes a column's
+`d9e7b076:src/psp/header.rs`, typed by
+`d9e7b076:src/psp/registry.rs`, which already distinguishes a column's
 cardinality from its element type).
 
 **A fixed menu rather than an open-ended scheme, deliberately.** An arbitrary plug-in encoding would
@@ -1007,7 +1007,7 @@ should happen to a killed run, and is goal 3.
 buffered writer's errors, *then* sync. A `BufWriter` dropped without that can swallow a failed flush,
 and a truncated footer on a billions-of-records file looks exactly like an interrupted run.
 Production's writer carries this warning in its own doc comment
-([`src/psp/writer.rs:694-702`](../../../../src/psp/writer.rs)) because it has bitten before.
+(`d9e7b076:src/psp/writer.rs`) because it has bitten before.
 
 ### 6.4 Appending to a finished file
 
@@ -1181,12 +1181,12 @@ in the header.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| header framing | [`src/psp/header.rs`](../../../../src/psp/header.rs) | the pattern as-is — magic, length prefix, TOML body, sentinel — so `head` still works on an ng psp |
-| the field manifest | the `[[column]]` array, [`src/psp/header.rs:24`](../../../../src/psp/header.rs) + [`src/psp/registry.rs`](../../../../src/psp/registry.rs) | the shape; §4.5 widens it to carry encoding parameters |
-| footer | [`src/psp/trailer.rs`](../../../../src/psp/trailer.rs) | the layout and the tail-magic-last trick; widened for the trailer's offsets |
-| block index | [`src/psp/index.rs`](../../../../src/psp/index.rs) | the flat vector, unchanged — §3.3 says why it no longer needs replacing |
-| variable-length integers | [`src/psp/varint.rs`](../../../../src/psp/varint.rs) | as-is: LEB128 and zig-zag LEB128, specified and tested |
-| the compression seam | `new_column_compressor`, [`src/psp/block.rs:718`](../../../../src/psp/block.rs) | the shape — one long-lived compressor per writer, frame checksums on. The window cap is new |
+| header framing | `d9e7b076:src/psp/header.rs` | the pattern as-is — magic, length prefix, TOML body, sentinel — so `head` still works on an ng psp |
+| the field manifest | the `[[column]]` array, `d9e7b076:src/psp/header.rs` + `d9e7b076:src/psp/registry.rs` | the shape; §4.5 widens it to carry encoding parameters |
+| footer | `d9e7b076:src/psp/trailer.rs` | the layout and the tail-magic-last trick; widened for the trailer's offsets |
+| block index | `d9e7b076:src/psp/index.rs` | the flat vector, unchanged — §3.3 says why it no longer needs replacing |
+| variable-length integers | `d9e7b076:src/psp/varint.rs` | as-is: LEB128 and zig-zag LEB128, specified and tested |
+| the compression seam | `new_column_compressor`, `d9e7b076:src/psp/block.rs` | the shape — one long-lived compressor per writer, frame checksums on. The window cap is new |
 | the streaming reader and writer | `examples/psp_row_stream_roundtrip.rs` | the working prototype every number here was measured on; the parity oracle below is its `verify-streaming` |
 
 **Parity oracle.** The prototype's `verify-streaming` walks the new store and the `.psp` it was

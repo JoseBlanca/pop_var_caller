@@ -19,7 +19,7 @@ Every read was produced by one library preparation on one sequencing run. The SA
 that as a **read group** (`@RG`): an identifier, the sample the DNA came from (`SM`), the library
 it was prepared into (`LB`), and the platform. ng reads those records today, extracts one string
 from them — the sample name — and throws the rest away
-([`open_bam.rs:856`](../../../../src/ng/read/input/open_bam.rs#L856)). From that point on nothing
+([`open_bam.rs`](../../../../src/read/input/open_bam.rs)). From that point on nothing
 downstream can tell which library a read came from.
 
 **This spec makes the read group a first-class object**: parsed once per file, given a run-wide
@@ -233,13 +233,13 @@ groups the result by sample name.
 
 **This is not extra work bolted on for an edge case — it is the step that decides what the samples
 are.** You cannot build a per-sample file list without reading the headers, and ng's tooling
-already does this by hand: [`ng_ssr_cohort_stutter.rs`](../../../../examples/ng_ssr_cohort_stutter.rs)
+already does this by hand: `d9e7b076:examples/ng_ssr_cohort_stutter.rs`
 opens each file once just to probe its sample name, then groups the paths itself. The pre-pass
 replaces that with one shared step.
 
 **Cost.** Each file's header is read twice — once here, once at its real open. A header read is a
 file open and one block; the expensive part of opening, parsing the index
-([`open_bam.rs:82`](../../../../src/ng/read/input/open_bam.rs#L82)), happens only at the real open.
+([`open_bam.rs`](../../../../src/read/input/open_bam.rs)), happens only at the real open.
 Not measured; expected to be lost in the noise. If it ever isn't, the pre-pass could hand each
 parsed header forward, at the cost of holding every header in memory at once.
 
@@ -273,7 +273,7 @@ as a cohort of alignment files is, so psp mode cannot call what direct mode turn
 ([`run_streaming.md`](run_streaming.md) §6.2).
 
 Two of the three already exist in some form — `MissingTag` and `NoReadGroups`
-([`open_bam.rs:841`](../../../../src/ng/read/input/open_bam.rs#L841)) — but they collapse into
+([`open_bam.rs`](../../../../src/read/input/open_bam.rs)) — but they collapse into
 one error variant, `MissingSampleName { read_group: Option<String> }`, whose `None` arm means "no
 read groups at all" and whose `Some` arm means "this read group has no `SM`". Those are two
 different problems with two different fixes. **Split them**, and put the fix in the message: a user
@@ -346,7 +346,7 @@ tag on every record it would fail, and the only remedy would be rewriting every 
 to add a tag carrying no information. Every file in the surveyed archive declares exactly one `@RG`,
 so this is also the universal path today, and it costs nothing per read: the same stamp-before-read
 mechanism that carries `source_file_index` now
-([`filtering.rs:438`](../../../../src/ng/read/filtering.rs#L438)).
+([`filtering.rs`](../../../../src/read/filtering.rs)).
 
 **The accepted risk, stated once.** In a single-`@RG` file, a record whose tag names some *other*
 group is assigned to the declared one without complaint. Detecting it would mean reading the tag on
@@ -362,7 +362,7 @@ have to be recognised in order to be left out. The one-declared-group shortcut a
 tag on the reused buffer and is the first point where the filled record is available. It writes a
 resolved identifier into the buffer; `decode` copies it into the read. A resolution failure is an
 `Err` from `read_next`, which the record-source contract already treats as fatal to the run
-([`filtering.rs:343`](../../../../src/ng/read/filtering.rs#L343)).
+([`filtering.rs`](../../../../src/read/filtering.rs)).
 
 **Shape it as an enum, not an `Option<ReadGroupId>`.** The obvious signature hands the resolver a
 default identifier that is `Some` for a single-group file and `None` otherwise — but then `None`
@@ -392,12 +392,12 @@ ng-owned read type (§8) makes an ng error type possible, carrying path, read na
 
 | what | today | after |
 |---|---|---|
-| several `@RG` in one file naming several samples | error at open, `SampleNames::Several` ([`open_bam.rs:839`](../../../../src/ng/read/input/open_bam.rs#L839)) | not an error; several read groups per file is normal |
-| the sample-name agreement check | twice — within a file (`sample_names`) and across files ([`agreed_sample_name`, `mod.rs:550`](../../../../src/ng/read/input/mod.rs#L550)) | once, at `SampleReads::open`, over the read groups that open was handed |
-| `AlignmentFile::sample_name() -> &str` ([`:417`](../../../../src/ng/read/input/open_bam.rs#L417)) | one string per file | gone; the sample is a property of the read-group table |
-| `SampleReads::open(&[PathBuf], …)` ([`mod.rs:363`](../../../../src/ng/read/input/mod.rs#L363)) | takes paths, derives the sample by agreement | takes the sample's read groups, which know their paths |
-| per-file `ReadFilterCounts` ([`mod.rs:413`](../../../../src/ng/read/input/mod.rs#L413)) | keyed on the file, "never summed" | keyed on the **read group** |
-| the read type | production's `MappedRead` ([`alignment_input.rs:78`](../../../../src/bam/alignment_input.rs#L78)), reused | ng-owned, with `read_group: ReadGroupId` |
+| several `@RG` in one file naming several samples | error at open, `SampleNames::Several` ([`open_bam.rs`](../../../../src/read/input/open_bam.rs)) | not an error; several read groups per file is normal |
+| the sample-name agreement check | twice — within a file (`sample_names`) and across files ([`agreed_sample_name`, `mod.rs`](../../../../src/read/input/mod.rs)) | once, at `SampleReads::open`, over the read groups that open was handed |
+| `AlignmentFile::sample_name() -> &str` ([`open_bam.rs`](../../../../src/read/input/open_bam.rs)) | one string per file | gone; the sample is a property of the read-group table |
+| `SampleReads::open(&[PathBuf], …)` ([`mod.rs`](../../../../src/read/input/mod.rs)) | takes paths, derives the sample by agreement | takes the sample's read groups, which know their paths |
+| per-file `ReadFilterCounts` ([`mod.rs`](../../../../src/read/input/mod.rs)) | keyed on the file, "never summed" | keyed on the **read group** |
+| the read type | production's `MappedRead` ([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)), reused | ng-owned, with `read_group: ReadGroupId` |
 
 Three of these deserve their reason.
 
@@ -413,7 +413,7 @@ Lifting *that* would mean demultiplexing a single pass over a file into several 
 deferred in §12, and the read-group identifier is what would make it a local change.
 
 **Counts move to the read group** because the reason they exist stops being true otherwise. The
-rationale written at [`mod.rs:406`](../../../../src/ng/read/input/mod.rs#L406) is that a bad run
+rationale written at [`mod.rs`](../../../../src/read/input/mod.rs) is that a bad run
 shows up as one file with an anomalous drop rate, so summing erases the signal. Once a file may
 hold several read groups, a per-file tally conflates them and erases the same signal. Keying on the
 read group restores it.
@@ -428,10 +428,10 @@ unblocks the per-read allocation work already parked as measure-first in
 [`../impl_plan/read_filtering.md`](../impl_plan/read_filtering.md) — not to be done here.
 
 **One thing this leaves open.** On the generic path a read becomes a `PreparedRead`
-([`src/pileup/walker/mod.rs`](../../../../src/pileup/walker/mod.rs)), production's type, which
+(`d9e7b076:src/pileup/walker/mod.rs`), production's type, which
 carries no source tag at all — so the identifier dies there. The STR path is unaffected: its
 generator works on the read type directly (`kept: Vec<MappedRead>`,
-[`ssr.rs:312`](../../../../src/ng/locus_generation/ssr.rs#L312)). Owning the read type makes owning
+[`ssr.rs`](../../../../src/locus_generation/ssr.rs)). Owning the read type makes owning
 a prepared-read type later a second copy rather than a surprise. Deferred (§12).
 
 ---
@@ -465,7 +465,7 @@ of it is invisible on single-sample inputs, and every file in the surveyed archi
 single-sample.
 
 **What needs no change.** The duplicate-read check
-([`DuplicateReadAcrossFiles`, `mod.rs:622`](../../../../src/ng/read/input/mod.rs#L622)) is scoped to
+([`DuplicateReadAcrossFiles`, `mod.rs`](../../../../src/read/input/mod.rs)) is scoped to
 one sample's files, so opening one path under two samples never trips it while passing the same
 path twice within one sample still does. The reader pool is per `AlignmentFile`, so two opens get
 two independent pools with nothing to coordinate.
@@ -473,10 +473,10 @@ two independent pools with nothing to coordinate.
 **Downstream, for context, not decided here.** Cohort consumers need every sample's observations at
 one locus. That vec is assembled *above* the generator by a driver that walks the segment stream
 once and runs the per-sample generators in step — the shape
-[`ng_ssr_cohort_stutter.rs`](../../../../examples/ng_ssr_cohort_stutter.rs) already prototypes. The
+`d9e7b076:examples/ng_ssr_cohort_stutter.rs` already prototypes. The
 per-sample generator contract stays as it is. One note for whoever writes that driver:
 `SampleLocusObservations` carries `region`, `reference_bases` and `kind`
-([`locus_generation/mod.rs:34`](../../../../src/ng/locus_generation/mod.rs#L34)), all properties of
+([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)), all properties of
 the locus rather than of a sample, so a bare vec of them duplicates both flanks of an STR per
 sample.
 

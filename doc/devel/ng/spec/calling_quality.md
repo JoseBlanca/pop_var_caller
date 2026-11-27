@@ -372,7 +372,7 @@ buffer can hold. Read it back from the linear array and a strongly-supported var
 **And ng's `Phred` refuses infinity where production clamps it.** `Phred::from_log_prob` returns
 `DomainError::PhredInfinite` for a log-probability of `−∞`, deliberately, and its own doc comment
 says the consumer's answer is *"cap at its own ceiling and carry on"*
-([`types.rs:454-476`](../../../../src/types.rs)). **This module is that consumer and names the
+([`types.rs`](../../../../src/types.rs)). **This module is that consumer and names the
 ceiling**: `MAX_SITE_QUALITY = 9999`, production's `QUAL_MAX`
 (`d9e7b076:src/vcf/record_encode.rs:44`), inherited and soft. A `NaN`
 is not capped — it is a bug in the arithmetic above and must surface as one, which `Phred::try_new`
@@ -389,7 +389,7 @@ comment (`posterior_engine.rs:112`, `:119`, `d9e7b076:src/var_calling/posterior_
 Nobody revisited them.
 
 **ng already holds the same two numbers, fitted.** `SpectrumSeed { alpha_ref, alpha_alt_total }`
-([`genotype_prior/mod.rs:494`](../../../../src/calling/genotype_prior/mod.rs)) is the run's
+([`genotype_prior/mod.rs`](../../../../src/calling/genotype_prior/mod.rs)) is the run's
 frequency spectrum, reached through `FrozenParameters::prior_seed`, and it lands at
 `(1, θ)` on a neutral panel — `α_ref = 1` being the neutral `1/p` density written as a Dirichlet
 ([`calling_priors.md`](calling_priors.md) §2.3, §4). **Decision: the site quality's prior is the
@@ -898,7 +898,7 @@ production's do, so the quality does not depend on which backend a build selecte
 ## 10. The types
 
 ```rust
-// src/ng/calling/quality/mod.rs
+// src/calling/quality/mod.rs
 
 /// The pooled read counts the two artifact tests read, and the one number the
 /// called genotypes contribute. Nine scalars, whatever the cohort size — every

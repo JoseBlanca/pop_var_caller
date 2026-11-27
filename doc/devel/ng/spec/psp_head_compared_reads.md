@@ -25,7 +25,7 @@ The head is the fixed prefix every stored observation opens with — position of
 span, non-reference read count, body byte count, then the chain-id changes — so a reader can
 judge a record and skip its body without decoding it
 ([`psp_file_format.md`](psp_file_format.md) §4.3;
-[`RECORD_HEAD_FIELDS`, `src/ng/psp/record.rs:138-144`](../../../../src/ng/psp/record.rs)). This
+[`RECORD_HEAD_FIELDS`, `src/psp/record.rs`](../../../../src/psp/record.rs)). This
 spec adds a sixth entry to that list and changes nothing else about the format.
 
 ## 2. The problem — the rule needs two numbers and the head carries one
@@ -33,7 +33,7 @@ spec adds a sixth entry to that list and changes nothing else about the format.
 The keep rule decides which loci the cohort builds: a locus is built when **some single sample**
 shows at least `max(floor, share × its compared reads)` non-reference reads — floor 2 reads,
 share 2 in 100 (`MinAltReads::required_of` and `reached_by`,
-[`src/ng/run/cohort_merge/mod.rs:500,526`](../../../../src/ng/run/cohort_merge/mod.rs);
+[`src/run/cohort_merge/mod.rs,526`](../../../../src/run/cohort_merge/mod.rs);
 [`cohort_merge.md`](cohort_merge.md) §4.3). Two numbers per sample per locus: the non-reference
 count — **in the head** — and the compared-reads count the share is taken of — **today only in
 the body**.
@@ -59,7 +59,7 @@ numbers adjacent and nothing else constrains it — a soft choice.
 
 **Semantics: exactly the second element of
 `SampleLocusObservations::non_reference_and_compared_reads()`**
-([`src/ng/locus_generation/mod.rs:264-277`](../../../../src/ng/locus_generation/mod.rs)): the
+([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)): the
 sum of `num_obs` over the record's `Complete`-witness observations, saturating `u32`. That is
 the same subset the numerator is counted over — partial reads and
 `reads_without_observation` are in neither half, so **numerator ≤ denominator on every
@@ -69,7 +69,7 @@ that could never clear it, which is why depth was ruled out when the requirement
 
 **Derived by the encoder, never supplied** — the same contract as `non-reference-reads`, and
 the deriving call already computes both and discards this one at the line that writes the head
-([`src/ng/psp/record.rs:1719`](../../../../src/ng/psp/record.rs):
+([`src/psp/record.rs`](../../../../src/psp/record.rs):
 `let (non_reference_reads, _) = record.non_reference_and_compared_reads();`).
 
 **Two checks come with it:**
@@ -79,12 +79,12 @@ the deriving call already computes both and discards this one at the line that w
   free.
 - **head-against-body:** `decode_the_body_of` already re-derives the numerator from the built
   body and refuses a head that disagrees
-  ([`src/ng/psp/record.rs:1992-2002`](../../../../src/ng/psp/record.rs)). The derivation
+  ([`src/psp/record.rs`](../../../../src/psp/record.rs)). The derivation
   returns both numbers in one pass, so the denominator joins the same comparison at no extra
   walk.
 
 `RecordHead` gains the field
-([`src/ng/psp/record.rs:81-106`](../../../../src/ng/psp/record.rs)), so every consumer of a
+([`src/psp/record.rs`](../../../../src/psp/record.rs)), so every consumer of a
 head — `records_where`, the walk, the future cheap-numbers read — gets it without decoding
 anything.
 
@@ -99,10 +99,10 @@ summaries-first read needs it head-side:
   generic one fails every tract wider than 50 bases as an over-wide locus.
 - **the never-mix assertion**: a cohort locus must not hold a generic and an STR member at
   once, checked per member at close
-  ([`src/ng/run/cohort_merge/close.rs:647-653`](../../../../src/ng/run/cohort_merge/close.rs)).
+  ([`src/run/cohort_merge/close.rs`](../../../../src/run/cohort_merge/close.rs)).
 
 Today the tag is the body's first-listed kind field
-([`BODY_FIELDS`' `locus-kind`, `src/ng/psp/record.rs:220`](../../../../src/ng/psp/record.rs),
+([`BODY_FIELDS`' `locus-kind`, `src/psp/record.rs`](../../../../src/psp/record.rs),
 written by `put_kind` at `:1093`, read at `:1351`). **The tag moves to the head — one varint,
 the same three values — and the body keeps what goes with it**: the `SsrDetail` (motif and
 flanks) stays body-side, present exactly when the head's tag says repeat tract, because
@@ -117,7 +117,7 @@ the tag by a check or by construction is the coder's.
 `RecordLayout::from_manifest` refuses a file declaring anything else — the module's own doc
 says what that means for timing: *"It costs nothing today because no psp exists; from
 Milestone F it costs a version"*
-([`src/ng/psp/record.rs:133-137`](../../../../src/ng/psp/record.rs)). The same shape as the
+([`src/psp/record.rs`](../../../../src/psp/record.rs)). The same shape as the
 owner's 2026-09-03 ruling on the header fields ([`run_streaming.md`](run_streaming.md) §6):
 no version bump, because the only refusable files are pre-ruling scratch files, and a refusal
 naming the missing field is the accepted behaviour. **So this lands before
@@ -164,24 +164,24 @@ zero.
 
 - **Round trip:** encode → decode equality on the existing suite, the new field and the moved
   tag included — every `LocusKind`, the tract detail surviving in the body
-  (`every_locus_kind_round_trips`, [`record.rs:2366`](../../../../src/ng/psp/record.rs)).
+  (`every_locus_kind_round_trips`, [`record.rs`](../../../../src/psp/record.rs)).
 - **Both checks provoked:** a head over-reading its denominator refused head-only; a head
   disagreeing with its body refused at build, in both directions.
 - **The layout refusal:** a manifest declaring the old five-field head is refused with a
   message naming `reads-compared-with-reference` as missing.
 - **The pinned bytes move deliberately:** `the_fixture_encodes_to_these_exact_bytes`
-  ([`src/ng/psp/record.rs:2282`](../../../../src/ng/psp/record.rs)) is updated as part of the
+  ([`src/psp/record.rs`](../../../../src/psp/record.rs)) is updated as part of the
   change, not discovered broken.
 
 ## 7. Reuse map
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the derivation | `non_reference_and_compared_reads` ([`locus_generation/mod.rs:264`](../../../../src/ng/locus_generation/mod.rs)) | called as-is; the discarded second element is written instead of dropped |
-| head plumbing | `RECORD_HEAD_FIELDS`, `RecordHead`, `read_record_head`, `RecordLayout::from_manifest` ([`record.rs`](../../../../src/ng/psp/record.rs)) | one entry, one field, one read, one declaration — no new mechanism |
-| the consistency check | `decode_the_body_of` ([`record.rs:1992`](../../../../src/ng/psp/record.rs)) | the denominator joins the existing head-vs-body comparison |
-| the kind codec | `put_kind` / `read_locus_kind` ([`record.rs:1093,1351`](../../../../src/ng/psp/record.rs)) | moved to the head's encode/decode; the tract detail's body fields unchanged |
-| the cost probes | `examples/ng_psp_head_encoding.rs` (deleted at promotion step C14), [`examples/ng_psp_skip_value.rs`](../../../../examples/ng_psp_skip_value.rs) | extended with the sixth field and rerun on the same corpora |
+| the derivation | `non_reference_and_compared_reads` ([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) | called as-is; the discarded second element is written instead of dropped |
+| head plumbing | `RECORD_HEAD_FIELDS`, `RecordHead`, `read_record_head`, `RecordLayout::from_manifest` ([`record.rs`](../../../../src/psp/record.rs)) | one entry, one field, one read, one declaration — no new mechanism |
+| the consistency check | `decode_the_body_of` ([`record.rs`](../../../../src/psp/record.rs)) | the denominator joins the existing head-vs-body comparison |
+| the kind codec | `put_kind` / `read_locus_kind` ([`record.rs,1351`](../../../../src/psp/record.rs)) | moved to the head's encode/decode; the tract detail's body fields unchanged |
+| the cost probes | `examples/ng_psp_head_encoding.rs` (deleted at promotion step C14), `d9e7b076:examples/ng_psp_skip_value.rs` | extended with the sixth field and rerun on the same corpora |
 
 ## 8. Open questions
 

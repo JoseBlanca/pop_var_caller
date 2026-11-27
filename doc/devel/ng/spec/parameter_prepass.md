@@ -942,9 +942,9 @@ is unvalidated on the data this spec's numbers come from. §10.3 says how to tes
 manufacturing the contrast a simulator can supply and our cohorts cannot.
 
 ng already carries the evidence at this grain: `ObservedSequence` includes its read group in its
-identity ([`src/locus_generation/mod.rs:178`](../../../../src/locus_generation/mod.rs)), so an
+identity ([`src/locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)), so an
 allele seen from two groups is two rows with their own quality moments, and the read-group table
-([`src/read/input/read_groups.rs:43`](../../../../src/read/input/read_groups.rs), the
+([`src/read/input/read_groups.rs`](../../../../src/read/input/read_groups.rs), the
 `ReadGroup` record) resolves that identity to sample, library and experiment — recording whether each grouping name was
 **declared** by the file or **synthesized** because the file gave none.
 
@@ -1141,8 +1141,8 @@ thread count.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| read-group identity and grouping | `src/ng/read/input/read_groups.rs` | used as-is; the fold to library/experiment is already there |
-| read group on each observation | `src/ng/locus_generation/mod.rs:166` | the read-group half of the two *chemistry* accumulators' keys (§5.1). The other two are keyed by sample |
+| read-group identity and grouping | `src/read/input/read_groups.rs` | used as-is; the fold to library/experiment is already there |
+| read group on each observation | `src/locus_generation/mod.rs` | the read-group half of the two *chemistry* accumulators' keys (§5.1). The other two are keyed by sample |
 | the three-genotype likelihood | `src/sample_summary/het.rs:266` (`observe_site`) | the three binomials are already computed there; they are **added** instead of compared |
 | the site's sufficient statistic | `src/sample_summary/het.rs:146` (`SiteCounts::from_record`) | the `(depth, alt-count)` reduction is reusable — **minus** its `None` return for a pure-REF column (§2.1) |
 | grid search over accumulated counts | GATK `DragstrParametersEstimator.java` (vendored) | algorithm copied, not code. Its stratification choices are the STR path's ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.3) |

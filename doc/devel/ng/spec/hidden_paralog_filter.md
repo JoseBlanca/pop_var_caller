@@ -94,13 +94,13 @@ Three that this document adds:
 an EM over every record's likelihood ratio, and the FDR cut is a quantile of the resulting
 posteriors, so no record can be dropped or tagged until all have been scored. Production's module
 doc says it in one line: the filter "cannot fit in the current single streaming pass"
-([`paralog_filter/mod.rs`](../../../../src/var_calling/paralog_filter/mod.rs)). Something must hold the
+(`d9e7b076:src/var_calling/paralog_filter/mod.rs`). Something must hold the
 records between scoring and verdict; production holds them in a spill file, and so does ng (§3.4).
 
 **Production scores inline and needs one spill read; ng cannot, and needs two.** Production's
 per-sample coverage model is fitted at reader-open from the psp's stored histogram, so a worker
 scores each record as it is called and the spill carries the ratio
-([`write_pass.rs:1-19`](../../../../src/var_calling/paralog_filter/write_pass.rs)). In ng the
+(`d9e7b076:src/var_calling/paralog_filter/write_pass.rs`). In ng the
 histogram is complete only when the calling pass ends ([`window_coverage.md`](window_coverage.md)
 §1), so:
 
@@ -116,7 +116,7 @@ as small beside the psps. The trailer histogram would buy it back and is deferre
 [`window_coverage.md`](window_coverage.md) §8 gives.
 
 **Both modes reach the filter through one function.** Direct mode and psp mode already share
-[`call_cohort_from_sources_handing_each_record_over`, `callers.rs:799`](../../../../src/ng/run/callers.rs),
+[`call_cohort_from_sources_handing_each_record_over`, `callers.rs`](../../../../src/run/callers.rs),
 which hands each assembled record to a sink in genome order. With the filter on, that sink is the
 spill writer; with it off, the VCF writer as today. The histograms come out of the cache with the
 sources when that function returns.
@@ -129,7 +129,7 @@ sources when that function returns.
 
 **What one copy's depth looks like in this sample, as a function of GC** — the one-copy depth
 level, a GC-bias multiplier, and σ₀, the scatter of a one-copy window's relative depth. Fitted per
-sample from its histogram by [`SingleCopyCoverageModel::fit`, `coverage_model.rs:227`](../../../../src/paralog/coverage_model.rs),
+sample from its histogram by `SingleCopyCoverageModel::fit`, `coverage_model.rs` (`d9e7b076:src/paralog/coverage_model.rs`),
 copied into ng with its configuration and its tests. Its defaults — the single-copy band
 `0.4..1.6`, the minimum bin count 50, the smoothing window, the mode/median guard `[0.5, 1.5]`,
 the overflow guard at a fifth — are **inherited from the tomato2 prototype and production, not
@@ -155,7 +155,7 @@ measurements are in `doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md
 **A rejected fit is not an error.** The fit refuses a sample it cannot anchor — no windows, a
 peak in the bottom bin, a mode/median ratio outside the guard, too many windows past the
 histogram's range — and production carries such a sample as *absent*: it contributes no coverage
-evidence to any record ([`prepass.rs`](../../../../src/var_calling/paralog_filter/prepass.rs)). ng
+evidence to any record (`d9e7b076:src/var_calling/paralog_filter/prepass.rs`). ng
 does the same, and **the run report names each rejected sample and the reason**, so a run over a
 cohort whose fits all failed says so rather than silently filtering nothing.
 
@@ -165,12 +165,12 @@ cohort whose fits all failed says so rather than silently filtering nothing.
 ### 3.2 What is scored, and with what — decision: every record, on coverage and its read split
 
 Per record, per sample, the scorer takes four numbers
-([`SampleObservation`, `locus_score.rs:43`](../../../../src/paralog/locus_score.rs)): the relative
+(`SampleObservation`, `locus_score.rs` (`d9e7b076:src/paralog/locus_score.rs`)): the relative
 copy number, the ALT reads, the total reads, and the sample's inbreeding coefficient.
 
 - **Relative copy number** = the sample's window mean depth at the locus, divided by the model's
   expected one-copy depth at the window's GC
-  ([`relative_copy_number`, `coverage_model.rs:302`](../../../../src/paralog/coverage_model.rs)).
+  (`relative_copy_number`, `coverage_model.rs` (`d9e7b076:src/paralog/coverage_model.rs`)).
   The pair comes from the spill; **a sample with an absent pair, or no model, is absent** from
   the record's score.
 
@@ -185,14 +185,14 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
   signal. That is why D4 counts deletions apart from tracts.
 - **Inbreeding coefficient** — ng's own, per sample: the parameters file's `[inbreeding]` row,
   fitted per sample from runs of homozygosity by the pre-pass and exposed as
-  [`RunParameters::inbreeding_coefficient_by_sample`, `run_parameters.rs:695`](../../../../src/ng/calling/run_parameters.rs).
+  [`RunParameters::inbreeding_coefficient_by_sample`, `run_parameters.rs`](../../../../src/calling/run_parameters.rs).
   Production replaced its per-individual estimate with one cohort number because the
   heterozygosity proxy it had was divergence-contaminated (single-sample doc §5); ng has the
   quantity production wanted, and the copied scorer already takes it as a per-sample slice.
 - **ALT and total reads — this is where the record's kind enters, and it is the one decision
   here that goes beyond production.** Production scores only **biallelic SNPs** — one reference
   base, one single-base alternative — and never flags anything else
-  ([`is_biallelic_snp`, `calibrate.rs:135`](../../../../src/var_calling/paralog_filter/calibrate.rs)),
+  (`is_biallelic_snp`, `calibrate.rs` (`d9e7b076:src/var_calling/paralog_filter/calibrate.rs`)),
   because its allele term models a SNP: a real heterozygote sits near half, a collapsed copy's
   difference at `m/T`. The owner's ruling is that repeat tracts are first-class and the filter
   must apply to them.
@@ -201,7 +201,7 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
   decided 2026-10-08 on branch `tract-ceiling`, which called each STR segment both ways and was not
   merged — this rule was ported from it alone):
   `alt_reads =` the sum of every alternative's reads, `total_reads = AD[0] + alt_reads`, from the
-  record's sample column ([`SampleReadCounts::allele_reads`, `vcf/mod.rs:597`](../../../../src/ng/vcf/mod.rs)),
+  record's sample column ([`SampleReadCounts::allele_reads`, `vcf/mod.rs`](../../../../src/vcf/mod.rs)),
   however the record was called. A sample with `total_reads == 0` is absent from the score, as in
   production. **Alternatives are pooled**, which the H2 story permits unchanged: it asks whether
   the non-reference share sits at some whole `m/T`, and two copies of three carrying two
@@ -271,24 +271,24 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
 - **A record with no alternative allele is not scored.** A refused tract written `ALT .` with
   every sample no-called ([`vcf_output.md`](vcf_output.md) §8) establishes nothing to flag.
 
-**The score itself** is [`score_locus_for_paralogy`, `locus_score.rs:248`](../../../../src/paralog/locus_score.rs)
-with its per-pass [`ParalogScorePrecompute`](../../../../src/paralog/locus_score.rs), copied. Its
+**The score itself** is `score_locus_for_paralogy`, `locus_score.rs` (`d9e7b076:src/paralog/locus_score.rs`)
+with its per-pass `ParalogScorePrecompute` (`d9e7b076:src/paralog/locus_score.rs`), copied. Its
 constants — the carrier copy numbers `{3, 4, 6, 8}`, the winsor cap at four copies, the grids,
-the pseudocount — are production's ([`paralog/mod.rs`](../../../../src/paralog/mod.rs)),
+the pseudocount — are production's (`d9e7b076:src/paralog/mod.rs`),
 **prototype-tuned on tomato2 and inherited**. A record with no usable sample is unscored, which is
 *kept, never flagged*: its ratio is `NaN`, which the histogram refuses to fold and the verdict
-never flags ([`ParalogCalibration::flags`, `calibrate.rs:97`](../../../../src/var_calling/paralog_filter/calibrate.rs)).
+never flags (`ParalogCalibration::flags`, `calibrate.rs` (`d9e7b076:src/var_calling/paralog_filter/calibrate.rs`)).
 
 ### 3.3 From scores to a cut — production's prior and FDR, then a rate per window
 
 **The run-wide rate.** Pass two folds every finite ratio into a fixed-size histogram of ratios
-([`ParalogLrHistogram`, `prior.rs:108`](../../../../src/paralog/prior.rs)), estimates π from it by
-EM ([`ParalogPrior::estimate`, `prior.rs:181`](../../../../src/paralog/prior.rs)), builds the
-tail-FDR curve over the same bins ([`ParalogFdrCurve`, `prior.rs:230`](../../../../src/paralog/prior.rs)),
+(`ParalogLrHistogram`, `prior.rs` (`d9e7b076:src/paralog/prior.rs`)), estimates π from it by
+EM (`ParalogPrior::estimate`, `prior.rs` (`d9e7b076:src/paralog/prior.rs`)), builds the
+tail-FDR curve over the same bins (`ParalogFdrCurve`, `prior.rs` (`d9e7b076:src/paralog/prior.rs`)),
 and resolves the least-stringent ratio at which the FDR meets the target
-([`lr_threshold_for_fdr`, `prior.rs:274`](../../../../src/paralog/prior.rs)). All copied. When the
+(`lr_threshold_for_fdr`, `prior.rs` (`d9e7b076:src/paralog/prior.rs`)). All copied. When the
 EM does not converge the prior falls back to `0.03`
-([`DEFAULT_FALLBACK_PARALOG_PRIOR`, `calibrate.rs:30`](../../../../src/var_calling/paralog_filter/calibrate.rs)),
+(`DEFAULT_FALLBACK_PARALOG_PRIOR`, `calibrate.rs` (`d9e7b076:src/var_calling/paralog_filter/calibrate.rs`)),
 the run warns, and the header says so.
 
 **Pass two also keeps every record's ratio in memory** — one `f64` per record, in spill order —
@@ -395,7 +395,7 @@ with the generic locus owning its anchor base. Every record's samples have one s
 2026-10-09 a tract could be spilled with its window alone, and the flag also chose that shape.
 
 **Why the line and not the record.** The record type has ten fields behind a constructor that
-asserts every parity between them ([`VcfRecord::new`, `vcf/mod.rs:187`](../../../../src/ng/vcf/mod.rs));
+asserts every parity between them ([`VcfRecord::new`, `vcf/mod.rs`](../../../../src/vcf/mod.rs));
 a codec over it is ten field codecs and a reconstruction that must satisfy every assertion, and a
 field the record gains later is a field the codec silently drops. The line is the record's own
 bytes: pass three writes them back unchanged except for the two columns the verdict touches, so
@@ -404,10 +404,10 @@ shape has to be mirrored. The per-sample side fields are the four numbers the sc
 written so the scorer never parses text.
 
 **The codec is hand-rolled over the psp's varint primitives**
-([`encode_u64_leb128`, `psp/varint.rs:46`](../../../../src/psp/varint.rs)), with **the encoder
+(`encode_u64_leb128`, `psp/varint.rs` (`d9e7b076:src/psp/varint.rs`)), with **the encoder
 destructuring its input exhaustively** — the codebase's idiom for a struct that must not gain a
-field silently ([`cohort_merge/mod.rs`](../../../../src/ng/run/cohort_merge/mod.rs)'s `render`;
-[`types.rs:233`](../../../../src/var_calling/types.rs)) — and **floats written by bit pattern**, so
+field silently ([`cohort_merge/mod.rs`](../../../../src/run/cohort_merge/mod.rs)'s `render`;
+`d9e7b076:src/var_calling/types.rs`) — and **floats written by bit pattern**, so
 an absent pair survives. **No manifest, no layout check, no version**: the file is created, read
 twice and deleted inside one run, and its only reader is the process that wrote it. That is the
 owner's ruling, and the distinction from the psp — a user-facing artifact that has to interpret
@@ -440,7 +440,7 @@ Per entry, in spill order, with its ratio from pass two:
 
 - **flagged** ⇔ the ratio is finite and its posterior is at or above the windowed cut (§3.3), or,
   at a window of 0, its tail FDR is at or below the target
-  ([`flags`, `calibrate.rs:97`](../../../../src/var_calling/paralog_filter/calibrate.rs));
+  (`flags`, `calibrate.rs` (`d9e7b076:src/var_calling/paralog_filter/calibrate.rs`));
 - **dropped** if flagged and `--paralog-filter-tag` is not given: the line is not written and
   the drop is counted;
 - **tagged** if flagged and the flag is given: the `FILTER` column becomes `hiddenParalog`, or
@@ -467,18 +467,18 @@ ratio is written so that a run that drops can be audited against one that tags.
 ##paralogFilter=target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;samples_with_coverage_model=61/63;window=50000;shrink=10;pull_to=0.018439;post_cut=0.987654
 ```
 
-Production writes the first four ([`paralog_provenance`, `write_pass.rs:120`](../../../../src/var_calling/paralog_filter/write_pass.rs))
+Production writes the first four (`paralog_provenance`, `write_pass.rs` (`d9e7b076:src/var_calling/paralog_filter/write_pass.rs`))
 because a dropped record leaves no per-record trace; the fifth says how much of the cohort the
 coverage evidence rested on. The last four are the windowed rate's (§3.3): the window in bases,
 the pull in records, the typical window's rate it pulls toward, and the posterior the cut resolved
 to (`none` where nothing is flagged). In a windowed run `post_cut` decides, and `pi` and `lr_cut`
 are the run-wide values; a run at a window of 0 writes the first five only. ng's header writes
 its meta lines as `##key=value`
-([`header_text`, `header.rs:431`](../../../../src/ng/vcf/header.rs)); this is one more.
+([`header_text`, `header.rs`](../../../../src/vcf/header.rs)); this is one more.
 
 **The writer gains one entry point**: write a line whose contig, position and tract-ness are
 given, running the same ordering check `write_record` runs
-([`writer.rs:114`](../../../../src/ng/vcf/writer.rs)). Patching the line touches columns seven and
+([`writer.rs`](../../../../src/vcf/writer.rs)). Patching the line touches columns seven and
 eight only — `FILTER` and `INFO`, tab-separated, both always present in ng's records — and a
 record whose `INFO` is `.` has it replaced rather than appended to.
 
@@ -494,7 +494,7 @@ model was rejected, each with its reason; π, the cut, and whether the EM conver
 | `--hidden-dup-window <BASES>` | `50000` | added 2026-10-22, default raised from `0` (owner, 2026-10-23): estimate π per window of this width rather than once for the genome; `0` is the one genome-wide π. See `src/paralog/windowed_prior.rs` |
 
 Both on `call-from-psps` and `call-from-alignments`
-([`CallFromPspsArgs`, `call_from_psps.rs:75`](../../../../src/pop_var_caller_exp/call_from_psps.rs)),
+(`CallFromPspsArgs`, `call_from_psps.rs` (`d9e7b076:src/pop_var_caller_exp/call_from_psps.rs`)),
 under an `Advanced` heading beside the merge's knobs. The window and histogram parameters
 ([`window_coverage.md`](window_coverage.md) §3.6) are not exposed in this document's scope; they are
 compiled defaults until a measurement says one needs to move.
@@ -628,7 +628,7 @@ pub struct ParalogVerdicts {
    wrong about `VcfRecord::alleles()` being the span's own sequences while `REF`/`ALT` gain an
    anchor base at encode time.
 3. **`F` per sample, and the slice's length is the cohort's.** The scorer returns a neutral
-   score on a length mismatch rather than failing ([`locus_score.rs:248`](../../../../src/paralog/locus_score.rs)).
+   score on a length mismatch rather than failing (`d9e7b076:src/paralog/locus_score.rs`).
    Build the slice from the parameters file in the run's sample order and assert the length.
 4. **`NaN` is *unscored*, and it must stay `NaN` through the spill, the ratio vector and the
    verdict.** Any step that turns it into zero makes a record with no evidence look neutral and
@@ -646,16 +646,16 @@ pub struct ParalogVerdicts {
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the model constants and grids | [`src/paralog/mod.rs`](../../../../src/paralog/mod.rs) | copied into `src/ng/paralog/`, production untouched |
-| the coverage model fit | [`coverage_model.rs`](../../../../src/paralog/coverage_model.rs) with its tests | copied; reads ng's histogram type, which is production's shape |
-| the per-locus score and its precompute | [`locus_score.rs`](../../../../src/paralog/locus_score.rs) with its tests | copied; **the parity oracle is bit-identical ratios against production's on identical synthetic inputs** |
-| the prior, the EM, the FDR curve | [`prior.rs`](../../../../src/paralog/prior.rs) with its tests | copied |
-| the calibration and the verdict | [`ParalogCalibration`, `flags`, `posterior`, `calibrate.rs:64-118`](../../../../src/var_calling/paralog_filter/calibrate.rs) | copied |
-| the header line | [`paralog_provenance`, `write_pass.rs:120`](../../../../src/var_calling/paralog_filter/write_pass.rs) | copied, one field added |
-| the spill's framing idea | [`spill.rs`](../../../../src/var_calling/paralog_filter/spill.rs) | the shape (length-framed, written once, read twice, deleted) is kept; the payload is §3.4's, not production's record codec |
-| the varint codec | [`psp/varint.rs`](../../../../src/psp/varint.rs) | called as-is |
-| the sink both modes share | [`call_cohort_from_sources_handing_each_record_over`, `callers.rs:799`](../../../../src/ng/run/callers.rs) | the filter is a sink; the function does not change |
-| the inbreeding coefficients | [`RunParameters::inbreeding_coefficient_by_sample`, `run_parameters.rs:695`](../../../../src/ng/calling/run_parameters.rs) | read as-is |
+| the model constants and grids | `d9e7b076:src/paralog/mod.rs` | copied into `src/paralog/`, production untouched |
+| the coverage model fit | `d9e7b076:src/paralog/coverage_model.rs` with its tests | copied; reads ng's histogram type, which is production's shape |
+| the per-locus score and its precompute | `d9e7b076:src/paralog/locus_score.rs` with its tests | copied; **the parity oracle is bit-identical ratios against production's on identical synthetic inputs** |
+| the prior, the EM, the FDR curve | `d9e7b076:src/paralog/prior.rs` with its tests | copied |
+| the calibration and the verdict | `ParalogCalibration`, `flags`, `posterior`, `calibrate.rs` (`d9e7b076:src/var_calling/paralog_filter/calibrate.rs`) | copied |
+| the header line | `paralog_provenance`, `write_pass.rs` (`d9e7b076:src/var_calling/paralog_filter/write_pass.rs`) | copied, one field added |
+| the spill's framing idea | `d9e7b076:src/var_calling/paralog_filter/spill.rs` | the shape (length-framed, written once, read twice, deleted) is kept; the payload is §3.4's, not production's record codec |
+| the varint codec | `d9e7b076:src/psp/varint.rs` | called as-is |
+| the sink both modes share | [`call_cohort_from_sources_handing_each_record_over`, `callers.rs`](../../../../src/run/callers.rs) | the filter is a sink; the function does not change |
+| the inbreeding coefficients | [`RunParameters::inbreeding_coefficient_by_sample`, `run_parameters.rs`](../../../../src/calling/run_parameters.rs) | read as-is |
 | the reference draft of the maths | `benchmarks/tomato2/src/build_paralog_lr.py`, `build_paralog_eb.py`, `build_gc_normalization.py` | what production was validated against; not an oracle for ng |
 
 **What is not an oracle**: production's filter on the same slice. Its depth is raw depth where
