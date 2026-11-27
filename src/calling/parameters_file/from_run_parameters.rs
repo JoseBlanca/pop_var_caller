@@ -13,7 +13,6 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
 
-use super::bindings::hex_digest;
 use super::{
     BaseQualityCalibration, BaseQualityCalibrationRow, BetweenLocusShare, CensusIdentity,
     Contamination, ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach,
@@ -44,6 +43,7 @@ use crate::parameter_estimation::joint::ssr_fit::{LevelProvenance, ShareProvenan
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::read::input::read_groups::ReadGroups;
+use crate::reference_info::format_md5_hex;
 use crate::repeat_catalog::StrRepeatCriteria;
 #[cfg(test)]
 use crate::types::ErrorRate;
@@ -410,7 +410,7 @@ impl ParametersFile {
             format_version: FORMAT_VERSION,
             ploidy: run.ploidy().get(),
             fitted_from: InputsFittedFrom {
-                reference_digest: hex_digest(&reference.0),
+                reference_digest: format_md5_hex(reference.0),
                 samples: samples
                     .iter()
                     .map(|of_sample| of_sample.sample.to_string())

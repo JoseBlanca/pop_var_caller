@@ -69,13 +69,17 @@ pub struct ContigInfo {
 /// Render a 16-byte MD5 as the 32 lowercase hex characters SAM's `@SQ M5` and the psp's
 /// `chromosome.md5` are written in.
 ///
-/// Every digest in ng is computed here — `read_fasta` for a contig's bases and for the
-/// whole reference — so the one way of spelling one belongs here too, beside the `[u8; 16]`
-/// it renders. The callers are all message-writers: an alignment file whose assembly does
-/// not match the reference, a catalog built against another reference, a psp that was
-/// written against a third. Each of those is a refusal a person has to act on, and a
-/// digest they cannot compare against the one `samtools` prints is a refusal they cannot
-/// act on.
+/// **The crate's one MD5 encoder.** Every file this crate writes a digest into — a psp
+/// header, a repeat catalog's footer, a parameters file, a VCF's `##contig` lines and its
+/// parameters-file line — and every refusal that quotes one goes through here, so a digest
+/// written by one file and compared by another cannot be two spellings of the same bytes.
+/// The refusals matter as much as the files: an alignment file whose assembly does not
+/// match the reference, a catalog built against another reference, a psp written against
+/// a third — each is a message a person has to act on, and a digest they cannot compare
+/// against the one `samtools` prints is one they cannot act on.
+///
+/// The decoders stay apart on purpose: a psp refuses upper case by its format's rule, a
+/// BAM's `M5` may be upper case, and a catalog reads back only what this crate wrote.
 pub(crate) fn format_md5_hex(bytes: [u8; 16]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(32);
@@ -1762,6 +1766,7 @@ mod tests {
         for hex in [
             "00ef897c3d6ff0c78aff06ac189178dd",
             "6aef897c3d6ff0c78aff06ac189178dd",
+            "000fa0ff0102030405060708090a0b0c",
             "00000000000000000000000000000000",
             "ffffffffffffffffffffffffffffffff",
         ] {

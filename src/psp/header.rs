@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{PspReadError, PspWriteError};
 use crate::psp::segmentation_section::{self, REPEAT_GROUND_KEY, WireSegmentation};
+use crate::reference_info::format_md5_hex;
 use crate::segmentation_inputs::SegmentationInputs;
 use crate::types::{Bp, ReadGroupId};
 
@@ -1145,11 +1146,6 @@ pub(crate) fn wire_float_of(value: f32) -> f64 {
         .expect("a float's own Display re-parses")
 }
 
-/// Every MD5 travels as 32 lowercase hex characters, which is what a SAM `@SQ M5` is.
-pub(crate) fn hex_of(digest: [u8; 16]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 pub(crate) fn digest_of(field: &str, spelled: &str) -> Result<[u8; 16], BrokenRule> {
     let wrong = || {
         BrokenRule::new(
@@ -1290,14 +1286,14 @@ impl From<&Header> for WireHeader {
             observation_reach_ceiling_bp: observation_reach_ceiling_bp.get(),
             reference: WireReference {
                 name: reference.name.clone(),
-                md5: reference.md5.map(hex_of),
+                md5: reference.md5.map(format_md5_hex),
             },
             contig: contigs
                 .iter()
                 .map(|contig| WireContig {
                     name: contig.name.clone(),
                     length: contig.length,
-                    md5: contig.md5.map(hex_of),
+                    md5: contig.md5.map(format_md5_hex),
                 })
                 .collect(),
             read_group: read_groups
@@ -2677,7 +2673,7 @@ mod tests {
     /// re-encode to different bytes, and goal 5's byte identity would be gone.
     #[test]
     fn a_digest_is_refused_for_its_length_and_for_its_case_alike() {
-        let lower = hex_of([0x1b; 16]);
+        let lower = format_md5_hex([0x1b; 16]);
         for (what, spelled) in [
             ("too short", "1b1b1b".to_string()),
             ("too long", format!("{lower}ab")),

@@ -59,6 +59,7 @@ use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::census::RecordingTerms;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::read::input::read_groups::{ReadGroup, ReadGroups};
+use crate::reference_info::format_md5_hex;
 use crate::region_typing::segment_criteria::SsrSegmentCriteria;
 use crate::repeat_catalog::StrRepeatCriteria;
 
@@ -127,7 +128,7 @@ impl CensusIdentity {
         for (term, digest) in selection.fields() {
             named.push(CensusTerm {
                 term: (*term).to_owned(),
-                digest: hex_digest(digest),
+                digest: format_md5_hex(*digest),
             });
         }
         // **The whole digest and every block**, because that is what this value's own equality
@@ -166,7 +167,7 @@ impl CensusIdentity {
         });
         named.push(CensusTerm {
             term: "depth ladder edges".to_owned(),
-            digest: hex_digest(&depth_ladder.0),
+            digest: format_md5_hex(depth_ladder.0),
         });
         named.push(CensusTerm {
             term: "per-position depth cap".to_owned(),
@@ -177,27 +178,14 @@ impl CensusIdentity {
     }
 }
 
-/// A digest of whatever is fed to it, in the file's spelling.
+/// A digest of whatever is fed to it, in the file's spelling: 32 characters of lower-case hex,
+/// from the crate's one MD5 encoder, so the string a run writes and the string a later run
+/// compares it against cannot be two spellings of the same bytes.
 fn a_digest_over(feed: impl FnOnce(&mut Md5)) -> String {
     let mut hasher = Md5::new();
     feed(&mut hasher);
     let digest: [u8; 16] = hasher.finalize().into();
-    hex_digest(&digest)
-}
-
-/// **The file's spelling of a 16-byte digest**: 32 characters of lower-case hex.
-///
-/// The one place either binding's text is produced, so the string a run writes and the string a
-/// later run compares it against cannot be two spellings of the same bytes.
-pub(super) fn hex_digest(digest: &[u8; 16]) -> String {
-    use std::fmt::Write as _;
-
-    digest
-        .iter()
-        .fold(String::with_capacity(32), |mut hex, byte| {
-            write!(hex, "{byte:02x}").expect("a string never fails");
-            hex
-        })
+    format_md5_hex(digest)
 }
 
 // ---------------------------------------------------------------------
@@ -248,7 +236,7 @@ impl ParametersFile {
     /// samples to match: a fit starting from an earlier run's numbers.
     #[must_use]
     pub fn was_fitted_against(&self, reference: &ReferenceDigest) -> bool {
-        self.fitted_from.reference_digest == hex_digest(&reference.0)
+        self.fitted_from.reference_digest == format_md5_hex(reference.0)
     }
 
     /// **Which routing threshold this file's run and `asked` first differ on** — `None` where
@@ -395,7 +383,7 @@ impl ParametersFile {
             return Err(fitted_from_other_inputs(
                 "fitted_from.reference_digest",
                 &bound.reference_digest,
-                hex_digest(&reference.0),
+                format_md5_hex(reference.0),
             ));
         }
 
@@ -1886,18 +1874,6 @@ mod tests {
                 .contains("0123456789abcdef0123456789abcdef")
                 && refusal.to_string().contains(&"ab".repeat(16)),
             "both values reach the message a run prints: {refusal}"
-        );
-    }
-
-    /// **A digest is the bytes and not their rendering** — the two ends of the byte range, in
-    /// order, so a formatter that dropped a leading zero or printed upper case fails.
-    #[test]
-    fn a_digest_spells_every_byte_as_two_lower_case_characters() {
-        assert_eq!(
-            hex_digest(&[
-                0x00, 0x0f, 0xa0, 0xff, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
-            ]),
-            "000fa0ff0102030405060708090a0b0c"
         );
     }
 }
