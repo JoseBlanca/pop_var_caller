@@ -129,7 +129,8 @@ const MAX_IMPLIED_DIVERSITY: f64 = 0.5;
 /// chromosomes. **Adding either point mass widens the margin**, and that is measured rather than
 /// argued: swept over the whole box the fit clamps to, the largest share of the ceiling any
 /// density asks for is that same 100 in 101, and it is asked for only where the point masses carry
-/// nothing ([`seed_tests::no_density_the_fit_can_produce_comes_within_one_part_in_a_hundred_of_its_ceiling`],
+/// nothing (the test
+/// `seed_tests::no_density_the_fit_can_produce_comes_within_one_part_in_a_hundred_of_its_ceiling`,
 /// `doc/devel/ng/spec/ordinary_site_prior_moments.md` §6).
 ///
 /// So this is now a **release assertion** rather than a fall-back: tripping it means the two

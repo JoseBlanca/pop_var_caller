@@ -174,7 +174,7 @@ use crate::types::{LogProb, ReadGroupId};
 /// estimate.
 ///
 /// Production's value, which ng carried until 2026-09-03, is 0.01
-/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)); 0.05 held for the rest of that day, and 0.20
+/// (`d9e7b076:src/ssr/cohort/em.rs`); 0.05 held for the rest of that day, and 0.20
 /// from then until 2026-10-18.
 pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.07;
 

@@ -62,10 +62,10 @@ use super::Concentration;
 /// The floor on a candidate's share of the prior's mass, so a candidate the fit gives nothing
 /// keeps a strictly positive share rather than falling into an absorbing zero.
 ///
-/// **Ported from production's `G0_FLOOR`** (`src/ssr/cohort/allele_freq_prior.rs`). Why a zero
-/// would matter is the spec's sentence rather than production's: a masked long heterozygous copy
-/// that the candidate set nearly missed has to stay recoverable rather than fall into a prior it
-/// can never climb out of (`calling_priors.md` §5).
+/// **Ported from production's `G0_FLOOR`** (`d9e7b076:src/ssr/cohort/allele_freq_prior.rs`). Why a
+/// zero would matter is the spec's sentence rather than production's: a masked long heterozygous
+/// copy that the candidate set nearly missed has to stay recoverable rather than fall into a prior
+/// it can never climb out of (`calling_priors.md` §5).
 ///
 /// **A candidate reaches it when the fit put no mass on its length class**, which includes an edge
 /// class the fit left empty. A candidate past the fit's reach does not take the floor: it shares

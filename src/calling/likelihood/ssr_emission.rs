@@ -64,7 +64,7 @@ pub struct SsrCandidate<'a> {
     /// own shape.** There an allele is the whole locus as a carrier has it, because the
     /// varying regions sit inside surrounding context that alleles disagree about. Here the
     /// locus *is* the tract: the STR generator slices exactly the tract into an observation's
-    /// bases ([`locus_generation/ssr.rs`](../../../../src/locus_generation/ssr.rs)), the
+    /// bases ([`crate::locus_generation::ssr`]), the
     /// flanks are shared by every candidate by construction, and comparing them would be
     /// comparing two copies of the same context.
     ///
@@ -1263,10 +1263,11 @@ fn letters_against_stretching_followed_by(
 /// letters factor out exactly; on an interrupted one they do not, because an interruption
 /// sits at a different offset in each stretching.
 ///
-/// **It must agree with [`segment_tract`], which is what actually places a slip.** That is
-/// asserted rather than argued — `a_tract_is_pure_exactly_when_the_segmenter_finds_one_run`
+/// **It must agree with [`segment_tract_into`], whose split is what actually places a slip.**
+/// That is asserted rather than argued — `a_tract_is_pure_exactly_when_the_segmenter_finds_one_run`
 /// checks the two against each other over every tract of eight bases or fewer on a two-letter
-/// alphabet — because `segment_tract`'s own documentation calls its greedy left-to-right phase
+/// alphabet — because the test-only `segment_tract`'s documentation
+/// calls its greedy left-to-right phase
 /// *a choice*, and a later change to that choice must not be able to leave the two classifying
 /// different tracts.
 ///
@@ -1496,8 +1497,8 @@ fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut 
 /// bundle's layout collects every slip of every run in one buffer, where two slips may well
 /// render the same bytes. A caller that wants this slip's renderings alone clears `out` first.
 ///
-/// `repeats` is non-zero: the identity has no slip to place, and [`enumerate_placements`]
-/// answers it without splitting anything.
+/// `repeats` is non-zero: the identity has no slip to place, and the test-only
+/// `enumerate_placements` answers it without splitting anything.
 fn place_slip_in_each_run(
     segments: &[TractSegment],
     tract: &[u8],
@@ -2391,7 +2392,8 @@ fn bundle_censored_emission(
 ///
 /// What it buys: a sequencing indel in one run shifts the read against every piece after it, and
 /// most of the states that shift leads to are a few mismatches deep — each a factor near
-/// `ε / 3` — long before the read's bases are spent; they were most of what step 4c's walk cost.
+/// `ε / 3` — long before the read's bases are spent; they were most of what the
+/// unpruned walk cost.
 pub const NEGLIGIBLE_PARTIAL_READ_MASS: f64 = 1e-12;
 
 /// **The reference flank a carrier of this allele has past the hull, on the side a read that held
@@ -3858,7 +3860,7 @@ mod tests {
     /// that whoever settles the contraction question in spec §4.2 finds this rather than
     /// rediscovering it.
     ///
-    /// **This is a fact about `emission`, which milestone F shipped, not about the censored
+    /// **This is a fact about `emission`, as it shipped, not about the censored
     /// term.** Repairing it changes scores at one- and two-repeat tracts, which is a decision
     /// about the model rather than a coding slip.
     #[test]

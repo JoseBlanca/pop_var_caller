@@ -76,7 +76,7 @@
 //!   associative, so an order that varies is a run whose genotypes vary (spec §8).
 //! - **The row itself allocates nothing**: every buffer it works in is the caller's, held
 //!   once per worker and reused across every sample of every locus ([`SsrRowScratch`], and
-//!   the generic path's own from Milestone D). Production lifted exactly these out of its
+//!   and [`GenericRowScratch`] on the generic path). Production lifted exactly these out of its
 //!   iteration after a profile put the allocator's self-time at about a sixth of cycles.
 //!   **The buffers themselves are amortised rather than allocation-free** — they grow when a
 //!   sample or locus is wider than any before it and never shrink — and
@@ -191,17 +191,18 @@ pub(crate) fn copy_shares(ploidy: Ploidy) -> [f64; MAX_PLOIDY_COPIES + 1] {
 /// there is one implementation and one name and a consumer points at it — two spellings of one
 /// number are two things that can drift, and the tree already shows what that costs: production
 /// keeps a *third* private copy of these same two values in its own stutter model with nothing
-/// connecting it to either. The floor below comes from `src/var_calling/`, which is frozen
-/// production that ng does not depend on, so it is copied deliberately and pinned by a test
+/// connecting it to either. The floor below comes from the deleted caller's
+/// `d9e7b076:src/var_calling/`, which ng never depended on, so it is copied deliberately and
+/// pinned by a test
 /// — the same discipline `alignment/stutter.rs` uses for the slip cutoff it inherited.
 pub use crate::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 
 /// Floor under any per-read error probability before a logarithm is taken of it.
 ///
 /// **Inherited from production at `1e-12` and declared inherited**
-/// (`var_calling::contamination_estimation::MIN_BASE_ERROR`), not measured here.
-/// `tests::the_floors_still_equal_productions` pins the equality, so the two cannot drift
-/// while they are meant to describe one model assumption.
+/// (`var_calling::contamination_estimation::MIN_BASE_ERROR` at commit `d9e7b076`), not
+/// measured here. `tests::the_base_error_floor_is_pinned_at_one_in_a_trillion` pins the
+/// value, so changing it is a deliberate act rather than drift.
 ///
 /// What it buys: an observation the genotype cannot explain at all yields about −27.6 nats
 /// rather than negative infinity, so one such read makes a genotype very unlikely instead of
@@ -315,7 +316,7 @@ pub const DEFAULT_ERROR_PROBABILITY_MULTIPLIER: f64 = 2.0;
 ///
 /// **The two are far apart on real reads, and the size is now measured rather than assumed:
 /// a factor of 25.2 on the 63-accession tomato cohort and 44.1 on HG002 at 300×**
-/// (`examples/ng_minted_error_means.rs`, 2026-08-24; spec §3.2 carries the table). Per read
+/// (a since-removed measurement program, 2026-08-24; spec §3.2 carries the table). Per read
 /// group on tomato the ratio runs 22.7 to 37.0, median 24.4, with no read group anywhere near
 /// one. So building the scale from the arithmetic mean would have divided every charged error
 /// by 25 to 44 — **14 to 16 Phred**, every read treated as that much cleaner than the fit
@@ -473,7 +474,7 @@ impl ReadGroupCalibration {
     /// §3.3 charges an unexplained observation `q_sum + n·(log scale − log m)`, so the
     /// multiplier never appears as a multiplier there: it is one addition per observation.
     ///
-    /// **The row no longer takes this route** (C1, 2026-08-24). Spec §3.6's mixture is
+    /// **The row no longer takes this route** (since 2026-08-24). Spec §3.6's mixture is
     /// evaluated in probability space, so the row multiplies by the scale rather than adding
     /// its logarithm — through [`charged_error`](Self::charged_error). What still reads this
     /// is the independent §3.3 oracle the row's own tests check the mixture against at zero
@@ -501,8 +502,8 @@ impl ReadGroupCalibration {
     /// which still decides where the cap sits — after pooling, on the observation, never on the
     /// reads before it.
     ///
-    /// Production pairs its floor with a ceiling at a half, and ng adopted both at A2 before
-    /// anything consumed them. **The ceiling cannot be applied to what the row charges**,
+    /// Production pairs its floor with a ceiling at a half, and ng adopted both before anything
+    /// consumed them. **The ceiling cannot be applied to what the row charges**,
     /// and the reason is a stated requirement rather than a preference: spec §2.3 asks that
     /// no term be a non-linear function of a per-read quality, because the merge hands the
     /// row a *fold* of reads and `q_sum` recovers only their geometric mean. `min(x, ½)` is
@@ -536,9 +537,7 @@ impl ReadGroupCalibration {
     ///   *positive* log-likelihood, measured at `+48.90` on the row's own fixture. And
     ///   `x.max(y)` returns `y` when `x` is `NaN`, so **a `NaN` would come back as
     ///   `MIN_BASE_ERROR` — the most confident error probability this module admits** rather
-    ///   than as a `NaN` anything downstream could see. That is the one place this differs
-    ///   from [`charged_error`](Self::charged_error), whose
-    ///   `f64::clamp` passes a `NaN` through, and it is why the check is here and not there.
+    ///   than as a `NaN` anything downstream could see.
     /// - **A scale that is not finite and positive.** [`scale`](Self::scale) is a public
     ///   field, so [`from_fitted_rate`](Self::from_fitted_rate)'s own guard can be bypassed
     ///   by building the struct literally, which the tests in this file do.
@@ -801,7 +800,7 @@ pub fn fill_batch_allele_copies(
 ///
 /// The genotype prior faced this exactly and answered it the same way: `fill_sample_concentration`
 /// subtracts a sample's own expected copies before using the cohort's as that sample's prior.
-/// This is that subtraction, one axis over (owner, 2026-08-24; C2's review found the batch of one).
+/// This is that subtraction, one axis over (owner, 2026-08-24; a review found the batch of one).
 ///
 /// **A sample alone in its batch therefore has nothing left**, and takes the no-evidence
 /// fallback below — the reference, and the floor elsewhere. That is the conservative answer and
@@ -820,7 +819,7 @@ pub fn fill_batch_allele_copies(
 /// a locus with one candidate allele a batch full of evidence and a batch with none are
 /// bit-identical, both `[1.0]`, and at any allele count the fallback row is a legal-looking
 /// frequency. A caller that wants to say *this locus was scored against a contaminant nobody
-/// measured* has no other way to know (C2's review). **The loop calls this and does not yet
+/// measured* has no other way to know (found in review). **The loop calls this and does not yet
 /// report it**: what the run says about the contamination it used is the step after the loop's
 /// wiring, and the call site binds this rather than dropping it so that a reader sees it is owed
 /// rather than handled.
@@ -907,7 +906,7 @@ fn normalise_batch_rows(out: &mut [f64], allele_count: usize, first_batch: usize
         // slot is checked as it accumulates, so a row of finite copies whose sum overflows
         // reaches here — and then every ratio is `finite / inf`, which is zero, and every
         // allele is lifted to the floor. The row would come back finite, plausible, and saying
-        // the neighbours carry nothing (C2's review, which built the case: one sample holding
+        // the neighbours carry nothing (a review built the case: one sample holding
         // 1e308 copies of each of two alleles).
         assert!(
             total.is_finite(),
@@ -1085,7 +1084,7 @@ impl<'a> FrozenContamination<'a> {
     /// **The last of those is the one that fails silently.** A run that declared three batches
     /// against a batching naming only the first constructs cleanly otherwise: every read group
     /// reads row 0, `batch_count` reports three, and **a run that declared batches is scored
-    /// against the cohort frequency with nothing said** (C2's review).
+    /// against the cohort frequency with nothing said** (found in review).
     #[must_use]
     pub fn new(
         fractions: &'a [ContaminationView],
@@ -1303,7 +1302,7 @@ impl<'a> FrozenContamination<'a> {
 /// batching that was stated from one that was assumed — where the other half of this mixture
 /// carries [`ContaminationSource`] for exactly that reason. The distinction belongs to
 /// [`SequencingBatches::is_default`](crate::parameter_estimation::joint::sequencing_batches::SequencingBatches::is_default),
-/// which answers it — built at the calling loop's E2a, and reachable from the run's parameters
+/// which answers it, and reachable from the run's parameters
 /// through `RunParameters::sequencing_batches`. **Nothing reports it yet**, which is the step
 /// after this one.
 ///
@@ -1423,7 +1422,7 @@ impl<'a> ContaminationMixture<'a> {
     ///
     /// **The branch that decides which formula runs deserves a name.** The row used to ask
     /// this as `allele_count() == 0`, which announces at the call site only that a table is
-    /// empty (C1's review).
+    /// empty (changed in review).
     #[must_use]
     pub fn is_absent(&self) -> bool {
         self.fractions.is_empty()
@@ -1454,7 +1453,7 @@ impl<'a> ContaminationMixture<'a> {
     /// indexes it by [`ReadGroupId`]. Without this the row could only discover a mixture built
     /// for a different run *lazily*, when some observation happened to name a read group past
     /// the end — so a locus whose reads all came from the first few groups would pass, and the
-    /// mismatch would surface at whichever locus first reached further, or never (C1's review).
+    /// mismatch would surface at whichever locus first reached further, or never (found in review).
     #[must_use]
     pub fn read_group_count(&self) -> usize {
         self.fractions.len()
@@ -1752,10 +1751,9 @@ pub struct GenericSampleEvidence<'a> {
     /// so those positions have to survive to the scoring (spec §5.1, §5.3).
     ///
     /// **They are a set of runs with holes in it, not one run**, because the generic fold
-    /// mints witnesses that way (spec §5.3, corrected 2026-08-24). So the restricted
-    /// projection is a **gather** and cannot be a subslice of the allele's bases — it needs a
-    /// buffer sized by the widest witness, which is the generic row's own scratch and lands
-    /// with Milestone D.
+    /// mints witnesses that way (spec §5.3, corrected 2026-08-24). The row does not assemble
+    /// that projection: it checks a partial read against the allele's prefix or suffix
+    /// ([`generic::allele_is_compatible_with_partial`]), so nothing is gathered.
     ///
     /// **The witnessed positions and the bases are on different axes, and their lengths are
     /// not interchangeable.** The witness counts *locus positions*; the bases are what the
@@ -1951,12 +1949,10 @@ impl<'a> SsrSampleEvidence<'a> {
 /// corrected.** The evidence view *borrows* this buffer, so it is still borrowed while the
 /// row runs — and a row taking `&mut` the same object as the evidence borrows cannot be
 /// called at all. Compiled, the mistake is `error[E0499]: cannot borrow as mutable more than
-/// once`, at the first call site the next milestone writes. The two have different lifetimes
-/// of use: what the row reads has to outlive the call, and what the row scribbles in does
-/// not. So they are two types, and **the row's own scratch arrives with the step that first
-/// needs one** — Milestone D, which adds a compatibility cache per `(partial, allele)` and a
-/// gather buffer for a witness with holes in it. Inventing it empty here would be shape
-/// without substance.
+/// once`, at the first call site. The two have different lifetimes of use: what the row reads
+/// has to outlive the call, and what the row scribbles in does not. So they are two types:
+/// the row's own scratch is [`GenericRowScratch`], which holds a compatibility verdict per
+/// `(partial, allele)`.
 ///
 /// **Amortised, not allocation-free**, and the difference is worth stating rather than
 /// implying. The buffer grows only when a sample is wider than every sample this worker has
@@ -2290,13 +2286,11 @@ impl<'a> ReadGroupParameters<'a> {
 /// # Why it is a separate type from `GenericEvidenceBuffer`
 ///
 /// **The evidence view borrows that buffer**, so it is still borrowed while the row runs, and a
-/// row taking `&mut` the same object the evidence borrows cannot be called at all. A2 recorded
-/// that and deferred this type to the step that first had something to put in it, which is this
-/// one.
+/// row taking `&mut` the same object the evidence borrows cannot be called at all.
 ///
 /// # What is not here, and was expected to be
 ///
-/// A2 and the plan both expected a **gather buffer** — somewhere to assemble an allele's bases
+/// The plan expected a **gather buffer** — somewhere to assemble an allele's bases
 /// restricted to a witness with holes in it. There is none, because the comparison turned out
 /// not to need one: an allele is the whole locus as a carrier has it, so a partial read is
 /// checked against the allele's *prefix* or *suffix* and nothing is assembled
@@ -2492,8 +2486,8 @@ impl GenericRowScratch {
 /// Fixtures both this module's tests and `generic.rs`'s need, in one place.
 ///
 /// **They were copied byte-identically into both test modules and would have drifted** — the
-/// batching is exactly the kind of fixture that gets adjusted on one side of a change (C2's
-/// review).
+/// batching is exactly the kind of fixture that gets adjusted on one side of a change (found
+/// in review).
 #[cfg(test)]
 pub(crate) mod test_batching {
     use super::{BatchId, BatchOfEachReadGroup, ContaminationMixture, ContaminationView};
@@ -2930,19 +2924,19 @@ mod tests {
         }
     }
 
-    // ---- A2: the parameter views, the floors, the scratch ----
+    // ---- the parameter views, the floors, the scratch ----
 
-    /// The floor is inherited from production and the doc comment says so. Two spellings of
-    /// one model assumption are two things that can drift, and nothing else would notice: a
-    /// floor moved to `1e-9` changes an impossible observation's charge by 7 nats, which is a
+    /// **Pins the base-error floor at `1e-12`**, the value inherited from the deleted caller
+    /// (`var_calling::contamination_estimation::MIN_BASE_ERROR` at commit `d9e7b076`). That code
+    /// is gone, so this compares against a literal: it fails only when someone edits the
+    /// constant, and is there so that the edit is noticed. Nothing else would notice: a floor
+    /// moved to `1e-9` changes an impossible observation's charge by 7 nats, which is a
     /// plausible-looking number rather than a failure.
     ///
     /// **Production's ceiling is not applied here and so is not pinned here** — the generic row
     /// applies its own, after pooling; see `what_the_row_charges_a_poor_read_is_not_capped`.
     #[test]
-    fn the_floor_still_equals_productions() {
-        // Production's `var_calling::contamination_estimation::MIN_BASE_ERROR` at commit
-        // `d9e7b076`, frozen at promotion step C18.
+    fn the_base_error_floor_is_pinned_at_one_in_a_trillion() {
         const PRODUCTION_MIN_BASE_ERROR: f64 = 1e-12;
         assert_eq!(
             MIN_BASE_ERROR.to_bits(),
@@ -3074,13 +3068,11 @@ mod tests {
         )
         .expect("three reads are a denominator");
 
-        // **Through `charged_error`, which is what the row charges** — not through the capped
-        // reading beside it. Spec §3.2's calibrated property is *the average charged error
-        // equals the measured rate*, and the cap is what breaks it, so pinning the property on
-        // the capped function tests a claim only the other one makes. This fixture's reads sit
-        // well inside the cap, so both return the same number here and the test passed either
-        // way; that is exactly why it had to be moved rather than left to fail one day. (C1,
-        // 2026-08-24 — the row stopped using the capped reading and this test did not follow.)
+        // **Through `charged_error`, which is what the row charges.** Spec §3.2's calibrated
+        // property is *the average charged error equals the measured rate*, and a cap at a half
+        // would break it. (This test once went through a capped reading of the same error, which
+        // the row stopped using on 2026-08-24; this fixture's reads sit well inside the cap, so
+        // the test passed either way, which is why it had to be moved.)
         let charged = calibration.charged_error(q_sum, num_reads);
         let relative_gap = (charged - rate).abs() / rate;
 
@@ -3480,8 +3472,8 @@ mod tests {
     ///
     /// This test is a compile-time check wearing a runtime test's clothes: with the buffer and
     /// the row's scratch merged into one type, the third line is
-    /// `error[E0499]: cannot borrow as mutable more than once`, which is where the next
-    /// milestone would have discovered it.
+    /// `error[E0499]: cannot borrow as mutable more than once`, at the first caller that holds
+    /// both.
     #[test]
     fn one_caller_holds_the_evidence_and_a_row_scratch_at_once() {
         /// Stands in for the row function's signature: reads the evidence, writes a row,
@@ -3670,7 +3662,7 @@ mod tests {
         assert_eq!(scratch.model_scratch_mut().as_slice(), b"ACGT");
     }
 
-    // ---- C1: the contamination mixture's two halves ----
+    // ---- the contamination mixture's two halves ----
 
     fn a_read_group_contaminated_at(fraction: f64) -> ContaminationView {
         ContaminationView {
@@ -3797,7 +3789,7 @@ mod tests {
         let _ = one_batch(&fractions, &frequencies);
     }
 
-    /// **The lower half of the same bound, which had no test until C1's review widened the
+    /// **The lower half of the same bound, which had no test until a review widened the
     /// range to `NEG_INFINITY..=1.0` and watched the whole module stay green.**
     ///
     /// `new` is public and this assertion is the only guard. A negative frequency reaches the
@@ -3850,7 +3842,7 @@ mod tests {
     /// **One named way to say uncontaminated.** Two empty slices satisfy every other check in
     /// `new`, so without this a caller building both halves from a fit that returned nothing
     /// lands on the clean case through a constructor whose name says the opposite — and never
-    /// reads the paragraph where the decision is written down (C1's review).
+    /// reads the paragraph where the decision is written down (found in review).
     #[test]
     #[should_panic(expected = "is spelled `ContaminationMixture::uncontaminated`")]
     fn two_empty_halves_are_refused_because_that_case_has_a_name() {
@@ -3878,10 +3870,10 @@ mod tests {
             .contaminant_frequency_of(ReadGroupId(0), AlleleId(5));
     }
 
-    // ---- D1: the row's own scratch ----
+    // ---- the row's own scratch ----
 
     /// **The stride assertions are the whole reason `slot` exists**, and removing both left the
-    /// module green (D1's review): a cache prepared for one locus and read at another's stride
+    /// module green (found in review): a cache prepared for one locus and read at another's stride
     /// returns a real verdict from the wrong row rather than running off the end.
     #[test]
     #[should_panic(expected = "allele 4 is past the 3")]
@@ -4021,7 +4013,7 @@ mod tests {
         let _ = scratch.charged_error_of_partial(3);
     }
 
-    // ---- C2: the frequency the contaminant is drawn against ----
+    // ---- the frequency the contaminant is drawn against ----
 
     /// Four diploids at a two-allele locus: two carrying the reference twice, one
     /// heterozygous, one carrying the alternative twice.
@@ -4177,7 +4169,7 @@ mod tests {
     ///
     /// **Before the subtraction it returned its own genotype** — a lone heterozygote came back
     /// `[0.5, 0.5]`, so its own alternative reads were half-explained as a neighbour's, which
-    /// is a sample acting as its own contaminant. C2's review found it; the owner settled it
+    /// is a sample acting as its own contaminant. A review found it; the owner settled it
     /// the same day. This is the conservative answer and the right one: a library with nobody
     /// beside it has no contaminating population to be drawn from.
     #[test]
@@ -4198,7 +4190,7 @@ mod tests {
     /// **A batch is divided by its own copies, not by how many samples are in it** — and the
     /// fixtures that came before this one were blind to the difference, because every sample in
     /// them carried exactly two copies. Mutation testing found it: a divisor of *two copies per
-    /// sample* passed all 127 module tests (C2's review).
+    /// sample* passed all 127 module tests.
     ///
     /// This cohort mixes ploidies, which is what separates the two. Scoring the alternative
     /// homozygote leaves a tetraploid at 3:1 beside a diploid reference homozygote — five
@@ -4347,7 +4339,7 @@ mod tests {
         });
     }
 
-    // ---- C2: what each half of the producer refuses ----
+    // ---- what each half of the producer refuses ----
 
     /// A negative copy count is arithmetic that went wrong upstream, and the finiteness check
     /// alone does not catch it — mutation testing dropped the `>= 0.0` half and the module
@@ -4380,7 +4372,7 @@ mod tests {
 
     /// A copy table that is not a whole number of rows would leave the last batch short, and
     /// `chunks_exact_mut` drops the remainder — so the row would keep whatever it held. The
-    /// check is release-mode and had no test until mutation testing neutered it (C2's review).
+    /// check is release-mode and had no test until mutation testing neutered it.
     #[test]
     #[should_panic(expected = "a batch's row is 2 alleles wide")]
     fn a_copy_buffer_that_is_not_whole_rows_is_a_caller_bug() {
@@ -4424,7 +4416,7 @@ mod tests {
     /// are the same row.** The sum never writes a batch no sample names, so `out.fill(0.0)`
     /// leaves it at a zero total and it leaves through the frequency's no-evidence fallback —
     /// coming back as a legal-looking frequency that says the neighbours carry the reference.
-    /// C2's review built it: a table sized for three batches against a batching naming only the
+    /// A review built it: a table sized for three batches against a batching naming only the
     /// first returned `[0.999999999999, 1e-12]` for the other two, with nothing raised.
     #[test]
     #[should_panic(expected = "no sample ran in batch 1")]
@@ -4499,7 +4491,7 @@ mod tests {
         );
     }
 
-    // ---- C2: what the mixture refuses ----
+    // ---- what the mixture refuses ----
 
     /// A mixture whose batching names a batch its frequency table has no row for would read
     /// another batch's frequencies, or past the end. Checked at construction, so the row's
@@ -4541,7 +4533,7 @@ mod tests {
     /// **A mixture whose batching names fewer batches than its table has rows scores every
     /// library against the first**, and constructs cleanly without this check — the mirror of
     /// the producer's own, and the reason a defaulted batching cannot slip past both ends
-    /// (C2's review).
+    /// (found in review).
     #[test]
     #[should_panic(expected = "no read group ran in batch 1")]
     fn a_mixture_whose_batching_leaves_a_row_unread_is_a_caller_bug() {
@@ -4646,7 +4638,7 @@ mod tests {
         );
     }
 
-    // ---- C1: what the row charges a wrong read ----
+    // ---- what the row charges a wrong read ----
 
     /// **This method charges a poor read what it was minted with, past a half and all** — the
     /// cap belongs to the generic row, applied to the pooled observation (spec §3.3 as amended
@@ -4734,11 +4726,8 @@ mod tests {
 
     /// **`f64::max` returns the other operand when one is `NaN`**, so without the check a
     /// `NaN` summed log error comes back as [`MIN_BASE_ERROR`] — the most confident error
-    /// probability the module admits — and the row is finite, plausible and wrong.
-    ///
-    /// This is the one place [`ReadGroupCalibration::charged_error`] and
-    /// [`ReadGroupCalibration::charged_error`] needed different guards:
-    /// `f64::clamp` propagates a `NaN`, `f64::max` swallows it. Found by C1's review.
+    /// probability the module admits — and the row is finite, plausible and wrong. Found in
+    /// review.
     #[test]
     #[should_panic(expected = "at or below zero")]
     fn a_summed_log_error_that_is_not_a_number_is_a_caller_bug() {

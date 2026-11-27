@@ -4,7 +4,8 @@
 //!
 //! **This file holds the random-mating half.** Every genotype gets it. The other half, the
 //! branch for two copies that are the same one counted twice, is the inbreeding mixture that
-//! plan step B2 wraps around it (`doc/devel/ng/spec/calling_priors.md` §3.2).
+//! [`fill_inbreeding_mixture_log_priors`] wraps around it (`doc/devel/ng/spec/calling_priors.md`
+//! §3.2).
 
 use crate::calling::genotype_prior::{GenotypePriorModel, PriorRow};
 use crate::float;
@@ -43,13 +44,13 @@ use crate::types::{InbreedingF, LogProb};
 ///
 /// **Production has that shared primitive and a second, private copy of the same mathematics,
 /// and they do not agree to the last bit.** The shared one has exactly one shipping caller,
-/// the STR cohort's EM (`src/ssr/cohort/em.rs`); the SNP/indel engine runs
-/// `fill_log_indep_per_g_from` (`src/var_calling/posterior_engine.rs`) instead, which already
-/// takes a caller's `out` and a caller's `lgamma_alpha` — the same shape this port needed,
-/// arrived at independently and for the same stated reason. It **associates differently**,
-/// summing the per-allele terms and adding the multinomial coefficient last where this folds
-/// from the coefficient. Measured over a grid of 492 genotype values, **112 of them differ, by
-/// at most one unit in the last place**.
+/// the STR cohort's EM (`d9e7b076:src/ssr/cohort/em.rs`); the SNP/indel engine runs
+/// `fill_log_indep_per_g_from` (`d9e7b076:src/var_calling/posterior_engine.rs`) instead, which
+/// already takes a caller's `out` and a caller's `lgamma_alpha` — the same shape this port needed,
+/// arrived at independently and for the same stated reason. It **associates differently**, summing
+/// the per-allele terms and adding the multinomial coefficient last where this folds from the
+/// coefficient. Measured over a grid of 492 genotype values, **112 of them differ, by at most one
+/// unit in the last place**.
 ///
 /// So the parity test below pins this port to the *shared* primitive, and anyone building a
 /// differential against production's **SNP/indel** path should expect an ulp of disagreement
@@ -217,7 +218,8 @@ fn one_genotypes_log_prior(
 /// other**, which is the same mixture up to the shared constant a row is allowed to carry, and
 /// leaves an outbred sample's row bit-identical to the primitive's.
 ///
-/// A port of the mixture in `src/var_calling/posterior_engine.rs`, in its two-branch form.
+/// A port of the mixture in the deleted caller's `d9e7b076:src/var_calling/posterior_engine.rs`,
+/// in its two-branch form.
 ///
 /// **Derives `Debug` like every other public type in this module**, so a `&dyn GenotypePriorModel`
 /// can be printed: the seam exists to compare two priors, and a result that cannot name which one
@@ -235,7 +237,7 @@ impl GenotypePriorModel for MarginalizedDirichletPrior {
 ///
 /// **It exists so `F = 1` can be tested**, which is the mathematical edge of the model and a case
 /// no caller here can reach. **What keeps it away is the type, and nothing weaker**:
-/// [`InbreedingF`](crate::types::InbreedingF) is half-open `[0, 1)` — the tightening the
+/// [`InbreedingF`] is half-open `[0, 1)` — the tightening the
 /// prerequisites plan owed, **done 2026-08-23**, so
 /// [`InbreedingF::try_new(1.0)`](crate::types::InbreedingF::try_new) now returns an error and a
 /// coefficient of exactly 1 cannot be represented. The trait above therefore cannot deliver the
@@ -293,9 +295,8 @@ fn fill_inbreeding_mixture_log_priors(row: &mut PriorRow<'_>, inbreeding: f64) {
     // `1 − F` is floored because it is the one that can reach a *row entry*: at `F = 1` every
     // heterozygote's only branch is this one, so an unfloored `ln(0)` would write `−∞` into the
     // output. Spec §8 and arch §1.1 both say a genotype the prior rules out carries a finite, very
-    // negative log-prior rather than `−∞`, and the comparator arriving at plan step F1 is ported
-    // from `wright_genotype_log_priors`, which floors internally — so this is also what keeps the
-    // two implementations behind the seam on one convention.
+    // negative log-prior rather than `−∞` — the rule [`GenotypePriorModel`] states for every
+    // implementation, so a second prior written behind the seam keeps the same convention.
     //
     // `F` is *not* floored, because its `ln(0)` at `F = 0` never reaches a row entry: it makes the
     // identical-by-descent branch impossible, and `log_sum_exp_2` returns the other branch exactly.
@@ -527,7 +528,7 @@ mod tests {
     /// truncating the fold at six alleles. They move a row by 9.9 nats at a hundred samples and
     /// get 57 of 78 genotypes wrong on a twelve-allele locus.
     ///
-    /// **Production's rows are frozen since promotion step C21.** What
+    /// **Production's rows are frozen since the deleted caller was removed.** What
     /// `genetics::dirichlet_multinomial_log_priors` returned at every grid point, genotype by
     /// genotype, was recorded at commit `d9e7b076` into
     /// `testdata/dirichlet_multinomial_production.tsv` (1,904 values) and is read from there.
@@ -732,10 +733,10 @@ mod tests {
     /// same number.)
     ///
     /// **What this guards, and what it does not.** The reference entry it uses is written in
-    /// this test module, so nothing here stops a *seed builder* from choosing 10 — that is step
-    /// D3's to guard. What it pins is that this function turns the pair it is given into the
-    /// ratio the mathematics requires, and the last assertion shows it moving when the pair
-    /// does.
+    /// this test module, so nothing here stops a *seed builder* from choosing 10 — that is for
+    /// the seed builder's own tests to guard. What it pins is that this function turns the pair it
+    /// is given into the ratio the mathematics requires, and the last assertion shows it moving
+    /// when the pair does.
     #[test]
     fn the_heterozygote_is_twice_the_homozygous_alternative_at_every_realistic_diversity() {
         for alternative_total in [1e-4, 6e-4, 1e-3, 1e-2] {
@@ -881,7 +882,8 @@ mod tests {
     /// near 2,000 at a thousand diploid ones — and at 1.0 alone a `Σα` that hard-codes the
     /// reference entry is indistinguishable from the true one. Measured: such an implementation
     /// leaves this identity at 4.0e-15 with the reference pinned at 1.0, and misses by 0.95 once
-    /// it reaches 6,001. This is the same narrowing that B1's parity grid was widened to fix.
+    /// it reaches 6,001. This is the same narrowing that the production-parity grid was widened to
+    /// fix.
     ///
     /// Worst error over the whole grid on the correct code is **1.5e-11**, against the `1e-9`
     /// budget. The budget is not widened for the large totals because the term's own precision is
@@ -1029,7 +1031,8 @@ mod tests {
     ///
     /// **The estimator never delivers this**, so it tests the mathematics at its edge rather than a
     /// case the caller meets: production clamps its inbreeding estimate at 0.99, and ng's newtype is
-    /// half-open `[0, 1)` since `calling_prerequisites.md` A1. **This is the only path that reaches
+    /// half-open `[0, 1)` since 2026-08-23
+    /// (`doc/devel/ng/impl_plan/calling_prerequisites.md`). **This is the only path that reaches
     /// the limit**, because the bare-coefficient function admits `1` by design. The largest
     /// coefficient the type can carry is `1 − 2⁻⁵³`, where `1 − F` is about `1.1e-16` and the floor
     /// below never bites — what the seam does there is the sibling test's subject.
@@ -1221,10 +1224,11 @@ mod tests {
     ///
     /// [`at_full_inbreeding_only_the_homozygotes_survive_and_they_stand_at_the_concentration_ratio`]
     /// drives the bare coefficient, because [`InbreedingF`] is half-open `[0, 1)` since
-    /// `calling_prerequisites.md` A1 and `F = 1` cannot reach the seam at all. The greatest
-    /// coefficient that can is the `f64` immediately below one, where `1 − F` is `2⁻⁵³`: the
-    /// heterozygote's only branch loses exactly `ln 2⁻⁵³`, which is 36.74 nats or about **160 on
-    /// the Phred scale**, against the **60** two clean alternative bases at Q30 supply.
+    /// 2026-08-23 (`doc/devel/ng/impl_plan/calling_prerequisites.md`) and `F = 1` cannot reach the
+    /// seam at all. The greatest coefficient that can is the `f64` immediately below one, where
+    /// `1 − F` is `2⁻⁵³`: the heterozygote's only branch loses exactly `ln 2⁻⁵³`, which is 36.74
+    /// nats or about **160 on the Phred scale**, against the **60** two clean alternative bases at
+    /// Q30 supply.
     ///
     /// **So the type's range is not a cap on the estimate**, and this is where that is measured
     /// rather than asserted: impossible for any practical purpose, still a finite number, and

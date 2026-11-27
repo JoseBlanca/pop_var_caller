@@ -6,7 +6,7 @@
 //! ([`StutterRates`] plus the same-length share it derives).
 //! [`stutter_rates_for`] is the conversion, and it is the only place in ng that performs it.
 //!
-//! **The emission itself is not here.** `SsrEmissionModel` and Model A are Milestone F's,
+//! **The emission itself is not here.** `SsrEmissionModel` and its implementation live
 //! in `ssr_emission.rs` beside this file; this module is only the parameter adapter, which
 //! is why it is named for what it produces.
 //!
@@ -33,7 +33,7 @@ use crate::parameter_estimation::joint::ssr_fit::Slippage;
 
 /// How much stutter mass goes to **part-repeat** changes, as a fraction of the whole-repeat
 /// mass — production's `OUT_FRAME_REL`
-/// ([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs)).
+/// (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`).
 ///
 /// **A placeholder, not an estimate.** Production's own comment calls it "the Step-4 declared
 /// estimator … pinned to a real per-period estimate in Step 5", and that estimate was never
@@ -60,7 +60,7 @@ pub const PART_REPEAT_SHARE_OF_WHOLE: f64 = 0.05;
 /// nothing crashing (spec §4.2's first trap).
 ///
 /// Production makes the same conversion in the same words
-/// ([`hipstr.rs`](../../../../src/ssr/cohort/read_model/hipstr.rs): *"B's `decay` is the
+/// (`d9e7b076:src/ssr/cohort/read_model/hipstr.rs`: *"B's `decay` is the
 /// geometric continuation probability … so the matching conversion is `geom = 1 − decay`"*).
 /// Two tests here fail if it is dropped: `the_one_step_share_is_the_complement_of_the_fall_off`
 /// and `a_fitted_row_yields_a_distribution_that_sums_to_one`. **The sums-to-one tripwire in
