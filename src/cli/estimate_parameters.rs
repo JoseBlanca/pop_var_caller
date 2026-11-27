@@ -122,7 +122,8 @@ pub struct EstimateParametersArgs {
     #[arg(long, default_value_t = 2)]
     pub ploidy: u8,
 
-    /// The inbreeding coefficient of every sample, from 0 to 1, instead of fitting each sample's.
+    /// The inbreeding coefficient of every sample, from 0 up to but not including 1, instead of
+    /// fitting each sample's.
     ///
     /// Without it, each sample's coefficient is fitted from how much less heterozygous it is
     /// than the cohort's allele frequencies predict. Give it when you know how the material was

@@ -2,7 +2,7 @@
 
 pvc's accuracy has been compared with that of other tools on:
 
-- real human data from Genome in a Bottle (GIAB), and on
+- real human data from Genome in a Bottle (GIAB), and
 - simulations.
 
 The tools used in the comparison were:
@@ -13,6 +13,52 @@ The tools used in the comparison were:
 - GLnexus 1.4.1;
 - HipSTR 0.6.2;
 - Beagle 4.1 and STITCH 1.8.5.
+
+## Summary
+
+Each line is one benchmark; the sections below give the full results.
+
+- **HG002, one human genome, 5× to 50×.** DeepVariant makes the fewest errors at 30× and 50×. At
+  30× it gets 28,246 variants wrong, pvc 41,653, GATK 46,719 and freebayes 62,721. At 5× pvc
+  calls the most false SNPs: 15,236, against 4,726 to 8,239 for the others.
+- **The GIAB trio, 452 kb, 5× to about 300×.** At 5× the four callers get about as many
+  genotypes wrong, but GATK and DeepVariant leave about 150 SNP genotypes missing and pvc 12.
+  From 30× up no caller makes more than 1 Mendelian error, except DeepVariant's 5 at about 300×.
+- **Simulated STRs with PCR stutter, 50 samples at 30×.** pvc gets 99% of the variant genotypes
+  right and calls 1 false variant per 1,000 reference genotypes; the other four tools get 93% to
+  95% right and call 16 to 124.
+- **Simulated STRs without PCR stutter.** The callers are closer: at 30× in 50 samples pvc gets
+  100% right, the others 94% to 98%. In one sample GATK is level with pvc.
+- **GIAB's tandem-repeat benchmark, HG002, 5× to about 300×.** From 5× to 50×, pvc gets 46% to
+  89% of the STR genotypes right, DeepVariant 0 to 2 points fewer, and GATK, freebayes and HipSTR
+  fewer still. At about 300× DeepVariant and GATK are ahead, 91% against pvc's 90%.
+- **Imputation, simulated cohorts of 100 samples a group at 1× to 10×.** In the outbred group at
+  2×, pvc misses 1,425 of the variant genotypes with reads, STITCH 1,878 and GATK + Beagle 7,917;
+  but pvc calls 360 false variants there, against 123 for STITCH. In the F2 at 1×, STITCH misses
+  fewer than pvc, 513 against 1,137. On smaller simulated cohorts, of 10 to 50 samples, the results are in
+  [When it runs](neighbour_evidence.md#when-it-runs).
+- **Simulated inbreeding, 50 samples, F from 0 to 1, at 3×.** pvc gets 84.6% of the
+  non-reference genotypes right, GATK 64.6% and DeepVariant 65.0%. In the outbred group, though,
+  pvc calls 1,127 homozygotes heterozygous, GATK 9 and DeepVariant 120.
+- **Real tomato data.** There is no truth set for it, so this page gives no accuracy figure for
+  it.
+
+## How pvc was run and scored
+
+pvc version 909ea135 throughout. Every other tool was run as its documentation recommends, and
+freebayes's calls are kept at QUAL ≥ 20.
+
+| results | how pvc was run | how the calls were scored |
+|---|---|---|
+| HG002 whole genome, GIAB trio | psp mode, parameters estimated from the run's own samples; imputation off; `--call-satellites` (off by default) | pvc_eval 0.1.0 compares each sample's genotype at each locus with GIAB's truth, in its confident regions; only `PASS` calls count. RTG vcfeval 3.13 as a check. Mendelian errors are counted from the calls alone. |
+| GIAB tandem repeats | the same | the project's own scorer: both of the sample's sequences over each repeat, compared as repeat lengths |
+| simulated STRs | psp mode, parameters estimated, stutter included; imputation off | the project's own scorer: both sequences over the STR and 30 bases either side |
+| imputation | psp mode, parameters estimated; imputation forced on (`--refine-genotypes on`), and off for comparison | pvc_eval, each sample's genotype split by whether it had reads |
+| simulated inbreeding | psp mode with F estimated; psp mode with F = 0.9 stated; direct mode with `--defaults` (F = 0); imputation off; `--call-satellites` | each sample's genotype at every planted SNP |
+
+`--call-satellites` makes pvc call the SNPs and short indels inside repeats longer than 100
+bases, which it otherwise leaves uncalled, so that the comparison covers the same ground as the
+other callers.
 
 ## HG002, whole genome
 
@@ -47,6 +93,26 @@ is the read depth. The axes are on a log scale. The bottom-left corner is the be
 the truth has a variant and the call does not give its genotype. There were about 2,984,000 true
 SNPs and about 708,000 other true variants: indels, STRs and complex variants (740,000 to 758,000
 for freebayes, which writes nearby SNPs and indels as one complex record).*
+
+The same counts as recall and precision. **Recall** is the share of true variants whose genotype
+the call gives. **Precision** is the share of the variants called right among those called right
+or called where the truth is reference; a wrong genotype at a true variant counts against recall
+only, so this precision is a little higher than hap.py's or vcfeval's. Each cell gives recall,
+then precision:
+
+| depth | variants | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|---|
+| 5× | SNPs | 0.734 · 0.993 | 0.730 · 0.997 | 0.656 · 0.998 | 0.744 · 0.996 |
+| 10× | SNPs | 0.935 · 0.996 | 0.942 · 0.996 | 0.882 · 0.998 | 0.951 · 0.997 |
+| 30× | SNPs | 0.992 · 0.998 | 0.994 · 0.995 | 0.991 · 0.998 | 0.995 · 0.998 |
+| 50× | SNPs | 0.994 · 0.999 | 0.995 · 0.995 | 0.994 · 0.998 | 0.995 · 0.999 |
+| 5× | other | 0.655 · 0.993 | 0.641 · 0.995 | 0.58 · 0.997 | 0.667 · 0.994 |
+| 10× | other | 0.885 · 0.994 | 0.873 · 0.995 | 0.80 · 0.998 | 0.904 · 0.994 |
+| 30× | other | 0.985 · 0.998 | 0.984 · 0.996 | 0.96 · 0.998 | 0.992 · 0.999 |
+| 50× | other | 0.990 · 0.999 | 0.992 · 0.996 | 0.98 · 0.997 | 0.995 · 0.999 |
+
+*freebayes's recall on the other variants has two digits only, because its number of true
+variants is known only to lie between 740,000 and 758,000.*
 
 DeepVariant makes the fewest mistakes at 30× and 50×, and pvc the next fewest. At 5× pvc calls
 the most false variants. At 10× it calls about as many as GATK and DeepVariant, but misses more
@@ -98,6 +164,9 @@ Indels:
 At 5× the share of SNP sites with an error is about the same for the four callers: one in seven
 to one in nine. Above 5× the error rates fall quickly for every caller, and from 30× up all four
 callers have almost none.
+
+The trio's regions are small, 452 kb, so these counts are small too: from 0 to 68 a cell. A
+difference of a few errors between two callers says little.
 
 ## STRs
 
@@ -213,7 +282,9 @@ the homozygotes.
 
 pvc can use the other samples' haplotypes at the surrounding loci to refine each
 sample's genotypes or to fill missing data. It works out which samples' haplotypes the sample's
-two copies resemble along the genome, and uses that information as priors. The approach is similar to that of Beagle and STITCH.
+two copies resemble along the genome, and uses that information as priors. The approach is
+similar to that of Beagle and STITCH. The technical pages, and the option that turns it on
+(`--refine-genotypes`), call this imputation *refinement*; it is off by default.
 
 Three cohorts are simulated over one 4 Mb genome, with reads mapped by minimap2:
 
@@ -228,7 +299,7 @@ The tools compared:
 - **pvc** 909ea135, with refinement forced on (`--refine-genotypes on`);
 - **GATK + Beagle**: Beagle 4.1 (27Jan18.7e1) run on GATK's 4.6.0.0 calls, first to call genotypes from
   GATK's genotype likelihoods, then to phase them;
-- **STITCH** 1.8.5, which calls genotypes from the reads at GATK's SNP sites. Stitch leaves out the non-SNP variants.
+- **STITCH** 1.8.5, which calls genotypes from the reads at GATK's SNP sites.
 
 Beagle and STITCH were given the simulation's true recombination rate and, in the two
 populations, its true effective size. STITCH calls only SNPs, so the tables count SNPs only.
@@ -435,7 +506,8 @@ or fewer. Every error in the group's 10 samples, wrong and missing together:
   pvc calls 55% of the outbred group's heterozygotes right at 3×, against 71% with F estimated.
   Over all samples it still gets more right than with F = 0 (83.0% against 79.2%).
 - **GATK and DeepVariant call few homozygotes heterozygous at 3×, but leave many genotypes
-  missing.** At 3× GATK leaves 17,955 of the 45,056 heterozygotes without a genotype and
+  missing.** In the outbred group at 3×, pvc calls 1,127 homozygotes heterozygous, GATK 9 and
+  DeepVariant 120. But over all groups at 3×, GATK leaves 17,955 of the 45,056 heterozygotes without a genotype and
   DeepVariant 15,117; pvc leaves 2,267. Most of the gap at 3× and 5× is these missing genotypes.
   At 30× pvc and DeepVariant get 99.8% right, GATK 99.7%.
 - **At 15×, pvc makes the fewest errors in both groups.** Adding the three marks, at F = 1 pvc

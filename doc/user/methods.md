@@ -7,9 +7,9 @@ once.
 
 ![How evidence flows through pvc: a per-sample step that writes one psp file per sample, cohort steps that estimate the parameters and call jointly, and an optional refinement](figures/methods_signal_flow.svg)
 
-*The blue lane is done once per sample and never again. The orange lane is done over the whole
-cohort, and again when a sample is added. The grey lane is optional. [Calling](calling.md)
-compares this with direct mode.*
+*The lane "Per-sample pileup" is done once per sample and never again. The lane "Cohort calling"
+is done over the whole cohort, and again when a sample is added. The lane
+"Refinement/imputation" is optional. [Calling](calling.md) compares this with direct mode.*
 
 The steps, in order:
 
@@ -19,13 +19,18 @@ The steps, in order:
 2. **Per cohort: estimate the parameters** used as priors in calling: how often each library's
    bases are wrong, how inbred each sample is, how variable the population is, how often STRs
    stutter. These priors are estimated from the cohort's own reads, without calling a genotype
-   first (sections 6 and 7).
+   first (sections 6 and 7). This step is optional: without it, calling uses the built-in
+   values of [Estimated parameters](parameters.md#the-built-in-values---defaults), with F = 0
+   for every sample.
 3. **Per cohort: call.** The genome is divided into region types, each with its own likelihood
-   model of how a read arises from an allele (section 4). At each locus the candidate alleles are
+   model of how a read arises from an allele (section 4). At STRs pvc calls one locus whose
+   alleles are whole repeat sequences: this is the *STR path*. Everywhere else it calls SNPs and
+   indels: the *generic path*. At each locus the candidate alleles are
    chosen from all samples (section 5), and a loop alternates between the allele frequencies and
    the samples' genotypes until they agree (section 8). Qualities and site filters follow
    (sections 9 and 10).
-4. **Optionally, when asked for: refine.** Each sample's genotypes are called again (section 11)
+4. **Optionally, when asked for: refine.** This is what is often called imputation; these pages
+   call it *refinement*. Each sample's genotypes are called again (section 11)
    and phased again (section 12), using the information from the haplotypes that the other
    samples carry along the chromosome.
 
@@ -50,7 +55,7 @@ These are the main methods used by pvc:
   (section 8).
 - Site quality with penalties for sequencing artifacts, and a filter for hidden duplications
   (sections 9 and 10).
-- Optional refinement/imputation from the haplotypes the samples share (section 11).
+- Optional refinement from the haplotypes the samples share (section 11).
 - Phase from read pairs, extended by the refinement (section 12).
 
 ## 2. Read filters and read fixes
@@ -70,8 +75,8 @@ three quarters of its bases there have quality 15 or more.
 pvc adjusts the reads, their qualities and their alignments to avoid some known problems.
 
 - **Indels are left-aligned.** One deletion inside a run of identical bases can be written at
-  several positions, and mappers do not always choose the same one. On the generic path (the
-  SNP and indel path, section 4), pvc moves every indel of every read to its leftmost
+  several positions, and mappers do not always choose the same one. On the generic path, pvc
+  moves every indel of every read to its leftmost
   equivalent position, so all the reads that carry one indel show it in one place.
 - **Bases read past the end of the fragment are ignored.** When a DNA fragment is shorter than
   the read length, the sequencer reads through the fragment into the adaptor. pvc detects this
@@ -99,9 +104,9 @@ pvc adjusts the reads, their qualities and their alignments to avoid some known 
   estimated from the cohort's own reads (section 6); with `--defaults` it is 2. For a very poor
   base, the multiplication could give an error above 1 in 2: more likely wrong than right. pvc
   stops it at 1 in 2, where a base counts as no evidence for or against any allele. GATK's
-  base-quality recalibration (BQSR) solves the same problem with a table by reported quality,
-  machine cycle and sequence context, and needs a file of known variants. pvc's correction is
-  one number per read group and needs no known variants.
+  base-quality recalibration (BQSR; DePristo et al. 2011) solves the same problem with a table
+  by reported quality, machine cycle and sequence context, and needs a file of known variants.
+  pvc's correction is one number per read group and needs no known variants.
 - **At STRs, each read is aligned again.** A mapper places gaps without a model of repeats, so
   it can misjudge where a repeat ends in a read, or whether the read reaches past it at all.
   pvc takes the part of the read that the mapper placed over the repeat, plus 15 bases on each
@@ -119,13 +124,14 @@ bases are penalised in QUAL (section 9).
 
 ### What pvc does not do
 
-- **No BAQ.** BAQ (base alignment quality, from samtools) lowers the quality of bases near
-  possible indels. pvc does not apply it, and does not support reads that already carry it.
+- **No BAQ.** BAQ (base alignment quality, from samtools; Li 2011a) lowers the quality of
+  bases near possible indels. pvc does not apply it, and does not support reads that already carry it.
   BAQ lowers the bases beside an indel towards quality 0, so pvc would take the reads that show
   an indel in a short run of bases as almost certainly wrong. pvc warns when an alignment's
   header records a `samtools calmd` step that wrote BAQ over the base qualities.
-- **No local reassembly.** GATK's HaplotypeCaller rebuilds the reads of each active region
-  into haplotypes with a de Bruijn graph and aligns the reads to them again. pvc, like
+- **No local reassembly.** GATK's HaplotypeCaller (Poplin et al. 2018) rebuilds the reads of
+  each active region into haplotypes with a de Bruijn graph and aligns the reads to them again.
+  pvc, like
   freebayes, takes the mapper's alignment on the generic path, corrected only by
   left-alignment. This has two consequences. A variant the mapper aligned badly is not rescued.
   And a locus on the generic path can span at most 100 reference bases (`--max-locus-span`), so
@@ -188,30 +194,36 @@ is unknown. In a sample with genotype *g*, each read comes from one of the genot
 all equally likely. So the probability of a read that shows *o* is an average over the copies:
 
 ```
-P(read shows o | g) = (1 − c) · Σ_b (k_b / P) · e(o | b)  +  c · q(o)
+P(read shows o | g) = (1 − c) · Σ_b (k_b / m) · e(o | b, g)  +  c · q(o)
 
-e(o | o) = 1 − ε
-e(o | b) = ε / 3    when o and b differ by one substitution
-e(o | b) = ε        otherwise
+e(o | o, g) = 1 − ε
+e(o | b, g) = ε / 3    when o differs by one substitution from every allele in g
+e(o | b, g) = ε        otherwise
 ```
 
-*e(o | b)* is the probability that a read from a copy carrying *b* shows *o*. When the two are
-the same allele, the read is right, with probability 1 − ε. When they differ by one
+*e(o | b, g)* is the probability that a read from a copy carrying *b* shows *o*. When the two
+are the same allele, the read is right, with probability 1 − ε. When the read differs by one
 substitution, the read is wrong in one particular way: an error at that base could have
 produced any of the three other bases, so this one gets a third of ε. Any other difference,
-such as an indel, is charged the whole of ε.
+such as an indel, is charged the whole of ε. The third is given only when *o* is one
+substitution away from every allele the genotype carries: a read one substitution from one
+allele of a heterozygote and one indel from the other is charged the whole ε.
 
-*P* is the ploidy, and *k_b* the number of copies of allele *b* in *g*, so *k_b / P* is the
+*m* is the ploidy, and *k_b* the number of copies of allele *b* in *g*, so *k_b / m* is the
 chance that a read came from a copy carrying *b*. The sample's likelihood is the product over
 its reads.
 
 The last term is contamination. A share *c* of the read group's reads came from another
 individual. That individual shows allele *o* with probability *q(o)*, the allele's frequency in
 the rest of the cohort. *q* is re-estimated on every pass of the calling loop (section 8). *c*
-is zero unless it was estimated (section 6).
+and the calibration factor are estimated in section 6; with `--defaults`, *c* is 0 and the
+factor is 2.
 
-When *o* and *b* differ by one indel, ε is the read's uncalibrated error, because the
-calibration is estimated from substitutions.
+When *o* differs from the genotype's alleles by one indel, ε is the read's uncalibrated error,
+because the calibration is estimated from substitutions.
+
+A read that covers only part of the locus is a partial observation, as on the STR path: a copy
+whose allele agrees with the part the read shows gives it 1 − ε, any other copy ε.
 
 Reads of one read group that show the same allele are scored together at the geometric mean of
 their error probabilities, which is exact when they share one quality and an approximation
@@ -230,21 +242,27 @@ allele *a* gives that spelling is the product of two parts:
 - **The length.** If the read is *n* whole units away from the allele:
 
   ```
-  P(n ≠ 0)  = L · (share of that direction) · (1 − f) · f^(|n| − 1)
+  P(n < 0)  = L · u · (1 − ρ) · ρ^(|n| − 1)
+  P(n > 0)  = L · (1 − u) · (1 − ρ) · ρ^(n − 1)
   P(n = 0)  = 1 − L − (part-unit changes)
   ```
 
-  *L* is the stutter level, the share of reads that slip by whole units. The direction share
-  says how many of them are shorter and how many longer. *f* is the fall-off: each further unit
-  is *f* times as likely as the one before. A length change that is not a whole number of units
-  is treated as a sequencing indel. It has the same direction share and fall-off, and its total
-  probability is one twentieth of *L*, on top of *L*. *L*, the direction share and *f* are
-  estimated per class of repeat (unit length × number of copies). *L* is then multiplied by a factor
-  estimated for each read group and unit length (section 6). The built-in values are the same
-  HipSTR uses: 1 read in 20 a unit shorter and 1 in 20 a unit longer, each further unit 20
-  times rarer, and 1 in 100 a part of a unit shorter and 1 in 100 longer.
+  *L* is the stutter level, the share of reads that slip by whole units. *u* is the direction
+  share: the share of the slipped reads that are shorter than the allele. *ρ* is the fall-off:
+  each further unit is *ρ* times as likely as the one before. A length change that is not a
+  whole number of units is treated as a sequencing indel. *L*, *u* and *ρ* are estimated per
+  class of repeat (unit length × number of copies). *L* is then multiplied by a factor
+  estimated for each read group and unit length (section 6).
+
+  Part-unit changes are not estimated. Where the stutter was fitted, they have the same *u* and
+  *ρ*, and their total probability is fixed at one twentieth of *L*, on top of *L*: a stated
+  value, not a measurement. Where it was not, with `--defaults` and for any class the fit had no
+  numbers for, pvc uses HipSTR's built-in values unchanged (Willems et al. 2017): 1 read in 20 a
+  unit shorter and 1 in 20 a unit longer (*L* = 0.1), each further unit 20 times rarer, and 1 in
+  100 a part of a unit shorter and 1 in 100 longer, so the part-unit changes are one fifth of
+  *L*.
 - **The bases.** After the allele is brought to the read's length, each base matches with
-  probability 1 − ε and differs with ε/3. Here ε is not the read's base quality. It is a
+  probability 1 − ε_rep and differs with ε_rep/3. ε_rep is not the read's base quality. It is a
   substitution rate measured inside repeats, per class of repeat. Sequencers misread the 20
   bases that follow a run of 8 or more identical bases more often than other bases. For a read
   that spans the repeat, pvc adds an extra error rate there, estimated per read group.
@@ -252,13 +270,15 @@ allele *a* gives that spelling is the product of two parts:
 The probability of a read is then:
 
 ```
-P(read o | g) = (1 − λ − c) · Σ_a (k_a / P) · R(o | a)  +  λ · U  +  c · s(o)
+P(read o | g) = (1 − λ − c) · Σ_a (k_a / m) · R(o | a)  +  λ · U  +  c · s(o)
 ```
 
-*R* is the product of the two parts above. *λ* is the share of reads taken to fit no allele at
-all: reads from another place in the genome, or chimeric ones. It is 0.07 by default. Such a
-read is equally likely to show any length the candidates can reach (*U*). This term limits how
-much one odd read can pull a genotype. *c* is contamination, as on the generic path. Here,
+*R* is the product of the two parts above. *λ* is the weight given to reads that fit no allele
+at all: reads from another place in the genome, or chimeric ones. It is 0.07 unless edited in
+the parameters file, a value chosen by comparing genotype accuracy at several values. It is
+never estimated, and it is not a measurement of how many such reads there are. Such a read is
+equally likely to show any length the candidates can reach (*U*). This term limits how much one
+odd read can pull a genotype. *c* is contamination, as on the generic path. Here,
 though, the contaminant's allele *s(o)* is drawn from the lengths common in that class of
 repeat, and it does not change during the calling loop.
 
@@ -346,7 +366,7 @@ parameter values that make the observed reads most probable.
 For the positions of the generic path:
 
 ```
-L(parameters) = Π over positions of
+ℓ(parameters) = Π over positions of
       Σ over kinds of position
       ∫ over the allele frequency f
       Π over samples s  Σ over genotypes g   P(g | f, F_s) · P(reads of s | g, error rates)
@@ -363,22 +383,51 @@ L(parameters) = Π over positions of
 - *P(g | f, F_s)* is the genotype prior with the sample's inbreeding coefficient (section 7).
 
 The input data are the summaries written at the end of the psp files: about two million
-positions, the same in every sample. The search is an EM algorithm, sped up with Newton steps,
-run from three starting points that differ in the error rates they assume. It stops when the
-remaining step could raise the log-likelihood by less than 0.01.
+positions, the same in every sample. The search is an EM algorithm (Dempster et al. 1977), sped
+up with Newton steps, run from three starting points that differ in the error rates they assume.
+It stops when the remaining step could raise the log-likelihood by less than 0.01.
+`estimate-parameters` fits diploid samples only; at another ploidy, calling uses the built-in
+values.
 
-### What is estimated
+### What is estimated, and what is fixed
 
-| Quantity | For each | Method |
-|---|---|---|
-| Sequencing error rate, which gives the base-quality calibration | read group | the marginal likelihood above |
-| Inbreeding coefficient F | sample | the same fit |
-| Population diversity: the share of positions that vary and the distribution of allele frequencies | cohort | the same fit |
-| Contamination | read group | a second marginal likelihood, after the first |
-| Stutter level, direction and fall-off | class of repeat, with a multiplier of the level per read group and unit length | a marginal likelihood over the repeats |
-| Typical allele lengths and their spread between repeats | class of repeat | the same STR fit |
-| Substitution rate inside repeats | class of repeat | counted |
-| Extra errors after a run of one base | read group | counted |
+The first fit, the marginal likelihood above, has eight numbers for the whole cohort, two for
+each read group and one for each sample. The other numbers come from separate fits or counts.
+The last column says whether calling uses the number.
+
+| Quantity | For each | How it is obtained | Used in calling |
+|---|---|---|---|
+| Error rate at clean positions | read group | the first fit | yes, as the base-quality calibration factor |
+| Error rate at noisy positions | read group | the first fit | no |
+| Share of noisy positions | cohort | the first fit | no; the contamination fit leaves out the positions this fit judges more likely mismapped than not |
+| Homozygote excess, used as the inbreeding coefficient F | sample | the first fit | yes (section 7) |
+| Share of invariant positions; share of positions fixed for a non-reference base; the two shapes of the Beta distribution of the segregating allele frequencies | cohort | the first fit | yes, through the prior's seed (section 8) |
+| Share of duplicated positions; the two shapes of the Beta distribution of the share of samples that carry a duplication | cohort | the first fit | no |
+| Contamination | read group | a second marginal likelihood, after the first | yes |
+| Stutter level, direction share and fall-off | class of repeat, with a multiplier of the level per read group and unit length | a marginal likelihood over the repeats | yes |
+| Typical allele lengths and their spread between repeats | class of repeat | the same STR fit | yes, as the STR prior's seed (section 8) |
+| Substitution rate inside repeats | class of repeat | counted | yes |
+| Extra errors after a run of one base | read group | counted | yes |
+
+Some numbers that change genotypes are never estimated:
+
+| Fixed value | Where it acts |
+|---|---|
+| Weight of an STR read that fits no allele, λ = 0.07 | STR read likelihood (section 4) |
+| Part-unit stutter at one twentieth of the fitted level | STR read likelihood (section 4) |
+| The built-in values of `--defaults`: calibration factor 2, no contamination, F = 0, HipSTR's stutter, a seed of 1 and 1/1,000, a between-repeat share of 1/11, a substitution rate inside repeats of 1/1,000 ([Estimated parameters](parameters.md#the-built-in-values---defaults)) | wherever the fit gave no number |
+| Error rate of a read group without data, 1/1,000 | base-quality calibration |
+| The constants of the three QUAL penalties | section 9 |
+| The refinement's copying mismatch rate and the weight of its "none of them" template | section 11 |
+
+Every fitted number in the parameters file carries a `standard_error` where one could be
+computed: from how sharply the likelihood falls away from the number, or, for a counted rate,
+from the spread of the count. A paper can report it beside the value. Two pairs of numbers trade
+against each other along what the reads cannot see: the share of invariant positions against
+the first Beta shape, and the share of duplicated positions against the first carrier shape.
+Where the data do not separate them, the file marks both `separately_determined = false`, gives
+neither a standard error, and also gives the share of positions segregating (or duplicated)
+above a stated frequency, which is the number to quote.
 
 **Base-quality calibration.** The parameter fit calculates each read group's true error rate
 at clean positions. The calibration factor is that rate divided by the rate the reads claim.
@@ -387,11 +436,32 @@ read claims is the worse of its base and mapping qualities (section 2). A read g
 data gets a default error rate of 1 in 1,000.
 
 **Contamination.** Each read comes from the sample with probability 1 − *c* and from another
-individual with probability *c*. The fit sums over the genotypes of both; the contaminant's
-genotype is drawn at the cohort's allele frequencies. It keeps the *c*, between 0 and 0.5, that
-makes the reads most probable. It reports 0 unless a positive value explains the reads better.
-Only positions with reads in at least 8 samples and an allele frequency between 2% and 98% are
-used, so with fewer than 8 samples there is no estimate.
+individual with probability *c*. The fit sums over the genotypes of both, and draws them at
+different allele frequencies, following verifyBamID2 (Zhang et al. 2020):
+
+- *The sample's own genotype* is drawn, with its F, at allele frequencies of its own. pvc places
+  every sample on the cohort's main axes of variation, up to four (a principal-component analysis of
+  the samples' genotypes), and at each position fits the allele frequency as a straight line in
+  those coordinates, using every sample. A sample from a diverged group thus expects that
+  group's alleles. Scored against the pooled frequencies instead, the structure hides
+  contamination: on a simulated panel of four subpopulations at an F_ST of 0.2, a
+  sample contaminated
+  at 3% was then estimated at 0.5%.
+- *The contaminant's genotype* is drawn at the cohort's pooled frequencies, without inbreeding:
+  a contaminating library is whichever other sample was handled beside it, not one of similar
+  ancestry.
+
+The fit keeps the *c*, between 0 and 0.5, that makes the reads most probable, and reports 0
+unless a positive value explains the reads better. It uses only positions with reads in at least
+8 samples, a pooled allele frequency between 2% and 98%, and no sign of mismapping, and needs
+at least 100 of them; with fewer than 8 samples there is no estimate. A sample that alone
+supplies more than half of its own fitted frequency, such as one at the far end of an axis, is
+reported as *not identified*, and calling treats its read groups as uncontaminated.
+
+**The estimate is biased low.** On a simulated panel of 40 samples in four subpopulations, one
+sample contaminated at 3% was estimated at 2.6% at 30 reads a position and at 1.0% at 3 reads,
+while the 39 clean samples were at or near 0. It separates a contaminated sample from clean
+ones; it understates the share, most at low depth.
 
 **Stutter.** At each sampled repeat the parameter fit sums over the sample's possible pairs of
 allele lengths, with the sample's F, and asks which stutter numbers make the observed spread of
@@ -404,8 +474,9 @@ fit:
   unit;
 - repeats whose depth, or excess of reads of other lengths, suggests a duplicated sequence.
 
-The multiplier of each read group is pulled towards 1 when the
-read group has few reads, and is 1 when a sample has a single read group.
+The multiplier of each read group is pulled towards 1 when the read group has few reads: one
+fitted from fewer than about 20 slipped reads leans on that pull as much as on its reads. It is 1
+when a sample has a single read group.
 
 The substitution rate inside repeats is the number of mismatches divided by the number of
 bases compared, per class, pooled over all read groups, in reads that show the reference
@@ -425,20 +496,34 @@ P(AA) = p² + F·p·q        P(AB) = 2·p·q·(1 − F)        P(BB) = q² + F·
 
 In general, for any ploidy and any number of alleles, the prior is a mixture: with probability
 1 − F the genotype is drawn under random mating, and with probability F the sample is
-homozygous for one allele, drawn at its frequency.
+homozygous for one allele, drawn at its frequency. Above diploidy this is a simplification:
+the inbreeding term goes only to genotypes in which every copy is the same allele, so a
+tetraploid AABC gets none of it.
 
 With F = 0, the Hardy–Weinberg prior expects 2*pq* heterozygotes. In a selfing species there
 are almost no heterozygotes.
 
 F is estimated as one of the parameters of the fit in section 6: the F of each sample is the
 value that best explains how few, or how many, heterozygous positions its reads show, given the
-allele frequencies of the cohort. It is at least 0 and below 1. It is measured against the
-frequencies of the same cohort, so it is an inbreeding relative to that cohort.
+allele frequencies of the cohort. This is Wright's inbreeding coefficient (Wright 1922)
+measured as a homozygote excess, and three things follow from how it is measured:
+
+- **It is measured against the pooled frequencies of the whole cohort.** In a cohort with
+  population structure it therefore also takes up the deficit of heterozygotes that the
+  structure causes (the Wahlund effect). It is closer to Wright's F_IT (Wright 1951) than to an
+  individual's autozygosity, and can differ from a pedigree F or one from runs of homozygosity.
+  It is the quantity a prior built on the pooled frequencies needs.
+- **It is at least 0.** An excess of heterozygotes, as in an F1 hybrid or a clonal
+  heterozygous crop, is reported as 0.
+- **It is below 1.** At F = 1 the prior would give every heterozygote a probability of zero,
+  and no read evidence could produce a heterozygous call. For a fully inbred line, 0.99 puts
+  20 Phred against a heterozygote, which clean reads can overcome.
 
 With one sample, F cannot be estimated. One genome cannot show whether it has too few
 heterozygotes: there are no allele frequencies to compare with. F is set to 0 and marked
 `defaulted` in the parameters file. For an inbred line called alone, the user can supply the
-value with `--inbreeding`. The value must be below 1: pvc refuses `--inbreeding 1`.
+value with `estimate-parameters --inbreeding`. The value must be below 1: pvc refuses
+`--inbreeding 1`.
 
 The F of the parameters file is used in three places: the calling prior (section 8), the
 hidden-duplication filter (section 10), and the refinement (section 11). The stutter and
@@ -469,12 +554,21 @@ In words:
   copies are left out, so its reads are not counted twice, once as evidence and once as prior.
 - DM is the Dirichlet-multinomial distribution: the probability of drawing the genotype's
   copies from a population whose allele counts are α_s. With large counts it is the multinomial
-  of Hardy–Weinberg; with small ones it allows for the frequencies being uncertain.
+  of Hardy–Weinberg; with small ones it allows for the frequencies being uncertain. This is the
+  genotype-sampling distribution of Balding and Nichols (1995).
 - The seed is what is known before any sample is seen: a pseudo-count for the reference
-  allele and a much smaller one shared among the alternatives. It comes from the population
-  diversity estimated in section 6. With built-in parameters it is 1 for the reference and
-  0.001 shared among the alternatives. At an STR, the seed of each allele follows how common
-  its length is in repeats of that class.
+  allele and a much smaller one shared among the alternatives. It comes from the distribution
+  of allele frequencies fitted in section 6. The two pseudo-counts are chosen so that the
+  Dirichlet they define has the same mean alternative-allele frequency and the same expected
+  heterozygosity, E[2*f*(1 − *f*)], as the fitted distribution. On a population at neutral
+  equilibrium this gives 1 for the reference and θ, the heterozygosity, for the alternatives.
+  The alternatives' pseudo-count is shared out evenly among a site's alternative alleles, so a
+  site with three alleles is not taken as more variable than one with two. With built-in
+  parameters the seed is 1 for the reference and 0.001 shared among the alternatives.
+- At an STR, the seed of each length follows how common that length, counted from the reference
+  length, is in repeats of that class. Its total is fitted per class too, as how much the allele
+  lengths vary from one repeat to the next. The parameters file writes this as the
+  *between-repeat share*, 1/(1 + total): a total of 10, the built-in value, is a share of 1/11.
 - F_s enters as in section 7.
 - The expected copies are recomputed from the posteriors, and the loop repeats.
 
@@ -494,8 +588,8 @@ alleles that remain.
 
 ### Compared with GATK and freebayes
 
-GATK's HaplotypeCaller in gVCF mode first calls one sample at a time and writes its genotype
-likelihoods; no cohort exists yet. Joint genotyping then estimates the cohort's allele
+GATK's HaplotypeCaller in gVCF mode (Poplin et al. 2018) first calls one sample at a time and
+writes its genotype likelihoods; no cohort exists yet. Joint genotyping then estimates the cohort's allele
 frequencies with a loop like pvc's. It alternates between genotype posteriors given the
 frequencies, and frequencies given the expected allele counts. Its prior is a set of fixed
 pseudo-counts, and it stops when no expected count moves by more than 0.1. Four things differ.
@@ -512,11 +606,11 @@ pseudo-counts, and it stops when no expected count moves by more than 0.1. Four 
   of its prior.
 - GATK's prior assumes Hardy–Weinberg. pvc's has F per sample.
 
-freebayes does not iterate allele frequencies. Instead, it searches over combinations of
-genotypes, one per sample. It starts from each sample's most likely genotype and tries
+freebayes (Garrison and Marth 2012) does not iterate allele frequencies. Instead, it searches
+over combinations of genotypes, one per sample. It starts from each sample's most likely genotype and tries
 neighbouring combinations, changing one sample at a time. Each combination is scored by the
 samples' likelihoods times a prior on the combination. That prior includes the probability of
-its allele counts under a neutral population model (Ewens' sampling formula) and a
+its allele counts under a neutral population model (Ewens' sampling formula; Ewens 1972) and a
 Hardy–Weinberg term. The number of combinations grows exponentially with the number of
 samples, so they are searched, not enumerated. The best combination found decides which
 alternative alleles the site carries, and QUAL comes from the posteriors of the combinations
@@ -535,23 +629,36 @@ allele, given all the reads. That probability is computed directly. It is not th
 each sample's probability of being homozygous for the reference. Each sample's likelihoods are
 reduced to the likelihood of carrying 0, 1 or 2 non-reference copies (up to the ploidy). These
 are combined over the samples into the likelihood of each total number of non-reference copies
-in the cohort. A prior is applied to that total, built from the same seed as in section 8. QUAL
-is the posterior probability of a total of zero. The prior is on the alleles' frequency in the
-population, not on each sample separately, so QUAL does not rise merely because many samples
-match the reference.
+in the cohort, the dynamic programme of Li (2011b). A prior is applied to that total, built
+from the same seed as in section 8. This value is the posterior probability of a total of
+zero, what GATK computes as the probability that the cohort's allele count is zero.
+
+A sample whose reads give every genotype the same likelihood, such as one with no reads, drops
+out of the calculation exactly. The prior sets how much read evidence a site needs before its
+quality climbs above 0: the prior odds against the site being variable. At θ = 1/1,000 they are
+28 Phred at one diploid sample, 23 at 63 and 20 at 3,000; at θ = 1/100, 18, 13 and 10.
 
 Three penalties are then subtracted, each a test for a known kind of artifact. Each looks at
-the reads of the main alternative allele, pooled over the called samples.
+the reads of the main alternative allele, pooled over the called samples, and charges the
+Phred-scaled probability of a result at least as far from what is expected.
 
 | Penalty | The artifact | The test |
 |---|---|---|
-| `ABPEN` | too few alternative reads for the genotypes called | the alternative reads against the share the called genotypes predict; only a shortfall is charged |
-| `SPPEN` | alternative reads on one strand, or all at one end of the reads | the alternative reads' strand and position in the read against those of the reference reads |
-| `BQPEN` | the same base misread in many reads, typically late in the read beside a run of G or C | the share of alternative reads with a base quality below 20 against the share among the reference reads |
+| `ABPEN` | too few alternative reads for the genotypes called | the alternative reads against the share the called genotypes predict, a two-sided binomial tail; only a shortfall is charged, and the test is skipped where the genotypes predict 90% alternative reads or more |
+| `SPPEN` | alternative reads on one strand, or all at one end of the reads | the share of alternative reads on the forward strand, and the share placed mostly left of the site (an idea from freebayes), each against the reference reads' share as a two-sided beta-binomial tail; the larger of the two, times 4 |
+| `BQPEN` | the same base misread in many reads, typically late in the read beside a run of G or C | the share of alternative reads with a base quality below 20 against the share among the reference reads, a one-sided beta-binomial tail, times `--low-base-quality-weight` (1 by default); only an excess is charged |
 
-`SPPEN` and `BQPEN` are not charged at 3 alternative reads or fewer, where the tests have no
-power, and grow to full strength at 7. STR records carry no penalties. [The
-VCF](vcf.md#qual-and-gq) lists the fields.
+The beta-binomial tests allow for the reference reads' share being itself an estimate: it is
+the reference reads' counts plus a prior worth 10 reads (an even strand split, or the site's
+pooled share for the position) or 30 reads (at 2 low-quality reads in 100). The strand test is
+weighted 4 times because QUAL grows by about 30 Phred with each alternative read and the tail of
+a one-sided pile-up by a few. `SPPEN` and `BQPEN` are not charged at 3 alternative reads or
+fewer, where the tests have no power, and grow linearly to full strength at 7. STR records carry
+no penalties.
+
+The written QUAL is the value before penalties minus the three, at least 0 and at most 9999.
+It is no longer a probability: it is a score that ranks sites, which equals the probability
+above only where every penalty is 0. [The VCF](vcf.md#qual-and-gq) lists the fields.
 
 A site is written when its QUAL after penalties is at least `--min-site-quality` (1 by
 default) and at least one sample is called with an alternative allele.
@@ -581,7 +688,8 @@ also estimates how common hidden duplications are among the called sites: over t
 locally in windows of 50 kb by default, because duplications tend to cluster. Ratio and rate
 together give each site's probability of being a hidden duplication (`PARALOG_POST`). pvc ranks
 the sites by that probability and removes them from the top down. It stops before the expected
-share of true variants among the removed sites would exceed 1 in 100 (`--hidden-dup-fdr`). With
+share of true variants among the removed sites would exceed 1 in 100 (`--hidden-dup-fdr`), a
+false discovery rate computed from the sites' probabilities (Newton et al. 2004). With
 `--hidden-dup-tag` the removed sites are kept and marked `hiddenDup` instead.
 
 This filter is the reason the calls of a run wait on disk until the whole genome is called
@@ -594,19 +702,19 @@ Other filters:
 - `EMNoConv` marks a site where the loop of section 8 did not settle.
 - `tooManyAlleles` marks an STR where the limit of 32 candidates left alleles out.
 
-## 11. Refinement/imputation
+## 11. Refinement
 
 Calling treats each locus alone. Yet the samples of a cohort share stretches of chromosome,
 and that fact can be used to improve the genotypes. For instance, a sample's genotype at a
 site with one read could be settled by taking into account the genotypes of the other samples
-that share the same haplotype. The optional **neighbour-evidence pass** uses that kind of
-information. The haplotypes of the other samples act as a prior, and the sample's own genotype
-likelihoods as the evidence. Where a sample has no reads at a site, the posterior is the prior
-alone: what the haplotypes it copies predict.
+that share the same haplotype. The optional **refinement**, what is often called imputation,
+uses that kind of information. The haplotypes of the other samples act as a prior, and the
+sample's own genotype likelihoods as the evidence. Where a sample has no reads at a site, the
+posterior is the prior alone: what the haplotypes it copies predict.
 
 Along a chromosome, each of a sample's two copies is modelled as a mosaic of *templates*:
 stretches copied from haplotypes that other samples carry. This is the copying model of Li and
-Stephens that most imputation tools use. Three things are particular to pvc:
+Stephens (2003) that most imputation tools use. Three things are particular to pvc:
 
 - The templates come from the cohort itself. For each sample and each window of the
   genome, up to 16 other samples are chosen, those that agree best with it over stretches of
@@ -622,7 +730,21 @@ Stephens that most imputation tools use. Three things are particular to pvc:
   autozygous stretches: pvc keeps the values that better fit the sample's first 5,000
   informative sites.
 
-The pass works on the calls, not on the alignments.
+The model's numbers, between two sites *d* bases apart:
+
+- A copy keeps its template with probability e^(−*d*/*S*), where *S* is the typical length of a
+  copied stretch (30 or 300 kb, above). A copy that changes template lands on the "none of them"
+  template with probability 1 in 100,000, and on the others in proportion to the stretches of
+  the window over which each agreed best with the sample.
+- The autozygous state forms runs of typical length *R*, chosen per sample from 10 kb, 30 kb,
+  100 kb, 300 kb, 1 Mb and 3 Mb, and the gaps between runs have typical length
+  *R*·(1 − F)/F, so that over a long distance the share of the autozygous state is F. F is the
+  parameters file's, held between 0.01 and 0.99 and not re-estimated.
+- A template's allele differs from the copy's with probability 0.01.
+
+The 1 in 100,000 and the 0.01 are fixed values, not estimates.
+
+The refinement works on the calls, not on the alignments.
 
 | Input | Used for |
 |---|---|
@@ -635,14 +757,19 @@ The pass works on the calls, not on the alignments.
 Reads do not enter a genotype's evidence a second time: they already made the likelihoods.
 
 The genome is taken in windows of 2 Mb, with 1 Mb of margin on each side. On a large cohort the
-windows are shortened, down to 500 kb, to keep the pass within its memory budget
-(`--refine-window-bytes`). In each window the pass makes five rounds. In the first, the
+windows are shortened, down to 500 kb, to keep the refinement within its memory budget
+(`--refine-window-bytes`). In each window the refinement makes five rounds. In the first, the
 templates are the other samples' genotype posteriors. In each round, every sample is solved
 against the others' current haplotypes. A forward–backward pass over its sites gives the
 probability of each state. One path of states is drawn at random, and the sample's two
 haplotypes are estimated along that path. From the second round on, the templates are those
-drawn haplotypes. The genotype written is the average posterior of rounds two to five. The
-random draws are seeded, so a run gives the same output at any number of threads.
+drawn haplotypes. Where a template copied this same sample in the round before, and the
+sample's own reads leave its genotype unsure, that template is read with the cohort's
+frequencies in place of the stretch it copied, so a sample does not count its own reads twice.
+Drawing paths makes the method a sampler, like Beagle 4.1's, not an exact calculation: the
+genotype written is the average of the posteriors of rounds two to five, not a converged
+posterior. The random draws are seeded, so a run gives the same output at any number of
+threads.
 
 It applies to SNPs, indels and STRs alike, at sites with any number of alleles, in diploid
 samples only.
@@ -655,15 +782,27 @@ samples only.
 | STITCH | the reads, at a given list of biallelic SNPs | *K* ancestral haplotypes, estimated; no panel | EM over the ancestral haplotypes; built for low coverage |
 | pvc | genotype likelihoods; read pairs for the phase | up to 16 other samples of the cohort per window; no panel | hidden Markov model with an autozygous state; five rounds of sampled haplotypes |
 
-Like Beagle, pvc starts from genotype likelihoods and needs a caller before it; in pvc, that
-caller is pvc itself. Like STITCH, it needs no panel and is aimed at many samples at low
-depth. Unlike both, it carries each sample's inbreeding in the model. Unlike STITCH, it is
-not limited to biallelic SNPs.
+Beagle 4.1 (Browning and Browning 2016) is compared rather than Beagle 5 because it takes
+genotype likelihoods. STITCH is Davies et al. (2016). Like Beagle, pvc starts from genotype
+likelihoods and needs a caller before it; in pvc, that caller is pvc itself. Like STITCH, it
+needs no panel and is aimed at many samples at low depth. Unlike both, it carries each
+sample's inbreeding in the model. Unlike STITCH, it is not limited to biallelic SNPs.
 
-The pass is off by default and runs only when asked for with `--refine-genotypes`.
+The refinement is off by default and runs only when asked for with `--refine-genotypes`.
 
 [Accuracy](accuracy.md#imputation-genotype-refinement-and-filling) compares pvc with GATK
 followed by Beagle, and with STITCH, on simulated inbred and outbred cohorts.
+
+**In outbred cohorts the results are mixed, and measured only in simulations.** In an outbred
+population of 400 samples simulated with msprime (100 samples each at 30×, 10×, 5× and 2×), the
+refinement cut the variant genotypes missed at 2× from 12,220 to 1,546, and 7 of 94,860 phase
+links were wrong ([Accuracy](accuracy.md#imputation-genotype-refinement-and-filling)). In a
+cohort of 40 samples from the same kind of simulation, all at 2×, it got more genotypes right
+(29,381 to 31,378) but fewer heterozygotes (7,521 to 7,042). Earlier runs, of an older version,
+on cohorts built from 64 founder haplotypes at 3×, found it removed 13% of the wrong genotypes
+at 50 samples and gave 74% more at 10 samples, and 4.7% of its phase links wrong at 50 samples.
+[Genotypes from neighbouring sites](neighbour_evidence.md#when-it-runs) gives the details. This
+is why `--refine-genotypes auto` runs it only on inbred cohorts.
 
 ## 12. Phase
 
@@ -682,7 +821,7 @@ phase there is when the refinement does not run, including with one sample.
 
 **From the cohort.** The refinement estimates each sample's two haplotypes (section 11). But
 one estimate is one random draw, and a link between two sites is worth writing only if it is
-stable. So the pass draws 36 paths per sample over its rounds. It links two neighbouring
+stable. So the refinement draws 36 paths per sample over its rounds. It links two neighbouring
 heterozygous genotypes when at least 80% of the paths agree on the arrangement
 (`--phase-min-path-agreement`).
 
@@ -716,14 +855,14 @@ at the ends.
 | Read fixes (section 2) | unchanged: all are per read | unchanged | unchanged | at most `--max-depth` reads per read group are kept at a position; a locus deeper than that is not called |
 | Candidate alleles (5) | the bar applies to that sample alone | one clear carrier is enough for the whole cohort; at most 6 alleles, so rare ones can be left out at very variable sites | the 2-read minimum decides: a heterozygote needs 2 reads of the allele in some sample | the 10% share decides: alleles under 10% of every sample's reads, such as low-level mosaics, are not considered |
 | Error rate and calibration (6) | estimated | estimated; the fit reads every sample at the sampled positions | estimated, with wider uncertainty per read group | estimated |
-| Contamination (6) | not estimated, nor with fewer than 8 samples: there is no cohort to draw the contaminant from | estimated | needs positions covered in at least 8 samples | estimated |
-| Inbreeding F (7) | not estimable: set to 0 and marked `defaulted`; supply a value below 1 with `--inbreeding` | estimated per sample | estimated: many positions make up for few reads at each | estimated |
+| Contamination (6) | not estimated, nor with fewer than 8 samples: there is no cohort to give each sample its expected allele frequencies or to draw the contaminant from | estimated | needs positions covered in at least 8 samples | estimated |
+| Inbreeding F (7) | not estimable: set to 0 and marked `defaulted`; supply a value below 1 with `estimate-parameters --inbreeding` | estimated per sample | estimated: many positions make up for few reads at each | estimated |
 | Population diversity (6) | estimated | estimated | estimated | estimated |
 | Stutter (6) | estimated; the spread of allele lengths between repeats is not, and takes a built-in value | estimated | estimated, since reads are pooled over the repeats of a class | estimated |
 | Calling loop (8) | the prior is the seed alone, so the loop settles at once | cost in proportion to the samples; rare alleles get a prior that reflects their rarity | the prior carries much of the weight, so F and the allele frequencies matter most here | the reads decide; the prior changes few genotypes |
-| QUAL (9) | the probability that this sample is not homozygous for the reference | does not rise with the number of samples matching the reference | `SPPEN` and `BQPEN` are off at 3 alternative reads or fewer | all penalties at full strength |
+| QUAL (9) | the probability that this sample is not homozygous for the reference | samples without reads do not change it; the prior asks for less evidence as the cohort grows, 20 Phred at 3,000 samples against 28 at one (at θ = 1/1,000) | `SPPEN` and `BQPEN` are off at 3 alternative reads or fewer | all penalties at full strength |
 | Hidden-duplication filter (10) | runs | runs | runs with less power: at low depth a sample's depth at one site is noisy | runs |
-| Refinement (11) | cannot run | 16 templates per sample whatever the cohort size; the window shortens to bound memory | where it helps most, in inbred cohorts | changes little: the reads already settle the genotypes |
+| Refinement (11) | cannot run | 16 templates per sample whatever the cohort size; the window shortens to bound memory | where it helps most, in inbred cohorts; in outbred cohorts results are mixed (section 11) | changes little: the reads already settle the genotypes |
 | Phase (12) | from reads only | from the cohort and from reads | few read pairs cover two sites: from reads alone, 20 of 289 heterozygous SNPs (7%) were phased in 100 regions of the human sample HG002 at 3× | from reads alone, 197 of 289 (68%) in the same regions at 30×, and little more beyond, because 32 reads per site are kept for phasing |
 
 A single sample at low depth is the hardest case, and the weakest: there is no cohort to give
@@ -731,3 +870,40 @@ allele frequencies, F or contamination, and few reads to outweigh the prior. In 
 prefers to leave a genotype uncalled, or a parameter marked `defaulted`, rather than write a
 confident value it has no evidence for. [Accuracy](accuracy.md) reports the measured accuracy
 in each of these cases.
+
+## References
+
+- Balding DJ, Nichols RA (1995). A method for quantifying differentiation between populations at
+  multi-allelic loci and its implications for investigating identity and paternity. *Genetica*
+  96:3–12.
+- Browning BL, Browning SR (2016). Genotype imputation with millions of reference samples.
+  *American Journal of Human Genetics* 98:116–126.
+- Davies RW, Flint J, Myers S, Mott R (2016). Rapid genotype imputation from sequence without
+  reference panels. *Nature Genetics* 48:965–969.
+- Dempster AP, Laird NM, Rubin DB (1977). Maximum likelihood from incomplete data via the EM
+  algorithm. *Journal of the Royal Statistical Society, Series B* 39:1–38.
+- DePristo MA, Banks E, Poplin R, et al. (2011). A framework for variation discovery and
+  genotyping using next-generation DNA sequencing data. *Nature Genetics* 43:491–498.
+- Ewens WJ (1972). The sampling theory of selectively neutral alleles. *Theoretical Population
+  Biology* 3:87–112.
+- Garrison E, Marth G (2012). Haplotype-based variant detection from short-read sequencing.
+  arXiv:1207.3907.
+- Li H (2011a). Improving SNP discovery by base alignment quality. *Bioinformatics*
+  27:1157–1158.
+- Li H (2011b). A statistical framework for SNP calling, mutation discovery, association mapping
+  and population genetical parameter estimation from sequencing data. *Bioinformatics*
+  27:2987–2993.
+- Li N, Stephens M (2003). Modeling linkage disequilibrium and identifying recombination hotspots
+  using single-nucleotide polymorphism data. *Genetics* 165:2213–2233.
+- Newton MA, Noueiry A, Sarkar D, Ahlquist P (2004). Detecting differential gene expression with
+  a semiparametric hierarchical mixture method. *Biostatistics* 5:155–176.
+- Poplin R, Ruano-Rubio V, DePristo MA, et al. (2018). Scaling accurate genetic variant discovery
+  to tens of thousands of samples. bioRxiv 201178.
+- Rubinacci S, Ribeiro DM, Hofmeister RJ, Delaneau O (2021). Efficient phasing and imputation of
+  low-coverage sequencing data using large reference panels. *Nature Genetics* 53:120–126.
+- Willems T, Zielinski D, Yuan J, Gordon A, Gymrek M, Erlich Y (2017). Genome-wide profiling of
+  heritable and de novo STR variations. *Nature Methods* 14:590–592.
+- Wright S (1922). Coefficients of inbreeding and relationship. *American Naturalist* 56:330–338.
+- Wright S (1951). The genetical structure of populations. *Annals of Eugenics* 15:323–354.
+- Zhang F, Flickinger M, Taliun SAG, et al. (2020). Ancestry-agnostic estimation of DNA sample
+  contamination from sequence reads. *Genome Research* 30:185–194.

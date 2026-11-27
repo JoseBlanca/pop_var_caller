@@ -23,8 +23,13 @@ it there. If the reference's directory is read-only, you can write it elsewhere 
 and pass `--catalog` to every later command.
 
 `repeat-catalog` uses one thread by default, because each thread holds a whole chromosome in
-memory: six threads on the human genome need more than 16 GB. One thread builds the human
-catalogue in under two minutes. The catalogue is the same at any thread count.
+memory. `--threads` sets more; the catalogue is the same at any thread count. Measured:
+
+| genome | threads | time | peak memory |
+|---|---|---|---|
+| human, GRCh38 | 1 | about 40 s | about 1.4 GB |
+| human, GRCh38 | 6 | about 12 s | about 4.7 GB |
+| tomato, SL4.0 (782 Mb, 13 chromosomes; 6,441,172 repeats) | 1 | 17 s | 484 MiB |
 
 ## The alignments
 
@@ -49,6 +54,14 @@ the sample, the read-group `ID` and the file name.
 
 In psp mode the sample name becomes a file name, so a name that is empty, is `.` or `..`, or
 contains `/` is refused. Dots elsewhere in a name, as in `S.1`, are fine.
+
+## Regions
+
+`--regions` takes a BED file: the first three columns are the chromosome, as named in the FASTA,
+and the start and end, counted from 0 with the end excluded (the BED convention). Further columns,
+blank lines, `#` comments and `track` or `browser` lines are ignored. Intervals that overlap or
+touch are merged, and an end past the chromosome's end is cut back to it. A chromosome not in the
+reference is refused.
 
 ## Read filters
 

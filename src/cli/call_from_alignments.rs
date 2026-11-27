@@ -131,8 +131,9 @@ pub struct CallFromAlignmentsArgs {
 
     /// Call with the numbers built into pvc instead of a parameters file.
     ///
-    /// These assume no base-quality miscalibration, no contamination and no inbreeding, and use
-    /// built-in repeat stutter rates. Fitted numbers come from psp mode, through
+    /// These double every base's reported error probability (Illumina qualities are taken to be
+    /// optimistic by about a factor of two), and assume no contamination and no inbreeding. They
+    /// use built-in repeat stutter rates. Fitted numbers come from psp mode, through
     /// `pvc estimate-parameters`.
     #[arg(long)]
     pub defaults: bool,
