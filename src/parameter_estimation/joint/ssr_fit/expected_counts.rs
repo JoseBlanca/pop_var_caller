@@ -484,7 +484,7 @@ fn ln_reads(ln_chances: &[f64], reads: &[u32]) -> f64 {
 ///
 /// It holds no prior. A genotype's weight in a round is this likelihood times the genotype's prior
 /// ([`GenotypePrior`]), multiplied where it is read, so a step that moves only the shares or the
-/// spread reuses the row as it is.
+/// concentration reuses the row as it is.
 ///
 /// A view into [`ScoredDistinctRows`], which holds every row's likelihoods in one array.
 #[derive(Clone, Copy)]
@@ -517,7 +517,7 @@ struct RowWeights {
 /// distribution at every slip rate a read group is scored at, the log chance of a read in each
 /// bucket under each genotype, and where the slipped reads land. Everything in it depends on the
 /// stutter and the read groups' multipliers alone, so the rows scored with it serve every set of
-/// shares and spread ([`ScoredDistinctRows`]).
+/// shares and concentration ([`ScoredDistinctRows`]).
 ///
 /// **One slip rate for a pooled table, one for each distinct multiplier for a keyed one.** Read
 /// groups at the same multiplier share their rate's distributions, so a keyed table at every
@@ -782,10 +782,10 @@ impl ReadModel {
     }
 }
 
-/// **Each genotype's prior at a round's allele-length shares and spread**, split into the part
-/// where a sample's two copies are one draw (identical by descent, or drawn alike from the tract)
-/// and the part where they are two. A sample's homozygote excess, which weighs the two parts,
-/// comes in with the sample ([`Self::add_sample`]).
+/// **Each genotype's prior at a round's allele-length shares and concentration**, split into the
+/// part where a sample's two copies are one draw (identical by descent, or drawn alike from the
+/// tract) and the part where they are two. A sample's homozygote excess, which weighs the two
+/// parts, comes in with the sample ([`Self::add_sample`]).
 struct GenotypePrior {
     /// The allele's share for a homozygote, zero for a heterozygote; in `genotypes` order.
     one_draw: Vec<f64>,
@@ -870,10 +870,10 @@ impl GenotypePrior {
 /// calling one: at 960 read groups on 32 threads, freeing them took 21 of the fit's 78 seconds,
 /// more than at one thread (8 seconds), and longer than scoring the rows.
 ///
-/// **Why it is kept apart from the shares and the spread.** Scoring the rows is the costly part of
-/// a round and depends on the stutter alone. The standard errors take steps in the shares and in F
-/// at fixed stutter, and these all read one scoring of the class instead of scoring it again for
-/// each step ([`Self::expected_counts`]).
+/// **Why it is kept apart from the shares and the concentration.** Scoring the rows is the costly
+/// part of a round and depends on the stutter alone. The standard errors take steps in the shares
+/// and in F at fixed stutter, and these all read one scoring of the class instead of scoring it
+/// again for each step ([`Self::expected_counts`]).
 pub(super) struct ScoredDistinctRows<'a> {
     distinct: &'a DistinctRows,
     model: std::borrow::Cow<'a, ReadModel>,
@@ -954,7 +954,7 @@ impl<'a> ScoredDistinctRows<'a> {
     }
 
     /// **One round's expected counts over the whole class** at the scored stutter, the
-    /// allele-length shares `shares` and the spread `concentration`
+    /// allele-length shares `shares` and the concentration
     /// ([`expected_counts_by_distinct_rows`]).
     pub(super) fn expected_counts(&self, shares: &[f64], concentration: f64) -> Counts {
         let (distinct, model) = (self.distinct, &self.model);
@@ -1064,7 +1064,7 @@ impl<'a> ScoredDistinctRows<'a> {
 impl ScoredDistinctRows<'_> {
     /// **The genotype each sample's weights put highest**: for every (tract, sample) with reads,
     /// in the order of `evidence.tracts` then each tract's samples, the genotype with the largest
-    /// weight at the scored stutter, the shares `shares` and the spread `concentration`.
+    /// weight at the scored stutter, the shares `shares` and the concentration.
     ///
     /// The weights are the expectation step's own ([`ReadModel::counts_of`]): the row's
     /// likelihood times the genotype's prior, its one-draw and two-draw parts mixed by the
@@ -1213,7 +1213,7 @@ pub(super) struct TractOffLengthReads {
 }
 
 /// **One round's expected counts over the whole class**, at the stutter `slippage`, the
-/// allele-length shares `shares` and the spread `concentration`: each tract's expected counts
+/// allele-length shares `shares` and the concentration: each tract's expected counts
 /// summed over the class's tracts, with every distinct row of reads scored once however many
 /// samples hold it ([`DistinctRows`]).
 ///
@@ -1295,7 +1295,7 @@ fn pooled_reads(sample: &SampleTractReads, buckets: usize) -> Vec<u32> {
     reads
 }
 
-/// **One pair of samples' likelihood at a tract as a function of the spread `α` alone**, the
+/// **One pair of samples' likelihood at a tract as a function of the concentration `α` alone**, the
 /// shares held: `N(α) / ((α + 1)(α + 2)(α + 3))`, with `N(α) = c₀ + c₁α + c₂α² + c₃α³` and these
 /// the four coefficients, lowest power first. Every coefficient is a sum of products of
 /// likelihoods, shares and excesses, so none is negative and `N` is evaluated without cancellation.
@@ -1435,18 +1435,18 @@ fn pair_cubic(
     )
 }
 
-/// **One tract's pairwise log-likelihood at the spread `spread`, less its rows' offsets**, from its
-/// pairs' [`PairCubic`]s. The rows' offsets are left out: they depend on neither the shares nor the
-/// spread.
-pub(super) fn scaled_ln_pairs_of_tract(cubics: &[PairCubic], spread: f64) -> f64 {
+/// **One tract's pairwise log-likelihood at the concentration `concentration`, less its rows'
+/// offsets**, from its pairs' [`PairCubic`]s. The rows' offsets are left out: they depend on
+/// neither the shares nor the concentration.
+pub(super) fn scaled_ln_pairs_of_tract(cubics: &[PairCubic], concentration: f64) -> f64 {
     if cubics.is_empty() {
         return 0.0;
     }
-    let below = (spread + 1.0) * (spread + 2.0) * (spread + 3.0);
+    let below = (concentration + 1.0) * (concentration + 2.0) * (concentration + 3.0);
     cubics
         .iter()
         .map(|[c0, c1, c2, c3]| {
-            let above = ((c3 * spread + c2) * spread + c1) * spread + c0;
+            let above = ((c3 * concentration + c2) * concentration + c1) * concentration + c0;
             float::ln((above / below).max(1e-300))
         })
         .sum()
@@ -1570,10 +1570,10 @@ pub(super) fn pair_cubics_by_tract(
         .collect()
 }
 
-/// **Every pair of samples a class's spread is read from**, at the stutter and shares it was built
-/// at: at a tract, every sample with reads paired with the next (and the last with the first), each
-/// pair held as its [`PairCubic`]. Built once, then [`log_likelihood`](Self::log_likelihood) scores
-/// any spread.
+/// **Every pair of samples a class's concentration is read from**, at the stutter and shares it was
+/// built at: at a tract, every sample with reads paired with the next (and the last with the
+/// first), each pair held as its [`PairCubic`]. Built once, then
+/// [`log_likelihood`](Self::log_likelihood) scores any concentration.
 pub struct SamplePairs {
     /// Per tract with two samples or more, its pairs.
     per_tract: Vec<Vec<PairCubic>>,
@@ -1610,8 +1610,8 @@ impl SamplePairs {
     /// [`log_likelihood`](Self::log_likelihood) sums them: what a standard error that treats the
     /// tract as the independent unit needs.
     #[must_use]
-    pub fn log_likelihood_by_tract(&self, ln_spread: f64) -> Vec<f64> {
-        ln_pairs_by_tract(&self.per_tract, float::exp(ln_spread))
+    pub fn log_likelihood_by_tract(&self, ln_concentration: f64) -> Vec<f64> {
+        ln_pairs_by_tract(&self.per_tract, float::exp(ln_concentration))
     }
 
     /// Whether any tract has two samples with reads.
@@ -1620,44 +1620,45 @@ impl SamplePairs {
         self.per_tract.is_empty()
     }
 
-    /// **The pairwise log-likelihood at spread `exp(ln_spread)`**, at the shares the pairs were built
-    /// at, up to a constant that depends on neither.
+    /// **The pairwise log-likelihood at concentration `exp(ln_concentration)`**, at the shares the
+    /// pairs were built at, up to a constant that depends on neither.
     #[must_use]
-    pub fn log_likelihood(&self, ln_spread: f64) -> f64 {
-        ln_pairs_summed_in_tract_order(&self.per_tract, float::exp(ln_spread))
+    pub fn log_likelihood(&self, ln_concentration: f64) -> f64 {
+        ln_pairs_summed_in_tract_order(&self.per_tract, float::exp(ln_concentration))
     }
 }
 
-/// **Every tract's pairwise log-likelihood at `spread`, summed in the order of the tracts.** The
-/// tracts are scored side by side, then added one after another, so the total has the same bits
+/// **Every tract's pairwise log-likelihood at `concentration`, summed in the order of the tracts.**
+/// The tracts are scored side by side, then added one after another, so the total has the same bits
 /// whatever the number of threads. Summed by the thread pool instead, the order of the additions
 /// followed how the work was split, and the total moved in its last places from one run to the
 /// next: enough to move F's curve, and through it every other number of the fit (spec
 /// `str_penalised_fit.md` §3).
-fn ln_pairs_summed_in_tract_order(per_tract: &[Vec<PairCubic>], spread: f64) -> f64 {
-    ln_pairs_by_tract(per_tract, spread).iter().sum()
+fn ln_pairs_summed_in_tract_order(per_tract: &[Vec<PairCubic>], concentration: f64) -> f64 {
+    ln_pairs_by_tract(per_tract, concentration).iter().sum()
 }
 
-/// **Each tract's pairwise log-likelihood at `spread`, in the order of the tracts.** The tracts are
-/// scored side by side and collected in order. Both the total
+/// **Each tract's pairwise log-likelihood at `concentration`, in the order of the tracts.** The
+/// tracts are scored side by side and collected in order. Both the total
 /// ([`ln_pairs_summed_in_tract_order`]) and the per-tract values a standard error needs
 /// ([`SamplePairs::log_likelihood_by_tract`]) come from here, so the two hold the same numbers in
 /// the same order.
-fn ln_pairs_by_tract(per_tract: &[Vec<PairCubic>], spread: f64) -> Vec<f64> {
+fn ln_pairs_by_tract(per_tract: &[Vec<PairCubic>], concentration: f64) -> Vec<f64> {
     per_tract
         .par_iter()
-        .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
+        .map(|cubics| scaled_ln_pairs_of_tract(cubics, concentration))
         .collect()
 }
 
 /// One pair of samples' likelihood at a tract: both samples' reads summed over their alleles, each
 /// sample one draw (chance its excess) or two, the draws weighted as a Pólya urn.
 ///
-/// **Summed in closed form, a pair in `classes²` steps rather than `classes⁴`.** With `w = spread ·
-/// share`, the urn's weight for a later draw is `w_x` plus how many earlier draws were `x`, so every
-/// sum over the later sample's alleles reduces to a few totals of its row: `Q = Σ L(c,d) w_c w_d`,
-/// `R = Σ L(c,c) w_c`, `u_x = Σ_c L(c,x) w_c` and the diagonal `D_x = L(x,x)`. Checked against the
-/// four nested sums in `the_closed_form_pair_likelihood_is_the_four_nested_sums`.
+/// **Summed in closed form, a pair in `classes²` steps rather than `classes⁴`.** With `w =
+/// concentration · share`, the urn's weight for a later draw is `w_x` plus how many earlier draws
+/// were `x`, so every sum over the later sample's alleles reduces to a few totals of its row: `Q =
+/// Σ L(c,d) w_c w_d`, `R = Σ L(c,c) w_c`, `u_x = Σ_c L(c,x) w_c` and the diagonal `D_x = L(x,x)`.
+/// Checked against the four nested sums in
+/// `the_closed_form_pair_likelihood_is_the_four_nested_sums`.
 #[cfg(test)]
 fn pair_likelihood(
     one: &[f64],
@@ -1665,7 +1666,7 @@ fn pair_likelihood(
     other: &[f64],
     other_excess: f64,
     weights: &[f64],
-    spread: f64,
+    concentration: f64,
     classes: usize,
 ) -> f64 {
     let totals = |row: &[f64]| {
@@ -1683,7 +1684,7 @@ fn pair_likelihood(
     };
     let (d1, u1, q1, r1) = totals(one);
     let (d2, u2, q2, r2) = totals(other);
-    let alpha = spread;
+    let alpha = concentration;
     let two = alpha * (alpha + 1.0);
     let three = two * (alpha + 2.0);
     let four = three * (alpha + 3.0);
@@ -1743,7 +1744,7 @@ mod tests {
         other: &[f64],
         other_excess: f64,
         weights: &[f64],
-        spread: f64,
+        concentration: f64,
         classes: usize,
     ) -> f64 {
         // The chance of each ordered sequence of draws, built draw by draw.
@@ -1754,7 +1755,7 @@ mod tests {
                     .iter()
                     .filter(|previous| *previous == allele)
                     .count() as f64;
-                chance *= (weights[*allele] + earlier) / (spread + position as f64);
+                chance *= (weights[*allele] + earlier) / (concentration + position as f64);
             }
             chance
         };
@@ -1800,8 +1801,8 @@ mod tests {
     /// **A sample's call is the genotype its posterior puts highest**, the posterior computed here
     /// sample by sample as the row-by-row expected counts compute it: each genotype's read
     /// likelihood times its prior, the prior mixing "the two copies are one draw" and "two draws"
-    /// by the sample's homozygote excess and the spread. The 20 samples carry excesses from 0 to
-    /// 0.98, so a call that dropped either part of the prior, or swapped them, would put some
+    /// by the sample's homozygote excess and the concentration. The 20 samples carry excesses from
+    /// 0 to 0.98, so a call that dropped either part of the prior, or swapped them, would put some
     /// samples' weight on another genotype. A tie may go either way: the call's posterior must be
     /// the largest to within rounding.
     #[test]
@@ -2241,9 +2242,9 @@ mod tests {
         }
     }
 
-    /// **A pair's cubic in the spread is its closed-form likelihood**, to within rounding, on random
-    /// rows at nineteen classes (the shipped ±9), every excess, spreads across the search's range,
-    /// and a row with exact zeros, as a sample whose reads rule alleles out has.
+    /// **A pair's cubic in the concentration is its closed-form likelihood**, to within rounding,
+    /// on random rows at nineteen classes (the shipped ±9), every excess, concentrations across the
+    /// search's range, and a row with exact zeros, as a sample whose reads rule alleles out has.
     #[test]
     fn a_pairs_cubic_is_its_closed_form_likelihood() {
         let classes = 19;
@@ -2281,8 +2282,8 @@ mod tests {
             RowAtShares::of(&one, &shares, classes),
             RowAtShares::of(&other, &shares, classes),
         );
-        for spread in [1e-3, 0.01, 0.5, 3.0, 200.0, 1e4] {
-            let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+        for concentration in [1e-3, 0.01, 0.5, 3.0, 200.0, 1e4] {
+            let weights: Vec<f64> = shares.iter().map(|share| concentration * share).collect();
             for (one_excess, other_excess) in [(0.0, 0.0), (0.3, 0.9), (0.98, 0.5), (1.0, 1.0)] {
                 let closed = pair_likelihood(
                     &one,
@@ -2290,7 +2291,7 @@ mod tests {
                     &other,
                     other_excess,
                     &weights,
-                    spread,
+                    concentration,
                     classes,
                 );
                 let [c0, c1, c2, c3] = pair_cubic(
@@ -2299,18 +2300,20 @@ mod tests {
                     &shares,
                     classes,
                 );
-                let cubic = (((c3 * spread + c2) * spread + c1) * spread + c0)
-                    / ((spread + 1.0) * (spread + 2.0) * (spread + 3.0));
+                let cubic = (((c3 * concentration + c2) * concentration + c1) * concentration + c0)
+                    / ((concentration + 1.0) * (concentration + 2.0) * (concentration + 3.0));
                 assert!(
                     (cubic - closed).abs() <= 1e-12 * closed.abs(),
-                    "spread {spread}, excesses {one_excess} {other_excess}: {cubic} against {closed}"
+                    "concentration {concentration}, excesses {one_excess} {other_excess}: \
+                     {cubic} against {closed}"
                 );
             }
         }
     }
 
     /// **The closed-form pair likelihood is the four nested sums over both samples' alleles**, to
-    /// within rounding, on random rows at thirteen classes, every excess and several spreads.
+    /// within rounding, on random rows at thirteen classes, every excess and several
+    /// concentrations.
     #[test]
     fn the_closed_form_pair_likelihood_is_the_four_nested_sums() {
         let classes = 13;
@@ -2338,8 +2341,8 @@ mod tests {
             let total: f64 = raw.iter().sum();
             raw.iter().map(|value| value / total).collect()
         };
-        for spread in [0.01, 0.5, 3.0, 200.0] {
-            let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+        for concentration in [0.01, 0.5, 3.0, 200.0] {
+            let weights: Vec<f64> = shares.iter().map(|share| concentration * share).collect();
             for (one_excess, other_excess) in [(0.0, 0.0), (0.3, 0.9), (0.98, 0.5), (1.0, 1.0)] {
                 let fast = pair_likelihood(
                     &one,
@@ -2347,7 +2350,7 @@ mod tests {
                     &other,
                     other_excess,
                     &weights,
-                    spread,
+                    concentration,
                     classes,
                 );
                 let slow = pair_likelihood_by_nested_sums(
@@ -2356,12 +2359,13 @@ mod tests {
                     &other,
                     other_excess,
                     &weights,
-                    spread,
+                    concentration,
                     classes,
                 );
                 assert!(
                     (fast - slow).abs() <= 1e-10 * slow.abs(),
-                    "spread {spread}, excesses {one_excess} {other_excess}: {fast} against {slow}"
+                    "concentration {concentration}, excesses {one_excess} {other_excess}: \
+                     {fast} against {slow}"
                 );
             }
         }
