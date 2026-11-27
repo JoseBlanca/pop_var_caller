@@ -285,9 +285,10 @@ impl std::fmt::Display for IndexEntryField {
 /// Why an index could not be read.
 ///
 /// **Its own type, carrying no path**, like this module's other codec errors: the file's name
-/// belongs to whoever opened the file, and F4's `open` is what dresses one of these as a
-/// [`PspReadError`](super::PspReadError). Every variant means *this file is damaged, rebuild
-/// it* — there is no variant here that a caller could act on by changing a setting.
+/// belongs to whoever opened the file, and [`PspReader::open`](super::PspReader::open) is what
+/// dresses one of these as a [`PspReadError`](super::PspReadError). Every variant means *this file
+/// is damaged, rebuild it* — there is no variant here that a caller could act on by changing a
+/// setting.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IndexDecodeError {
@@ -382,7 +383,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // F1 — the index's own bytes
+    // The index's own bytes
     // -----------------------------------------------------------------
 
     fn index_entry(contig: u32, position: u64, block_offset: u64) -> BlockIndexEntry {
@@ -865,11 +866,11 @@ mod tests {
 
     /// **Both width constants, against the bytes the encoder actually produces.**
     ///
-    /// ⚠ Without this, neither can fail. `LARGEST_ENTRY_BYTES` was 18 for the whole of F1 — five
-    /// bytes for the contig, five for the position — and nothing noticed, because a reservation
-    /// that is too small only makes a `Vec` grow. But a position is a `u64`, so its
-    /// variable-length form runs to ten bytes and the widest entry is 23. The number was carried
-    /// over from production, where all four of the index's fields genuinely are `u32`.
+    /// ⚠ Without this, neither can fail. `LARGEST_ENTRY_BYTES` was 18 when the index codec was
+    /// first written — five bytes for the contig, five for the position — and nothing noticed,
+    /// because a reservation that is too small only makes a `Vec` grow. But a position is a `u64`,
+    /// so its variable-length form runs to ten bytes and the widest entry is 23. The number was
+    /// carried over from production, where all four of the index's fields genuinely were `u32`.
     #[test]
     fn the_width_constants_are_the_widths_the_encoder_produces() {
         let widest = encode_index(&[index_entry(u32::MAX, u64::MAX, u64::MAX)]);
@@ -898,8 +899,8 @@ mod tests {
     }
 
     /// The bytes are the format, so their layout is stated once against a literal rather than
-    /// only against this module's own decoder. **A change here is a format change**; from
-    /// Milestone F it costs a version.
+    /// only against this module's own decoder. **A change here is a format change**, and it
+    /// costs a version.
     #[test]
     fn one_entry_encodes_to_these_exact_bytes() {
         let bytes = encode_index(&[index_entry(3, 300, 4_096)]);

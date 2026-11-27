@@ -54,12 +54,13 @@ pub struct Footer {
 /// **Fixed width and fixed order**, which is what lets a reader seek [`FOOTER_BYTES`] back from
 /// the end of a file and read the whole thing in one go without knowing anything else about it.
 ///
-/// **⚠ This will encode a footer [`decode_footer`] refuses**, and deliberately: the reader's
-/// rule that the index ends exactly where the trailer begins is not checked here, because this
-/// module's own tests must be able to *write* a footer that breaks it in order to prove the
-/// reader refuses one. So the obligation is real and it is not this function's — **it belongs to
-/// F3's `finish`**, which is what computes the two offsets from what it has actually written,
-/// and which must not be able to produce a file its own reader rejects.
+/// **⚠ This will encode a footer [`decode_footer`] refuses**, and deliberately: the reader's rule
+/// that the index ends exactly where the trailer begins is not checked here, because this module's
+/// own tests must be able to *write* a footer that breaks it in order to prove the reader refuses
+/// one. So the obligation is real and it is not this function's — **it belongs to
+/// [`PspWriter::finish`](super::PspWriter::finish)**, which is what computes the two offsets from
+/// what it has actually written, and which must not be able to produce a file its own reader
+/// rejects.
 pub fn encode_footer(footer: &Footer) -> [u8; FOOTER_BYTES] {
     // Destructured with no `..`: **a field added to the footer is a compile error here** rather
     // than a field silently left out of every file this build writes, and the footer is the one
@@ -195,8 +196,8 @@ impl std::fmt::Display for FileSection {
 /// Why a footer could not be read.
 ///
 /// **Its own type, carrying no path**, like this module's other codec errors: the file's name
-/// belongs to whoever opened the file, and F4's `open` is what dresses one of these as a
-/// [`PspReadError`](super::PspReadError).
+/// belongs to whoever opened the file, and [`PspReader::open`](super::PspReader::open) is what
+/// dresses one of these as a [`PspReadError`](super::PspReadError).
 ///
 /// **The first variant is not the same instruction as the others.** No magic means *this file
 /// was never finished — rebuild it*, which is goal 3 and the everyday case of a killed pileup;
@@ -242,7 +243,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------
-    // F2 — the footer's own bytes
+    // The footer's own bytes
     // -----------------------------------------------------------------
 
     /// A footer round-trips field for field, including a trailer of no bytes.

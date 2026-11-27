@@ -358,7 +358,7 @@ pub enum PspReadError {
         ///
         /// **Kept as a cause rather than flattened into `reason`**, so that a caller walking
         /// the chain reaches which field of which entry the index stopped at. Four different
-        /// causes reached this variant as one string until Milestone G.
+        /// causes once reached this variant as one string.
         ///
         /// **Typed rather than `Box<dyn Error>`**, so that a caller deciding whether a re-run
         /// would help can tell the footer from the block index by matching rather than by
@@ -372,12 +372,12 @@ pub enum PspReadError {
     ///
     /// **The cause is the walk's own error, not a string.** A record's
     /// [`Truncated`](RecordDecodeError::Truncated) means *the body stopped early*, which the
-    /// streaming reader answers by decompressing more and only turns into damage once the block
-    /// has no more to give; its [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade
-    /// the reader*, which is [`UnsupportedRecordEncoding`](Self::UnsupportedRecordEncoding)
-    /// here and must not arrive as damage. [`BlockReadError`] is where those distinctions are
-    /// already drawn, so this variant carries one rather than restating it (the C1 review, M13;
-    /// the D1 review, which asked that they not be flattened).
+    /// streaming reader answers by decompressing more and only turns into damage once the block has
+    /// no more to give; its [`Unsupported`](RecordDecodeError::Unsupported) means *upgrade the
+    /// reader*, which is [`UnsupportedRecordEncoding`](Self::UnsupportedRecordEncoding) here and
+    /// must not arrive as damage. [`BlockReadError`] is where those distinctions are already drawn,
+    /// so this variant carries one rather than restating it, and two reviews asked that they not be
+    /// flattened.
     #[error("{}: block {block} is corrupt", path.display())]
     CorruptBlock {
         path: PathBuf,
@@ -402,8 +402,8 @@ pub enum PspReadError {
     /// runs out, and the two arrive at the same line. The refusal names the ceiling and the
     /// knob that raises it, which is what spec §7 asks of it.
     ///
-    /// ⚠ **The message named the ceiling without naming a way to raise it** until the G1
-    /// review pointed out that the sentence underneath said *raise the ceiling to read it*
+    /// ⚠ **The message named the ceiling without naming a way to raise it** until a review
+    /// pointed out that the sentence underneath said *raise the ceiling to read it*
     /// while no `PspReader` had one. `PspReader::with_a_record_buffer_ceiling` is that knob.
     #[error(
         "{}: a record in block {block} needs more than the {allowed_bytes} bytes this reader \
@@ -559,8 +559,8 @@ pub enum HeaderRefusal {
     /// **A refusal rather than a fallback**, and the distinction is the point: *absent* is what a
     /// file written before the parameter existed looks like and legitimately falls back to this
     /// build's level, where *present and unreadable* is **a setting recorded and then ignored**,
-    /// which is worse than one not recorded (spec goal 4). Until the G4 review they were the same
-    /// arm, and a file recording `"1"` was appended to at level 9 with nothing said.
+    /// which is worse than one not recorded (spec goal 4). Until a review caught it they were the
+    /// same arm, and a file recording `"1"` was appended to at level 9 with nothing said.
     #[error("the header records a compression level of {recorded}, which is not an integer")]
     UnreadableLevel { recorded: String },
 
@@ -582,8 +582,8 @@ pub enum HeaderRefusal {
     /// window log `header.rs`'s own validation refuses as
     /// [`PspWriteError::InvalidHeaderField`] before the compressor sees it.
     ///
-    /// ⚠ **The G3 review found it unreachable and this doc said so; G4 made it reachable and the
-    /// doc was not updated until G4's own review caught that.** A variant documented as
+    /// ⚠ **It was once unreachable and this doc said so; a later change made it reachable and the
+    /// doc was not updated until a review caught that.** A variant documented as
     /// unreachable, quietly reachable, is a path nothing protects.
     #[error(transparent)]
     Compressor(#[from] BlockCompressError),
@@ -923,7 +923,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // A3 — read_header, from a file on disk
+    // read_header, from a file on disk
     // -----------------------------------------------------------------
 
     /// The same tomato-shaped header the encoder's own tests use, trimmed to what a file
@@ -1053,7 +1053,7 @@ mod tests {
     /// given rather than reporting a damaged ng file.
     #[test]
     fn a_production_psp_on_disk_is_refused_as_a_foreign_file() {
-        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen at promotion step C18.
+        // Production's `psp::header::HEAD_MAGIC` at commit `d9e7b076`, frozen while ng replaced it.
         const PRODUCTION_HEAD_MAGIC: [u8; 4] = *b"PSP\n";
         let mut productions = Vec::new();
         productions.extend_from_slice(&PRODUCTION_HEAD_MAGIC);
