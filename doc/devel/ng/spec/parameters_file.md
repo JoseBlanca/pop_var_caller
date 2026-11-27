@@ -19,7 +19,7 @@ Before ng can score a single read it needs a set of numbers that no locus can su
 trust each library's own base qualities, how much of each library's DNA came from somebody else,
 how inbred each sample is, how variable the population is, and how often a read slips a repeat in
 each kind of tract. Today those numbers exist only in memory — `RunParameters`
-([`run_parameters.rs:97`](../../../../src/ng/calling/run_parameters.rs)) assembles them from the
+([`run_parameters.rs`](../../../../src/calling/run_parameters.rs)) assembles them from the
 pre-pass and calling reads them through a borrowed view. **Nothing writes them down, and nothing
 can read them in.**
 
@@ -51,7 +51,7 @@ Three things follow from having it, and the first is a mode:
    changed call.
 2. **Every number carries its warrant.** Fitted here, borrowed from a neighbouring grain, supplied,
    or defaulted — the four states `Provenance`
-   ([`parameter_estimation/mod.rs:60`](../../../../src/ng/parameter_estimation/mod.rs)) already
+   ([`parameter_estimation/mod.rs`](../../../../src/parameter_estimation/mod.rs)) already
    names. A value without its warrant is a number nobody can judge.
 3. **A person can read it and change one line.** A user who wants to raise one library's error rate
    should not need a tool, a schema, or this document.
@@ -87,7 +87,7 @@ Three things follow from having it, and the first is a mode:
   rather than of the plant.
 - **slippage group** — the set of read groups whose reads are drawn under one set of repeat-slip
   numbers. Declared by the run, not inferred; `StratumFits::slippage_group_of`
-  ([`stratum_fits.rs:370`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)).
+  ([`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs)).
 - **stratum** — a (motif period, reference repeat count) class of repeat tract. Tomato SL4.00 holds
   462,701 STR loci in 141 of them at the STR path's calling floors
   ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6).
@@ -100,7 +100,7 @@ Three things follow from having it, and the first is a mode:
 
 **Every number in this file is a value plus a warrant plus a count of what was behind it.** That
 shape already exists: `Estimate<T>` is `{ value, provenance, observations }`
-([`parameter_estimation/mod.rs:122`](../../../../src/ng/parameter_estimation/mod.rs)), and the
+([`parameter_estimation/mod.rs`](../../../../src/parameter_estimation/mod.rs)), and the
 warrant has four states, ranked weakest-last:
 
 | warrant | what it means |
@@ -147,7 +147,7 @@ not because of the binding. Per-number differences come only from what the fit i
 ## 3. What the file holds
 
 Section by section, and every one of them is a field of `RunParameters`
-([`run_parameters.rs:97`](../../../../src/ng/calling/run_parameters.rs)) except the identity block,
+([`run_parameters.rs`](../../../../src/calling/run_parameters.rs)) except the identity block,
 which is new here.
 
 ### 3.1 Identity and binding
@@ -171,7 +171,7 @@ fitted zero.**
 A zero scale charges every read of that library the error floor, which is maximal confidence about
 every base, drawn from a fit that found no errors at all. `ReadGroupCalibration::from_fitted_rate`
 refuses it and the assembly takes `ReadGroupCalibration::defaulted` instead
-([`run_parameters.rs`](../../../../src/ng/calling/run_parameters.rs), module documentation). The
+([`run_parameters.rs`](../../../../src/calling/run_parameters.rs), module documentation). The
 file must be able to express that state, which is why the warrant travels with the value rather
 than being inferred from it: a scale of exactly 2.0 is a legitimate fitted answer as well as the
 default.
@@ -202,7 +202,7 @@ preparation sequenced over several lanes gives several read groups sharing one l
 two lanes of one preparation can carry genuinely different fractions, because index hopping happens
 on a flowcell and not in a tube. A per-sample row would have to pick one fraction or average two,
 and both throw away the distinction the grain exists for
-([`run_report.rs:172`](../../../../src/ng/calling/run_report.rs)).
+(`run_report.rs`, since removed).
 
 ### 3.5 Per sample — the inbreeding coefficient
 
@@ -240,7 +240,7 @@ estimator that carried no such dependence was removed on 2026-09-11
 
 Three values: the reference concentration, the total alternative concentration, and which regime
 they were derived under (`SpectrumSeed`,
-[`genotype_prior/mod.rs:497`](../../../../src/ng/calling/genotype_prior/mod.rs)).
+[`genotype_prior/mod.rs`](../../../../src/calling/genotype_prior/mod.rs)).
 
 **Written as the seed, not as the moments it came from.** The seed is built once per run by
 `RunParameters::seed_from_moments` from two integrals of the fitted frequency density, and what
@@ -305,7 +305,7 @@ The largest section, and the one whose axes matter:
 - **which slippage group each read group's reads are drawn under** — the run's own declaration.
 - **per (stratum × slippage group): the slippage numbers**, with the warrant on each. The axis is
   the *slippage group*, not the read group (`StratumRow`,
-  [`stratum_fits.rs:355`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)), which is
+  [`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs)), which is
   what stops this section growing with the number of libraries.
 - **per stratum: the fitted length spectrum and its concentration** — the tract ladder's top rung.
   **Only a stratum fitted on its own tracts has one.** A stratum furnished from its period's
@@ -490,7 +490,7 @@ Four bindings, and each has a failure attached:
   sample. That the file's own numbers are dense over `0..n` remains a rule, and it is
   `validate`'s: a gap there drops the highest read group entirely and surfaces as a panic at
   whichever locus first carries one of that library's reads
-  ([`run_parameters.rs`](../../../../src/ng/calling/run_parameters.rs), module documentation).
+  ([`run_parameters.rs`](../../../../src/calling/run_parameters.rs), module documentation).
 - **the census recording terms the fit ran under.** These identify *which* census produced the
   numbers. They are recorded in the census file rather than in the psp header, because several
   different censuses can be built from one psp
@@ -592,7 +592,7 @@ paragraph counted three axes and missed the largest one.
 **Four axes, and two of them grow with the cohort.** One row per read group (§3.3, §3.4), one row
 per sample (§3.5), one row per (stratum × slippage group) (§3.7) — and **one row per (read group ×
 stratum × ploidy)**, which is the grain the repeat-tract substitution rate is fitted and stored at
-(`StratumKey`, [`ssr/mod.rs`](../../../../src/ng/parameter_estimation/ssr/mod.rs)). §3.7's phrase
+(`StratumKey`, [`repeat_strata.rs`](../../../../src/parameter_estimation/repeat_strata.rs)). §3.7's phrase
 "per stratum: the substitution rate" understates it: the rate is per read group as well, because
 how often a base misreads inside a tract is a property of the chemistry.
 
@@ -619,7 +619,7 @@ the fitted pairs on a real cohort.
 
 **Memory.** Read once at run start into `RunParameters`, which is "assembled once, before any locus
 is called, and never written afterwards"
-([`run_parameters.rs:97`](../../../../src/ng/calling/run_parameters.rs)). The file's parsed form is
+([`run_parameters.rs`](../../../../src/calling/run_parameters.rs)). The file's parsed form is
 dropped after assembly; nothing holds the TOML tree during calling.
 
 **Concurrency.** None. The file is read before any worker starts and written after the last locus
@@ -635,11 +635,11 @@ using an existing parser buys.
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the numbers themselves | `RunParameters` ([`run_parameters.rs:97`](../../../../src/ng/calling/run_parameters.rs)) | the file is its serialised form; the four assembly rules become §3 and §5 unchanged |
-| value + warrant + count | `Estimate<T>`, `Provenance` ([`parameter_estimation/mod.rs:60,122`](../../../../src/ng/parameter_estimation/mod.rs)) | written as-is; `Supplied` already exists for this file's sake |
-| what a run used, for an output | `RunParameterReport` ([`run_report.rs:54`](../../../../src/ng/calling/run_report.rs)) | becomes a *view over* the parameters file rather than a parallel structure; today it covers contamination, batching and the outlier weight only, and its only callers are tests |
-| TOML parse/emit | the `toml` crate, already a dependency of the psp header ([`src/psp/header.rs:42`](../../../../src/psp/header.rs)) | no new dependency |
-| binding by digest, and refusing on mismatch | the census file's identity block ([`census_file.rs`](../../../../src/ng/parameter_estimation/joint/census_file.rs)) | the same shape one level up (§6) |
+| the numbers themselves | `RunParameters` ([`run_parameters.rs`](../../../../src/calling/run_parameters.rs)) | the file is its serialised form; the four assembly rules become §3 and §5 unchanged |
+| value + warrant + count | `Estimate<T>`, `Provenance` ([`parameter_estimation/mod.rs`](../../../../src/parameter_estimation/mod.rs)) | written as-is; `Supplied` already exists for this file's sake |
+| what a run used, for an output | `RunParameterReport` (`run_report.rs`, since removed) | was to become a *view over* the parameters file; it has been removed, and a calling run now writes the parameters file itself into its log |
+| TOML parse/emit | the `toml` crate, already a dependency of the psp header ([`src/psp/header.rs`](../../../../src/psp/header.rs)) | no new dependency |
+| binding by digest, and refusing on mismatch | the census file's identity block ([`census_file.rs`](../../../../src/parameter_estimation/joint/census_file.rs)) | the same shape one level up (§6) |
 
 **Parity oracle:** the two-mode comparison already required by
 [`run_streaming.md`](run_streaming.md) §12 — the same cohort, called in psp mode from the fit in
@@ -652,9 +652,9 @@ memory and in direct mode from the file that fit wrote, must give the same VCF.
 - **What the VCF header prints from this file.** The emission step's document. This one settles
   what is available, not what is shown.
 - **A command that writes the defaults without running a caller.** Useful and cheap, but it is a
-  command-surface question and belongs with the rest of `pop_var_caller_exp`'s subcommands, whose
+  command-surface question and belongs with the rest of `pvc`'s subcommands, whose
   names kebab-case from their enum variants
-  ([`cli.rs:21`](../../../../src/pop_var_caller_exp/cli.rs)).
+  ([`cli/command_line.rs`](../../../../src/cli/command_line.rs)).
 - **Merging two parameters files** — for instance taking one cohort's chemistry with another's
   population numbers. No use for it has arisen; if one does, it belongs in this document rather
   than in a tool.
@@ -678,7 +678,7 @@ memory and in direct mode from the file that fit wrote, must give the same VCF.
    ([`../research/`](../research/)). Until that report exists, §8's third bullet has no numbers
    behind it, and a run with no slippage falls through to whatever `StratumFits` does with an
    absent `(stratum, slippage group)` row today
-   ([`stratum_fits.rs:355`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs)) —
+   ([`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs)) —
    behaviour that already exists for partially-fitted runs and that nobody has traced. **Trace it
    before writing the reader**, because if it silently produces a score rather than refusing, the
    gap between "no default yet" and "default compiled in" is invisible in the output.
