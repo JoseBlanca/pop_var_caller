@@ -1,25 +1,12 @@
-//! Reference FASTA I/O — streaming and manual-evict fetchers plus the
-//! `MultiChromRefFetcher` trait that abstracts "give me reference
-//! bases at a given chromosome and position."
+//! The reference's contig table, and what is left of the reference-FASTA fetchers.
 //!
-//! This module is a peer of the pipeline-stage modules. Every stage
-//! that needs the reference (BAQ, the pileup walker, the DUST filter
-//! on the cohort side, the per-group merger when extracting REF
-//! sequence for compound alleles) reaches in here.
-//!
-//! - `fetcher::StreamingChromRefFetcher` /
-//!   `fetcher::ManualEvictChromRefFetcher` /
-//!   `fetcher::RepositoryRefFetcher` — the production
-//!   implementations; see [`fetcher`] for the per-impl tradeoffs.
-//! - `fetcher::ChromRefFetcher` — single-chromosome trait
-//!   (sliding-buffer contract, used by single-chrom consumers).
-//! - `MultiChromRefFetcher` — multi-chromosome trait used by the
-//!   pileup walker.
-//! - [`ChromRefFetchError`] — typed errors raised by every fetcher.
-//! - [`ContigEntry`] / [`ContigList`] — the reference's contig table
-//!   (name, length, optional MD5). Shared across the FASTA, CRAM, and
-//!   PSP formats because every input asserts which reference it is
-//!   against.
+//! - [`ContigEntry`] / [`ContigList`] — the reference's contig table (name, length, optional
+//!   MD5). Shared across the FASTA, CRAM and psp formats because every input asserts which
+//!   reference it is against.
+//! - [`ChromRefFetchError`] — the error a reference read raises, and [`fetcher`]'s
+//!   canonicalisation rule. The fetchers that module was named for served the deleted production
+//!   caller and are gone; the readers in use are [`crate::raw_chrom_reader`] and
+//!   [`crate::ref_seq`].
 
 pub mod fetcher;
 
@@ -143,13 +130,11 @@ impl ContigIdsByName {
 // ---------------------------------------------------------------------
 
 #[cfg(test)]
-/// Multi-chromosome reference-FASTA fetcher used by the Stage 1
-/// pileup walker. Errors are typed ([`ChromRefFetchError`]) so
-/// callers can route I/O failures, range failures, and contract
-/// violations distinctly. Single-chromosome consumers (DUST, BAQ,
-/// PerGroupMerger) should use [`ChromRefFetcher`] instead — it
-/// drops the `chrom_id` parameter and exposes a sliding-buffer
-/// contract specifically for monotonic-forward access.
+/// The deleted production pileup walker's multi-chromosome reference interface, kept for tests
+/// only: the generic locus generator's mock reference
+/// (`locus_generation::pileup::mock_reference`) implements it so code copied from that walker
+/// can be tested unchanged. Errors are typed ([`ChromRefFetchError`]) so callers can route I/O
+/// failures, range failures and contract violations apart.
 pub trait MultiChromRefFetcher {
     /// Fetch `length` reference bases starting at the 1-based
     /// position `start` on chromosome `chrom_id`. Bytes are
@@ -174,8 +159,8 @@ pub trait MultiChromRefFetcher {
 #[cfg(test)]
 /// Forwarding impl so callers may pass either an owned fetcher or a
 /// shared reference. The fetcher's methods all take `&self`, so the borrow is
-/// sufficient. (Production's pileup walker, deleted in promotion Milestone D,
-/// was the caller that needed it.)
+/// sufficient. (Production's pileup walker, deleted with production, was the
+/// caller that needed it.)
 impl<T: MultiChromRefFetcher + ?Sized> MultiChromRefFetcher for &T {
     fn fetch(
         &self,
