@@ -3,30 +3,30 @@
 *Status: architecture draft (2026-08-10), companion to the spec
 [`../spec/repeat_catalog.md`](../spec/repeat_catalog.md) (the design and its rationale) and to the
 shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary) and
-[`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
+[`module_layout.md`](module_layout.md) (the module tree). Naming follows
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): nouns for types, verbs
 for functions, **STR** in prose ↔ `ssr` in code. Signatures are illustrative; the **contract** is the
 deliverable. Every "why" lives in the spec — this doc does not re-argue one.*
 
 ## Module home
 
-`src/ng/repeat_catalog/` — a folder, not a file, because it owns three separable concerns with
+`src/repeat_catalog/` — a folder, not a file, because it owns three separable concerns with
 different reasons to change (the builder that rides the reference pass, the reader that answers
 queries, the Parquet wire format). It is **not a pipeline step**: like `reference_info.rs` and
 `ref_seq.rs` it is reference-side infrastructure, so it sits beside them rather than in the numbered
 sequence (`module_layout.md`, *The tree*).
 
 ```
-src/ng/repeat_catalog/
+src/repeat_catalog/
 ├── mod.rs        – RepeatCatalog (the reader), StrRepeatCriteria, FoundRepeat, RepeatCatalogError
 ├── criteria.rs   – StrRepeatCriteria + the serves() comparison and its refusal type
 ├── builder.rs    – RepeatCatalogBuilder: the ReferenceBasesObserver impl (spec §2.3)
 └── parquet_file.rs – the schema, the writer, the row-group reader (spec §3.5)
 ```
 
-Two edits land outside it: the observer seam in `src/ng/reference_info.rs` (§2.1), and lifting
+Two edits land outside it: the observer seam in `src/reference_info.rs` (§2.1), and lifting
 `classify`'s motif/trim/purity arithmetic into callable helpers in
-`src/ng/region_typing/segment_criteria.rs` (§5, row *motif/trim/purity*). The CLI subcommand lands in
+`src/region_typing/segment_criteria.rs` (§5, row *motif/trim/purity*). The CLI subcommand lands in
 `src/pop_var_caller_exp/repeat_catalog.rs`, mirroring `typed_regions.rs` (`src/pop_var_caller_exp/mod.rs:8-15`).
 
 ---
@@ -353,26 +353,26 @@ Every row was read at the cited line.
 
 | this doc | existing code | how they meet |
 |---|---|---|
-| detection | `find_tandem_repeats` ([`tandem_repeat.rs:483`](../../../../src/ng/tandem_repeat.rs)) | called as-is, once per whole contig; `scan_windowed` (`:1003`) is the fallback of spec §2.3, not used |
-| the detector's row | `RepeatInterval` ([`tandem_repeat.rs:208-219`](../../../../src/ng/tandem_repeat.rs)) | 0-based half-open; converted to `FoundRepeat`'s 1-based inclusive spans at the builder's edge |
-| scoring weights | `ScanParams` ([`tandem_repeat.rs:123-135`](../../../../src/ng/tandem_repeat.rs)) | stored in the header verbatim; `min_copies` there stays the scanner's permissive floor (the table's minimum, 3) |
-| period range | `PeriodRange` ([`tandem_repeat.rs:55`](../../../../src/ng/tandem_repeat.rs)) | reused; the catalog builds at 1..=6 |
-| copy floors | `MinCopies` ([`segment_criteria.rs:355-362`](../../../../src/ng/region_typing/segment_criteria.rs)) | reused; the catalog's table is `[5, 5, 4, 4, 4, 3]` against `MinCopies::default()`'s `[8, 6, 6, 6, 5, 4]` (`:444`) |
-| classification policy | `SsrSegmentCriteria` ([`segment_criteria.rs:478-540`](../../../../src/ng/region_typing/segment_criteria.rs)) | wrapped by `StrRepeatCriteria` (§1.1) |
-| pre-screen, overlap resolution | `prefilter` ([`segment_criteria.rs:677`](../../../../src/ng/region_typing/segment_criteria.rs)) | called by the reader on rows from the file instead of on a live scan |
-| admission | `classify` ([`segment_criteria.rs:849`](../../../../src/ng/region_typing/segment_criteria.rs)) → `Classified` (`:717-733`) | the reader's segmentation runs it; the builder does **not** — it needs only the criteria-free parts |
-| motif / trim / purity | inside `finish_locus` ([`segment_criteria.rs:1011-1097`](../../../../src/ng/region_typing/segment_criteria.rs)): the `minimal_trim` call (`:1031`, defined `:1217`), `Motif::new` (`:1083`), `recompute_purity` (`:1097`) | **lifted into `pub(crate)` helpers** so the builder and `finish_locus` share one implementation; nothing is re-derived here |
-| the locus type | `SsrSegment` ([`segment_criteria.rs:141-153`](../../../../src/ng/region_typing/segment_criteria.rs)) | `str_loci` returns these, built through `SsrSegment::new` so its coordinate invariant still guards them |
-| the segment type | `TypedRegion` / `RegionKind` ([`region_typing/mod.rs:146`, `:170`](../../../../src/ng/region_typing/mod.rs)) | `genome_segments` returns these — the same four kinds, from a file instead of a scan |
-| the parity oracle | `partition_resident` ([`region_typing/mod.rs:380`](../../../../src/ng/region_typing/mod.rs)) | §10.1's differential runs it over the same reference at the same policy |
-| the satellite cap's other home | `TypedRegionConfig::max_str_len` ([`region_typing/mod.rs:209-232`](../../../../src/ng/region_typing/mod.rs)) | there it is the cap **and** the window margin; here there are no windows, so `StrRepeatCriteria::max_str_len_bp` is the cap alone |
-| the reference pass | `read_reference_info` ([`reference_info.rs:270`](../../../../src/ng/reference_info.rs)), `FastaPass` (`:516`), `flush_md5` (`:664`) | gains the observer seam of §2.1; the digests and geometry are untouched |
-| contig table | `ContigInfo` ([`reference_info.rs:51-67`](../../../../src/ng/reference_info.rs)), `ReferenceInfo` (`:71-93`) | stored in the header verbatim — name, length, MD5 (`@SQ M5`) |
-| sibling-file pattern | `sibling_fai_path` ([`reference_info.rs:796`](../../../../src/ng/reference_info.rs)), `write_fai` (`:816`) | the same shape: derived file beside the reference, written atomically, created on request |
-| error style | `RefSeqError` ([`ref_seq.rs:41`](../../../../src/ng/ref_seq.rs)), `ReferenceInfoError` ([`reference_info.rs:183`](../../../../src/ng/reference_info.rs)) | `#[non_exhaustive]` `thiserror` enum, one doc comment per variant saying when it fires |
-| region restriction | `GenomeRegions` ([`region_typing/mod.rs:78-80`](../../../../src/ng/region_typing/mod.rs)), wrapping `RegionSet` ([`regions.rs:74`](../../../../src/regions.rs)) | the `region` argument; `None` = whole reference |
-| scalars | `ContigId`, `Position`, `Bp`, `Motif` ([`types.rs:13`, `:34`, `:174`, `:338`](../../../../src/ng/types.rs)) | reused; no new scalar newtype is minted except `SpanBp` (§1.2) |
-| the CLI | `PopVarCallerExpCommand` ([`pop_var_caller_exp/cli.rs:22`](../../../../src/pop_var_caller_exp/cli.rs)), `typed_regions.rs` | a second variant `RepeatCatalog(RepeatCatalogArgs)`, one module beside `typed_regions` |
+| detection | `find_tandem_repeats` ([`tandem_repeat.rs`](../../../../src/tandem_repeat.rs)) | called as-is, once per whole contig; `scan_windowed` is the fallback of spec §2.3, not used |
+| the detector's row | `RepeatInterval` ([`tandem_repeat.rs`](../../../../src/tandem_repeat.rs)) | 0-based half-open; converted to `FoundRepeat`'s 1-based inclusive spans at the builder's edge |
+| scoring weights | `ScanParams` ([`tandem_repeat.rs`](../../../../src/tandem_repeat.rs)) | stored in the header verbatim; `min_copies` there stays the scanner's permissive floor (the table's minimum, 3) |
+| period range | `PeriodRange` ([`tandem_repeat.rs`](../../../../src/tandem_repeat.rs)) | reused; the catalog builds at 1..=6 |
+| copy floors | `MinCopies` ([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)) | reused; the catalog's table is `[5, 5, 4, 4, 4, 3]` against `MinCopies::default()`'s `[8, 6, 6, 6, 5, 4]` |
+| classification policy | `SsrSegmentCriteria` ([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)) | wrapped by `StrRepeatCriteria` (§1.1) |
+| pre-screen, overlap resolution | `prefilter` ([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)) | called by the reader on rows from the file instead of on a live scan |
+| admission | `classify` ([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)) → `Classified` | the reader's segmentation runs it; the builder does **not** — it needs only the criteria-free parts |
+| motif / trim / purity | inside `finish_locus` ([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)): the `minimal_trim` call, `Motif::new`, `recompute_purity` | **lifted into `pub(crate)` helpers** so the builder and `finish_locus` share one implementation; nothing is re-derived here |
+| the locus type | `SsrSegment` ([`segment_criteria.rs`](../../../../src/region_typing/segment_criteria.rs)) | `str_loci` returns these, built through `SsrSegment::new` so its coordinate invariant still guards them |
+| the segment type | `TypedRegion` / `RegionKind` ([`region_typing/mod.rs`](../../../../src/region_typing/mod.rs)) | `genome_segments` returns these — the same four kinds, from a file instead of a scan |
+| the parity oracle | `partition_resident` ([`region_typing/mod.rs`](../../../../src/region_typing/mod.rs)) | §10.1's differential runs it over the same reference at the same policy |
+| the satellite cap's other home | `TypedRegionConfig::max_str_len` ([`region_typing/mod.rs`](../../../../src/region_typing/mod.rs)) | there it is the cap **and** the window margin; here there are no windows, so `StrRepeatCriteria::max_str_len_bp` is the cap alone |
+| the reference pass | `read_reference_info` ([`reference_info.rs`](../../../../src/reference_info.rs)), `FastaPass`, `flush_md5` | gains the observer seam of §2.1; the digests and geometry are untouched |
+| contig table | `ContigInfo` ([`reference_info.rs`](../../../../src/reference_info.rs)), `ReferenceInfo` | stored in the header verbatim — name, length, MD5 (`@SQ M5`) |
+| sibling-file pattern | `sibling_fai_path` ([`reference_info.rs`](../../../../src/reference_info.rs)), `write_fai` | the same shape: derived file beside the reference, written atomically, created on request |
+| error style | `RefSeqError` ([`ref_seq.rs`](../../../../src/ref_seq.rs)), `ReferenceInfoError` ([`reference_info.rs`](../../../../src/reference_info.rs)) | `#[non_exhaustive]` `thiserror` enum, one doc comment per variant saying when it fires |
+| region restriction | `GenomeRegions` ([`region_typing/mod.rs`](../../../../src/region_typing/mod.rs)), wrapping `RegionSet` ([`regions.rs`](../../../../src/regions.rs)) | the `region` argument; `None` = whole reference |
+| scalars | `ContigId`, `Position`, `Bp`, `Motif` ([`types.rs`](../../../../src/types.rs)) | reused; no new scalar newtype is minted except `SpanBp` (§1.2) |
+| the CLI | `PopVarCallerExpCommand` (`d9e7b076:src/pop_var_caller_exp/cli.rs`), `typed_regions.rs` | a second variant `RepeatCatalog(RepeatCatalogArgs)`, one module beside `typed_regions` |
 
 ---
 

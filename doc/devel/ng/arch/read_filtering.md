@@ -3,7 +3,7 @@
 *Status: architecture draft (2026-07-14), companion to the spec
 [`../spec/read_filtering.md`](../spec/read_filtering.md) (the design and its rationale) and
 to the shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary + step
-traits) and [`module_layout.md`](module_layout.md) (the `src/ng/` tree). `ng_step_interfaces.md`
+traits) and [`module_layout.md`](module_layout.md) (the module tree). `ng_step_interfaces.md`
 §3 sketches step 1 only briefly and defers "the real interface"; this doc is it. Naming
 follows [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): domain
 nouns for types, verbs for functions, newtypes for domain scalars, **STR** in prose ↔ `ssr`
@@ -21,11 +21,11 @@ the **contract** is the deliverable. See the spec for the "why" behind every dec
 
 ## Module home
 
-One file, `src/ng/read/filtering.rs`, with its `#[cfg(test)]` block beside it — read
+One file, `src/read/filtering.rs`, with its `#[cfg(test)]` block beside it — read
 filtering is a **fixed prelude with no bake-off**, so it is a file, not a folder
 (`module_layout.md` principle 1a). It shares the `read/` module with step 2 (`ReadPreparer`),
 which turns filtering's output into locus evidence and keeps its swappable impls side by side
-(principle 1b). The scalar newtypes seed `src/ng/types.rs` (§2.2 below); everything else is
+(principle 1b). The scalar newtypes seed `src/types.rs` (§2.2 below); everything else is
 step-1-local.
 
 ## 1. The filter cascade (contract)

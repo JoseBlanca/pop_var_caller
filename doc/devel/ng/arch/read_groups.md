@@ -11,8 +11,8 @@ illustrative; the **contract** is the deliverable.*
 ## Module home
 
 ```
-src/ng/types.rs           – ReadGroupId (shared vocabulary, §1.1)
-src/ng/read/
+src/types.rs           – ReadGroupId (shared vocabulary, §1.1)
+src/read/
 ├── aligned_read.rs       – AlignedRead, the ng-owned decoded read (§1.4), and (since
 │                           2026-08-03) RawAlignedRead/NoodlesRawAlignedRead, which carry
 │                           the read group off the file (§3.3)
@@ -32,7 +32,7 @@ src/ng/read/
 ```
 
 `read_groups.rs` sits in `input/` because the only `@RG` parser in ng is already there
-([`open_bam.rs:856`](../../../../src/ng/read/input/open_bam.rs#L856)) and because the plan it
+([`open_bam.rs`](../../../../src/read/input/open_bam.rs)) and because the plan it
 produces is what `SampleReads` is built from. The ng read type is one level up, in `read/`, because
 filtering, preparation and locus generation all speak it.
 
@@ -44,7 +44,7 @@ filtering, preparation and locus generation all speak it.
 pre-pass. Like `GenomePosition` before it ([`sample_reads.md`](sample_reads.md) §1.1) it goes in
 `ng::types` and is added to `ng_step_interfaces.md` §1; this module is its first consumer, not its
 owner. Unconstrained, so a public field and `get()`, matching `ContigId`
-([`types.rs:13`](../../../../src/ng/types.rs#L13)).
+([`types.rs`](../../../../src/types.rs)).
 
 ```rust
 /// Which read group a read belongs to: an index into the run's [`ReadGroups`] table.
@@ -162,7 +162,7 @@ sorted is a code-review question, not this doc's.
 
 ng owns its decoded read (spec §8), so the identifier can ride on it and production stays unaware
 of ng. Same fields as production's `MappedRead`
-([`alignment_input.rs:78`](../../../../src/bam/alignment_input.rs#L78)) with `source_file_index`
+([`alignment_input.rs`](../../../../src/bam/alignment_input.rs)) with `source_file_index`
 replaced — the read group knows its file.
 
 ```rust
@@ -224,7 +224,7 @@ pub enum RecordSourceError {
 ```
 
 **Why a new source error rather than folding these into `io::Error`.** `ReadFilterError::Source`
-wraps `io::Error` today ([`filtering.rs:586`](../../../../src/ng/read/filtering.rs#L586)); stuffing
+wraps `io::Error` today ([`filtering.rs`](../../../../src/read/filtering.rs)); stuffing
 a read-group failure in there would render it as a string and lose the read's identity, which is the
 one thing the message needs (spec §7).
 
@@ -332,20 +332,20 @@ Every row read at the cited line. The first four are **removals** — code that 
 
 | ng name | existing code | action |
 |---|---|---|
-| — | `SampleNames` enum + `sample_names()` [`open_bam.rs:835`, `:856`](../../../../src/ng/read/input/open_bam.rs#L835) | **replace**: parse the whole `@RG` record, not just `SM` |
-| — | `AlignmentFileError::MultipleSampleNames` [`mod.rs:132`](../../../../src/ng/read/input/mod.rs#L132) | **delete**: several samples per file is a normal input (spec §8) |
-| `ReadGroupError::{NoReadGroups, MissingSampleName}` | `AlignmentFileError::MissingSampleName { read_group: Option<String> }` [`mod.rs:151`](../../../../src/ng/read/input/mod.rs#L151) — one variant for both states | **split** into two, moved to the pre-pass |
-| — | `AlignmentFile::sample_name()` [`open_bam.rs:417`](../../../../src/ng/read/input/open_bam.rs#L417) | **delete**: the sample is the plan's, not a file's |
-| `build_read_groups` | no counterpart; [`ng_ssr_cohort_stutter.rs:175`](../../../../examples/ng_ssr_cohort_stutter.rs#L175) groups paths by `SM` by hand, opening each file once to probe | **new**; that ad-hoc grouping becomes a call |
-| the single-sample check | `agreed_sample_name` [`mod.rs:550`](../../../../src/ng/read/input/mod.rs#L550) | **keep**, re-keyed on read groups (§3.2) |
-| `ReadGroupId` | no counterpart — reads carry `source_file_index: usize` [`alignment_input.rs:102`](../../../../src/bam/alignment_input.rs#L102) | **new**, in `ng::types` |
-| `AlignedRead` | `MappedRead` [`alignment_input.rs:78`](../../../../src/bam/alignment_input.rs#L78) | **model, not reuse**; copy `record_buf_to_mapped_read` (deleted 2026-11-26; ng's copy is `decode_record` in `read/aligned_read.rs`) |
-| decode helpers | `compute_adaptor_boundary` is `pub(crate)` [`:883`](../../../../src/bam/alignment_input.rs#L883); `cigar_to_ops` is module-private [`:1105`](../../../../src/bam/alignment_input.rs#L1105) | reuse the first as-is; the second needs `pub(crate)` or a copy |
-| the per-record stamp | `NoodlesRawAlignedRead.source_file_index` ([`aligned_read.rs`](../../../../src/ng/read/aligned_read.rs) since 2026-08-03; `filtering.rs` when this was written), stamped in `read_next` | same slot, new payload: the file's `ReadGroupResolution` |
+| — | `SampleNames` enum + `sample_names()` [`open_bam.rs`](../../../../src/read/input/open_bam.rs) | **replace**: parse the whole `@RG` record, not just `SM` |
+| — | `AlignmentFileError::MultipleSampleNames` [`mod.rs`](../../../../src/read/input/mod.rs) | **delete**: several samples per file is a normal input (spec §8) |
+| `ReadGroupError::{NoReadGroups, MissingSampleName}` | `AlignmentFileError::MissingSampleName { read_group: Option<String> }` [`mod.rs`](../../../../src/read/input/mod.rs) — one variant for both states | **split** into two, moved to the pre-pass |
+| — | `AlignmentFile::sample_name()` [`open_bam.rs`](../../../../src/read/input/open_bam.rs) | **delete**: the sample is the plan's, not a file's |
+| `build_read_groups` | no counterpart; `d9e7b076:examples/ng_ssr_cohort_stutter.rs` groups paths by `SM` by hand, opening each file once to probe | **new**; that ad-hoc grouping becomes a call |
+| the single-sample check | `agreed_sample_name` [`mod.rs`](../../../../src/read/input/mod.rs) | **keep**, re-keyed on read groups (§3.2) |
+| `ReadGroupId` | no counterpart — reads carry `source_file_index: usize` [`alignment_input.rs`](../../../../src/bam/alignment_input.rs) | **new**, in `ng::types` |
+| `AlignedRead` | `MappedRead` [`alignment_input.rs`](../../../../src/bam/alignment_input.rs) | **model, not reuse**; copy `record_buf_to_mapped_read` (deleted 2026-11-26; ng's copy is `decode_record` in `read/aligned_read.rs`) |
+| decode helpers | `compute_adaptor_boundary` is `pub(crate)` [`alignment_input.rs`](../../../../src/bam/alignment_input.rs); `cigar_to_ops` is module-private [`alignment_input.rs`](../../../../src/bam/alignment_input.rs) | reuse the first as-is; the second needs `pub(crate)` or a copy |
+| the per-record stamp | `NoodlesRawAlignedRead.source_file_index` ([`aligned_read.rs`](../../../../src/read/aligned_read.rs) since 2026-08-03; `filtering.rs` when this was written), stamped in `read_next` | same slot, new payload: the file's `ReadGroupResolution` |
 | the record readers | `BamRegionSource` / `CramRegionSource` (`region_query.rs`, **deleted 2026-08-03** — now `aligned_reads_reader/bam.rs`, `aligned_reads_reader/cram.rs` and `region_raw_aligned_reads.rs`) | carry the resolution the same way; a CRAM settles it inside `decode_container_at`, which is what lets every auxiliary tag be dropped |
-| `ReadFilterCounts` | [`filtering.rs:117`](../../../../src/ng/read/filtering.rs#L117) | reuse the type; change its key (§3.2) |
-| `@RG` tag constants | noodles `read_group::tag::{SAMPLE, LIBRARY, PLATFORM}` (`SM`/`LB`/`PL`) | use as-is; there is **no** `SRX` constant — a non-standard tag read through `other_fields()`, as `SAMPLE` already is [`open_bam.rs:861`](../../../../src/ng/read/input/open_bam.rs#L861) |
-| `DuplicateReadAcrossFiles` | [`mod.rs:622`](../../../../src/ng/read/input/mod.rs#L622) | unchanged — still scoped to one sample's files (spec §9) |
+| `ReadFilterCounts` | [`filtering.rs`](../../../../src/read/filtering.rs) | reuse the type; change its key (§3.2) |
+| `@RG` tag constants | noodles `read_group::tag::{SAMPLE, LIBRARY, PLATFORM}` (`SM`/`LB`/`PL`) | use as-is; there is **no** `SRX` constant — a non-standard tag read through `other_fields()`, as `SAMPLE` already is [`open_bam.rs`](../../../../src/read/input/open_bam.rs) |
+| `DuplicateReadAcrossFiles` | [`mod.rs`](../../../../src/read/input/mod.rs) | unchanged — still scoped to one sample's files (spec §9) |
 
 ## 6. Open items
 
@@ -353,7 +353,7 @@ Every row read at the cited line. The first four are **removals** — code that 
   §13). Until it closes, `ReadGroup::experiment` is always `Synthesized` from the library, which is
   a working default, not the answer.
 - *Impl-time.* How the reused record buffer holds the resolution and still satisfies its `Default`
-  bound ([`filtering.rs:346`](../../../../src/ng/read/filtering.rs#L346)) — an `Arc` refreshed per
+  bound ([`filtering.rs`](../../../../src/read/filtering.rs)) — an `Arc` refreshed per
   query is the obvious route; confirm when coding.
 - *Impl-time.* `PerRecord` as a linear array or a sorted one (§1.3). Measure only if a real
   multi-`@RG` file appears; every file in the surveyed archive declares one.

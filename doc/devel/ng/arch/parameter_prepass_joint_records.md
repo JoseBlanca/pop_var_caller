@@ -3,7 +3,7 @@
 *Status: architecture draft (2026-08-12), companion to the spec
 [`../spec/parameter_prepass_joint_records.md`](../spec/parameter_prepass_joint_records.md) (the
 design and its rationale) and to the shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md)
-(vocabulary) and [`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
+(vocabulary) and [`module_layout.md`](module_layout.md) (the module tree). Naming follows
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): nouns for types, verbs
 for functions, **STR** in prose ↔ `ssr` in code. Signatures are illustrative; the **contract** is the
 deliverable. Every "why" lives in the spec — this doc does not re-argue one.*
@@ -13,7 +13,7 @@ mathematics that reads them is [`parameter_prepass_joint_fit.md`](parameter_prep
 
 ## Module home
 
-`src/ng/parameter_estimation/joint/census.rs`, beside `loci.rs` and `fit.rs`. **No trait**: one
+`src/parameter_estimation/joint/census.rs`, beside `loci.rs` and `fit.rs`. **No trait**: one
 record shape per path, no competing candidate, so a codec trait would be ceremony over two structs
 and a writer.
 
@@ -331,7 +331,7 @@ twenty-five reads a position — the second of which is already in `GenericEvide
 subsystem rather than a field: no other type held one, no interface passed one, and the only signature
 that mentioned it was `CensusWriter::finish`.
 
-**`coverage.rs` is now dead code** — `src/ng/parameter_estimation/joint/coverage.rs`, about 560 lines,
+**`coverage.rs` is now dead code** — `8456669b~1:src/ng/parameter_estimation/joint/coverage.rs`, about 560 lines,
 built during the walk and read by nothing. Delete it with this change rather than leaving it to be
 found.
 
@@ -590,9 +590,9 @@ make a property of the sample look like a property of the file.
 | `DepthBin`, the ladder behind `DepthCode` | `generic/depth_bins.rs:106,141` (file since removed) | reused unchanged; **do not mint a second ladder** |
 | `CensusWriter::add_locus` | `GenericAccumulators::add_locus` (`generic/accumulators.rs:278` (file since removed)) | same signature and same borrow, so one genome walk feeds both routes |
 | `CensusWriter::merge` | `GenericAccumulators::merge` (`generic/accumulators.rs:392` (file since removed)) | same contract: shard, then fold |
-| what the writer is fed | `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs)) | taken as-is: `region`, `observations`, and the no-observation scalar |
-| `ReadGroupId` | [`src/types.rs:199`](../../../../src/types.rs) | used as-is |
-| `StratumCounts` | [`repeat_catalog/strata.rs:15`](../../../../src/repeat_catalog/strata.rs) | stored, not restated |
+| what the writer is fed | `SampleLocusObservations` ([`locus_generation/mod.rs`](../../../../src/locus_generation/mod.rs)) | taken as-is: `region`, `observations`, and the no-observation scalar |
+| `ReadGroupId` | [`src/types.rs`](../../../../src/types.rs) | used as-is |
+| `StratumCounts` | [`repeat_catalog/strata.rs`](../../../../src/repeat_catalog/strata.rs) | stored, not restated |
 | `SelectionTerms`, `CensusLociDigest` | [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §1.2–1.3 | held, not redefined |
 
 **Renamed in the code — 2026-08-14** (`refactor(ng): A2`, plan

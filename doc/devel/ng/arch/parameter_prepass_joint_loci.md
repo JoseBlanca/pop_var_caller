@@ -6,7 +6,7 @@ own tests. `CensusLoci`, `SelectionTerms` and `CensusLociDigest` are still the c
 yet code. Companion to the spec
 [`../spec/parameter_prepass_joint_loci.md`](../spec/parameter_prepass_joint_loci.md) (the design and
 its rationale) and to the shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md)
-(vocabulary) and [`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
+(vocabulary) and [`module_layout.md`](module_layout.md) (the module tree). Naming follows
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md): nouns for types, verbs
 for functions, **STR** in prose ↔ `ssr` in code. Signatures are illustrative; the **contract** is the
 deliverable. Every "why" lives in the spec — this doc does not re-argue one.*
@@ -17,12 +17,12 @@ deliverable. Every "why" lives in the spec — this doc does not re-argue one.*
 
 ## Module home
 
-`src/ng/parameter_estimation/joint/` — a sibling of `generic/` and `ssr/` under step 4, because it is
+`src/parameter_estimation/joint/` — a sibling of `generic/` and `ssr/` under step 4, because it is
 a second route to the same parameters rather than a different step (`module_layout.md`,
 *parameter_estimation/*). This document owns one file of it.
 
 ```
-src/ng/parameter_estimation/joint/
+src/parameter_estimation/joint/
 ├── mod.rs      – the route's surface; re-exports the three units below
 ├── loci.rs     – THIS DOCUMENT: which loci are kept, and the terms that travel with them
 ├── census.rs   – what is recorded at each (its own arch doc)
@@ -37,7 +37,7 @@ spec §1).
 
 **Nothing is added to `repeat_catalog/`.** The STR sampler this consumer asked for already ships —
 `RepeatCatalog::sample_loci_per_stratum` and `count_loci_per_stratum`
-([`src/repeat_catalog/reader.rs:242,260`](../../../../src/repeat_catalog/reader.rs)) — so this
+([`src/repeat_catalog/reader.rs,260`](../../../../src/repeat_catalog/reader.rs)) — so this
 unit states a policy and calls them (spec §3.2).
 
 ---
@@ -292,7 +292,7 @@ pub fn select_generic_positions(
 ```
 
 **Decided — the same hash construction the catalog's sampler uses**, keyed by the contig's **name**
-as `hash_locus` is ([`src/repeat_catalog/strata.rs:158`](../../../../src/repeat_catalog/strata.rs)),
+as `hash_locus` is ([`src/repeat_catalog/strata.rs`](../../../../src/repeat_catalog/strata.rs)),
 so both halves of the selection rest on one uniformity assumption rather than two (spec §2). *An
 earlier draft of this section proposed lifting `hash_locus` to `pub(crate)` and rekeying it by
 `ContigId`. Neither happened, and neither should: an index is a property of the file's contig order,
@@ -365,14 +365,14 @@ produces a number with no meaning (spec §5).
 
 | this doc | existing code | how they meet |
 |---|---|---|
-| the STR sampler | `RepeatCatalog::sample_loci_per_stratum` ([`repeat_catalog/reader.rs:260`](../../../../src/repeat_catalog/reader.rs)) | called, not reimplemented; returns `(StratumCounts, StratumSample)` from one pass, which is exactly `CensusLoci`'s two STR fields |
-| the per-stratum totals | `RepeatCatalog::count_loci_per_stratum` ([`repeat_catalog/reader.rs:242`](../../../../src/repeat_catalog/reader.rs)) | it delegates to the sampler at `cap = 0`, so asking for both costs one pass — take the pair from `sample_loci_per_stratum` and never call this one separately |
-| `StratumCounts`, `StratumSample` | [`repeat_catalog/strata.rs:15,49`](../../../../src/repeat_catalog/strata.rs) | used as-is; `CensusLoci` stores them rather than converting |
-| the hash | `hash_locus` ([`repeat_catalog/strata.rs:158`](../../../../src/repeat_catalog/strata.rs), called from `StratumSampler::offer:110`) | the generic rule uses the same function and seed convention. **It is private today and keyed by contig *name*** — lifting it to `pub(crate)` and taking a `ContigId` is this unit's one edit outside its own file |
-| `StrRepeatCriteria` | [`repeat_catalog/criteria.rs`](../../../../src/repeat_catalog/criteria.rs), taken by `str_loci` ([`reader.rs:220`](../../../../src/repeat_catalog/reader.rs)) | stored in `SelectionTerms` by value; it is already the run's whole STR policy |
-| the catalog-vs-reference check | `RepeatCatalog::open_checking_against_reference` ([`repeat_catalog/reader.rs:53`](../../../../src/repeat_catalog/reader.rs)) | happens before this unit runs, which is why the catalog's own identity is **not** in `SelectionTerms` (spec §5.1) |
-| `GenomePosition`, `ContigId`, `Position`, `Bp` | [`src/types.rs:60,13,34,174`](../../../../src/types.rs) | used as-is; this unit seeds no new scalar |
-| the scope of a run | `ReadScope` (taken by `str_loci`/`count_loci_per_stratum`, [`reader.rs:220,242`](../../../../src/repeat_catalog/reader.rs)) | `AnalysedRegions` must convert into one, so a `--regions` run counts and samples inside the BED — spec §3.3 |
+| the STR sampler | `RepeatCatalog::sample_loci_per_stratum` ([`repeat_catalog/reader.rs`](../../../../src/repeat_catalog/reader.rs)) | called, not reimplemented; returns `(StratumCounts, StratumSample)` from one pass, which is exactly `CensusLoci`'s two STR fields |
+| the per-stratum totals | `RepeatCatalog::count_loci_per_stratum` ([`repeat_catalog/reader.rs`](../../../../src/repeat_catalog/reader.rs)) | it delegates to the sampler at `cap = 0`, so asking for both costs one pass — take the pair from `sample_loci_per_stratum` and never call this one separately |
+| `StratumCounts`, `StratumSample` | [`repeat_catalog/strata.rs,49`](../../../../src/repeat_catalog/strata.rs) | used as-is; `CensusLoci` stores them rather than converting |
+| the hash | `hash_locus` ([`repeat_catalog/strata.rs`](../../../../src/repeat_catalog/strata.rs), called from `StratumSampler::offer:110`) | the generic rule uses the same function and seed convention. **It is private today and keyed by contig *name*** — lifting it to `pub(crate)` and taking a `ContigId` is this unit's one edit outside its own file |
+| `StrRepeatCriteria` | [`repeat_catalog/criteria.rs`](../../../../src/repeat_catalog/criteria.rs), taken by `str_loci` ([`reader.rs`](../../../../src/repeat_catalog/reader.rs)) | stored in `SelectionTerms` by value; it is already the run's whole STR policy |
+| the catalog-vs-reference check | `RepeatCatalog::open_checking_against_reference` ([`repeat_catalog/reader.rs`](../../../../src/repeat_catalog/reader.rs)) | happens before this unit runs, which is why the catalog's own identity is **not** in `SelectionTerms` (spec §5.1) |
+| `GenomePosition`, `ContigId`, `Position`, `Bp` | [`src/types.rs,13,34,174`](../../../../src/types.rs) | used as-is; this unit seeds no new scalar |
+| the scope of a run | `ReadScope` (taken by `str_loci`/`count_loci_per_stratum`, [`reader.rs,242`](../../../../src/repeat_catalog/reader.rs)) | `AnalysedRegions` must convert into one, so a `--regions` run counts and samples inside the BED — spec §3.3 |
 
 ---
 

@@ -288,7 +288,7 @@ pub struct LocusCounts {
 - **Reference and `@SQ` match exactly, enforced at read ingestion — decided (owner, 2026-07-22).**
   Reads were mapped against the reference, so each file's `@SQ` list must equal the reference
   contig list — names, lengths, order — a check read ingestion runs at file open
-  ([open_bam.rs:243](../../../../src/ng/read/input/open_bam.rs#L243)). A contig in the reference
+  ([open_bam.rs](../../../../src/read/input/open_bam.rs)). A contig in the reference
   but absent from a sample's `@SQ` therefore **cannot reach this step**: there is no benign-mismatch
   case to absorb, and §4's fatal-error model is never at risk from one. Supersedes spec §8 item 4 /
   §12's "zero reads" lean.
@@ -299,7 +299,7 @@ pub struct LocusCounts {
   nobody can read it: a drop rate silently under-reported, on the one path that reaches it — an
   iterator dropped **mid-region**. Field declaration order already gives this (`generators` first),
   and that was the whole enforcement from C4 until now, guarded by a comment. The `Drop` impl
-  ([locus_generation/mod.rs](../../../../src/ng/locus_generation/mod.rs)) makes the order an
+  ([locus_generation/mod.rs](../../../../src/locus_generation/mod.rs)) makes the order an
   optimisation rather than the guarantee, so a reorder cannot silently undo it. *Rejected:* leaving
   the order alone (the failure is invisible, so the comment is the only thing standing between a
   reorder and a wrong number). **No test can fail either way, and that is a property of the types:**
@@ -324,18 +324,18 @@ alongside them.
 
 | ng name | existing code | action |
 |---|---|---|
-| `RegionKind` / `TypedRegion` (dispatch input) | [region_typing/mod.rs:170](../../../../src/ng/region_typing/mod.rs#L170), [:146](../../../../src/ng/region_typing/mod.rs#L146) | consume as-is; the `match` is exhaustive over its four variants (`SsrSegment`/`SsrBundle`/`Generic`/`Satellite`) |
-| iterator + counts shape | `TypedRegionIterator` [region_typing/mod.rs:789](../../../../src/ng/region_typing/mod.rs#L789), `TypedRegionCounts` [:269](../../../../src/ng/region_typing/mod.rs#L269) | mirror — same lazy `Item = Result<_,_>`, same `counts()` accessor |
-| `GenomeRegion` / `Position` / `ContigId` | [types.rs:77](../../../../src/ng/types.rs#L77), [:32](../../../../src/ng/types.rs#L32), [:11](../../../../src/ng/types.rs#L11) | reuse as-is (1-based inclusive, `u64`); `region.len()` derives `num_obs_along_locus()`'s length |
-| `ObservedSequence` | `AlleleObservation` [pileup_record.rs:138](../../../../src/pileup_record.rs#L138) + `AlleleSupportStats` [:44](../../../../src/pileup_record.rs#L44) | **model** — the moments (`num_obs`/`q_sum`/`fwd`/`mapq_sum`/`mapq_sum_sq`) map field-for-field; ng keeps `placed_left`, drops `placed_start` (no model consumes it, and it is re-derivable), and adds `read_coverage` + `read_group` |
-| `ChainId` | [pileup_record.rs:30](../../../../src/pileup_record.rs#L30) (`type ChainId = u64`) | reuse as-is; production's REF-chain-id drop (§8 there) is the memory lesson §6 records |
-| `CohortLocus` composing `SampleLocusObservations` | `CohortPileupRecord.per_sample: Vec<Option<PileupRecord>>` [var_calling/types.rs:39](../../../../src/var_calling/types.rs#L39) | **model for the cohort type** — not this step; the merge groups by overlap (spec §3, §11) |
-| `SampleReads` (read access) | [read/input/mod.rs](../../../../src/ng/read/input/mod.rs), `cursor` | reuse as-is. **The entry point changed**: `reads_in_region` was deleted at [`alignment_cursor.md`](../spec/alignment_cursor.md)'s Milestone F, and a generator now holds a `SampleCursor` for a chromosome. §8 there was this step's feedback (the per-query accessor); the cursor closed it by taking one accessor per file per chromosome instead |
-| `LocusGenerationError::Reads` | `IngestError` [read/input/mod.rs:584](../../../../src/ng/read/input/mod.rs#L584) | wrap — read on `main` |
-| `LocusGenerationError::Reference` | `RefSeqError` [ref_seq.rs:39](../../../../src/ng/ref_seq.rs#L39) | wrap |
-| `LocusGenerationError::TypedRegion` | `TypedRegionError` [region_typing/mod.rs:1640](../../../../src/ng/region_typing/mod.rs#L1640) | wrap |
-| reference accessor a generator holds | `RefSeq`/`RawRefSeq`/`EvictableRefSeq` [ref_seq.rs:142](../../../../src/ng/ref_seq.rs#L142), [:180](../../../../src/ng/ref_seq.rs#L180), [:230](../../../../src/ng/ref_seq.rs#L230) | a generator's own field (spec §4) |
-| `MappedRead` (generator's read input) | [bam/alignment_input.rs:78](../../../../src/bam/alignment_input.rs#L78) | reuse as-is |
+| `RegionKind` / `TypedRegion` (dispatch input) | [region_typing/mod.rs](../../../../src/region_typing/mod.rs) | consume as-is; the `match` is exhaustive over its four variants (`SsrSegment`/`SsrBundle`/`Generic`/`Satellite`) |
+| iterator + counts shape | `TypedRegionIterator` [region_typing/mod.rs](../../../../src/region_typing/mod.rs), `TypedRegionCounts` [`mod.rs`](../../../../src/region_typing/mod.rs) | mirror — same lazy `Item = Result<_,_>`, same `counts()` accessor |
+| `GenomeRegion` / `Position` / `ContigId` | [types.rs](../../../../src/types.rs) | reuse as-is (1-based inclusive, `u64`); `region.len()` derives `num_obs_along_locus()`'s length |
+| `ObservedSequence` | `AlleleObservation` `d9e7b076:src/pileup_record.rs` + `AlleleSupportStats` `d9e7b076:src/pileup_record.rs` | **model** — the moments (`num_obs`/`q_sum`/`fwd`/`mapq_sum`/`mapq_sum_sq`) map field-for-field; ng keeps `placed_left`, drops `placed_start` (no model consumes it, and it is re-derivable), and adds `read_coverage` + `read_group` |
+| `ChainId` | `d9e7b076:src/pileup_record.rs` (`type ChainId = u64`) | reuse as-is; production's REF-chain-id drop (§8 there) is the memory lesson §6 records |
+| `CohortLocus` composing `SampleLocusObservations` | `CohortPileupRecord.per_sample: Vec<Option<PileupRecord>>` `d9e7b076:src/var_calling/types.rs` | **model for the cohort type** — not this step; the merge groups by overlap (spec §3, §11) |
+| `SampleReads` (read access) | [read/input/mod.rs](../../../../src/read/input/mod.rs), `cursor` | reuse as-is. **The entry point changed**: `reads_in_region` was deleted at [`alignment_cursor.md`](../spec/alignment_cursor.md)'s Milestone F, and a generator now holds a `SampleCursor` for a chromosome. §8 there was this step's feedback (the per-query accessor); the cursor closed it by taking one accessor per file per chromosome instead |
+| `LocusGenerationError::Reads` | `IngestError` [read/input/mod.rs](../../../../src/read/input/mod.rs) | wrap — read on `main` |
+| `LocusGenerationError::Reference` | `RefSeqError` [ref_seq.rs](../../../../src/ref_seq.rs) | wrap |
+| `LocusGenerationError::TypedRegion` | `TypedRegionError` [region_typing/mod.rs](../../../../src/region_typing/mod.rs) | wrap |
+| reference accessor a generator holds | `RefSeq`/`RawRefSeq`/`EvictableRefSeq` [ref_seq.rs](../../../../src/ref_seq.rs) | a generator's own field (spec §4) |
+| `MappedRead` (generator's read input) | `d9e7b076:src/bam/alignment_input.rs` | reuse as-is — *deleted 2026-11-27; the generators now read `AlignedRead` ([read/aligned_read.rs](../../../../src/read/aligned_read.rs))* |
 | `LocusKind` / `SsrDetail` | [ng_step_interfaces.md §2](ng_step_interfaces.md), spec §3 | referenced, not re-typed — shared vocabulary |
 
 ## Test & bench shape
