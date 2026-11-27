@@ -128,7 +128,7 @@ fn driver(fixture: &SyntheticSample) -> Driver {
     )
     .unwrap();
 
-    let preparer = LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::with_shared_index(
+    let preparer = LeftAlignPreparer::new(WindowedRefSeq::with_shared_index(
         fixture.fasta.clone(),
         contigs.clone(),
         index.clone(),

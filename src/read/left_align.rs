@@ -11,16 +11,15 @@
 //! reads supporting them pool into a single candidate instead of scattering across several weak
 //! ones. Bases and qualities are copied through untouched; only the CIGAR changes.
 //!
-//! **The shifting is not implemented here.** It is production's `left_align_indels` (itself a port
-//! of GATK's `AlignmentUtils.leftAlignIndels`), reached through the
-//! [`AlignmentNormalizer`] trait in
-//! [`alignment`](crate::alignment) — this module supplies the reference window, the round-trip
-//! into and out of an `Alignment`, and the policy of when to fetch at all.
+//! **The shifting is not implemented here.** It is
+//! [`left_align_indels`](crate::alignment::indel_norm::left_align_indels), a port of GATK's
+//! `AlignmentUtils.leftAlignIndels`, called directly — this module supplies the reference window
+//! and the policy of when to fetch at all.
 //!
 //! Design: `doc/devel/ng/spec/read_preparation.md`, `doc/devel/ng/arch/read_preparation.md`.
 
 use super::{ReadPrepError, ReadPreparer};
-use crate::alignment::{Alignment, AlignmentNormalizer, DefaultAlignmentNormalizer};
+use crate::alignment::indel_norm::left_align_indels;
 use crate::bam::alignment_input::CigarOp;
 use crate::bam::alignment_input::cigar_ref_span;
 use crate::read::aligned_read::AlignedRead;
@@ -66,16 +65,9 @@ pub struct LeftAlignScratch {
 
 /// Step 2's v1 preparer: **pass through, or canonicalise the indels** a read already carries.
 ///
-/// # What it is generic over, and why both are visible
-///
 /// `R` is the reference it fetches windows from. It is held as a field rather than passed per
 /// call because a preparer that needs no reference should not have to carry an unused one — the
 /// pass-through-only arm holds nothing, and "needs no reference" stays a compile-time fact.
-///
-/// `N` is the normalizer that does the shifting. The alignment module ships three so they can be
-/// *compared*, and names [`DefaultAlignmentNormalizer`] to record which one won — so burying a
-/// concrete choice in here would hide it at the use site and make that comparison unrepeatable
-/// through this step. It costs nothing: the default normalizer is a unit struct.
 ///
 /// # Per worker, never shared
 ///
@@ -89,33 +81,17 @@ pub struct LeftAlignScratch {
 /// the wrong ownership model, that a preparer is something to hand around rather than something a
 /// worker owns.
 #[derive(Debug)]
-pub struct LeftAlignPreparer<R: RefSeq, N: AlignmentNormalizer = DefaultAlignmentNormalizer> {
+pub struct LeftAlignPreparer<R: RefSeq> {
     /// The reference this preparer fetches its windows from — **the uppercased, canonical view**
     /// ([`RefSeq::fetch_into`]), not production's raw bytes. An alignment has no business
     /// treating a base differently because a masking tool lowercased it (spec §6).
     reference: R,
-    /// The normalizer the canonicalize path calls. Stateless; one value serves every read.
-    normalizer: N,
 }
 
-impl<R: RefSeq> LeftAlignPreparer<R, DefaultAlignmentNormalizer> {
-    /// Build over `reference` with the recommended normalizer — algorithm 1a, the
-    /// GATK/production left-aligner.
-    ///
-    /// This is the constructor a caller wants unless it is running a bake-off; the alternative
-    /// normalizers exist as comparators, not as choices to make by taste.
-    pub fn with_default_normalizer(reference: R) -> Self {
-        Self::new(reference, DefaultAlignmentNormalizer::default())
-    }
-}
-
-impl<R: RefSeq, N: AlignmentNormalizer> LeftAlignPreparer<R, N> {
-    /// Build over `reference`, naming the normalizer explicitly — the bake-off constructor.
-    pub fn new(reference: R, normalizer: N) -> Self {
-        Self {
-            reference,
-            normalizer,
-        }
+impl<R: RefSeq> LeftAlignPreparer<R> {
+    /// Build over `reference`.
+    pub fn new(reference: R) -> Self {
+        Self { reference }
     }
 
     /// The reference this preparer reads from. **Test/diagnostic only** — a driver holds the
@@ -129,9 +105,9 @@ impl<R: RefSeq, N: AlignmentNormalizer> LeftAlignPreparer<R, N> {
     /// Rewrite this read's indels into their leftmost equivalent spelling, in place.
     ///
     /// Only the CIGAR changes: bases, qualities and the placement start are all left where they
-    /// are. The default normalizer wraps production's `left_align_indels`, which production calls
-    /// with end-deletion stripping *off*, so a deletion that slides to the read's start stays a
-    /// leading deletion rather than moving `alignment_start` (spec §5).
+    /// are. [`left_align_indels`] runs with end-deletion stripping *off*, so a deletion that
+    /// slides to the read's start stays a leading deletion rather than moving `alignment_start`
+    /// (spec §5).
     fn canonicalize(
         &self,
         read: &mut AlignedRead,
@@ -163,31 +139,23 @@ impl<R: RefSeq, N: AlignmentNormalizer> LeftAlignPreparer<R, N> {
             .map_err(ReadPrepError::Reference)?;
         // The window must cover the read's whole footprint, and `fetch_into` guarantees it: on
         // success it writes exactly `length` bases, on failure it returns `Err`. Worth asserting
-        // because the failure mode of a short window is silent — the normalizer fails *safe*,
-        // handing back the CIGAR untouched, so normalization would simply not happen and nothing
-        // would say so.
+        // because the failure mode of a short window is silent — `left_align_indels` fails
+        // *safe*, handing back the CIGAR untouched, so normalization would simply not happen and
+        // nothing would say so.
         debug_assert_eq!(
             scratch.reference_window.len() as u64,
             reference_span,
             "a successful fetch must fill the whole window"
         );
 
-        // The normalizer works on an `Alignment`, not on a bare CIGAR, so the CIGAR moves out of
-        // the read and back — no clone. `reference_offset` is 0 because the window *starts* at
-        // the read's first aligned base; the offset exists for callers holding a larger stretch,
-        // and a non-zero value here would place the read against the wrong bases.
-        let mut alignment = Alignment {
-            reference_offset: 0,
-            cigar: std::mem::take(&mut read.cigar),
-        };
-        self.normalizer
-            .normalize(&mut alignment, &read.seq, &scratch.reference_window);
-        read.cigar = alignment.cigar;
+        // The window *starts* at the read's first aligned base, which is the reference
+        // `left_align_indels` expects (its `ref_seq[0]`).
+        left_align_indels(&mut read.cigar, &read.seq, &scratch.reference_window);
         Ok(())
     }
 }
 
-impl<R: RefSeq + EvictableRefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N> {
+impl<R: RefSeq + EvictableRefSeq> ReadPreparer for LeftAlignPreparer<R> {
     type Scratch = LeftAlignScratch;
 
     /// Prepare one read: canonicalise its indels if it has any, otherwise hand back what the
@@ -324,11 +292,10 @@ mod tests {
         );
     }
 
-    /// The default constructor reaches the recommended normalizer, and the preparer keeps the
-    /// reference it was handed.
+    /// The preparer keeps the reference it was handed.
     #[test]
-    fn the_default_constructor_holds_its_reference() {
-        let preparer = LeftAlignPreparer::with_default_normalizer(reference());
+    fn the_constructor_holds_its_reference() {
+        let preparer = LeftAlignPreparer::new(reference());
         let mut window = Vec::new();
         preparer
             .reference()
@@ -359,7 +326,7 @@ mod tests {
     /// the reference is never consulted, which is why this passes a reference that panics.
     #[test]
     fn a_read_with_no_indel_never_fetches_a_reference_window() {
-        let preparer = LeftAlignPreparer::with_default_normalizer(NeverFetched);
+        let preparer = LeftAlignPreparer::new(NeverFetched);
         let mut scratch = LeftAlignScratch::default();
         let prepared = preparer
             .prepare_read(read_with(3, vec![CigarOp::Match(4)], b"ACGT"), &mut scratch)
@@ -379,7 +346,7 @@ mod tests {
     /// quality handling, since BAQ is deferred.
     #[test]
     fn base_qualities_pass_through_uncapped() {
-        let preparer = LeftAlignPreparer::with_default_normalizer(NeverFetched);
+        let preparer = LeftAlignPreparer::new(NeverFetched);
         let mut scratch = LeftAlignScratch::default();
         let mut read = read_with(1, vec![CigarOp::Match(4)], b"ACGT");
         read.qual = vec![2, 40, 11, 37];
@@ -400,7 +367,7 @@ mod tests {
     #[test]
     fn an_indel_in_a_homopolymer_is_moved_to_its_leftmost_spelling() {
         let reference = InMemoryRefSeq::from_contigs(vec![b"TAAAAG".to_vec()]);
-        let preparer = LeftAlignPreparer::with_default_normalizer(reference);
+        let preparer = LeftAlignPreparer::new(reference);
         let mut scratch = LeftAlignScratch::default();
 
         let prepared = preparer
@@ -430,7 +397,7 @@ mod tests {
     /// read that simply produced nothing.
     #[test]
     fn a_failed_fetch_is_an_error_not_a_decline() {
-        let preparer = LeftAlignPreparer::with_default_normalizer(AlwaysFailsToFetch);
+        let preparer = LeftAlignPreparer::new(AlwaysFailsToFetch);
         let mut scratch = LeftAlignScratch::default();
         let outcome = preparer.prepare_read(
             read_with(
@@ -458,9 +425,7 @@ mod tests {
     #[test]
     fn the_read_group_rides_through_both_paths() {
         let preparer =
-            LeftAlignPreparer::with_default_normalizer(InMemoryRefSeq::from_contigs(vec![
-                b"TAAAAG".to_vec(),
-            ]));
+            LeftAlignPreparer::new(InMemoryRefSeq::from_contigs(vec![b"TAAAAG".to_vec()]));
         let mut scratch = LeftAlignScratch::default();
 
         let mut no_indel = read_with(1, vec![CigarOp::Match(5)], b"TAAAA");
@@ -497,7 +462,7 @@ mod tests {
     /// subsequent read fails here.
     #[test]
     fn two_reads_from_different_groups_keep_their_own() {
-        let preparer = LeftAlignPreparer::with_default_normalizer(reference());
+        let preparer = LeftAlignPreparer::new(reference());
         let mut scratch = LeftAlignScratch::default();
         let groups: Vec<ReadGroupId> = [ReadGroupId(3), ReadGroupId(11)]
             .into_iter()
@@ -518,7 +483,7 @@ mod tests {
     /// for it; so does this, rather than asking for a zero-length window.
     #[test]
     fn an_all_insertion_read_is_passed_through_without_fetching() {
-        let preparer = LeftAlignPreparer::with_default_normalizer(NeverFetched);
+        let preparer = LeftAlignPreparer::new(NeverFetched);
         let mut scratch = LeftAlignScratch::default();
         let prepared = preparer
             .prepare_read(

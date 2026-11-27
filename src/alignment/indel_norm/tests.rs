@@ -267,3 +267,82 @@ fn wrapper_keeps_leading_deletion_and_is_noop_without_indel() {
     left_align_indels(&mut plain, b"ACGTA", b"ACGTA");
     assert_eq!(plain, vec![Match(5)]);
 }
+
+#[test]
+fn wrapper_carries_a_deletion_across_a_block_and_merges_it() {
+    // Two single-A deletions separated by a Match block on AAAAAT/AAAT. The right deletion is
+    // carried across the intervening block and merged with the left into one leading
+    // Deletion(2) — cross-block propagation and merging, exercised together.
+    let mut cigar = vec![Match(1), Deletion(1), Match(1), Deletion(1), Match(2)];
+    left_align_indels(&mut cigar, b"AAAT", b"AAAAAT");
+    assert_eq!(cigar, vec![Deletion(2), Match(4)]);
+}
+
+#[test]
+fn wrapper_already_leftmost_input_comes_back_byte_identical() {
+    // Idempotence: 1M1D4M on GAAAT/GAAAAT is already leftmost and must come back unchanged,
+    // not re-spelled to another leftmost form. A second application of the left-aligner to its
+    // own output must likewise change nothing — the property a fixpoint loop would check.
+    let mut cigar = vec![Match(1), Deletion(1), Match(4)];
+    left_align_indels(&mut cigar, b"GAAAT", b"GAAAAT");
+    assert_eq!(cigar, vec![Match(1), Deletion(1), Match(4)]);
+
+    for (cigar, read, reference) in [
+        (
+            vec![Match(4), Deletion(1), Match(1)],
+            &b"GAAAT"[..],
+            &b"GAAAAT"[..],
+        ),
+        (vec![Match(4), Insertion(1), Match(1)], b"GAAAAT", b"GAAAT"),
+        (vec![Match(5), Deletion(2)], b"CATAT", b"CATATAT"),
+    ] {
+        let mut once = cigar;
+        left_align_indels(&mut once, read, reference);
+        let mut twice = once.clone();
+        left_align_indels(&mut twice, read, reference);
+        assert_eq!(once, twice, "a second pass moved {read:?} on {reference:?}");
+    }
+}
+
+// --- The leftmost property grades the wrapper's output ------------------
+//
+// The property checker is written from the definition of "leftmost", not from
+// `normalize_alleles`, so it outranks agreement with any other implementation: wherever
+// the output is not leftmost, that is a finding (spec §6).
+
+#[test]
+fn every_wrapper_output_passes_the_leftmost_property() {
+    use crate::alignment::leftmost_property::{Alignment, assert_left_aligned};
+
+    let cases: [(Vec<CigarOp>, &[u8], &[u8]); 6] = [
+        // Homopolymer deletion, rightmost placement.
+        (vec![Match(4), Deletion(1), Match(1)], b"GAAAT", b"GAAAAT"),
+        // Homopolymer insertion, rightmost placement.
+        (vec![Match(4), Insertion(1), Match(1)], b"GAAAAT", b"GAAAT"),
+        // Period-2 SSR deletion (one AT unit), rightmost placement.
+        (vec![Match(5), Deletion(2)], b"CATAT", b"CATATAT"),
+        // Period-2 SSR insertion (one CA unit) inside a longer repeat.
+        (
+            vec![Match(6), Insertion(2), Match(1)],
+            b"GCACACACT",
+            b"GCACACT",
+        ),
+        // Already leftmost, unique context — must stay put and still pass.
+        (vec![Match(2), Deletion(1), Match(2)], b"GATT", b"GACTT"),
+        // Two deletions across a block, merged to one leading deletion.
+        (
+            vec![Match(1), Deletion(1), Match(1), Deletion(1), Match(2)],
+            b"AAAT",
+            b"AAAAAT",
+        ),
+    ];
+    for (cigar, read, reference) in cases {
+        let mut cigar = cigar;
+        left_align_indels(&mut cigar, read, reference);
+        let alignment = Alignment {
+            reference_offset: 0,
+            cigar,
+        };
+        assert_left_aligned(&alignment, read, reference);
+    }
+}

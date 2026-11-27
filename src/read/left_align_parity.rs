@@ -236,7 +236,7 @@ fn production_prepared(reference: &str, qname: &[u8]) -> FrozenPreparedRead {
 /// difference: ng's read is that read plus its read group, and read preparation reads none of it.
 fn ng_prepared(read: MappedRead, fasta_path: &Path, contigs: &ContigList) -> PreparedRead {
     let reference = ResidentRefSeq::new(repository(fasta_path), contigs.clone());
-    let preparer = LeftAlignPreparer::with_default_normalizer(reference);
+    let preparer = LeftAlignPreparer::new(reference);
     let mut scratch = <LeftAlignPreparer<ResidentRefSeq> as ReadPreparer>::Scratch::default();
     preparer
         .prepare_read(to_aligned_read(read), &mut scratch)
