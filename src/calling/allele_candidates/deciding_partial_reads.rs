@@ -43,6 +43,9 @@
 //! the read likelihood is handed the merge's own rows and partials, so a partial read is never
 //! scored as complete and never counted twice.
 
+use crate::calling::likelihood::generic::{
+    carrier_sequence_ends_with, carrier_sequence_starts_with,
+};
 use crate::cohort_observation::{
     AlleleSupport, CohortObservation, PartialObservation, SampleSupport, SupportedAllele,
 };
@@ -204,6 +207,10 @@ fn the_one_allele_a_partial_read_fits(
 /// with them from the right. Exact: a read carrying a sequencing error fits nothing and so counts
 /// for nothing. A read showing more flank bases than the stored flank holds fits nothing either;
 /// it would have anchored on them and been a crossing read.
+///
+/// The comparison itself is the SNP/indel read likelihood's test of a partial read against a
+/// carrier's sequence ([`carrier_sequence_starts_with`], [`carrier_sequence_ends_with`]); only
+/// the far flank, shortened by the allele's own edge deletion, is this path's.
 fn partial_read_fits(
     read: &[u8],
     held_flank: HeldFlank,
@@ -211,20 +218,16 @@ fn partial_read_fits(
     flank_deletion: FlankDeletion,
     (left_flank, right_flank): (&[u8], &[u8]),
 ) -> bool {
-    let bases_in_allele = read.len().min(allele.len());
     match held_flank {
         HeldFlank::Left => {
             let far_flank =
                 &right_flank[usize::from(flank_deletion.right).min(right_flank.len())..];
-            read[..bases_in_allele] == allele[..bases_in_allele]
-                && far_flank.starts_with(&read[bases_in_allele..])
+            carrier_sequence_starts_with(allele, far_flank, read)
         }
         HeldFlank::Right => {
             let far_flank = &left_flank
                 [..left_flank.len() - usize::from(flank_deletion.left).min(left_flank.len())];
-            let bases_in_flank = read.len() - bases_in_allele;
-            read[bases_in_flank..] == allele[allele.len() - bases_in_allele..]
-                && far_flank.ends_with(&read[..bases_in_flank])
+            carrier_sequence_ends_with(far_flank, allele, read)
         }
     }
 }

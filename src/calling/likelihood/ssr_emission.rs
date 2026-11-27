@@ -109,32 +109,6 @@ pub struct BundleCandidate<'a> {
     pub leading_flank_bases: u32,
 }
 
-/// **`bases`, read as the sequence over `extent`, respelled over the wider `target` extent**:
-/// the reference flank bases between the two are added on each side. `None` when `target` does
-/// not contain `extent` or reaches past the flanks the locus holds.
-pub(crate) fn respelled_over(
-    bases: &[u8],
-    extent: crate::locus_generation::FlankDeletion,
-    target: crate::locus_generation::FlankDeletion,
-    (left_flank, right_flank): (&[u8], &[u8]),
-    out: &mut Vec<u8>,
-) -> Option<()> {
-    let (left, right) = (usize::from(extent.left), usize::from(extent.right));
-    let (to_left, to_right) = (usize::from(target.left), usize::from(target.right));
-    if to_left < left
-        || to_right < right
-        || to_left > left_flank.len()
-        || to_right > right_flank.len()
-    {
-        return None;
-    }
-    out.clear();
-    out.extend_from_slice(&left_flank[left_flank.len() - to_left..left_flank.len() - left]);
-    out.extend_from_slice(bases);
-    out.extend_from_slice(&right_flank[right..to_right]);
-    Some(())
-}
-
 /// Everything a model is handed for one `(read group, candidate)`, and the only channel it
 /// has.
 ///

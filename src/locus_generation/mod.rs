@@ -24,13 +24,16 @@ mod witness;
 pub use witness::{LocusLen, ReadWitness, WitnessedLocusPositions};
 
 use crate::read::filtering::ReadFilterCounts;
-use crate::read::input::{IngestError, SampleReads};
-use crate::ref_seq::RefSeqError;
+use crate::read::input::cursor::CursorCounts;
+use crate::read::input::sample_cursor::SampleCursor;
+use crate::read::input::{IngestError, SampleIdentity, SampleReads};
+use crate::ref_seq::{RawRefSeq, RefSeqError};
 use crate::region_typing::reference_runs::ReferenceRun;
 use crate::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::region_typing::{BundleMember, RegionKind, TypedRegion};
 use crate::types::ChainId;
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
+use std::collections::BTreeMap;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
 /// showed there.
@@ -650,6 +653,55 @@ impl FlankDeletion {
     }
 }
 
+/// **Whether an insertion at a repeat's right junction belongs to the repeat** — anchored on the
+/// repeat's last base, with the flank after it — given the insertion's last base and the
+/// repeat's.
+///
+/// It belongs to the repeat exactly when the two bases are equal: left-alignment can then carry
+/// the insertion into the repeat, so it is repeat content; otherwise it is the flank's. **Both
+/// paths ask this one function so that each such insertion is owned by exactly one of them**: the
+/// STR path keeps it in the tract's spelling when this says yes (`tract_span_from_input` in
+/// `ssr.rs`), and the generic path claims it when this says no (`claimed_junction_insertion` in
+/// `pileup/open_record.rs`). Two copies of the comparison that drifted apart would count such an
+/// insertion twice, or not at all.
+#[inline]
+pub(crate) fn right_junction_insertion_extends_the_repeat(
+    last_inserted_base: u8,
+    repeat_last_base: u8,
+) -> bool {
+    last_inserted_base == repeat_last_base
+}
+
+/// **`bases`, read as the sequence over `extent`, respelled over the wider `target` extent**:
+/// the reference flank bases between the two are added on each side. `None` when `target` does
+/// not contain `extent` or reaches past the flanks the locus holds.
+///
+/// Read by the STR read likelihood, which compares a read and an allele whose extents differ over
+/// the wider of the two, and by STR candidate selection, which asks whether two alleles so
+/// respelled are one misread base apart.
+pub(crate) fn respelled_over(
+    bases: &[u8],
+    extent: FlankDeletion,
+    target: FlankDeletion,
+    (left_flank, right_flank): (&[u8], &[u8]),
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    let (left, right) = (usize::from(extent.left), usize::from(extent.right));
+    let (to_left, to_right) = (usize::from(target.left), usize::from(target.right));
+    if to_left < left
+        || to_right < right
+        || to_left > left_flank.len()
+        || to_right > right_flank.len()
+    {
+        return None;
+    }
+    out.clear();
+    out.extend_from_slice(&left_flank[left_flank.len() - to_left..left_flank.len() - left]);
+    out.extend_from_slice(bases);
+    out.extend_from_slice(&right_flank[right..to_right]);
+    Some(())
+}
+
 impl SequenceObservation {
     /// Whether these reads showed the reference's own bases over `reference_bases`.
     ///
@@ -855,6 +907,99 @@ pub enum GeneratorCounts<'a> {
     Pileup(&'a pileup::PileupGeneratorCounts),
     /// The STR generator's run-level counts.
     Ssr(&'a ssr::SsrGeneratorCounts),
+}
+
+/// **What a generator keeps about its sample's reader across chromosomes**: which sample it
+/// reads, and what the cursors it has already retired did. Both generators keep one beside
+/// their own cursor, which each holds differently (the generic one inside its walker).
+///
+/// **One sample per generator.** A cursor is opened for one sample's files and kept, so a
+/// generator handed a second sample would answer it out of the first one's files — every
+/// individual in a cohort reporting the first one's reads, with no error and output of exactly
+/// the right shape. [`check_sample`](Self::check_sample) refuses a foreign sample
+/// ([`ForeignSample`](LocusGenerationError::ForeignSample)), and a generator adopts its sample
+/// only once a cursor has opened ([`adopt`](Self::adopt)), so a failed open leaves it unclaimed
+/// and a retry with the same sample still works.
+///
+/// **A cursor's tallies die with it**, and a generator rebuilds its cursor at every chromosome
+/// change, so the retiring cursor's tallies are added here at the boundary
+/// ([`retire`](Self::retire)) and the live one is asked directly when a total is wanted. A
+/// reader that asked only the live cursor would report the last chromosome's figures as the
+/// whole walk's — every number plausible, and short.
+#[derive(Default)]
+pub(crate) struct CursorLedger {
+    /// The sample this generator opened its first cursor for; `None` until one opens.
+    sample: Option<SampleIdentity>,
+    /// What the cursors of already-retired chromosomes did.
+    retired_cursor_counts: CursorCounts,
+    /// Why the retired chromosomes' cursors dropped reads, per read group — keyed by the read
+    /// group the reads declared, `None` for reads that named none, the key
+    /// [`SampleCursor::read_group_counts`] hands back.
+    retired_read_group_counts: BTreeMap<Option<ReadGroupId>, ReadFilterCounts>,
+}
+
+impl CursorLedger {
+    /// **The sample `reads` belong to, or a [`ForeignSample`](LocusGenerationError::ForeignSample)
+    /// error naming `region` when this generator already reads another one.**
+    pub(crate) fn check_sample(
+        &self,
+        reads: &SampleReads,
+        region: GenomeRegion,
+    ) -> Result<SampleIdentity, LocusGenerationError> {
+        let sample = reads.identity();
+        if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
+            return Err(LocusGenerationError::ForeignSample { region });
+        }
+        Ok(sample)
+    }
+
+    /// Claim the generator for `sample` — called once a cursor for it has opened.
+    pub(crate) fn adopt(&mut self, sample: SampleIdentity) {
+        self.sample = Some(sample);
+    }
+
+    /// Add a retiring cursor's tallies, both the totals and the per-read-group drops, to the
+    /// running totals — called at a chromosome boundary, before the cursor is dropped.
+    pub(crate) fn retire<R: RawRefSeq>(&mut self, retiring: &SampleCursor<R>) {
+        self.retired_cursor_counts += retiring.counts();
+        for (read_group, counts) in retiring.read_group_counts() {
+            self.retired_read_group_counts
+                .entry(read_group)
+                .or_default()
+                .add(&counts);
+        }
+    }
+
+    /// **What the cursors did over every chromosome walked so far**: the retired ones' totals
+    /// plus the `live` cursor's, if there is one.
+    #[cfg(test)]
+    pub(crate) fn cursor_counts<R: RawRefSeq>(
+        &self,
+        live: Option<&SampleCursor<R>>,
+    ) -> CursorCounts {
+        let mut total = self.retired_cursor_counts;
+        if let Some(cursor) = live {
+            total += cursor.counts();
+        }
+        total
+    }
+
+    /// **Why the sample's reads were dropped, per read group, over the whole walk** — the
+    /// retired cursors' drops plus the `live` cursor's, in read-group order. The entries are a
+    /// read group's own and are never summed together: a library with an anomalous drop rate is
+    /// the signal they exist to show.
+    pub(crate) fn read_filter_counts<R: RawRefSeq>(
+        &self,
+        live: Option<&SampleCursor<R>>,
+    ) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
+        let mut total = self.retired_read_group_counts.clone();
+        if let Some(cursor) = live {
+            for (read_group, counts) in cursor.read_group_counts() {
+                total.entry(read_group).or_default().add(&counts);
+            }
+        }
+        total.into_iter().collect()
+    }
 }
 
 #[cfg(test)]

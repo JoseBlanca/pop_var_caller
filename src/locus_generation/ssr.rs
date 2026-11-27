@@ -15,11 +15,9 @@
 //! public surface — [`SsrGenerator`], the [`LocusGenerator`] that turns one
 //! `SsrSegment` into one locus.
 
-use std::collections::BTreeMap;
-
 use super::{
-    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, SampleLocusObservations,
-    SequenceObservation, SsrDetail,
+    CursorLedger, GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind,
+    SampleLocusObservations, SequenceObservation, SsrDetail,
 };
 use crate::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use crate::alignment::{
@@ -27,9 +25,11 @@ use crate::alignment::{
 };
 use crate::read::aligned_read::AlignedRead;
 use crate::read::filtering::ReadFilterCounts;
-use crate::read::input::cursor::{CursorCounts, CursorError};
+use crate::read::input::SampleReads;
+#[cfg(test)]
+use crate::read::input::cursor::CursorCounts;
+use crate::read::input::cursor::CursorError;
 use crate::read::input::sample_cursor::SampleCursor;
-use crate::read::input::{SampleIdentity, SampleReads};
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqError};
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position, ReadGroupId};
@@ -695,7 +695,10 @@ mod read_region {
                     }
                     if ref_cur == tract_end
                         && end == Some(read_cur)
-                        && last_inserted == tract_last_base
+                        && crate::locus_generation::right_junction_insertion_extends_the_repeat(
+                            last_inserted,
+                            tract_last_base,
+                        )
                     {
                         end = Some(read_cur + count);
                     }
@@ -989,6 +992,7 @@ mod classify {
         // there could be tract the mapper did not place, and goes to the delimiter as before.
         let tract_start = window_start + left as u32;
         let tract_end = tract_start + locus.repeat.tract_len() as u32;
+        let tract_on_reference = tract_start..tract_end;
         let (unaligned_before, unaligned_after) = unaligned_bases_at_the_ends(&read.cigar);
         let ends_before_the_tract = fp.ref_end <= tract_start && unaligned_after == 0;
         let starts_after_the_tract = fp.ref_start >= tract_end && unaligned_before == 0;
@@ -1069,7 +1073,9 @@ mod classify {
         // splits between spelling and flank deletion, and a split that can give flank bases back
         // does. A deletion that fits wholly inside the tract — a stutter contraction, whichever
         // way the mapper or a left-aligner placed it — comes out as no flank deletion at all.
-        let flank_deletion = flank_bases_deleted(cigar, fp.ref_start, tract_start, tract_end)
+        let edge_deleted =
+            flank_bases_deleted_at_the_edges(cigar, fp.ref_start, &tract_on_reference);
+        let flank_deletion = flank_deletion_of(edge_deleted)
             .filter(|deleted| deleted.left as usize <= left && deleted.right as usize <= right)
             .unwrap_or(FlankDeletion::NONE);
         let (input_span, flank_deletion) = match input_span {
@@ -1080,8 +1086,7 @@ mod classify {
                     fp,
                     span,
                     flank_deletion,
-                    tract_start,
-                    tract_end,
+                    &tract_on_reference,
                     guarded_flank_widths(left, right),
                 );
                 let (span, deleted) = in_smallest_form(
@@ -1101,13 +1106,9 @@ mod classify {
         };
         if let Some(span) = &input_span {
             let (aligned_before, aligned_after) =
-                aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract_start, tract_end);
-            if deletion_takes_flank_bases_at_a_tract_edge(
-                cigar,
-                fp.ref_start,
-                tract_start,
-                tract_end,
-            ) && aligned_before >= MIN_ALIGNED_FLANK_BASES
+                aligned_bases_beyond_the_tract(cigar, fp.ref_start, &tract_on_reference);
+            if edge_deleted != (0, 0)
+                && aligned_before >= MIN_ALIGNED_FLANK_BASES
                 && aligned_after >= MIN_ALIGNED_FLANK_BASES
             {
                 return complete_or_low_quality(read, span.clone(), flank_deletion, qual_buffer);
@@ -1203,16 +1204,14 @@ mod classify {
                     && indel_in_the_guarded_flank(
                         cigar,
                         fp.ref_start,
-                        tract_start,
-                        tract_end,
+                        &tract_on_reference,
                         guarded_flank_widths(left, right),
                     )
                     && {
                         let (before, after) = aligned_bases_beyond_the_tract(
                             cigar,
                             fp.ref_start,
-                            tract_start,
-                            tract_end,
+                            &tract_on_reference,
                         );
                         before >= MIN_ALIGNED_FLANK_BASES && after >= MIN_ALIGNED_FLANK_BASES
                     } =>
@@ -1299,7 +1298,7 @@ mod classify {
             return None;
         }
         let (aligned_before, aligned_after) =
-            aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract.start, tract.end);
+            aligned_bases_beyond_the_tract(cigar, fp.ref_start, &tract);
         if aligned_before < MIN_ALIGNED_FLANK_BASES || aligned_after < MIN_ALIGNED_FLANK_BASES {
             return None;
         }
@@ -1356,7 +1355,7 @@ mod classify {
 
     /// **How many reference bases the read's deletions take inside each flank of the window**,
     /// as `(left flank, right flank)` — the flanks being `window` less `tract`. Coordinates as in
-    /// [`deletion_takes_flank_bases_at_a_tract_edge`].
+    /// [`flank_bases_deleted_at_the_edges`].
     fn reference_bases_deleted_in_the_flanks(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -1389,11 +1388,17 @@ mod classify {
     /// the value the measurement in [`classify_read`]'s comment was taken at.
     const MIN_ALIGNED_FLANK_BASES: u32 = 5;
 
-    /// **Does a deletion in the CIGAR take flank bases at the tract's edge?** — either crossing
-    /// the edge, taking bases from both sides of the tract's first base or of its last, or lying
-    /// in the flank and ending at the tract's first base or starting just after its last.
-    /// `tract_start`/`tract_end` are 0-based reference positions, the end exclusive, as is
-    /// `ref_start`.
+    /// **How many flank bases the read's deletions take at the tract's edges**, as `(before the
+    /// tract, after it)` — `(0, 0)` when no deletion takes any. A deletion counts on the left when
+    /// it crosses the tract's first base or ends at it, taking the flank bases before it; on the
+    /// right when it crosses the tract's last base or starts just after it, taking the flank bases
+    /// after; one covering the whole tract counts on both sides. Where two deletions count on one
+    /// side, the later one's count stands. `tract` is the tract's 0-based reference positions,
+    /// the end exclusive; `ref_start` is 0-based too.
+    ///
+    /// Classification uses the one count two ways: whether it is `(0, 0)` decides whether a
+    /// read's own alignment, deletion and all, counts as having crossed the tract, and
+    /// [`flank_deletion_of`] turns it into the flank deletion recorded beside the spelling.
     ///
     /// **A deletion that touches the edge counts** (`str_edge_deletion_alleles.md` §5.1, amended
     /// 2026-10-18). Where a run of one base is followed by a different base, a read that misreads
@@ -1404,13 +1409,13 @@ mod classify {
     /// 30x, 565 of the 926 reference-length reads were such reads. Recorded, the read keeps its
     /// flank deletion, and calling compares it with each allele over the wider extent (§5.6), where
     /// it matches the deletion allele but for the misread base.
-    fn deletion_takes_flank_bases_at_a_tract_edge(
+    fn flank_bases_deleted_at_the_edges(
         cigar: &[CigarOp],
         ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
-    ) -> bool {
-        let mut at = ref_start;
+        tract: &Range<u32>,
+    ) -> (u32, u32) {
+        let (tract_start, tract_end) = (tract.start, tract.end);
+        let (mut left, mut right, mut at) = (0_u32, 0_u32, ref_start);
         for op in cigar {
             match op {
                 CigarOp::Match(n)
@@ -1419,17 +1424,18 @@ mod classify {
                 | CigarOp::Skip(n) => at += n,
                 CigarOp::Deletion(n) => {
                     let (from, to) = (at, at + n);
-                    if (from < tract_start && to >= tract_start)
-                        || (from <= tract_end && to > tract_end)
-                    {
-                        return true;
+                    if from < tract_start && to >= tract_start {
+                        left = tract_start - from;
+                    }
+                    if from <= tract_end && to > tract_end {
+                        right = to - tract_end;
                     }
                     at = to;
                 }
                 _ => {}
             }
         }
-        false
+        (left, right)
     }
 
     /// **How many flank bases beside each edge the delimiter will not open a gap in**, as `(left,
@@ -1465,10 +1471,10 @@ mod classify {
         fp: Footprint,
         span: Range<usize>,
         deleted: FlankDeletion,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
         widths: (u32, u32),
     ) -> (Range<usize>, FlankDeletion) {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         // The farthest flank bases an indel in the guard reaches: `first` on the left (the
         // first base it takes or sits before), `last` on the right (one past the last).
         let mut first = tract_start - u32::from(deleted.left);
@@ -1556,14 +1562,14 @@ mod classify {
     /// **Does an insertion or deletion in the CIGAR sit in the guarded flank bases** — the
     /// `widths.0` reference bases before the tract or the `widths.1` after it? A deletion counts
     /// when it takes any of those bases, an insertion when it sits between two of them or at the
-    /// edge. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
+    /// edge. Coordinates as in [`flank_bases_deleted_at_the_edges`].
     fn indel_in_the_guarded_flank(
         cigar: &[CigarOp],
         ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
         widths: (u32, u32),
     ) -> bool {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         let left_guard = tract_start.saturating_sub(widths.0)..tract_start;
         let right_guard = tract_end..tract_end + widths.1;
         let mut at = ref_start;
@@ -1594,38 +1600,10 @@ mod classify {
         false
     }
 
-    /// **How many flank bases the read's deletions take beside the tract**, or `None` when no
-    /// deletion crosses or touches either edge (or one takes more than 255 flank bases, which no
-    /// flank this path holds is long enough for). A deletion crossing the tract's first base, or
-    /// ending at it, takes the flank bases before it; one crossing its last base, or starting just
-    /// after it, the flank bases after; one covering the whole tract, both. Coordinates as in
-    /// [`deletion_takes_flank_bases_at_a_tract_edge`], which says why touching counts.
-    fn flank_bases_deleted(
-        cigar: &[CigarOp],
-        ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
-    ) -> Option<FlankDeletion> {
-        let (mut left, mut right, mut at) = (0_u32, 0_u32, ref_start);
-        for op in cigar {
-            match op {
-                CigarOp::Match(n)
-                | CigarOp::SeqMatch(n)
-                | CigarOp::SeqMismatch(n)
-                | CigarOp::Skip(n) => at += n,
-                CigarOp::Deletion(n) => {
-                    let (from, to) = (at, at + n);
-                    if from < tract_start && to >= tract_start {
-                        left = tract_start - from;
-                    }
-                    if from <= tract_end && to > tract_end {
-                        right = to - tract_end;
-                    }
-                    at = to;
-                }
-                _ => {}
-            }
-        }
+    /// **The flank deletion [`flank_bases_deleted_at_the_edges`] counted, as a
+    /// [`FlankDeletion`]**, or `None` when it counted none on either side, or more than 255 on
+    /// one (which no flank this path holds is long enough for).
+    fn flank_deletion_of((left, right): (u32, u32)) -> Option<FlankDeletion> {
         let deleted = FlankDeletion {
             left: u8::try_from(left).ok()?,
             right: u8::try_from(right).ok()?,
@@ -1684,13 +1662,13 @@ mod classify {
 
     /// **How many aligned bases a read has before the tract and after it**, as `(before,
     /// after)` — match operations only, so deleted, skipped, clipped and inserted bases do not
-    /// count. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
+    /// count. Coordinates as in [`flank_bases_deleted_at_the_edges`].
     fn aligned_bases_beyond_the_tract(
         cigar: &[CigarOp],
         ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
     ) -> (u32, u32) {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         let (mut before, mut after, mut at) = (0, 0, ref_start);
         for op in cigar {
             match op {
@@ -1987,6 +1965,30 @@ mod classify {
 
         // Reference frame: 6-base flanks around a CACACA tract → "GGGGGGCACACATTTTTT".
         const FRAME: &[u8] = b"GGGGGGCACACATTTTTT";
+
+        /// The flank deletion classification records for a read with this CIGAR.
+        fn flank_bases_deleted(
+            cigar: &[CigarOp],
+            ref_start: u32,
+            tract_start: u32,
+            tract_end: u32,
+        ) -> Option<FlankDeletion> {
+            flank_deletion_of(flank_bases_deleted_at_the_edges(
+                cigar,
+                ref_start,
+                &(tract_start..tract_end),
+            ))
+        }
+
+        /// Whether classification reads this CIGAR as a deletion taking flank bases at an edge.
+        fn deletion_takes_flank_bases_at_a_tract_edge(
+            cigar: &[CigarOp],
+            ref_start: u32,
+            tract_start: u32,
+            tract_end: u32,
+        ) -> bool {
+            flank_bases_deleted_at_the_edges(cigar, ref_start, &(tract_start..tract_end)) != (0, 0)
+        }
 
         fn locus() -> SsrLocus {
             SsrLocus {
@@ -2739,7 +2741,7 @@ mod classify {
                 (vec![Match(40), Deletion(3), Match(40)], false),
             ] {
                 assert_eq!(
-                    indel_in_the_guarded_flank(&cigar, 0, 30, 60, widths),
+                    indel_in_the_guarded_flank(&cigar, 0, &(30..60), widths),
                     expected,
                     "{cigar:?}"
                 );
@@ -2759,8 +2761,7 @@ mod classify {
                     fp,
                     30..60,
                     FlankDeletion { left: 0, right: 2 },
-                    30,
-                    60,
+                    &(30..60),
                     widths,
                 ),
                 (30..63, FlankDeletion { left: 0, right: 4 })
@@ -2773,8 +2774,7 @@ mod classify {
                     fp,
                     30..60,
                     FlankDeletion { left: 0, right: 2 },
-                    30,
-                    60,
+                    &(30..60),
                     widths,
                 ),
                 (30..60, FlankDeletion { left: 0, right: 2 })
@@ -2899,7 +2899,7 @@ mod classify {
                 60
             ));
             assert_eq!(
-                aligned_bases_beyond_the_tract(&across_the_end, 0, 30, 60),
+                aligned_bases_beyond_the_tract(&across_the_end, 0, &(30..60)),
                 (30, 26)
             );
             let across_the_start = [Match(27), Deletion(6), Match(40)];
@@ -2934,7 +2934,7 @@ mod classify {
                 "a flank deletion starting just after the tract's last base touches the edge"
             );
             assert_eq!(
-                aligned_bases_beyond_the_tract(&[SoftClip(10), Match(80)], 10, 30, 60),
+                aligned_bases_beyond_the_tract(&[SoftClip(10), Match(80)], 10, &(30..60)),
                 (20, 30)
             );
         }
@@ -4008,27 +4008,11 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: Repe
     /// `None` before the first locus. It is *not* cleared per segment: the whole point is that
     /// it outlives them.
     cursor: Option<(ContigId, SampleCursor<R>)>,
-    /// What the cursors of *already-retired* chromosomes did — see
-    /// [`cursor_counts`](Self::cursor_counts).
-    retired_cursor_counts: CursorCounts,
-    /// **Why the retired chromosomes' cursors dropped reads, per read group** — see
-    /// [`read_filter_counts`](Self::read_filter_counts).
-    ///
-    /// One axis finer than [`retired_cursor_counts`](Self::retired_cursor_counts) and kept for
-    /// the same reason: a cursor's tallies die with it, and this generator rebuilds its cursor
-    /// at every chromosome change, so a reader that asked only the live one would report the
-    /// last chromosome's drops as the whole walk's.
-    ///
-    /// Keyed by the read group the reads declared, `None` for reads that named none — the key
-    /// [`SampleCursor::read_group_counts`] already hands back.
-    retired_read_group_counts: BTreeMap<Option<ReadGroupId>, ReadFilterCounts>,
-    /// The sample this generator opened its first cursor for. **One sample per generator** —
-    /// a second one is refused rather than answered out of the first one's files. See
-    /// [`cursor_for`](Self::cursor_for) for what that mistake looks like when it is not caught.
-    ///
-    /// `None` until the first cursor opens, so a generator is unclaimed until it reads
-    /// something.
-    sample: Option<SampleIdentity>,
+    /// **The sample this generator reads, and what its retired chromosomes' cursors did** —
+    /// one sample per generator, refused in [`cursor_for`](Self::cursor_for), and the tallies
+    /// [`cursor_counts`](Self::cursor_counts) and [`read_filter_counts`](Self::read_filter_counts)
+    /// add the live cursor's to.
+    ledger: CursorLedger,
     /// The tract delimiter — the chosen [`RepeatDelimiter`] (algorithm 3 or 4).
     aligner: A,
     /// Reused alignment matrices (the aligner's own scratch type), so it does not reallocate per
@@ -4108,9 +4092,7 @@ where
             reference,
             make_reference: Box::new(make_reference),
             cursor: None,
-            retired_cursor_counts: CursorCounts::default(),
-            retired_read_group_counts: BTreeMap::new(),
-            sample: None,
+            ledger: CursorLedger::default(),
             aligner,
             align_scratch: A::Scratch::default(),
             stutter: StutterModel::hipstr_shipped(),
@@ -4139,11 +4121,8 @@ where
     /// D2 review proved the feature could be switched off with the whole suite green. What
     /// moves is only what the reader avoided (`spec/alignment_cursor.md` §11.5).
     pub fn cursor_counts(&self) -> CursorCounts {
-        let mut total = self.retired_cursor_counts;
-        if let Some((_, cursor)) = &self.cursor {
-            total += cursor.counts();
-        }
-        total
+        self.ledger
+            .cursor_counts(self.cursor.as_ref().map(|(_, cursor)| cursor))
     }
 
     /// **Why this sample's reads were dropped, per read group, over the whole walk** — every
@@ -4162,13 +4141,8 @@ where
     /// **The `None` key is reads that declared no read group**, which is the key the cursor
     /// itself uses; a run whose files all declare one never sees it.
     pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
-        let mut total = self.retired_read_group_counts.clone();
-        if let Some((_, cursor)) = &self.cursor {
-            for (read_group, counts) in cursor.read_group_counts() {
-                total.entry(read_group).or_default().add(&counts);
-            }
-        }
-        total.into_iter().collect()
+        self.ledger
+            .read_filter_counts(self.cursor.as_ref().map(|(_, cursor)| cursor))
     }
 
     /// This sample's cursor for `contig`, minting one if the last locus was on another
@@ -4210,10 +4184,7 @@ where
         reads: &SampleReads,
         region: GenomeRegion,
     ) -> Result<&mut SampleCursor<R>, LocusGenerationError> {
-        let sample = reads.identity();
-        if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
-            return Err(LocusGenerationError::ForeignSample { region });
-        }
+        let sample = self.ledger.check_sample(reads, region)?;
         // Let both readers drop what this walk has gone past. A reference reader is a
         // sliding window over the FASTA that only ever grows unless it is told to shrink, and
         // nobody was telling it: a forward walk of a chromosome ended up holding one byte for
@@ -4240,17 +4211,7 @@ where
             // cursors — and their kept reads — at once. The tallies are taken with it: they
             // die with the cursor, and they are what says whether it did anything.
             if let Some((_, retiring)) = self.cursor.take() {
-                self.retired_cursor_counts += retiring.counts();
-                // **Taken here for the same reason and at the same moment**, one axis finer: a
-                // cursor's per-read-group tallies die with it, and a run that read them only
-                // from the live cursor would report its last chromosome's drops as the whole
-                // walk's.
-                for (read_group, counts) in retiring.read_group_counts() {
-                    self.retired_read_group_counts
-                        .entry(read_group)
-                        .or_default()
-                        .add(&counts);
-                }
+                self.ledger.retire(&retiring);
             }
             let cursor = reads
                 .cursor(contig, &mut self.make_reference)
@@ -4258,7 +4219,7 @@ where
             self.cursor = Some((contig, cursor));
             // Adopted only once a cursor exists, so a failed open leaves the generator
             // unclaimed and a retry with the same sample still works.
-            self.sample = Some(sample);
+            self.ledger.adopt(sample);
         }
         Ok(&mut self.cursor.as_mut().expect("the cursor was just ensured").1)
     }

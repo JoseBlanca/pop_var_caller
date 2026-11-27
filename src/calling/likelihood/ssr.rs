@@ -66,13 +66,11 @@
 //! frozen.
 
 use super::ContaminationView;
-use super::ssr_emission::{
-    BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over,
-};
+use super::ssr_emission::{BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext};
 use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::calling::GenotypeTableView;
 use crate::float;
-use crate::locus_generation::{HeldFlank, ReadWitness, SequenceObservation};
+use crate::locus_generation::{HeldFlank, ReadWitness, SequenceObservation, respelled_over};
 use crate::misread_context::{ReadDirection, a_run_may_reach_a_charged_length};
 use crate::parameter_estimation::Provenance;
 use crate::types::{LogProb, ReadGroupId};

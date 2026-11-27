@@ -291,14 +291,9 @@ impl CigarCursor {
     /// (typical Illumina with 1–5 ops). Selected when
     /// `mode == CursorMode::Linear`.
     ///
-    /// The per-op match arms are **inlined manually** rather than
-    /// delegated to `emit_event_for_op_overlapping`. The bench
-    /// showed a ~15-20% regression on Linear-mode workloads when
-    /// the per-op work was extracted, even with `#[inline]` /
-    /// `#[inline(always)]` on the helper — rustc apparently
-    /// doesn't fully fuse the helper into this hot path. The
-    /// duplication with `emit_event_for_op_overlapping` is
-    /// deliberate.
+    /// The per-op work is [`emit_event_for_op_overlapping`](Self::emit_event_for_op_overlapping),
+    /// the same `#[inline(always)]` helper the binary-search walk calls, so the two walks
+    /// differ only in where they start.
     fn events_overlapping_linear(
         &self,
         lo: u32,
@@ -309,92 +304,11 @@ impl CigarCursor {
         if hi <= lo {
             return out;
         }
-        let n_ops = read.cigar.len();
-        // Index loop (not iterator) for codegen parity with the
-        // inlined per-op match arms — see the bench note at the
-        // top of the file. Mi21 in
-        // `ia/reviews/pileup_2026-05-11.md`.
-        for i in 0..n_ops {
-            let off = self.offsets[i];
-            if off.ref_pos > hi {
+        for i in 0..read.cigar.len() {
+            if self.offsets[i].ref_pos > hi {
                 break;
             }
-            let is_first = i == 0;
-            let is_last = i + 1 == n_ops;
-            match read.cigar[i] {
-                CigarOp::Match(len) | CigarOp::SeqMatch(len) | CigarOp::SeqMismatch(len) => {
-                    let op_lo = off.ref_pos;
-                    let op_hi = op_lo + len;
-                    let emit_lo = op_lo.max(lo);
-                    let emit_hi = op_hi.min(hi);
-                    if emit_lo < emit_hi {
-                        let span = emit_hi - emit_lo;
-                        for k in 0..span {
-                            let ref_pos = emit_lo + k;
-                            let read_off = off.read_pos + (ref_pos - op_lo);
-                            let base = read.seq[read_off as usize];
-                            // Skip read-N: an `N` base carries no
-                            // allele information, so emitting a Match
-                            // event for it would inflate scalars at
-                            // some allele bucket without justifying
-                            // evidence. See `pileup_walker.md`
-                            // §"N-base handling".
-                            if base == b'N' {
-                                continue;
-                            }
-                            // G1 — drop bases past the mate-pair adaptor
-                            // boundary. See `pileup_walker.md`
-                            // §"Adaptor-region per-base filter".
-                            if base_in_adaptor(ref_pos, read) {
-                                continue;
-                            }
-                            out.push(ReadEvent::Match {
-                                ref_pos,
-                                base,
-                                bq_baq: read.bq_baq[read_off as usize],
-                            });
-                        }
-                    }
-                }
-                CigarOp::Insertion(len) => {
-                    if is_first || is_last || off.ref_pos <= 1 {
-                        continue;
-                    }
-                    let anchor = off.ref_pos - 1;
-                    if anchor >= hi || anchor < lo {
-                        continue;
-                    }
-                    let read_off = off.read_pos as usize;
-                    let seq = read.seq[read_off..read_off + len as usize].to_vec();
-                    let bq_proxy = indel_bq_proxy_insertion(&read.bq_baq, read_off, len);
-                    out.push(ReadEvent::Insertion {
-                        anchor_ref_pos: anchor,
-                        seq,
-                        bq_proxy,
-                    });
-                }
-                CigarOp::Deletion(len) => {
-                    if is_first || is_last || off.ref_pos <= 1 {
-                        continue;
-                    }
-                    let anchor = off.ref_pos - 1;
-                    let footprint_end = anchor + len + 1;
-                    if anchor >= hi || footprint_end <= lo {
-                        continue;
-                    }
-                    let read_off = off.read_pos as usize;
-                    let bq_proxy = indel_bq_proxy_deletion(&read.bq_baq, read_off, len);
-                    out.push(ReadEvent::Deletion {
-                        anchor_ref_pos: anchor,
-                        deleted_len: len,
-                        bq_proxy,
-                    });
-                }
-                CigarOp::Skip(_)
-                | CigarOp::SoftClip(_)
-                | CigarOp::HardClip(_)
-                | CigarOp::Padding(_) => {}
-            }
+            self.emit_event_for_op_overlapping(i, lo, hi, &mut out, read);
         }
         out
     }
@@ -646,8 +560,11 @@ impl CigarCursor {
     /// the CIGAR has few ops so the constant per-call partition
     /// setup of the binary version isn't worth paying.
     ///
-    /// Per-op match arms are inlined manually — see the same
-    /// note on `events_overlapping_linear`.
+    /// Per-op match arms are inlined manually. An earlier bench
+    /// measured a ~15-20% regression on Linear-mode workloads when
+    /// `events_overlapping_linear`'s per-op work was delegated to its
+    /// `#[inline(always)]` helper; that walk now does delegate, and
+    /// this one has not been re-measured.
     fn events_at_linear(&self, walker_pos: u32, read: &PreparedRead) -> EventsAt {
         let mut out = EventsAt::new();
         let n_ops = read.cigar.len();

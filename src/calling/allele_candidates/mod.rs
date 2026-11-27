@@ -912,9 +912,7 @@ fn leftover_of(
         if remap.candidate_for(allele).is_some() {
             continue;
         }
-        let pooled_reads = rows.iter().fold(0_u32, |total, row| {
-            total.saturating_add(row.support.num_reads)
-        });
+        let pooled_reads = pooled_reads(rows);
         leftover.num_reads = leftover.num_reads.saturating_add(pooled_reads);
         let mass = rows.iter().map(|row| row.support.q_sum).sum::<f64>();
         assert!(
@@ -938,9 +936,7 @@ fn leftover_of(
         }
         let the_cap_cut_it =
             u32::try_from(allele).is_ok_and(|allele| cut_by_the_cap.binary_search(&allele).is_ok());
-        let pooled_reads = rows.iter().fold(0_u32, |total, row| {
-            total.saturating_add(row.support.num_reads)
-        });
+        let pooled_reads = pooled_reads(rows);
         if the_cap_cut_it && min_allele_support.reached_by(pooled_reads, compared_reads) {
             leftover.earned_reads_cut_by_the_cap = leftover
                 .earned_reads_cut_by_the_cap
@@ -1086,9 +1082,7 @@ fn summarise_alleles(
         );
         for rows in one_run_per_allele(sample, locus) {
             let allele = rows[0].allele;
-            let pooled_reads = rows.iter().fold(0_u32, |total, row| {
-                total.saturating_add(row.support.num_reads)
-            });
+            let pooled_reads = pooled_reads(rows);
             let summary = scratch.per_allele.get_mut(allele).unwrap_or_else(|| {
                 panic!(
                     "sample {}'s support row named allele {allele} of a locus whose table \
@@ -1191,6 +1185,111 @@ fn compare_best_first(left: RankedAlternative<'_>, right: RankedAlternative<'_>)
         )
         .then(right.summary.cohort_reads.cmp(&left.summary.cohort_reads))
         .then(left.bases.cmp(right.bases))
+}
+
+/// **How many reads one allele's support rows hold together** — its read-group rows summed,
+/// saturating at `u32::MAX`. The one spelling of "a sample's reads for this allele" that the bar,
+/// the leftover and the STR path's misread test all count with.
+fn pooled_reads<'rows>(rows: impl IntoIterator<Item = &'rows SupportedAllele>) -> u32 {
+    rows.into_iter().fold(0_u32, |total, row| {
+        total.saturating_add(row.support.num_reads)
+    })
+}
+
+/// **The tail both selection paths share: apply the cap, admit the survivors in the order of
+/// their bases, and work out each sample's leftover** (spec §4, §5).
+///
+/// Each path decides on its own *which* sequences are candidates and leaves their merge-table
+/// indices in `ranked_table_indices`, in any order. From there the steps are the same on both:
+///
+/// 1. **The cap.** Above [`CandidateSelectionConfig::max_candidate_alleles`] the list is ranked by
+///    [`compare_best_first`] and the worst-evidenced are cut. The cut indices go to
+///    `cap_cut_table_indices`, sorted, rather than being discarded: an allele lost to the cap is
+///    the only kind that may no-call a sample, so the leftover has to be told which they were.
+///    The ranking decides *which* alleles survive and never the order they appear in.
+/// 2. **Admission, in the order of the alleles' bases**, not the merge table's. The table
+///    numbers its alleles in the order it first met them, which is the order the samples were
+///    given, so admitting in table order made the `ALT` column — and every tie broken by allele
+///    id downstream — depend on how the cohort was listed. Two entries never have equal bases.
+///    Each allele is admitted with its flank-deletion extent, which is
+///    [`FlankDeletion::NONE`](crate::locus_generation::FlankDeletion::NONE) for every allele of
+///    a generic locus, so there the admission is a plain [`CandidateAlleles::admit`].
+/// 3. **The leftover**, last: it is per sample where the two steps above are per allele, and it
+///    reads the finished remapping to know what was dropped. Its reads come from `merge_rows`
+///    and its bar from `observation.per_sample` (see [`leftover_of`]); on the generic path the
+///    two are the same rows.
+///
+/// # Panics
+///
+/// When `merge_rows` and `observation.per_sample` cover different numbers of samples, and on a
+/// merge table of more than four billion alleles, where the count of cut alternatives refuses to
+/// narrow to `u32` rather than wrap.
+fn cap_and_admit(
+    observation: &CohortObservation,
+    merge_rows: &[SampleSupport],
+    locus_kind: crate::locus_generation::LocusKind,
+    config: &CandidateSelectionConfig,
+    per_allele: &[AlleleSummary],
+    ranked_table_indices: &mut Vec<u32>,
+    cap_cut_table_indices: &mut Vec<u32>,
+) -> LocusSelection {
+    let allowed_alternatives = usize::from(config.max_candidate_alleles.alternatives());
+    let verdict = if ranked_table_indices.len() <= allowed_alternatives {
+        SelectionVerdict::Selected
+    } else {
+        let alternative_of = |table_index: u32| RankedAlternative {
+            summary: per_allele[table_index as usize],
+            bases: &observation.alleles[table_index as usize],
+        };
+        ranked_table_indices.sort_unstable_by(|&left, &right| {
+            compare_best_first(alternative_of(left), alternative_of(right))
+        });
+        let dropped = ranked_table_indices.len() - allowed_alternatives;
+        cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
+        cap_cut_table_indices.sort_unstable();
+        ranked_table_indices.truncate(allowed_alternatives);
+        SelectionVerdict::Truncated {
+            dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
+        }
+    };
+    ranked_table_indices.sort_unstable_by(|&left, &right| {
+        observation.alleles[left as usize].cmp(&observation.alleles[right as usize])
+    });
+
+    let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), locus_kind);
+    let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
+    remap.admit(0, AlleleId::REFERENCE);
+    for &table_index in ranked_table_indices.iter() {
+        let table_index = table_index as usize;
+        let candidate = alleles.admit_with_flank_deletion(
+            observation.alleles[table_index].clone(),
+            observation.flank_deletion_of(table_index),
+        );
+        remap.admit(table_index, candidate);
+    }
+
+    assert_eq!(
+        merge_rows.len(),
+        observation.per_sample.len(),
+        "the merge's rows and the rows selection read cover different samples at {}",
+        observation.region
+    );
+    let covering_samples = observation.per_sample.len();
+    let leftovers = merge_rows
+        .iter()
+        .zip(&observation.per_sample)
+        .map(|(sample, selection_rows)| {
+            leftover_of(
+                sample,
+                selection_rows,
+                observation.region,
+                &remap,
+                config.min_allele_support,
+                cap_cut_table_indices,
+            )
+        })
+        .collect();
+    LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
 }
 
 /// **Hand-built cohort loci, shared by this module and by [`generic`]'s tests.**
