@@ -1638,9 +1638,8 @@ fn generic_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> &'a [GenericLocus
 /// **Everything a repeat tract carries beside its samples' reads** — handed out together
 /// because the two per-locus facts below are read within a line or two of the observations.
 ///
-/// *(One caller today: the tract's table fill. The per-locus prior seed reads the same three
-/// things and destructures the evidence itself, because it runs before the seed's own branch
-/// has anything else to do with them.)*
+/// *(Two callers: the tract's table fill and the slippage round's read attribution. The
+/// per-locus prior seed destructures the evidence itself.)*
 struct TractEvidence<'a> {
     /// One entry per sample of the run, in run order. **A tract rules no sample out**
     /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), so every sample has one.
@@ -1649,36 +1648,62 @@ struct TractEvidence<'a> {
     shape: SsrLocusShape<'a>,
 }
 
-impl<'a> TractEvidence<'a> {
-    /// **What the genotype prior believes about this tract's lengths, looked up once.**
-    ///
-    /// Both the prior's own seed and the third term of the read-likelihood mixture read it, and
-    /// they must read the same one: the run reports which rung of the tract ladder answered, so
-    /// a second lookup keyed differently would make the run's own record false. This is the one
-    /// lookup.
-    ///
-    /// **The reference tract's repeat count is entry 0**, because the reference allele is id 0
-    /// of every candidate table and these counts run parallel to it. It is what the spectrum's
-    /// offsets are measured from, and passing a candidate's instead would re-centre the shape on
-    /// that candidate.
-    ///
-    /// # Panics
-    ///
-    /// At an STR bundle, whose prior is [`bundle_prior_of`]'s.
-    fn prior(&self, parameters: &'a FrozenParameters<'a>) -> TractPrior<'a> {
-        let SsrLocusShape::Segment {
-            detail,
-            candidate_repeat_counts,
-        } = self.shape
-        else {
-            unreachable!("an STR bundle's prior is read per run, by `bundle_prior_of`")
-        };
-        let reference_repeats = RepeatCount(candidate_repeat_counts[0].get());
-        TractPrior {
-            reference_repeats,
-            allele_length_variation: parameters
-                .ssr_allele_length_variation_at(detail.motif.ssr_period(), reference_repeats),
+/// **What the genotype prior believes about one repeat locus's lengths, looked up once per
+/// locus**: a segment's [`TractPrior`] or a bundle's [`BundlePrior`].
+///
+/// Both the prior's own seed and the third term of the read-likelihood mixture read it, and they
+/// must read the same one: the run reports which rung of the tract ladder answered, so a second
+/// lookup keyed differently would make the run's own record false. [`str_prior_of`] is the one
+/// lookup; [`SummariseConditionLoop::call_locus`] makes it before the seed and hands the same
+/// value to every build of the tract's likelihood table, slippage rounds included.
+enum StrLocusPrior<'a> {
+    /// An STR segment: its stratum's allele length variation, keyed by the reference tract's
+    /// repeat count.
+    Segment(TractPrior<'a>),
+    /// An STR bundle: each reference run's own count and its stratum's allele length variation.
+    Bundle(BundlePrior<'a>),
+}
+
+/// **The repeat locus's prior, [`StrLocusPrior`]; `None` at an SNP/indel site**, which has none.
+///
+/// **The reference tract's repeat count is entry 0** of a segment's candidate counts, because the
+/// reference allele is id 0 of every candidate table and these counts run parallel to it. It is
+/// what the spectrum's offsets are measured from, and passing a candidate's instead would
+/// re-centre the shape on that candidate. A bundle reads its reference runs the same way, from
+/// entry 0 of its candidate parses ([`bundle_prior_of`]).
+fn str_prior_of<'a>(
+    evidence: &LocusEvidence<'_>,
+    parameters: &'a FrozenParameters<'a>,
+) -> Option<StrLocusPrior<'a>> {
+    match evidence {
+        LocusEvidence::Generic { .. } => None,
+        LocusEvidence::Ssr {
+            shape:
+                SsrLocusShape::Segment {
+                    detail,
+                    candidate_repeat_counts,
+                },
+            ..
+        } => {
+            let reference_repeats = RepeatCount(candidate_repeat_counts[0].get());
+            Some(StrLocusPrior::Segment(TractPrior {
+                reference_repeats,
+                allele_length_variation: parameters
+                    .ssr_allele_length_variation_at(detail.motif.ssr_period(), reference_repeats),
+            }))
         }
+        LocusEvidence::Ssr {
+            shape:
+                SsrLocusShape::Bundle {
+                    detail,
+                    candidate_parses,
+                },
+            ..
+        } => Some(StrLocusPrior::Bundle(bundle_prior_of(
+            detail,
+            candidate_parses,
+            parameters,
+        ))),
     }
 }
 
@@ -1784,6 +1809,7 @@ fn fill_what_no_pass_recomputes<Model: SsrEmissionModel>(
         candidates,
         genotypes,
         scratch,
+        str_prior_of(evidence, parameters).as_ref(),
         SlippageRoundBuild {
             adopted_slippage: None,
             emissions: None,
@@ -1793,6 +1819,15 @@ fn fill_what_no_pass_recomputes<Model: SsrEmissionModel>(
 
 /// [`fill_what_no_pass_recomputes`], with the slippage round's two channels — what the loop's
 /// driver calls, since only it holds a round; everything else fills the frozen build above.
+///
+/// `str_prior` is the locus's [`str_prior_of`], looked up once by the caller: `None` at an
+/// SNP/indel site, and at a repeat locus the one value every round's table is gathered under.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the frozen build's six inputs plus the two things a repeat locus brings from \
+              outside one build — its prior, looked up once per locus, and the slippage round's \
+              channels"
+)]
 fn fill_what_no_pass_recomputes_for_round<Model: SsrEmissionModel>(
     emission: &Model,
     evidence: &LocusEvidence<'_>,
@@ -1800,6 +1835,7 @@ fn fill_what_no_pass_recomputes_for_round<Model: SsrEmissionModel>(
     candidates: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     scratch: &mut CallingScratch<Model::Scratch>,
+    str_prior: Option<&StrLocusPrior<'_>>,
     refit: SlippageRoundBuild<'_>,
 ) {
     match evidence {
@@ -1810,8 +1846,10 @@ fn fill_what_no_pass_recomputes_for_round<Model: SsrEmissionModel>(
             fill_generic_locus_emissions(evidence, parameters, candidates, genotypes, scratch);
         }
         LocusEvidence::Ssr { .. } => {
+            let prior =
+                str_prior.expect("a repeat locus's caller looked up its prior with `str_prior_of`");
             fill_tract_likelihood_table(
-                emission, evidence, parameters, candidates, genotypes, scratch, refit,
+                emission, evidence, parameters, candidates, genotypes, scratch, prior, refit,
             );
         }
     }
@@ -1911,6 +1949,14 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
 ///
 /// On a contamination list that disagrees with the fit these parameters were gathered under —
 /// by [`TractScoringFits::locus_parameters`](super::repeat_tract_parameters::TractScoringFits::locus_parameters).
+///
+/// On a `prior` of the other kind of repeat locus than `evidence` — a segment's prior with a
+/// bundle's evidence, or the reverse. [`str_prior_of`] looks the prior up from the evidence, so
+/// this is a caller bug.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same inputs as `fill_what_no_pass_recomputes_for_round`, which passes them on"
+)]
 fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     emission: &Model,
     evidence: &LocusEvidence<'_>,
@@ -1918,36 +1964,45 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     candidates: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     scratch: &mut CallingScratch<Model::Scratch>,
+    prior: &StrLocusPrior<'_>,
     mut refit: SlippageRoundBuild<'_>,
 ) {
     let tract = tract_evidence_of(evidence);
-    let scored_candidates = match tract.shape {
-        SsrLocusShape::Segment {
-            detail,
-            candidate_repeat_counts,
-        } => {
+    let scored_candidates = match (tract.shape, prior) {
+        (
+            SsrLocusShape::Segment {
+                detail,
+                candidate_repeat_counts,
+            },
+            StrLocusPrior::Segment(tract_prior),
+        ) => {
             let scored = tract_candidates(candidates, candidate_repeat_counts);
             scratch.tract_fits_mut().gather_for_locus(
                 &detail.motif,
                 &scored,
-                tract.prior(parameters),
+                *tract_prior,
                 parameters,
             );
             scored
         }
-        SsrLocusShape::Bundle {
-            detail,
-            candidate_parses,
-        } => {
-            let scored = bundle_candidates(candidates, detail, candidate_parses);
-            scratch.tract_fits_mut().gather_for_bundle(
+        (
+            SsrLocusShape::Bundle {
                 detail,
-                &scored,
-                &bundle_prior_of(detail, candidate_parses, parameters),
-                parameters,
-            );
+                candidate_parses,
+            },
+            StrLocusPrior::Bundle(bundle_prior),
+        ) => {
+            let scored = bundle_candidates(candidates, detail, candidate_parses);
+            scratch
+                .tract_fits_mut()
+                .gather_for_bundle(detail, &scored, bundle_prior, parameters);
             scored
         }
+        _ => unreachable!(
+            "a repeat locus's prior is looked up from its own evidence by `str_prior_of`, so a \
+             segment's evidence always arrives with a segment's prior and a bundle's with a \
+             bundle's"
+        ),
     };
     // **The slippage round's numbers go over the frozen gather, not instead of it.** The
     // gather is re-run each round because everything *else* a cell carries is frozen and this
@@ -2528,8 +2583,12 @@ where
         // and is not carried onto a locus; the tract ladder's rungs are §4.4's three plus the
         // one `str_fit_to_calling.md` §3.2 adds between the top two, and the rung comes back on
         // the lookup and travels onto this locus's record.
-        let allele_length_variation_rung = match evidence {
-            LocusEvidence::Generic { .. } => {
+        // **The repeat locus's prior, looked up once here** and read both by the seed below and
+        // by every build of the tract's likelihood table ([`StrLocusPrior`] says why it must be
+        // one lookup). `None` at an ordinary site.
+        let str_prior = str_prior_of(evidence, parameters);
+        let allele_length_variation_rung = match (evidence, &str_prior) {
+            (LocusEvidence::Generic { .. }, _) => {
                 let _ = fill_locus_concentration(
                     parameters.prior_seed(),
                     variant_class_of(&candidates),
@@ -2538,39 +2597,39 @@ where
                 );
                 None
             }
-            LocusEvidence::Ssr {
-                shape:
-                    SsrLocusShape::Bundle {
-                        detail,
-                        candidate_parses,
-                    },
-                ..
-            } => {
+            (
+                LocusEvidence::Ssr {
+                    shape:
+                        SsrLocusShape::Bundle {
+                            candidate_parses, ..
+                        },
+                    ..
+                },
+                Some(StrLocusPrior::Bundle(prior)),
+            ) => {
                 // **The product of the runs' seeds** (`str_bundle_loci.md` §7.4): each run's
                 // shape read off its own stratum at its own offset, held with the most variable
                 // run's conviction — `fill_ssr_bundle_seed` says why.
-                let prior = bundle_prior_of(detail, candidate_parses, parameters);
                 let run_counts: Vec<u32> = candidate_parses
                     .iter()
                     .flat_map(|parse| parse.copies())
                     .collect();
-                let _ = fill_ssr_bundle_seed(&run_counts, &prior, scratch.seed_concentration_mut());
+                let _ = fill_ssr_bundle_seed(&run_counts, prior, scratch.seed_concentration_mut());
                 Some(prior.rung())
             }
-            LocusEvidence::Ssr {
-                shape:
-                    SsrLocusShape::Segment {
-                        detail,
-                        candidate_repeat_counts,
-                    },
-                ..
-            } => {
-                // **The reference tract's own repeat count is entry 0**, and that is a
-                // property of the candidate table rather than a convention agreed here: the
-                // reference allele is id 0 of every `CandidateAlleles` and stays there, and
-                // these counts are parallel to it. It is what the allele length variation's offsets are
-                // measured from, and passing a *candidate's* count instead would re-centre
-                // the shape on that candidate and flatten the prior.
+            (
+                LocusEvidence::Ssr {
+                    shape:
+                        SsrLocusShape::Segment {
+                            candidate_repeat_counts,
+                            ..
+                        },
+                    ..
+                },
+                Some(StrLocusPrior::Segment(prior)),
+            ) => {
+                // **The prior is keyed by the reference tract's own repeat count, entry 0 of
+                // the candidates' counts** ([`str_prior_of`] says why that entry).
                 //
                 // **A run whose fit produced no allele length variation anywhere is called here, at
                 // the ladder's bottom rung, rather than refused** — the owner's ruling of
@@ -2581,11 +2640,7 @@ where
                 // `StatedFlat`, which is how a call resting on a stated constant stays
                 // distinguishable from one resting on a measurement without re-running
                 // anything. §5 and §6 of that spec carry the ruling.
-                let reference_repeats = candidate_repeat_counts[0].get();
-                let allele_length_variation = parameters.ssr_allele_length_variation_at(
-                    detail.motif.ssr_period(),
-                    RepeatCount(reference_repeats),
-                );
+                //
                 // **One vector of `candidates` counts per tract**, and the third the repeat
                 // path allocates — `fill_tract_likelihood_table` names the other two. It is a
                 // type conversion: the seed builder takes plain counts, and the evidence
@@ -2597,12 +2652,15 @@ where
                     .collect();
                 let _ = fill_ssr_seed(
                     &repeats_of_each_candidate,
-                    reference_repeats,
-                    allele_length_variation,
+                    prior.reference_repeats.get(),
+                    prior.allele_length_variation,
                     scratch.seed_concentration_mut(),
                 );
-                Some(allele_length_variation.rung())
+                Some(prior.allele_length_variation.rung())
             }
+            (LocusEvidence::Ssr { .. }, _) => unreachable!(
+                "`str_prior_of` answers a repeat locus with the prior of its own kind of ground"
+            ),
         };
 
         // **Whether this locus runs the slippage round at all** (spec §5.1). Frozen —
@@ -2642,6 +2700,7 @@ where
                 &candidates,
                 &genotypes,
                 scratch,
+                str_prior.as_ref(),
                 SlippageRoundBuild {
                     adopted_slippage: (rounds_adopted > 0).then_some(adopted_cells.as_slice()),
                     emissions: cached_emissions.as_mut(),
