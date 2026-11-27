@@ -57,7 +57,7 @@ use crate::run::psp_writer_line::{PspTrailer, PspWriterLine};
 use crate::types::{Bp, ReadGroupId};
 
 use super::read_filter_provenance::read_filter_parameters;
-use super::walker::{WalkReference, generic_path_generators};
+use super::walker::{WalkReference, run_generators};
 use super::{RunError, RunSegments, Segmentation, WalkProgress};
 
 /// What one sample's walk opens and how it filters — the per-sample counterpart of direct
@@ -461,7 +461,7 @@ impl SampleObservationGatherer {
             &segmentation,
             provenance,
         );
-        let generators = generic_path_generators(
+        let generators = run_generators(
             &walk_reference,
             inputs.locus_generator_settings,
             // The generators derive the tract generator's bundle radius from here — the
@@ -597,8 +597,8 @@ impl SampleObservationGatherer {
     ///
     /// **It names no psp, and cannot.** A census kept in a file of its own used to name the psp
     /// it was built from, so that a pair which had come apart could be caught; a census that *is*
-    /// the psp's own trailer cannot come apart from it, and the naming went at
-    /// `psp_census_pair.md`'s Milestone E.
+    /// the psp's own trailer cannot come apart from it, so the census no longer names one
+    /// (`psp_census_pair.md`).
     ///
     /// # Errors
     ///
@@ -955,7 +955,7 @@ mod tests {
     ) -> Vec<SampleLocusObservations> {
         let reads = SampleReads::open_only_sample(paths, reference, read_filters, false)
             .expect("the direct open");
-        let generators = generic_path_generators(
+        let generators = run_generators(
             &WalkReference::of(reference).expect("bases"),
             settings,
             segmentation.inputs(),
@@ -1602,8 +1602,7 @@ mod census_tests {
     //!
     //! **These use the binary namespace's on-disk cohort fixture**, which is the only one in the
     //! tree that builds a real catalog file — and a real catalog is what the selection needs.
-    //! The alternative was a fourth copy of the reference-and-catalog builder, which is the debt
-    //! Milestone C recorded and F1 paid off.
+    //! The alternative was a fourth copy of the reference-and-catalog builder.
 
     use super::*;
     use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};

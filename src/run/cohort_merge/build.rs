@@ -100,14 +100,13 @@ impl LocusReferenceBases {
     /// reference pads every allele in the locus with `NUL` bytes and the alleles still
     /// unify, still count, and still look like sequences.
     ///
-    /// **The reference-width check is the exception, and it is deliberately here anyway.**
-    /// It asserts that one observation is self-consistent, which is its *producer's*
-    /// guarantee rather than the pairing's — the walk never reads `reference_bases`.
-    /// Today the only producer is this crate's own generator, so a mismatch is a bug here
-    /// and a panic is right. **When observations are decoded from a psp file it becomes a
-    /// corrupt-input failure and must become a `RunError`** beside
-    /// `ObservationExceedsReachCeiling` (arch §5): it is the same class of fact about the
-    /// same file.
+    /// **The reference-width check is the exception, and it is deliberately here anyway.** It
+    /// asserts that one observation is self-consistent, which is its *producer's* guarantee rather
+    /// than the pairing's — the walk never reads `reference_bases`. From this crate's own generator
+    /// a mismatch is a bug, and a panic is right. From a psp file it is damage, and the psp source
+    /// refuses it as such before the merge sees the record (`ReferenceBasesDoNotSpanTheRecord`, a
+    /// [`PspSourceError`](crate::run::PspSourceError)), so reaching this assertion means a defect
+    /// in this crate's generator.
     ///
     /// Release-level, deliberately: the release profile is the one this repo runs, and the
     /// cost is one pass over the gathered span, which the verdict above bounds.
@@ -154,9 +153,9 @@ impl LocusReferenceBases {
                 // would be loud or silent depending on which reads the data carried.
                 //
                 // Two of a sample's records being disjoint is the **producer's** guarantee,
-                // like the reference width below, so **when observations are decoded from a
-                // psp file this must become a `RunError`** beside
-                // `ObservationExceedsReachCeiling` (arch §5) rather than a panic.
+                // like the reference width below. The psp source refuses overlapping or
+                // out-of-order records as damage (`PspSourceError::ObservationsOverlap`), so
+                // this assertion catches a defect in the generator.
                 if let Some(previous) = previous {
                     assert!(
                         previous.end < member.region.start,
@@ -330,9 +329,8 @@ impl<'a> MemberPlacement<'a> {
     /// onto the locus's axis, so a consumer can restrict a candidate's projection to exactly
     /// the positions the read saw (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
     ///
-    /// The mint measures a witness against the record it belongs to
-    /// ([`SampleLocusObservations::locus_len`]), so every run moves right by how far this
-    /// member starts into the locus.
+    /// The mint measures a witness against the length of the record it belongs to, so every
+    /// run moves right by how far this member starts into the locus.
     ///
     /// **It takes the runs rather than the sequence, so that its one `None` means one thing.**
     /// Whether a sequence is partial at all is the caller's question and is answered by
@@ -349,7 +347,7 @@ impl<'a> MemberPlacement<'a> {
     /// [`WitnessedLocusPositions::one_run_from_offset_and_length`] refuses too.
     ///
     /// **How wide a locus can get is not bounded at 50 bases, and an earlier draft of this
-    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 100
+    /// comment said it was.** [`MaxCohortLocusSpan`] defaults to 100
     /// reference bases but is the operator's to set and holds any `NonZeroU32`, and
     /// [`super::close::LocusCloser`] exempts repeat-tract loci from it outright — so the
     /// reachable case is a satellite tract above 65,535 bases, or a raised bound. Within a
@@ -628,12 +626,12 @@ impl AlleleTable {
     }
 
     /// The table and every covering sample's support against it, in one pass over the
-    /// samples — what [`CohortObservation::over`] is, with [`over`](Self::over) the same
+    /// samples — what [`CohortObservation::over`] is, with the test-only `over` the same
     /// walk for a caller that wants the alleles alone.
     ///
     /// **One pass, not two.** Interning an allele answers which allele it is, so a sample's
-    /// support can be accumulated as its alleles are derived; the alternative the
-    /// [`index_of`](Self::index_of) doc describes — deriving again and looking the bytes up
+    /// support can be accumulated as its alleles are derived; the alternative the test-only
+    /// `index_of`'s doc describes — deriving again and looking the bytes up
     /// — would compose every read's allele a second time, which is the expensive half of
     /// this module. A sample's tally gains an entry the first time one of its reads reaches a
     /// `(allele, read group)` pair, and is sorted into ascending pair order at the end.
@@ -1050,7 +1048,9 @@ pub fn build_region_windowed<'a, E>(
     Ok(outcome)
 }
 
-/// `build_region_handing_over` over a window whose summaries are already in hand.
+/// Build one region over a window whose summaries are already in hand — the cache's path —
+/// handing each surviving locus to `keep` as it is built and each locus too wide to assemble to
+/// `refused`. The input contract is the test-only `build_region`'s, whose doc states it.
 #[expect(
     clippy::too_many_arguments,
     reason = "the seven the build has always taken, and the --explain-loci log it may note into"
@@ -1538,9 +1538,11 @@ fn share_of_one_read(
         // −0.5 one reports −0.5.
         //
         // That a sequence's read count agrees with the reads it names is the **producer's**
-        // guarantee, like the reference width and the chain ids, so **when observations are
-        // decoded from a psp file this must become a `RunError`** beside
-        // `ObservationExceedsReachCeiling` (arch §5) rather than a panic.
+        // guarantee, like the reference width and the chain ids. **The psp reader checks it on
+        // one list a record only** — the one it derives rather than stores
+        // (`psp/record.rs`, `check_a_derived_read_list`) — so a damaged psp whose stored list
+        // names reads under a zero count reaches this assertion and aborts the run rather than
+        // being refused as damage.
         assert!(
             sequence.num_obs > 0,
             "the observation {:?} at {} of sample index {} names reads but counts none, so \
@@ -1866,9 +1868,10 @@ fn alleles_of_sample(
             //
             // Release-level, like the walk's own checks beside it, and one comparison per
             // sequence against a derivation that already copies every sequence's bases.
-            // **When observations are decoded from a psp file this becomes corrupt input
-            // and must become a `RunError`** (arch §5), as the reference-width check
-            // above must.
+            // **The psp reader checks this on one list a record only**, the one it derives
+            // (`psp/record.rs`, `check_a_derived_read_list`); a damaged psp whose stored list
+            // is empty under a non-zero count reaches this assertion and aborts the run
+            // rather than being refused as damage.
             assert!(
                 !sequence.chain_ids.is_empty(),
                 "the observation {:?} at {} of sample index {} carries {} reads and no \
@@ -2022,7 +2025,7 @@ impl AlleleBacking<'_> {
     /// one. **That count is not small.** The generic mint writes a record at every covered
     /// position, so a sample can hold as many records inside a locus as the locus is wide —
     /// six inside a six-base locus, in `serial.rs`'s own minted fixture — bounded by
-    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 100 by default. What keeps it free is
+    /// [`MaxCohortLocusSpan`], 100 by default. What keeps it free is
     /// the company it keeps rather than the comparison being cheap: the same locus already
     /// sorts every sighting and composes and divides every read across every record.
     ///
@@ -2041,9 +2044,9 @@ impl AlleleBacking<'_> {
     /// profile aborts (`panic = "abort"`), so a header the user wrote can end a whole run —
     /// where `arch/cohort_merge.md` §5 puts a fact about the data on the counted-error side and
     /// keeps panics for bugs in whoever hands the work out. It is left as a panic here because
-    /// this module has no `RunError` to raise yet, and the conversion is owed together with the
-    /// chain-id check's (§5). Until then, a refusal here means *look at the file's `@RG`
-    /// records first*.
+    /// the merge has no error of its own to raise — its error type is the source's — and the
+    /// conversion is owed together with the chain-id check's (§5). Until then, a refusal here
+    /// means *look at the file's `@RG` records first*.
     fn read_group(&self, sample: usize) -> ReadGroupId {
         match self {
             Self::OneSequence(sequence) => sequence.read_group,

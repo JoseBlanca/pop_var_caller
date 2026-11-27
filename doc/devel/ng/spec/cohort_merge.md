@@ -21,9 +21,9 @@ streaming merge, §3.3 two-phase decode, §4.3 segment independence, §12 oracle
 one stream of cohort observations, in coordinate order, ready to be called — and it does that
 work on several threads at once.** It is the stage that was the wall floor in production, where
 the equivalent code — the cohort fold in
-[`cohort_integration.rs`](../../../../src/var_calling/cohort_integration.rs) — advanced every
+`cohort_integration.rs` — advanced every
 sample behind a single global frontier and therefore ran on one thread, however many the run had
-(its module doc, [`:1-38`](../../../../src/var_calling/cohort_integration.rs), describes that
+(its module doc, `:1-38`, describes that
 loop; §10 here carries what it teaches).
 
 [`run_streaming.md`](run_streaming.md) already fixed the outer shape: the merge streams, keys on
@@ -100,9 +100,9 @@ path; §4.4 says so at the point it matters.
 ### 1.3 Vocabulary
 
 - **observation** — one sample's evidence over one stretch of genome: a
-  `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)),
+  `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs)),
   with its `region` (1-based, inclusive — `GenomeRegion`,
-  [`types.rs:79`](../../../../src/ng/types.rs)). Same use as [`run_streaming.md`](run_streaming.md) §1.3.
+  [`types.rs:79`](../../../../src/types.rs)). Same use as [`run_streaming.md`](run_streaming.md) §1.3.
 - **cohort observation** — every sample's observations over one cohort locus, grouped and
   collated by this component; the unit the caller consumes. §4 defines it.
 - **cohort locus** — a group of positions chained by shared reference bases across the cohort
@@ -114,14 +114,14 @@ path; §4.4 says so at the point it matters.
   is 1 (its anchor base); a deletion's span is the deleted run plus its anchor.
 - **reach** — the last reference position an observation covers: `start + span − 1`. The word and
   the arithmetic are production's
-  ([`cohort_integration.rs:46-48`](../../../../src/var_calling/cohort_integration.rs)).
+  (`cohort_integration.rs:46-48`).
 - **`max_cohort_locus_span` / `max_cohort_locus_span`** — the *policy* constant: the widest cohort
   locus the
   caller undertakes to build. Default 100 bases (50 until 2026-10-04). §3 is its section
   derivations only.
 - **the reach ceiling** — the *physical* constant: the widest reference span any minted
   observation can have — the generic generator's `max_record_span`
-  ([`pileup/generator.rs:93`](../../../../src/ng/locus_generation/pileup/generator.rs)). It bounds
+  ([`pileup/generator.rs:93`](../../../../src/locus_generation/pileup/generator.rs)). It bounds
   how far the observation cache must reach and nothing else (§5, §6.4).
 - **position summary** — the cheap facts a builder needs about a position before it decides
   anything: what a record there covers, how many of the sample's reads were compared against the
@@ -132,7 +132,7 @@ path; §4.4 says so at the point it matters.
   **In the direct path these are read straight off the observations the walk minted** —
   there is no separate object. In the psp path they are the file's light columns, decoded ahead of
   the heavy ones (production's `TwoPhaseSegment`,
-  [`sample_reader.rs:698`](../../../../src/var_calling/sample_reader.rs)). The name is the role,
+  `sample_reader.rs:698`). The name is the role,
   not a data structure.
 - **candidate position** — a position whose position summary, in at least one sample, records a
   non-reference observation count above zero. Candidates are what the variability filter keeps
@@ -198,7 +198,7 @@ What it buys:
   so the true ceiling on an emitted observation is the larger of `max_cohort_locus_span` and the
   widest STR tract the
   segmentation admits — a tract longer than `max_str_len` is a satellite and yields no locus at all
-  ([`region_typing/mod.rs:223,235`](../../../../src/ng/region_typing/mod.rs), default 100 bases).
+  ([`region_typing/mod.rs:223,235`](../../../../src/region_typing/mod.rs), default 100 bases).
   At the two defaults that is 100 rather than 50, and both are the operator's to set.
 
 **It does not make a cut safe.** Deciding where one builder's ground can end without splitting a
@@ -234,7 +234,7 @@ the ground it covers being emitted twice over by builders that never saw what op
 
 Two different things make a locus that wide, and the rule does not distinguish them. One read may
 carry a deletion longer than 50 bases — ng mints observations up to `max_record_span`, 5,000 bases
-by default ([`pileup/generator.rs:93,141`](../../../../src/ng/locus_generation/pileup/generator.rs)).
+by default ([`pileup/generator.rs:93,141`](../../../../src/locus_generation/pileup/generator.rs)).
 Or several short events in different samples may overlap each other in a chain, none of them wide
 on its own, until the stretch they jointly cover passes 50. Either way the caller would have to
 build one locus wider than it undertakes to call, so either way it declines. What matters is how
@@ -318,20 +318,20 @@ The builder folds the k samples' evidence over its region into one cohort summar
 positions, and per position the widest reference span any sample's observation covers and whether
 any sample saw a non-reference read. This is production's `CohortSpanFold` — union on positions,
 `max` on the aggregates, commutative and associative so the fold order cannot matter
-([`cohort_integration.rs:64-149`](../../../../src/var_calling/cohort_integration.rs), proven
-order-independent by its tests, [`:1302,:1960`](../../../../src/var_calling/cohort_integration.rs)).
+(`cohort_integration.rs:64-149`, proven
+order-independent by its tests, `:1302,:1960`).
 
 **Only one of those two comes off the observation as a field.** The span is
 `SampleLocusObservations::region`
-([`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)). There is **no**
+([`locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs)). There is **no**
 non-reference count: an observation carries its bases and its read count, and whether those bases
 are the reference's is decided by comparing them — `*observation.bases == *locus.reference_bases`,
 which is exactly what the census writer does today
-([`census.rs:2084`](../../../../src/ng/parameter_estimation/joint/census.rs)), summing `num_obs`
+([`census.rs:2084`](../../../../src/parameter_estimation/joint/census.rs)), summing `num_obs`
 over the observations that differ. So the fold derives that half rather than reading it, and a
 builder pays one sequence comparison per observation to do so. It is the same derivation
 production makes: its non-reference column is derived from the light columns rather than stored
-([`sample_reader.rs:715-719`](../../../../src/var_calling/sample_reader.rs)).
+(`sample_reader.rs:715-719`).
 
 *(In the psp path the same number may instead arrive precomputed, since a file is free to store
 what a walk would have to recompute — that is the encoding spec's call, §13.)*
@@ -344,7 +344,7 @@ furthest base any observation in it reaches.
 already in the locus covers that base — the two overlap, so they cannot be called apart. If it
 falls beyond the reach, the open locus closes and the next position starts a new one. This is
 production's rule, unchanged (`derive_is_kept`,
-[`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs)).
+`cohort_integration.rs:166-187`).
 
 So a SNP at position 10 and a SNP at 11 are two loci, not one: neither observation covers the
 other's base. A deletion at 10 spanning to 14 and a SNP at 12 are one locus, because the deletion
@@ -401,7 +401,7 @@ Two steps, both mechanical:
   a position another sample's deletion also covers — so each observation's sequence is widened to
   the full locus span, padded with the reference bases either side. Those bases travel on the
   observation already (`reference_bases`,
-  [`locus_generation/mod.rs:46`](../../../../src/ng/locus_generation/mod.rs), whose doc calls them
+  [`locus_generation/mod.rs:46`](../../../../src/locus_generation/mod.rs), whose doc calls them
   "what a wider-span projection needs when samples merge"), so nothing has to be fetched.
 - **Unification.** Two projected sequences that are identical are the same allele, wherever they
   came from. The locus ends with one table of distinct alleles, the reference among them, and each
@@ -421,7 +421,7 @@ Two steps, both mechanical:
 deletion written at two placements would otherwise project to two sequences and become two alleles,
 silently splitting one variant's evidence in half. Read preparation canonicalises that before the
 generator mints anything (`LeftAlignPreparer`,
-[`read/left_align.rs:92`](../../../../src/ng/read/left_align.rs)), so equal sequences here really
+[`read/left_align.rs:92`](../../../../src/read/left_align.rs)), so equal sequences here really
 do mean the same allele. It is worth stating because the failure is invisible in the output: two
 half-supported alleles look like a noisy site, not like a bug.
 
@@ -433,13 +433,13 @@ apart.
 
 **Production does this in a merger too, and it is worth being exact about which one**, because it
 has two and they do different jobs. `PerPositionMerger`
-([`per_position_merger.rs:145`](../../../../src/var_calling/per_position_merger.rs)) is the k-way
+(`per_position_merger.rs:145`) is the k-way
 merge over the per-sample files: it lines the streams up by position and says which samples had a
 record there, and it unifies nothing. The allele work is `PerGroupMerger`
-([`per_group_merger.rs:585`](../../../../src/var_calling/per_group_merger.rs)), which runs after
+(`per_group_merger.rs:585`), which runs after
 grouping and emits *"a unified allele set"* per group, having *"projected every sample-local allele
 onto the group's reference span"* and *"deduplicated by byte equality"*
-([`:1-20`](../../../../src/var_calling/per_group_merger.rs)). So unification is merging work done
+(`:1-20`). So unification is merging work done
 after grouping — which is exactly where this component's builder does it. The one thing production
 folds in there that ng keeps downstream is the likelihood: its Stage 5 emits both, and here the
 builder emits evidence only (§1.2).
@@ -458,7 +458,7 @@ least
 
 non-reference reads. *Compared reads* is the denominator the numerator was drawn from: the reads
 whose whole sequence over the locus was compared against the reference
-([`SampleLocusObservations::reads_compared_with_reference`](../../../../src/ng/locus_generation/mod.rs)),
+([`SampleLocusObservations::reads_compared_with_reference`](../../../../src/locus_generation/mod.rs)),
 which is neither read depth nor the reads that merely covered the ground. A partial read, whose
 bases stop inside the locus, is in neither half.
 
@@ -498,8 +498,8 @@ downstream step can recover it, because nothing is emitted for that locus at all
 position a heterozygous carrier shows a single read about four times in ten, so this is not an
 empty class. It is the same trade production makes, whose rule is also per-sample (`derive_is_kept`
 over `max_nonref_obs`,
-[`cohort_integration.rs:166-187`](../../../../src/var_calling/cohort_integration.rs)), at the same
-default of 2 ([`var_calling/mod.rs:72`](../../../../src/var_calling/mod.rs)). Lowering
+`cohort_integration.rs:166-187`), at the same
+default of 2 (`var_calling/mod.rs:72`). Lowering
 `min_alt_obs` to 1 restores those variants and restores the cost.
 
 **Neither number has been measured against a truth set.** Both were chosen against loci-kept counts
@@ -509,7 +509,7 @@ rather than reasoned about.
 
 **A kept locus is kept whole**, quiet positions and all — the threshold decides whether the locus
 survives, never which of its positions do
-([`cohort_integration.rs:1344`](../../../../src/var_calling/cohort_integration.rs)).
+(`cohort_integration.rs:1344`).
 
 ### 4.4 Assembling the survivors
 
@@ -522,7 +522,7 @@ hand. There is no second read of anything.
 
 **In the psp path it is where the heavy columns are decompressed** — the deferred inflation of
 [`run_streaming.md`](run_streaming.md) §3.3, production's `set_variable_rows` shape
-([`sample_reader.rs:789`](../../../../src/var_calling/sample_reader.rs), one column at a time, a
+(`sample_reader.rs:789`, one column at a time, a
 transient of about one column). This is the only step in the whole document whose *cost* differs
 between the paths, which is why the discards above matter more there: what is discarded before this
 point is never decompressed at all.
@@ -594,8 +594,8 @@ the 200-base grain this design needs (§6.1). Any finer cut would have to be jus
 which means scanning backwards far enough that nothing could reach across, and that distance is
 bounded only by how wide an observation may be: up to `max_record_span`, **5,000 bases by default**
 and 65,535 at the ceiling
-([`pileup/generator.rs:93,141,45`](../../../../src/ng/locus_generation/pileup/generator.rs);
-production's default at [`walker/mod.rs:67`](../../../../src/pileup/walker/mod.rs)). Scanning five
+([`pileup/generator.rs:93,141,45`](../../../../src/locus_generation/pileup/generator.rs);
+production's default at `walker/mod.rs:67`). Scanning five
 kilobases backwards to hand out two hundred bases of work is not a trade worth making, and the scan
 would still be a *check* whose failure the organiser has to catch anyway.
 
@@ -808,7 +808,7 @@ the overlaps of §6.1, and it emits in genome order.
 Builders finish out of order; the consumer must see genome order. The reorder structure is
 production's, carried whole: results keyed by region index in an ordered map, drained while the
 head equals the next expected index — the `BTreeMap` the VCF writer drains on `next_expected`
-([`vcf_writer.rs:168-176`](../../../../src/var_calling/vcf_writer.rs)).
+(`vcf_writer.rs:168-176`).
 
 **Resolving overlaps is why the drain waits for a gapless run of regions rather than emitting each
 as it lands.** A locus can only be confirmed once the region before it has arrived, because that is
@@ -823,9 +823,9 @@ ground itself. But **every region delivers exactly one result — observations p
 failed-locus count — even when both are empty**, because the drain advances only on a gapless
 index sequence and the counts must all arrive to be summed (§3.3). Production distinguishes
 exactly these things: variant-free spans emit nothing while the order counter stays gapless
-([`cohort_integration.rs:1173-1179`](../../../../src/var_calling/cohort_integration.rs)), and the
+(`cohort_integration.rs:1173-1179`), and the
 gap is guarded at release level because a lost index silently truncates the output
-(`MissingChunks`, [`vcf_writer.rs:152-158`](../../../../src/var_calling/vcf_writer.rs)). ng keeps
+(`MissingChunks`, `vcf_writer.rs:152-158`). ng keeps
 both: the empty-result rule and the release-level guard (arch doc §5).
 
 Whether `call_vars_from_observation` runs inside the builder (buffering called variants) or after
@@ -893,7 +893,7 @@ What bounds the damage:
   its segment, and the boundary scan always terminates there. This is why production's
   `StalledCut` has no counterpart here: production's cut could fail to advance and spin, so it
   guards the progress invariant with a release-level error
-  ([`cohort_integration.rs:395-400`, fire site `:1145-1150`](../../../../src/var_calling/cohort_integration.rs));
+  (`cohort_integration.rs:395-400`, fire site `:1145-1150`);
   ng's progress guarantee is structural — the reference-defined segment — and production had no
   segments to lean on (§10, lesson 2).
 - **Memory: the look-ahead.** At most `look-ahead` regions are in flight; when the slow region
@@ -921,13 +921,13 @@ not merge overhead, and there is no cheaper "do nothing" that still yields calla
 observations. The overhead unique to this component at k = 1 is the per-region result markers
 (§6.3) and, under subdivision only, the boundary scans (§6.1) — per region, never per read.
 Production's sharpest ordering bug was at exactly k = 1 across many intervals
-([`cohort_integration.rs:1905-1928`](../../../../src/var_calling/cohort_integration.rs) — the
+(`cohort_integration.rs:1905-1928` — the
 single-sample cohort was "what actually fails"), so k = 1 through the full parallel path is a
 first-class oracle here, not a degenerate afterthought (§15).
 
 At k = 0 there is nothing to iterate; construction of a caller with zero samples is refused at
 the run level (production instead yields an empty stream —
-[`:1997`](../../../../src/var_calling/cohort_integration.rs); ng prefers the refusal because a
+`:1997`; ng prefers the refusal because a
 zero-sample *calling run* is always a caller bug, where production's producer was also test
 plumbing).
 
@@ -974,7 +974,7 @@ constant.
 |---|---|---|
 | the observation cache | `samples × observations over the builders' span` — the span being `builders × cohort_locus_builder_regions_len`, 3,200 bases at 16 builders and the 200-base default, plus the tail of observations reaching past it | the formula is §6.4's; measured on fabricated ground with a record every hundred bases at 1,000 samples and 16 in flight: **33 records held per sample**, against 4 at the old 20-base default. What one record costs in bytes is still **unmeasured** |
 | the current locus, per builder | one `max_cohort_locus_span`-wide window per sample, held while it is assembled (§4.5) | bounded by `max_cohort_locus_span`, never by the region |
-| the cohort summary, per builder | ~24 B per position of its region (production's three-column layout, [`cohort_integration.rs:64-78`](../../../../src/var_calling/cohort_integration.rs)) | ~4.8 kB at a 200-base region; independent of the sample count |
+| the cohort summary, per builder | ~24 B per position of its region (production's three-column layout, `cohort_integration.rs:64-78`) | ~4.8 kB at a 200-base region; independent of the sample count |
 | survivors awaiting release | about 1 locus per 100 positions of resolved ground (§4.3); a failed locus adds a span and a counter, no data (§3.2) | the 28,718 / 2.83 M measurement, 50 tomato samples at ~3× |
 
 **The cache is why the builders are kept close together, and why the region width is bounded at
@@ -994,7 +994,7 @@ Three facts, each carrying part of the property, together the whole of it:
 1. **The set of cohort loci — built, failed, and dropped alike — is a function of the per-sample
    streams and the configuration.** The fold is order-independent (union + `max`,
    production-tested with deliberate ties,
-   [`cohort_integration.rs:1960`](../../../../src/var_calling/cohort_integration.rs)); the
+   `cohort_integration.rs:1960`); the
    closure is a deterministic left-to-right walk of the folded summary (§4.1); both per-locus
    verdicts — `max_cohort_locus_span` and the variability filter — read only that summary (§3.2, §4.3);
    members are selected by span overlap (§4.2). No scheduling input appears anywhere in the
@@ -1008,7 +1008,7 @@ Three facts, each carrying part of the property, together the whole of it:
    partition into regions yields the same loci with the same members and the same verdicts —
    partition-invariance, production's own strongest producer test (identical output at chunk
    targets 1, 3, 17 and 100,000 —
-   [`cohort_integration.rs:1577-1588`](../../../../src/var_calling/cohort_integration.rs)). The
+   `cohort_integration.rs:1577-1588`). The
    division into building regions is itself fixed (boundaries are
    functions of the data — §6.1), but the property would hold even if it were not.
 3. **Emission order is region index, then position.** The ordered emitter (§6.3) makes the
@@ -1030,59 +1030,59 @@ segments and production had none.
 1. **Cut where a bound proves safety; never speculate.** Production derived its independent
    intervals by gap-merging block ranges under `max_group_span` — two blocks join unless the gap
    between them exceeds it, "so every interval boundary is a safe gap no variant group can span"
-   ([`merge_block_ranges`, `cohort_integration.rs:403-430`](../../../../src/var_calling/cohort_integration.rs))
+   (`merge_block_ranges`, `cohort_integration.rs:403-430`)
    — and cut chunks only at clean group boundaries
-   (`find_cut`, [`:266-287`](../../../../src/var_calling/cohort_integration.rs)). Nothing was ever
+   (`find_cut`, `:266-287`). Nothing was ever
    built and revoked; safety was decided from cheap metadata before any real work. Carried
    **Not carried.** This design does the opposite — it builds, overlaps, and lets the organiser
    resolve (§5), because production's approach needs a backward scan bounded by how wide an
    observation can be, and at a 200-base region that scan is tens of times the work it
    protects. Production's own assumption behind the gap constant — that it is at least any
    record's span — lived only in a test-fixture comment
-   ([`:1664`](../../../../src/var_calling/cohort_integration.rs)); ng promotes it to a named,
+   (`:1664`); ng promotes it to a named,
    header-recorded value (§5). The alternative — build speculatively, reconcile overlaps
    between workers after — puts coordination exactly where the data is hardest, and production's
    history contains no version that needed it.
 2. **`StalledCut`: guard progress at release level — but ng's guarantee is structural.**
    Production's cut can fail to advance on a degenerate fold, and a `debug_assert!` was promoted
    to a release error because a spin is worse than a stop
-   ([`:395-400`](../../../../src/var_calling/cohort_integration.rs)). Not carried as an error:
+   (`:395-400`). Not carried as an error:
    ng's boundary scan terminates at the segment end by construction (§7.1). Carried as a test:
    the scan's bound is asserted, and the dense-region shape is a fixture, not a surprise.
    Production needed the guard precisely because, with no reference-defined structure, no
    position was *guaranteed* cuttable.
 3. **Decide from the cheap facts, assemble only what survives.** Production reaches its verdicts
    from per-row summaries and touches the expensive evidence only for the rows it keeps
-   ([`TwoPhaseSegment`, `sample_reader.rs:698-712`; `set_variable_rows`, `:789`](../../../../src/var_calling/sample_reader.rs)).
+   (`TwoPhaseSegment`, `sample_reader.rs:698-712`; `set_variable_rows`, `:789`).
    That ordering is carried here — §4.3 and §4.4 are it, per builder, and §3.2 extends it to the
    failure verdict. **What it saves differs by path:** in the direct path the observations are
    already in hand, so what is saved is the assembling and everything after it; in the psp path
    the same ordering additionally means the discarded evidence is never decompressed. Also
    carried: production keeps an eager whole-segment decode alive purely as the byte-identity
    oracle its deferred path is checked against
-   ([`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs)) — §15 keeps that
+   (`sample_reader.rs:20-26`) — §15 keeps that
    oracle shape.
 4. **Reorder by index, drain on next-expected, and treat a gap as a release-level bug.** The
    writer's `BTreeMap` + `next_expected` cursor and the `MissingChunks` guard
-   ([`vcf_writer.rs:152-176`](../../../../src/var_calling/vcf_writer.rs)). Carried whole, with
+   (`vcf_writer.rs:152-176`). Carried whole, with
    the index moved from chunk order to region index and the "exactly one result per region,
    empty included" invariant stated (§6.3) — a result now carrying a count as well as
    observations.
 5. **The watermark is the anti-pattern this design exists to remove.** Production advanced every
    sample behind `min` over per-sample coverage — the cohort watermark
-   ([`cohort_integration.rs:920-939`](../../../../src/var_calling/cohort_integration.rs)) — and
+   (`cohort_integration.rs:920-939`) — and
    everything downstream of that single frontier was serial; its five-stage pipeline
-   ([`pipeline.rs:1-30`](../../../../src/var_calling/pipeline.rs)), bounded queues
-   ([`:98-111`](../../../../src/var_calling/pipeline.rs)) and measured thread split
-   ([`resolve_split`, `:135-168`](../../../../src/var_calling/pipeline.rs)) are machinery for
+   (`pipeline.rs:1-30`), bounded queues
+   (`:98-111`) and measured thread split
+   (`resolve_split`, `:135-168`) are machinery for
    overlapping work *around* a barrier ng does not have. Not carried, and nothing like it may
    reappear: a shared per-sample read window (§6.2) would be this frontier under another name.
    What is kept from that history is one measured direction: finer work units balanced better
-   ([`:86-97`](../../../../src/var_calling/pipeline.rs)), which informs `cohort_locus_builder_regions_len`'s sweep.
+   (`:86-97`), which informs `cohort_locus_builder_regions_len`'s sweep.
 6. **The test shapes are the transferable specification of correctness.** §15's table maps each
    production test to the ng test it becomes; the two that found real bugs — partition-invariance
    and the k = 1 multi-interval ordering test
-   ([`:1577`, `:1905`](../../../../src/var_calling/cohort_integration.rs)) — anchor the suite.
+   (`:1577`, `:1905`) — anchor the suite.
 
 ---
 
@@ -1106,7 +1106,7 @@ segments and production had none.
   builders resolve different boundaries, and a locus is built twice or not at all, silently. One
   code path for light-column access, used by both.
 - **Reach arithmetic must saturate.** Production's `reach` saturates on both operations
-  ([`cohort_integration.rs:46-48`](../../../../src/var_calling/cohort_integration.rs)); a
+  (`cohort_integration.rs:46-48`); a
   non-saturating rewrite overflows at contig ends and the cut check quietly inverts.
 - **A failed locus is a count; an over-ceiling observation is an error** (§3.2). Collapsing the
   second into the first hides file corruption inside a calibration counter; collapsing the first
@@ -1121,10 +1121,10 @@ segments and production had none.
 - **The empty region's result is load-bearing** (§6.3). Dropping it stalls the drain at the
   first variant-free region — and now also loses a count. Production promoted exactly this class
   of invariant to release errors after silent truncation
-  ([`vcf_writer.rs:152-158`](../../../../src/var_calling/vcf_writer.rs)).
+  (`vcf_writer.rs:152-158`).
 - **The generator's region halo is not the merge's business.** The generic generator queries a
   halo past its region and clamps on the anchor
-  ([`pileup/genome_walk.rs:200`](../../../../src/ng/locus_generation/pileup/genome_walk.rs));
+  ([`pileup/genome_walk.rs:200`](../../../../src/locus_generation/pileup/genome_walk.rs));
   an observation belongs to the region containing its start position, and that
   is what the organiser's overlap rule rests on. Re-filtering members by any other rule double-counts at
   region edges.
@@ -1244,7 +1244,7 @@ for the run).
    lower and which no measurement here has counted, and a cohort of *thousands*, which nothing
    real reaches: 63 accessions is the largest measured. The builder-idle profile this question
    originally asked for
-   ([`pipeline.rs:86-97`](../../../../src/var_calling/pipeline.rs)) is superseded by the phase
+   (`pipeline.rs:86-97`) is superseded by the phase
    timings in §6.2, which say where the merge's time goes without one.
 2. **When a sample has two separate observations inside one locus, is its allele the combination
    of both?** — OPEN, and it is the question projection raises that byte-equality does not answer.
@@ -1255,9 +1255,9 @@ for the run).
    cross-record compound *"only when chain-id evidence inside at least one sample links the
    constituents"*, and where a sample's chain is broken at a compound another sample anchored, it
    falls back to treating the constituents independently and records that it did
-   ([`per_group_merger.rs:1-20`](../../../../src/var_calling/per_group_merger.rs)); ng's
+   (`per_group_merger.rs:1-20`); ng's
    `SequenceObservation` carries `chain_ids` for reads that disagree with the reference
-   ([`locus_generation/mod.rs:157`](../../../../src/ng/locus_generation/mod.rs)). *Leaning:* follow
+   ([`locus_generation/mod.rs:157`](../../../../src/locus_generation/mod.rs)). *Leaning:* follow
    production — compound only on chain evidence, constituents-independent otherwise, and the
    fallback recorded rather than silent. **Settled by:** deciding it before the builder is coded,
    because it changes what a projected allele *is*; it is not a tuning question.
@@ -1301,7 +1301,7 @@ correctness that exists; each row names the ng test it becomes. All cited tests 
 lines given. The failed-locus rows have no production ancestor — the ruling is new — and are
 listed after the table.
 
-| production test ([`cohort_integration.rs`](../../../../src/var_calling/cohort_integration.rs) unless noted) | what it pins | the ng test it becomes |
+| production test (`cohort_integration.rs` unless noted) | what it pins | the ng test it becomes |
 |---|---|---|
 | `streaming_matches_reference_across_chunk_sizes` `:1577` | identical output at chunk targets 1, 3, 17, 100,000 | **partition-invariance**: one-shot whole-segment build equals region-wise builds at any partition, and at 1–16 builders — observations *and* failed counts equal — this component's regression anchor |
 | `staged_channel_path_matches_owned_across_intervals` `:1905` | k = 1 across many intervals equals the serial reference — the shape that found the stale-marker desync | k = 1 through the full parallel path over many regions and segments equals serial; run first, not last |
@@ -1310,7 +1310,7 @@ listed after the table.
 | `over_approximation_is_max_not_sum` `:1335` | production's keep is a `max` over samples, not a sum | **followed, not inverted, since 2026-08-19**: two samples with one non-reference read each at one position are **not** kept, because no single sample reached two (`one_non_reference_read_in_each_of_two_samples_does_not_reach_the_threshold`). ng adds a share of the sample's own reads on top, which production has no counterpart for (`the_share_decides_once_depth_makes_it_the_larger`) |
 | `multi_position_group_kept_whole` `:1344` | a kept group keeps its quiet member positions | same: a kept locus carries its reference-only member positions |
 | `interval_with_no_variants_yields_no_chunks` `:1640` | variant-free ground emits nothing, order stays gapless | an all-reference region emits no observation and still delivers its result; the drain's gap guard fires when it does not |
-| the eager-decode oracle ([`sample_reader.rs:20-26`](../../../../src/var_calling/sample_reader.rs)) | two-phase equals eager, byte for byte | an eager whole-region build, tests only, as the oracle the two-phase builder is compared against |
+| the eager-decode oracle (`sample_reader.rs:20-26`) | two-phase equals eager, byte for byte | an eager whole-region build, tests only, as the oracle the two-phase builder is compared against |
 | `produce_chunk_with_zero_samples_yields_none` `:1997` | zero samples does not spin | zero samples is refused at caller construction (§7.2) |
 
 New tests the ruling requires, with no production ancestor:
@@ -1329,15 +1329,15 @@ New tests the ruling requires, with no production ancestor:
 
 | what | existing code | how it is reused |
 |---|---|---|
-| reach arithmetic | `reach` ([`cohort_integration.rs:46-48`](../../../../src/var_calling/cohort_integration.rs)) | copied — saturating form and all (§11) |
-| the cohort fold | `CohortSpanFold` ([`cohort_integration.rs:64-149`](../../../../src/var_calling/cohort_integration.rs)) | the layout and the union+`max` algebra, re-implemented over ng's position summaries; the order-independence tests come with it |
-| grouping by shared bases | `derive_is_kept`'s group walk ([`:166-187`](../../../../src/var_calling/cohort_integration.rs)) | the chaining rule, unchanged; ng adds the per-locus bound verdict after it (§4.1) |
-| the reach ceiling's existing owner | `max_record_span` ([`pileup/generator.rs:93,141,45`](../../../../src/ng/locus_generation/pileup/generator.rs)) | read, recorded in the psp header, never re-decided here |
-| the psp path's deferred decode | `TwoPhaseSegment`, `set_variable_rows` ([`sample_reader.rs:698,789`](../../../../src/var_calling/sample_reader.rs)) | the shape the psp source must meet when that path is built; the direct path defers nothing, and the encoding spec owns ng's bytes |
-| ordered emission | reorder `BTreeMap` + `next_expected` + `MissingChunks` ([`vcf_writer.rs:152-176`](../../../../src/var_calling/vcf_writer.rs)) | carried whole, keyed by region index; the result gains a count (§6.3) |
+| reach arithmetic | `reach` (`cohort_integration.rs:46-48`) | copied — saturating form and all (§11) |
+| the cohort fold | `CohortSpanFold` (`cohort_integration.rs:64-149`) | the layout and the union+`max` algebra, re-implemented over ng's position summaries; the order-independence tests come with it |
+| grouping by shared bases | `derive_is_kept`'s group walk (`:166-187`) | the chaining rule, unchanged; ng adds the per-locus bound verdict after it (§4.1) |
+| the reach ceiling's existing owner | `max_record_span` ([`pileup/generator.rs:93,141,45`](../../../../src/locus_generation/pileup/generator.rs)) | read, recorded in the psp header, never re-decided here |
+| the psp path's deferred decode | `TwoPhaseSegment`, `set_variable_rows` (`sample_reader.rs:698,789`) | the shape the psp source must meet when that path is built; the direct path defers nothing, and the encoding spec owns ng's bytes |
+| ordered emission | reorder `BTreeMap` + `next_expected` + `MissingChunks` (`vcf_writer.rs:152-176`) | carried whole, keyed by region index; the result gains a count (§6.3) |
 | per-sample stream heads | `MergedRegionReads` ([`sample_reads.md`](../arch/sample_reads.md) §4) | the argmin-over-heads layout for walking k position summaries in step during the fold |
-| the flowing item | `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | members of a cohort observation, unchanged |
-| the segments and their boundaries | `TypedRegion`, `RegionKind` ([`region_typing/mod.rs:144,168`](../../../../src/ng/region_typing/mod.rs)) | the first build's whole partition (§6.1); their boundaries are the unconditional safe cuts (§5) |
+| the flowing item | `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/locus_generation/mod.rs)) | members of a cohort observation, unchanged |
+| the segments and their boundaries | `TypedRegion`, `RegionKind` ([`region_typing/mod.rs:144,168`](../../../../src/region_typing/mod.rs)) | the first build's whole partition (§6.1); their boundaries are the unconditional safe cuts (§5) |
 
 **The parity oracle for the whole document is partition-invariance (§15, first row)** — the same
 cohort observations and the same failed-locus counts from one builder over the whole genome and

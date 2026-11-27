@@ -351,7 +351,7 @@ impl DecodedContainer {
 /// one — and each holds its own [`SampleCursor`](crate::read::input::sample_cursor::SampleCursor),
 /// hence its own [`CramAlignedReadsReader`](super::cram::CramAlignedReadsReader), on purpose:
 /// their regions interleave, and one cursor between them would tie their lifetimes together
-/// (`walker.rs`'s `generic_path_generators`). Interleaving is exactly the case where both reach
+/// (`walker.rs`'s `run_generators`). Interleaving is exactly the case where both reach
 /// the same container, so before this cache **every container of the file was decoded twice**:
 /// 498 decodes of 249 distinct containers over 2 Mb of tomato chromosome 1, and 2,534 of 1,267
 /// over 10 Mb, with no container decoded twice by either reader on its own.

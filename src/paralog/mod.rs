@@ -12,8 +12,8 @@
 //! scores rather than assumed. And the calibration turns each score into a probability and
 //! resolves the operator's target false-discovery rate to a cut.
 //!
-//! Nothing here reads a file, writes a record or knows what a VCF is; the run's wiring will
-//! live in `crate::run::paralog_filter` (plan step B1) and has not landed.
+//! Nothing here reads a file, writes a record or knows what a VCF is; the run's wiring lives in
+//! [`crate::run::paralog_filter`].
 //!
 //! **Copied, not re-derived.** The model is production's
 //! (`doc/devel/specs/hidden_paralog_filter.md`, reformulated for one sample by
@@ -21,11 +21,11 @@
 //! beside this one are production's source, line for line and byte for byte: [`coverage_model`],
 //! 1,157 lines past its module header; [`locus_score`], 797, apart from its maths calls, which go
 //! through [`crate::float`] since 2026-09-14; and [`model_params`], 236. Two files
-//! of ng's own asserted the copies: `copy_fidelity.rs` textually, until promotion step C3 deleted
+//! of ng's own asserted the copies: `copy_fidelity.rs` textually, until ng's promotion deleted
 //! it, and `production_parity` numerically, which still does — it scores randomised loci and
-//! compares every number against production's answers, frozen at promotion step C4. What ng changes
-//! about the filter is where its numbers come from and when they are known, not what it computes:
-//! `doc/devel/ng/spec/hidden_paralog_filter.md`.
+//! compares every number against production's answers, frozen during the promotion. What ng
+//! changes about the filter is where its numbers come from and when they are known, not what it
+//! computes: `doc/devel/ng/spec/hidden_paralog_filter.md`.
 //!
 //! **This file is ng's own**, and holds nothing but its declarations, its re-exports and
 //! the tests ng adds to production's. Production keeps the model's constants in its own
@@ -33,16 +33,17 @@
 //! precisely so that a file-level guard can reach them — and it does, comparing from the
 //! first item's `///` on each side rather than from the end of a shared module header.
 //!
-//! Landed so far (plan `doc/devel/ng/impl_plan/hidden_paralog_filter.md`, Milestone A):
+//! What is here:
 //!
-//! - **A1:** the constants and grids ([`ParalogModelParams`] in [`model_params`]), and
-//!   the per-sample fit of what one copy's depth looks like
-//!   ([`SingleCopyCoverageModel`] in [`coverage_model`]).
-//! - **A2:** the per-locus score ([`score_locus_for_paralogy`] in [`locus_score`]) and its
-//!   per-pass tables, with the differential against production's that is the port's real
-//!   proof.
-//! - **A3:** how common hidden duplications are in this run and where to cut them
-//!   ([`ParalogPrior`] and [`ParalogFdrCurve`] in [`prior`], [`calibration::ParalogCalibration`]).
+//! - the constants and grids ([`ParalogModelParams`] in [`model_params`]), and the
+//!   per-sample fit of what one copy's depth looks like ([`SingleCopyCoverageModel`] in
+//!   [`coverage_model`]);
+//! - the per-locus score ([`score_locus_for_paralogy`] in [`locus_score`]) and its per-pass
+//!   tables, with the differential against production's that is the port's real proof;
+//! - how common hidden duplications are in this run and where to cut them ([`ParalogPrior`]
+//!   and [`ParalogFdrCurve`] in [`prior`], [`calibration::ParalogCalibration`]);
+//! - a duplication rate for each stretch of the genome rather than one for the whole run
+//!   ([`windowed_prior`]), the filter's default.
 
 pub mod calibration;
 pub mod coverage_model;

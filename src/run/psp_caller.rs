@@ -102,8 +102,9 @@ pub struct OpenPspCohort {
     /// loci with the criteria the walk cut its ground under, and a selection built under any
     /// others is one the cohort's censuses cannot match.
     segmentation_inputs: SegmentationInputs,
-    /// Every read group of every sample, numbered run-wide. **This is also the remap** — see
-    /// [`read_group_remap`](Self::read_group_remap).
+    /// Every read group of every sample, numbered run-wide. **This is also the remap** from each
+    /// sample's own read-group numbers into the run's: a sample's run-wide identifiers are pushed
+    /// in its file's header order, which is its walk-local numbering.
     read_groups: ReadGroups,
     /// The widest reference span any observation in any of these files can have — the maximum
     /// over the files' own ceilings, which is what a cohort reader must size for.
@@ -456,7 +457,7 @@ pub struct PspVariantCaller {
     segmentation: Arc<Segmentation>,
     parameters: RunParameters,
     /// **Checked at `open` and spent at
-    /// [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over).**
+    /// [`call_cohort_preparing_each_record`](Self::call_cohort_preparing_each_record).**
     /// These four are what the calling loop is handed, and they are settled at `open` for the
     /// reason every other refusal is: a run whose reference cannot serve a padding base should
     /// be told before a block is decoded rather than at its first locus.

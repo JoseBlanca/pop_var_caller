@@ -2,21 +2,19 @@
 //! reference bases.
 //!
 //! One pass over the samples' observations, merged by position, closing each locus as
-//! its reach stops growing. This is the **grouping half** of production's group walk
-//! (`derive_is_kept`, `var_calling/cohort_integration.rs`) with the columns removed, and
-//! the design is `doc/devel/ng/spec/cohort_merge.md` §4.1 with the types in
+//! its reach stops growing. This is the **grouping half** of the group walk in the caller
+//! this one replaced (its `derive_is_kept`) with the columns removed, and the design is
+//! `doc/devel/ng/spec/cohort_merge.md` §4.1 with the types in
 //! `doc/devel/ng/arch/cohort_merge.md` §3.
 //!
-//! **One thing differs from production besides the columns, and it is deliberate.**
-//! Production judges in the same loop — it decides which positions to keep as it groups
-//! them — where this walk only groups and hands every closed locus out, judging being
-//! the next step's (`doc/devel/ng/impl_plan/cohort_merge.md` A4).
+//! **One thing differs from that caller besides the columns, and it is deliberate.** It
+//! judged in the same loop — deciding which positions to keep as it grouped them — where this
+//! walk only groups and hands every closed locus out, judging being the next step's.
 //!
 //! **What the walk counts is per sample, and that is what the keep rule needs.** Each
 //! sample's non-reference reads and the reads they were drawn from are accumulated apart
 //! from every other sample's, because the rule asks whether *some one sample* showed
-//! enough — see [`MinAltReads`](crate::cohort_observation::MinAltReads) for why the
-//! cohort's sum is the wrong question.
+//! enough — see [`MinAltReads`] for why the cohort's sum is the wrong question.
 //! The cohort total is still reported on each closed locus, as the locus's size in
 //! evidence rather than as a decision.
 
@@ -387,7 +385,7 @@ impl ClosedLocus<'_> {
     /// **Not `region.len()`**, which overflows its `+ 1` before subtracting when a locus
     /// reaches the top of the coordinate space — a panic in a debug build and a span of
     /// **0** in the release profile, where overflow checks are off (that method's own
-    /// doc). Zero is the dangerous answer: this is what A4's width verdict compares
+    /// doc). Zero is the dangerous answer: this is what the width verdict compares
     /// against, so the widest locus expressible would be judged narrow enough to build.
     /// Subtracting first and adding after cannot do that.
     pub fn span(&self) -> u64 {
@@ -400,10 +398,10 @@ impl ClosedLocus<'_> {
 /// members are projected over can never be different numbers.
 ///
 /// **Not `GenomeRegion::len()`**, which answers 0 at the coordinate ceiling in the
-/// release profile (see [`ClosedLocus::span`]). **Nothing in this module reaches for that
-/// other spelling, an observation's own span included**: `build.rs` measures a member's
-/// span with this function too, so the width a member is projected over cannot disagree
-/// with the width the locus was judged on.
+/// release profile, where overflow checks are off: it overflows its `+ 1` before
+/// subtracting. **Nothing in this module reaches for that other spelling, an observation's own
+/// span included**: `build.rs` measures a member's span with this function too, so the width a
+/// member is projected over cannot disagree with the width the locus was judged on.
 pub(super) fn span_of(region: GenomeRegion) -> u64 {
     region
         .end
@@ -641,13 +639,12 @@ pub struct LocusCloser<'a> {
     /// alive alongside the data. Copying k pointers once per walk costs nothing and
     /// leaves the borrow where it belongs — on the observations.
     observations_per_sample: Vec<&'a [SampleLocusObservations]>,
-    /// The same sequence per sample, summarised — what every decision in this walk reads.
+    /// The same sequence per sample, summarised — what every decision in this walk reads,
+    /// when the caller had them to give.
     ///
     /// **At the same indices as `observations_per_sample`**, so one cursor addresses both
     /// (`observation_cache::WindowedCohort`). The walk consults the records for one thing
     /// only, the locus kind, which is a fact about the locus rather than about an observation.
-    /// The same sequence per sample, summarised — what every decision in this walk reads,
-    /// when the caller had them to give.
     ///
     /// **Owned like `observations_per_sample` and for the same reason**: the walk outlives the
     /// array it was handed. `None` means the caller had records only, and each summary is
@@ -891,11 +888,20 @@ impl<'a> Iterator for LocusCloser<'a> {
         // Take heads while the next one begins inside the reach, extending the reach as
         // we go.
         while let Some(sample) = self.pending.earliest() {
-            // A locus never crosses a contig, and neither does an observation, so a
-            // change of contig closes the locus whatever the positions say.
+            // **Every fact this walk reads about a record is read through its summary** — the
+            // region, the keep rule's two counts and whether the record is over the depth
+            // ceiling (`locus_generation::LocusSummary`). That is
+            // the property a run over stored files depends on: a psp answers them from a
+            // record's head without decoding the evidence behind it, and so can decline to
+            // build the roughly ninety-nine positions in a hundred that no sample varied at
+            // (`spec/cohort_merge_psp_path.md` §2). Direct mode pays exactly what it paid
+            // before: the same single walk over the record's sequences. The one exception is
+            // the kind, read below only where the records are in hand.
             let summary = self
                 .head_summary(sample)
                 .expect("the tournament showed a head, so its summary is at the same index");
+            // A locus never crosses a contig, and neither does an observation, so a
+            // change of contig closes the locus whatever the positions say.
             if summary.region().contig != contig || summary.region().start > reach {
                 break;
             }
@@ -913,14 +919,6 @@ impl<'a> Iterator for LocusCloser<'a> {
             // (`locus_generation/mod.rs`). The cost is one comparison against
             // per-observation work that already includes a base-by-base sequence
             // comparison in `non_reference_reads`.
-            // **Every fact this walk reads about a record is read here, once, and through
-            // the summary** — the region, the kind's discriminant, and the keep rule's two
-            // counts (`observation_cache::LocusSummary`). That is not tidiness: it is the
-            // property a run over stored files depends on, since a psp answers all four from
-            // a record's head without decoding the evidence behind it, and so can decline to
-            // build the roughly ninety-nine positions in a hundred that no sample varied at
-            // (`spec/cohort_merge_psp_path.md` §2). Direct mode pays exactly what it paid
-            // before: the same single walk over the record's sequences.
             assert!(
                 summary.region().start >= start,
                 "sample {sample}'s observations are not in coordinate order: {} starts \
@@ -944,16 +942,13 @@ impl<'a> Iterator for LocusCloser<'a> {
             // ordering check above, because a mixed locus must never reach a verdict.
             // Comparing discriminants keeps it O(1): `LocusKind`'s payload holds boxed
             // flanks, and comparing those per observation would not be affordable.
-            // **A release assertion that a locus never mixes a generic observation with a
-            // repeat tract's, and it runs only where the walk has the records to ask.** A
-            // kind is not in a summary and not in a record's head (the owner's ruling of
-            // 2026-09-04), so a walk over a sample whose evidence is still compressed cannot
-            // answer it without building a body — which is precisely what it must not do for
-            // the ninety-nine loci in a hundred it is about to drop. What it guards is
-            // structural rather than probable: segments are the reference's own partition and
-            // no observation crosses one, so no chain of overlapping observations can mix two
-            // kinds. Direct mode checks it anyway, at the cost of a discriminant compare, and
-            // a run over stored files takes the guarantee on the segmentation's word.
+            //
+            // **It runs only where the walk has the records to ask.** A kind is not in a
+            // summary and not in a record's head (the owner's ruling of 2026-09-04), so a
+            // walk over a sample whose evidence is still compressed cannot answer it without
+            // building a body — which it must not do for the ninety-nine loci in a hundred it
+            // is about to drop. A run over stored files takes the guarantee on the
+            // segmentation's word.
             if let Some(records) = self.records_of(sample) {
                 let opening_kind = &self.observations_per_sample[opening_at.0][opening_at.1].kind;
                 assert!(

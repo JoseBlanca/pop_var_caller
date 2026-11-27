@@ -71,7 +71,7 @@ Three changes, in dependency order:
   frontier the user's knob and sets its default; it does not measure where it belongs.
 - **It does not touch the parameter pre-pass**, whose own selection already asks the catalog
   with its own criteria ([`SelectionTerms`,
-  `joint/census.rs:509`](../../../../src/ng/parameter_estimation/joint/census.rs)) — except
+  `joint/census.rs:509`](../../../../src/parameter_estimation/joint/census.rs)) — except
   to require that the two sets of criteria agree (§2.3).
 
 ### 1.3 Vocabulary
@@ -85,13 +85,13 @@ Three changes, in dependency order:
 - **A locus generator** — the code that turns one stretch of reference plus one sample's
   reads over it into a locus: the distinct sequences the reads showed, each with its
   support. One slot per kind of stretch
-  ([`GeneratorSet`, `locus_generation/mod.rs:841`](../../../../src/ng/locus_generation/mod.rs)).
+  ([`GeneratorSet`, `locus_generation/mod.rs:841`](../../../../src/locus_generation/mod.rs)).
 - **Ground** — the stretches of reference sequence a run analyses, measured in bases; the
   run report's own word (*"analysed ground"*).
 - **Observation** — per sample, a
-  [`SampleLocusObservations`](../../../../src/ng/locus_generation/mod.rs) (what one
+  [`SampleLocusObservations`](../../../../src/locus_generation/mod.rs) (what one
   sample's reads showed at one locus); per cohort, a
-  [`CohortObservation`](../../../../src/ng/run/cohort_merge/build.rs) — the merge's
+  [`CohortObservation`](../../../../src/run/cohort_merge/build.rs) — the merge's
   unification of every sample's, and the thing calling consumes.
 
 ---
@@ -107,7 +107,7 @@ This was always the file's design —
 [`repeat_catalog.md`](repeat_catalog.md) builds below every calling floor precisely so that
 *"a caller can move its routing floor anywhere inside that gap by filtering, which is the
 question the file exists to keep open"* — and the run does not honour it:
-[`call_from_alignments.rs:845`](../../../../src/pop_var_caller_exp/call_from_alignments.rs)
+`call_from_alignments.rs:845`
 asks the catalog with `StrRepeatCriteria::default()`, which *is* the file's own storage
 floors. Everything the file holds becomes an STR locus of the run.
 
@@ -121,12 +121,12 @@ against 17, which is where 45 of the benchmark's 55 lost truth indels sit.
 ### 2.1 The knob
 
 The run's routing criteria are a
-[`StrRepeatCriteria`](../../../../src/ng/repeat_catalog/criteria.rs) of its own — the same
+[`StrRepeatCriteria`](../../../../src/repeat_catalog/criteria.rs) of its own — the same
 type the catalog reader already takes, so nothing downstream changes shape:
 
 - **period range** (default 1–6),
 - **per-period copy floors** (default `[8, 6, 6, 6, 5, 4]` —
-  [`MinCopies::default`, `segment_criteria.rs:402`](../../../../src/ng/region_typing/segment_criteria.rs),
+  [`MinCopies::default`, `segment_criteria.rs:402`](../../../../src/region_typing/segment_criteria.rs),
   **measured** over the tomato archive on 2026-08-10 as the copy counts at which a repeat
   starts to stutter; below them, that type's own documentation says, *"the generic SNP/indel
   caller handles the tract"*),
@@ -144,7 +144,7 @@ floors, so a run that types nothing routes as ng means to route.
 **The plumbing is one line by construction**: `segments_over` already passes a
 `StrRepeatCriteria` to `catalog.genome_segments`, and everything the criteria feed —
 admission, bundling, whole-tract emission at BED edges
-([`segments_of_contig_in`, `repeat_catalog/segments.rs:72`](../../../../src/ng/repeat_catalog/segments.rs))
+([`segments_of_contig_in`, `repeat_catalog/segments.rs:72`](../../../../src/repeat_catalog/segments.rs))
 — is built and shared with the development tools, which already ask with the calling floors
 (`examples/shared/catalog_regions.rs` and every STR dump).
 
@@ -156,7 +156,7 @@ hole"* — restated here because it is what makes §2.1 recover variants rather 
 shrink a number: a sub-floor candidate's bases fall back to the generic path, whose locus
 generator is built and calling at 0.984/0.982 recall (SNPs/indels, 30×). The catalog-reading
 path already implements the fallback
-([`repeat_features_of_contig`](../../../../src/ng/repeat_catalog/segments.rs), the same
+([`repeat_features_of_contig`](../../../../src/repeat_catalog/segments.rs), the same
 admission the scan runs).
 
 ### 2.3 The criteria are recorded, and agreement with a fit is the user's call
@@ -165,7 +165,7 @@ Two different obligations, and only the first is enforcement:
 
 - **Against the catalog**: a reader asking for less than the file was built at is refused —
   built, [`StrRepeatCriteria`'s admissibility check,
-  `criteria.rs:101`](../../../../src/ng/repeat_catalog/criteria.rs). This one is not policy:
+  `criteria.rs:101`](../../../../src/repeat_catalog/criteria.rs). This one is not policy:
   the rows below the file's floors were never written, so the request cannot be served.
 - **Against a fitted parameters file — the user decides, the run records. Decided 2026-09-02
   (owner):** *"The user could supply any priors to the caller; it is their decision to use
@@ -173,7 +173,7 @@ Two different obligations, and only the first is enforcement:
   for (`SelectionTerms::ssr_criteria`, *"what this run asked the catalog for — a reader
   chooses its floors freely within what the file was built at"*), and the parameters file
   carries that census identity as named, comparable terms
-  ([`bindings.rs`](../../../../src/ng/calling/parameters_file/bindings.rs)). The calling
+  ([`bindings.rs`](../../../../src/calling/parameters_file/bindings.rs)). The calling
   run's own routing criteria are written into the parameters file it saves beside its VCF,
   so a run whose routing differed from its fit's is a fact on the record — visible, never
   blocking. The trade the user is taking when the two differ is worth one sentence here: a
@@ -185,15 +185,15 @@ Two different obligations, and only the first is enforcement:
 ## 3. Per-sample tract observations: fill the slot, and pay two accounting debts
 
 **The generator exists and works.**
-[`SsrGenerator`](../../../../src/ng/locus_generation/ssr.rs) turns one tract segment into one
+[`SsrGenerator`](../../../../src/locus_generation/ssr.rs) turns one tract segment into one
 locus — reads fetched over the tract, each aligned to read off its repeat length, tallied
 into a `SampleLocusObservations` whose `kind` is `LocusKind::Ssr(SsrDetail)` with the
 motif and both flanks
-([`locus_generation/mod.rs:429`](../../../../src/ng/locus_generation/mod.rs)). Demonstrated
-on real data 2026-09-02: at 30×, 18–29 length-pinning reads per covered tract. What a run is
-missing is the wiring:
-[`generic_path_generators`, `walker.rs:1588`](../../../../src/ng/run/walker.rs) builds
-`GeneratorSlot::Unfilled(NotImplemented)` for both repeat slots.
+([`locus_generation/mod.rs:429`](../../../../src/locus_generation/mod.rs)). Demonstrated
+on real data 2026-09-02: at 30×, 18–29 length-pinning reads per covered tract. What a run was
+missing when this was written was the wiring: the function that builds a sample's generator set
+built `GeneratorSlot::Unfilled(NotImplemented)` for both repeat slots. It now fills both
+([`run_generators`, `walker.rs:1639`](../../../../src/run/walker.rs)).
 
 ### 3.1 Construction
 
@@ -202,9 +202,9 @@ scratch and is never shared — the run spec's own rule), built beside the pileu
 from the same `WalkReference` accessors:
 
 - **aligner**: the unit-robust delimiter, algorithm 4u — the bake-off winner and
-  [`ng_ssr_loci_dump`](../../../../examples/ng_ssr_loci_dump.rs)'s default. Not a knob here;
+  `ng_ssr_loci_dump`'s default. Not a knob here;
   the bake-off is recorded and a run gets its winner.
-- **config**: [`SsrGeneratorConfig::default()`](../../../../src/ng/locus_generation/ssr.rs)
+- **config**: [`SsrGeneratorConfig::default()`](../../../../src/locus_generation/ssr.rs)
   — flank 15 bp (must satisfy `flank_bp <= bundle_threshold`, the constructor's own check),
   read cap 1,000 per locus (production's number, **soft, never measured**).
 
@@ -212,7 +212,7 @@ from the same `WalkReference` accessors:
 
 - **Read-filter tallies.** The trait's `read_filter_counts` defaults to empty and
   `SsrGenerator` does not override it
-  ([`locus_generation/mod.rs:507`](../../../../src/ng/locus_generation/mod.rs);
+  ([`locus_generation/mod.rs:507`](../../../../src/locus_generation/mod.rs);
   the 2026-09-01 run-report work recorded this as the thing that *"will bite whoever fills a
   tract slot"*). The generator keeps its own reader and retired counts; the override is owed
   in the same change that fills the slot, or every run's per-read-group drop rates
@@ -228,9 +228,9 @@ from the same `WalkReference` accessors:
 
 The walk's contract is untouched: segments are the reference's partition, no observation
 crosses a segment boundary, one kind per cohort locus is asserted where loci chain
-([`close.rs:636`](../../../../src/ng/run/cohort_merge/close.rs)), and the tract's exemption
+([`close.rs:636`](../../../../src/run/cohort_merge/close.rs)), and the tract's exemption
 from the span cap is already exhaustive on the kind
-([`judge`, `close.rs:110`](../../../../src/ng/run/cohort_merge/close.rs)). Concurrency
+([`judge`, `close.rs:110`](../../../../src/run/cohort_merge/close.rs)). Concurrency
 invariance (the E2 oracle — byte-identical output at every thread count) must hold with the
 slot filled; nothing in the tract generator reads anything another sample wrote, so nothing
 new crosses threads.
@@ -241,7 +241,7 @@ new crosses threads.
 
 **The gap, named by [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §2:** the merge
 closes tract loci deliberately, but
-[`CohortObservation`, `build.rs:974`](../../../../src/ng/run/cohort_merge/build.rs) carries
+[`CohortObservation`, `build.rs:974`](../../../../src/run/cohort_merge/build.rs) carries
 only the region, the allele table and the per-sample rows. The kind — and with it the motif,
 so the period, so the repeat counts — is dropped at assembly.
 
@@ -256,9 +256,9 @@ so the period, so the repeat counts — is dropped at assembly.
 - Everything already right stays: per-`(allele, read group)` support rows (the stutter model
   is per read group and needs them apart — §2's own second finding), partial observations
   kept apart from alleles rather than padded into them
-  ([`build.rs:1050`](../../../../src/ng/run/cohort_merge/build.rs)), the variability filter,
+  ([`build.rs:1050`](../../../../src/run/cohort_merge/build.rs)), the variability filter,
   and the note already booked in the merge for tracts longer than a read
-  ([`build.rs:1025`](../../../../src/ng/run/cohort_merge/build.rs)).
+  ([`build.rs:1025`](../../../../src/run/cohort_merge/build.rs)).
 
 **Rejected: a parallel `SsrCohortObservation` type.** Two types would force every holder
 between the merge and the caller — the cache, the parallel cover, the driver — to carry two
@@ -271,7 +271,7 @@ pure cost. The kind is a field because a cohort locus *has* exactly one.
 
 After these three changes a run yields, in genome order, cohort observations each stating
 `Generic` or `Ssr(detail)` — and the driver still calls only the first:
-[`call_one_generic_locus`, `callers.rs:813`](../../../../src/ng/run/callers.rs) is
+[`call_one_generic_locus`, `callers.rs:813`](../../../../src/run/callers.rs) is
 unconditionally the SNP/indel path. **The branch on the kind is deliberately not here.** It
 needs the tract's candidate selection to have something to dispatch *to*, and both belong to
 [`calling_loop_ssr.md`](calling_loop_ssr.md). Until that lands, a tract cohort observation is
@@ -303,11 +303,11 @@ lands, visible in the run report's counts.
 
 | what | existing code | reuse |
 |---|---|---|
-| criteria type, admissibility vs the file | [`StrRepeatCriteria`](../../../../src/ng/repeat_catalog/criteria.rs) | as is; the run builds one from flags instead of `default()` |
-| classification at chosen floors, bundling, whole-tract emission | [`repeat_catalog/segments.rs`](../../../../src/ng/repeat_catalog/segments.rs) | as is — already parameterised, already what the dev tools call |
-| the tract generator | [`SsrGenerator`](../../../../src/ng/locus_generation/ssr.rs) | as is, plus a `read_filter_counts` override |
-| per-sample → cohort collation, partials, kinds asserted | [`cohort_merge/{close,build}.rs`](../../../../src/ng/run/cohort_merge/build.rs) | one field added, nothing reshaped |
-| criteria in the run's recorded identity | [`SelectionTerms`](../../../../src/ng/parameter_estimation/joint/census.rs), [`parameters_file/bindings.rs`](../../../../src/ng/calling/parameters_file/bindings.rs) | the calling run's criteria join the comparison |
+| criteria type, admissibility vs the file | [`StrRepeatCriteria`](../../../../src/repeat_catalog/criteria.rs) | as is; the run builds one from flags instead of `default()` |
+| classification at chosen floors, bundling, whole-tract emission | [`repeat_catalog/segments.rs`](../../../../src/repeat_catalog/segments.rs) | as is — already parameterised, already what the dev tools call |
+| the tract generator | [`SsrGenerator`](../../../../src/locus_generation/ssr.rs) | as is, plus a `read_filter_counts` override |
+| per-sample → cohort collation, partials, kinds asserted | [`cohort_merge/{close,build}.rs`](../../../../src/run/cohort_merge/build.rs) | one field added, nothing reshaped |
+| criteria in the run's recorded identity | [`SelectionTerms`](../../../../src/parameter_estimation/joint/census.rs), [`parameters_file/bindings.rs`](../../../../src/calling/parameters_file/bindings.rs) | the calling run's criteria join the comparison |
 | oracle for the routing | [`examples/ng_typed_region_dump.rs`](../../../../examples/ng_typed_region_dump.rs) | reproduces a run's routing byte-for-byte; grew the `catalog|calling` switch for exactly this measurement |
 
 ## 8. Deferred, with a recommended home

@@ -106,7 +106,4 @@ impl From<&SpillEntry> for RecordPlace {
 /// window — are exactly what [`crate::window_coverage::WindowCoverage`] carries, so the
 /// swap was this re-export and the deletion of the copy. The codec in [`spill`] reads the two
 /// fields and nothing else, and did not change.
-///
-/// Production's `src/sample_summary/coverage.rs`, which promotion Milestone D deletes, holds a
-/// second, unrelated `WindowCoverage` — its per-tile summary; the two do not meet.
 pub use crate::window_coverage::WindowCoverage;

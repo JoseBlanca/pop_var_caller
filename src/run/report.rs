@@ -655,9 +655,8 @@ impl<'a> RunReport<'a> {
 /// **What can differ today is the build, not a flag.** `generate-psps` exposes no read-filter
 /// option and walks with the compiled-in policy, so two psps disagree here only when they were
 /// written by ng builds whose defaults differ — a cohort walked over months, which is exactly
-/// the cohort psp mode exists to make possible (spec §2). The moment those settings become
-/// flags, which Milestone C left as the owner's call, this becomes the check on what a person
-/// typed.
+/// the cohort psp mode exists to make possible (spec §2). If those settings ever become flags,
+/// this becomes the check on what a person typed.
 fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTallies) {
     let empty: Vec<&str> = stored
         .per_sample

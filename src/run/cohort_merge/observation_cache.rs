@@ -352,10 +352,10 @@ pub struct ObservationCache<S> {
     samples: Vec<SampleWindow<S>>,
     /// **One reference accessor for the whole run** (`spec/window_coverage.md` §3.2). It slides
     /// forward with the merge and releases what the merge has walked past — the release is
-    /// [`fetch_the_ground_this_cover_reached`](Self::fetch_the_ground_this_cover_reached)'s last
-    /// statement, and [`MergeReference`] is the bound that makes it available at all. It is
-    /// never shared with another thread; `Send + Sync` is what keeps the cache itself `Send`
-    /// where its sources are, and what lets the parallel cover borrow the cache shared.
+    /// [`fetch_the_ground`](Self::fetch_the_ground)'s last statement, and [`MergeReference`] is the
+    /// bound that makes it available at all. It is never shared with another thread; `Send + Sync`
+    /// is what keeps the cache itself `Send` where its sources are, and what lets the parallel
+    /// cover borrow the cache shared.
     ///
     /// A trait object rather than a type parameter: the accessor is read **once per cover**
     /// and not once per position, so the indirection costs nothing measurable, and every
@@ -1017,7 +1017,7 @@ impl<S> ObservationCache<S> {
     /// it**: a position on a contig the merge has left, and a position no cover has reached yet.
     /// What it does *not* mean is a record without a base — the ground a cover reads covers
     /// every record every sample holds on that contig
-    /// ([`fetch_the_ground_this_cover_reached`](Self::fetch_the_ground_this_cover_reached)), so
+    /// ([`ground_this_cover_holds_on`](Self::ground_this_cover_holds_on)), so
     /// a consumer walking the held records finds a base at each of their positions.
     ///
     /// It is `pub(super)` and not `pub` because [`cover`](Self::cover) is: outside the merge
@@ -1097,8 +1097,6 @@ impl<S> ObservationCache<S> {
     ///
     /// **Only the round driver, a test reference, reads it**; the streaming driver reads the
     /// same prefix off its sealed round ([`RoundView`]).
-    ///
-    /// PROTOTYPE (2026-09-09 concurrency review).
     #[cfg(test)]
     pub(super) fn window_starts_into(&self, span: GenomeRegion, into: &mut Vec<usize>) {
         let left_edge = left_edge_of(span);
@@ -1502,9 +1500,8 @@ where
     /// every cover it reaches into, and each of those covers reads ground containing it.
     ///
     /// **A record spanning more than one base has its evidence built here in psp mode**, which
-    /// is the one place this measurement costs a run over stored files anything. Plan step B2
-    /// measured how often that is: 1 record in 871 on the six-accession slice and 1 in 1,221 on the
-    /// wider store.
+    /// is the one place this measurement costs a run over stored files anything. How often that
+    /// is, measured: 1 record in 871 on the six-accession slice and 1 in 1,221 on the wider store.
     ///
     /// # Errors
     ///
@@ -1870,11 +1867,10 @@ where
         // failure. The closer's own ordering check (`LocusCloser::over`) compares only within
         // one locus and would not see it. One comparison per observation drawn.
         //
-        // **When observations are decoded from a psp file this must become a `RunError`**
-        // beside `ObservationExceedsReachCeiling` (arch §5), like the producer-guarantee
-        // checks in `build.rs` — a source out of coordinate order is then a fact about the
-        // file rather than a bug in this crate, and this is the first such check the psp path
-        // reaches.
+        // **From a psp file, a source out of coordinate order is damage rather than a bug in
+        // this crate**, and the psp source refuses it as such before the draw sees the record
+        // (`PspSourceError::ObservationsOverlap`). So this assertion catches a defect in the
+        // generator.
         // **Strictly after, not at or after, and the measurement is what tightened it.** The
         // per-sample cursor that makes a record observed exactly once is a *start*, compared with
         // `<=` ([`WindowCoverageInProgress::first_not_yet_observed`]) — so two records sharing a
@@ -1913,10 +1909,9 @@ where
 /// bases each, adjacent, in genome order, the last one clamped to the analysed region's own
 /// last base.
 ///
-/// **It lives here, beside the cache, because it is the organiser's geometry**: milestone E
-/// hands these regions out to builders, and a second derivation of the clamp there is exactly
-/// the defect this function's tests exist to catch. Its first caller is the serial driver that
-/// reads through the cache (`super::serial::merge_cohort_through_cache`).
+/// **It lives here, beside the cache, because every driver divides its ground with it**, and a
+/// second derivation of the clamp in one of them is exactly the defect this function's tests
+/// exist to catch.
 ///
 /// **It is a function of its own so that the division can be checked**, which no merge's output
 /// can do: dividing the ground changes nothing a caller sees — that is the whole claim of the
@@ -1962,10 +1957,6 @@ pub fn building_regions_of(
     })
 }
 
-/// The first held observation that reaches `position` or beyond — the window's left edge for
-/// a call at `position`, and the window's length when every one of them ends before it.
-/// [`first_reaching_index`] over summaries, which every window has and only some have records
-/// for.
 /// The base at `at` in a buffer whose first byte is `bases_from`, or `None` where the buffer
 /// does not hold that position.
 ///

@@ -8,21 +8,16 @@
 //! own, writes what it saw to a per-sample file, fits the parameters from those, and calls
 //! from the files.
 //!
-//! What this file holds today is the object, its construction, the merge driven over one
-//! walker per sample, and the calling joined to it — reads in, one called locus per locus the
-//! merge kept. What is still missing is the shape and the emission: the object returns every
-//! called locus in one go rather than yielding VCF records as it goes, which is the rest of
-//! this milestone and the pool's (`doc/devel/ng/impl_plan/run_driver_direct_mode.md`).
+//! This file holds the object, its construction, and the calling body both modes share
+//! ([`call_cohort_from_sources_handing_each_record_over`]): the merge driven over one source per
+//! sample, each locus genotyped where it is built, and each finished record handed over as it
+//! is released. [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] is the path
+//! `call-from-alignments` takes; `merge_cohort` and `call_cohort`, which collect everything and
+//! return it at once, are compiled for tests only.
 //!
 //! **`pub`, though the architecture calls all of this crate-private** (arch §6: three public
-//! objects, each an iterator, and nothing else). **The intent is real and acting on it is still
-//! blocked, and the block is mechanical**: neither `merge_cohort` nor `call_cohort` has a
-//! consumer outside tests until the
-//! subcommand lands, so narrowing it makes it dead code and the crate's `-D warnings` gate
-//! rejects the build — measured, not assumed, when this step tried it. What *did* narrow is
-//! everything reachable only through it: `WalkReference` and `generic_path_generators` are
-//! `pub(crate)`. Narrow the rest when the command exists to call it. `cohort_merge` carries the
-//! same note for the same reason.
+//! objects, each an iterator, and nothing else). The subcommand reaches its types through the
+//! re-exports in [`run`](super).
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -92,7 +87,7 @@ use super::records::{
     reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
-use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
+use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, run_generators};
 
 /// The alignment files a run reads, and how it reads them.
 ///
@@ -460,13 +455,12 @@ impl AlignedFilesVariantCaller {
     /// the sample's own, never shared.
     ///
     /// **One generator set per walker, never one shared between walkers**, because a locus
-    /// generator carries state
-    /// across segments (spec §8). Each is the generic path filled and both repeat-tract slots
-    /// refused as unbuilt, which is what [`generic_path_generators`] documents.
+    /// generator carries state across segments (spec §8). [`run_generators`] says what each set
+    /// holds.
     fn walkers(self) -> Result<RunReadyToWalk, RunError> {
         let mut walkers = Vec::with_capacity(self.samples.len());
         for reads in self.samples {
-            let generators = generic_path_generators(
+            let generators = run_generators(
                 &self.walk_reference,
                 self.locus_generator_settings,
                 // The generators derive the tract generator's bundle radius from here —
@@ -496,19 +490,17 @@ impl AlignedFilesVariantCaller {
     /// forward only as far as the ground it is building, so each stretch of each file is decoded
     /// once and no walker runs ahead of what has been asked for (spec §5.1).
     ///
-    /// **This is the merge's oracle, not the path a run takes.** It proves the join — real
-    /// reads through real walkers into the merge that was until now fed from memory — and it
-    /// stops at the evidence, so a test can compare cohort loci without a genotyper's answers
-    /// in the way. [`call_cohort`](Self::call_cohort) is what a run drives, and it is this
-    /// same driver with the calls made where each locus is built.
+    /// **This is the merge's oracle, not the path a run takes.** It joins real reads through
+    /// real walkers to the merge and stops at the evidence, so a test can compare cohort loci
+    /// without a genotyper's answers in the way. [`call_cohort`](Self::call_cohort) is the same
+    /// driver with the calls made where each locus is built.
     ///
     /// **Its memory is the whole cohort's surviving loci**, which no real run can afford
     /// (spec §5.1's `callers in flight × one cohort locus` plus the frontier). That is what an
-    /// oracle wants and what `call_cohort` no longer does.
+    /// oracle wants.
     ///
-    /// **It keeps none of what the walk counted**, and that is deliberate rather than a gap:
-    /// this is the merge's own oracle, not the path a run takes.
-    /// [`call_cohort`](Self::call_cohort) is the run's, and it hands the tallies back.
+    /// **It keeps none of what the walk counted**: a test of the merge has no use for the
+    /// tallies. [`call_cohort`](Self::call_cohort) hands them back.
     pub fn merge_cohort(self) -> Result<RegionOutcome, RunError> {
         let reference_for_the_merge = self.walk_reference.accessor();
         let pieces = self.walkers()?;
@@ -548,18 +540,16 @@ impl AlignedFilesVariantCaller {
     ///
     /// # What it does not do
     ///
-    /// **It still returns everything at once**, and **its cover is the serial one** — this is
-    /// the oracle the parallel-covered record path is compared against (Milestone E), so it
-    /// deliberately takes no part in the parallel cover: one driver has to keep the schedule
-    /// the fixtures were reasoned about under. Spec §5.1 bounds a run at `callers in flight ×
-    /// one cohort locus`; what this bounds is the *observations*, not the calls.
+    /// **It returns everything at once**, and **its cover is the serial one** — this is the
+    /// oracle the parallel-covered record path is compared against, so it deliberately takes
+    /// no part in the parallel cover: one driver has to keep the schedule the fixtures were
+    /// reasoned about under. Spec §5.1 bounds a run at `callers in flight × one cohort locus`;
+    /// what this bounds is the *observations*, not the calls.
     /// **`loci_too_wide_to_assemble` accumulates for the whole run too**, and nothing
     /// bounds it either.
     ///
-    /// **Every locus goes down the generic path.** Repeat-tract candidate selection is
-    /// specified and unbuilt, and both tract generator slots are refused as such — so a run
-    /// over ground with tracts in it is short rather than wrong, and
-    /// [`CohortWalkTallies`] says by how much.
+    /// Each locus goes down the path its kind asks for — SNP/indel, repeat tract or STR bundle
+    /// — through the same dispatch the record path uses.
     ///
     /// # Errors
     ///
@@ -1185,7 +1175,7 @@ where
 /// opening the files and turning the spent walkers into per-sample tallies; psp mode's caller
 /// is the same function plus opening the psps.
 ///
-/// # Where this run's parallelism is (Milestone E, decided 2026-09-01)
+/// # Where this run's parallelism is
 ///
 /// **Each cover's samples are drawn forward concurrently; everything else is one thread.**
 /// Measured on 63 tomato accessions, decoding reads is 88% of `call_cohort` and genotyping
@@ -1768,7 +1758,7 @@ where
 /// cohort observation and in candidate selection's leftover — both of which end here
 /// ([`records`](super::records)). So the answer is handed to a closure rather than returned:
 /// inside it the observation, the allele remapping and the leftover are all still in scope, and
-/// after it they are dropped. [`call_cohort`](AlignedFilesVariantCaller::call_cohort), which
+/// after it they are dropped. The test-only `AlignedFilesVariantCaller::call_cohort`, which
 /// wants the call alone, passes a closure that returns it unchanged.
 #[expect(
     clippy::too_many_arguments,
@@ -2100,12 +2090,12 @@ impl CohortWalkTallies {
                     SampleWalkTallies {
                         regions: walker.counts().clone(),
                         // **The slot holds a pileup generator or nothing**, which is what
-                        // `generic_path_generators` builds, so the two arms below are the two
+                        // `run_generators` builds, so the two arms below are the two
                         // real cases and the third is unreachable rather than merged in: a tally
                         // of another kind there would be a generator set built for a different
                         // path, and this reports it as counting nothing — which is what a
                         // generator set nobody mis-wired also reports. Nothing in a run can
-                        // produce it; if `generic_path_generators` ever fills the slot from a
+                        // produce it; if `run_generators` ever fills the slot from a
                         // caller's choice, this becomes two facts and needs two answers.
                         read_filters: walker.generators().read_filter_counts(),
                         snp_indel: match walker.generators().generic_counts() {
@@ -2277,9 +2267,10 @@ pub(super) fn refuse_parameters_assembled_for_another_cohort(
 /// refine_memory_warn_and_open_files_2026-11-26.md`), with `lsof` sampled through whole
 /// `call-from-alignments` runs on tomato1, and accounted for in the code:
 ///
-/// - **1 for the file**: [`AlignmentFile::open`] opens it once, and every cursor on it reads
-///   through one shared block cache (`aligned_reads_reader/bgzf_blocks.rs`). The index is parsed
-///   into memory and holds none.
+/// - **1 for the file**:
+///   [`AlignmentFile::open`](crate::read::input::open_bam::AlignmentFile::open) opens it once,
+///   and every cursor on it reads through one shared block cache
+///   (`aligned_reads_reader/bgzf_blocks.rs`). The index is parsed into memory and holds none.
 /// - **3 on the reference**, one a cursor: a sample's walker holds three locus generators (the
 ///   pileup, the repeat tract and the repeat bundle), each with its own cursor, and every cursor
 ///   mints a reference reader for the mismatch filter, which opens the FASTA.
@@ -3960,10 +3951,10 @@ mod checks_that_needed_their_own_fixtures {
     }
 }
 
-/// **Milestone C — the merge, fed by walkers.**
+/// **The merge, fed by walkers.**
 ///
-/// Everything before this fed the cohort merge from memory: its own fixtures hand it vectors of
-/// observations, and so do the merge's two oracles. This drives it over **walkers** — real
+/// The cohort merge's own fixtures feed it from memory: they hand it vectors of observations,
+/// and so do the merge's two oracles. This drives it over **walkers** — real
 /// alignment files, the real generic locus generator, the run's own segments — and checks that
 /// what comes out the far end is cohort loci in genome order.
 #[cfg(test)]
@@ -4470,10 +4461,10 @@ mod the_merge_over_walkers {
     }
 }
 
-/// **C2 — cohort loci from reads are the cohort loci the same observations give from memory.**
+/// **Cohort loci from reads are the cohort loci the same observations give from memory.**
 ///
-/// The merge was built and proved against sources that hand it vectors. Milestone C changed the
-/// sources to walkers over real alignment files and nothing else — not the driver, not the
+/// The merge was built and proved against sources that hand it vectors. Walkers over real
+/// alignment files change the sources and nothing else — not the driver, not the
 /// building regions, not the keep rule. So the answer must not move, and this is what says it
 /// does not.
 ///
@@ -4484,7 +4475,7 @@ mod the_merge_over_walkers {
 /// segment-independence test.
 ///
 /// **What the oracle does share with the caller, and cannot not share, is the reference and the
-/// generator set.** [`WalkReference`] and [`generic_path_generators`] are on both sides, so a
+/// generator set.** [`WalkReference`] and [`run_generators`] are on both sides, so a
 /// defect in either — a swapped [`GeneratorSet`](crate::locus_generation::GeneratorSet) slot,
 /// a setting that silences the walk — moves both answers together and neither differential can
 /// see it. What pins those is
@@ -4500,7 +4491,7 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
     use crate::read::input::test_fixtures::fixture_reference_from_its_index;
     use crate::run::cohort_merge::fixtures::refuse_any_difference;
     use crate::run::cohort_merge::serial::merge_cohort_serially;
-    use crate::run::walker::{WalkReference, generic_path_generators};
+    use crate::run::walker::{WalkReference, run_generators};
     use std::convert::Infallible;
     use std::path::PathBuf;
 
@@ -4529,7 +4520,7 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
                 )
                 .expect("the fixture sample opens");
                 let default_criteria_segmentation = super::tests::segmentation();
-                let generators = generic_path_generators(
+                let generators = run_generators(
                     &walk_reference,
                     crate::locus_generation::pileup::PileupGeneratorConfig::default(),
                     default_criteria_segmentation.inputs(),
@@ -4656,7 +4647,7 @@ mod cohort_loci_from_reads_match_cohort_loci_from_records {
     }
 }
 
-/// **The survivors of the mutation pass on Milestone C.**
+/// **The survivors of a mutation pass over the merge fed by walkers.**
 ///
 /// Six deliberate defects lived through the tests above: the run's merge parameters replaced by
 /// unrelated constants (three of them), the analysed ground swapped for the segments, the
@@ -4911,7 +4902,7 @@ mod what_the_fixtures_above_could_not_distinguish {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
         let default_criteria_segmentation = super::tests::segmentation();
-        let mut generators = generic_path_generators(
+        let mut generators = run_generators(
             &walk_reference,
             PileupGeneratorConfig::default(),
             default_criteria_segmentation.inputs(),
@@ -6328,7 +6319,7 @@ mod records_handed_over_as_the_run_finishes_them {
     /// **The records are the loci `call_cohort` calls, less the ones that establish no
     /// variant** — same spans, same genotypes, same order.
     ///
-    /// The oracle is the entry point every Milestone D test is written against, so a record
+    /// The oracle is the entry point the record path's tests are written against, so a record
     /// path that called differently — a scratch it reset differently, a sample order it read
     /// differently — shows here as a genotype that does not match.
     #[test]
@@ -6826,10 +6817,10 @@ mod records_handed_over_as_the_run_finishes_them {
     }
 
     // ---------------------------------------------------------------
-    // Milestone E2 — concurrency invariance (spec §12.2; the plan's E2).
+    // Concurrency invariance (spec §12.2).
     //
-    // The record path's whole claim is the same VCF at every worker count, and since E1 a
-    // worker count is a rayon thread count: the cover's sweep is the one thing that threads.
+    // The record path's whole claim is the same VCF at every worker count, and a worker count
+    // is a rayon thread count: the cover's sweep is the one thing that threads.
     // The oracle is the serial caller, on a cohort whose loci differ in kind — a shared SNP,
     // a sample-private SNP, an insertion, a locus that is called and establishes no variant,
     // a sample with no evidence at all — over ground with a repeat tract interleaved between

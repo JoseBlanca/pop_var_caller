@@ -4,20 +4,22 @@
 //! **Why a run has to be asked rather than read.** The window-coverage measurement changes no VCF
 //! byte — that is the standing oracle for the whole of this work — so a run whose windows were all
 //! absent, or all one cover behind, produces exactly the output a correct one produces. The failure
-//! plan step C3 exists to prevent is precisely of that shape: a cover that stops at its region's
-//! last base leaves that region's last centres unfinalised, and every sample reads as absent at the
-//! loci nearest each region boundary, silently. Nothing in the run's own output can show it.
+//! the cover's look-ahead exists to prevent is precisely of that shape: a cover that stops at its
+//! region's last base leaves that region's last centres unfinalised, and every sample reads as
+//! absent at the loci nearest each region boundary, silently. Nothing in the run's own output can
+//! show it.
 //!
-//! So a run set up for the comparison writes down what it read, and
-//! [`examples/ng_window_coverage_probe.rs`](../../../../../examples/ng_window_coverage_probe.rs)
-//! walks the same stored files end to end — one pass, no covers, no eviction — and checks the two
-//! agree bit for bit (spec
-//! [`window_coverage.md`](../../../../../doc/devel/ng/spec/window_coverage.md) §10).
+//! So a run set up for the comparison writes down what it read, for a check that walks the same
+//! stored files end to end — one pass, no covers, no eviction — and confirms the two agree bit for
+//! bit (spec [`window_coverage.md`](../../../../../doc/devel/ng/spec/window_coverage.md) §10).
+//! The example that made that check (`examples/ng_window_coverage_probe.rs`) was deleted on
+//! 2026-10-31 with the other examples no subcommand reaches; git history keeps it, and nothing in
+//! the tree reads the file now except this module's tests.
 //!
-//! **Both halves of the row format live here**, [`write_the_row`] beside `read_a_row`, because
-//! the reader is in another crate target: a column reordered on one side alone would still parse
-//! on the other, and the comparison would then report every locus as one the run had no window
-//! for — which is the shape of a *pass* in this measurement, not of a failure.
+//! **Both halves of the row format live here**, [`write_the_row`] beside the test-only
+//! `read_a_row`: a column reordered on one side alone would still parse on the other, and a
+//! comparison would then report every locus as one the run had no window for — which is the
+//! shape of a *pass* in this measurement, not of a failure.
 //!
 //! **One row a sample per record the run writes, not per locus the merge builds.** A locus that
 //! establishes no variant becomes no record and leaves no row, so it is outside what the
@@ -117,7 +119,7 @@ pub fn write_the_row(row: RecordedWindow, into: &mut String) {
 }
 
 #[cfg(test)]
-/// [`write_the_row`]'s inverse, for the comparison in the other crate target.
+/// [`write_the_row`]'s inverse, which the tests read the rows back with.
 ///
 /// # Errors
 ///

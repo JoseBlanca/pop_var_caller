@@ -280,7 +280,7 @@ impl ParalogScoringContext {
     /// sample there is nothing to check against: an index past the record's own rows is
     /// indistinguishable from a sample that was simply not covered, so a record narrower than
     /// the cohort would score on a prefix and a wider one would be truncated —
-    /// [`score_locus_for_paralogy`](crate::paralog::score_locus_for_paralogy) answers a
+    /// [`score_locus_for_paralogy`] answers a
     /// length mismatch with a *neutral score* rather than an error, so neither would fail
     /// loudly. Both are wiring errors between the sink that filled the spill and this context,
     /// and both produce a plausible, quietly weaker score on some records — the defect shape
