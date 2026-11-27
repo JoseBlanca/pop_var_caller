@@ -759,14 +759,8 @@ fn walk_one_sample(
         GeneratorSlot::Unfilled(UnhandledReason::OutOfScope),
     );
 
-    let contig_of = |name: &str| {
-        prepared
-            .contigs
-            .entries
-            .iter()
-            .position(|entry| entry.name == name)
-            .map(|i| ContigId(i as u32))
-    };
+    let contig_ids = prepared.contigs.ids_by_name();
+    let contig_of = |name: &str| contig_ids.id_of(name);
     // **This sample's read groups and who each one is.** The names travel into the census
     // because a cohort of censuses is merged on them rather than on the numbers, which every
     // census mints from zero.
