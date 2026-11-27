@@ -34,14 +34,13 @@ use crate::paralog::{
     ParalogCalibration, ParalogLrHistogram, calibrate_from_the_ratio_histogram,
 };
 
-use std::io::BufRead;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use rayon::prelude::*;
 
 use super::{
     CohortSizeMismatch, CompressedSpillBody, ParalogScoringContext, SpillEntryDecoder, SpillError,
-    SpillFile, SpillFileError, SpillReader,
+    SpillFile, SpillFileError,
 };
 
 /// **The operator's target false-discovery rate**, checked once at the boundary.
@@ -255,15 +254,6 @@ pub enum PassTwoError {
 /// a record on 4,352 samples, so about 300 MB.
 const SCORING_BATCH: usize = 2048;
 
-/// **A batch of compressed bodies, as the reading thread hands it over.** The first `filled`
-/// bodies are this batch's; the rest are buffers kept from an earlier, fuller one. `ended_with`
-/// is the reader's failure, when the batch stopped short because of one.
-struct ReadBatch {
-    bodies: Vec<CompressedSpillBody>,
-    filled: usize,
-    ended_with: Option<SpillError>,
-}
-
 /// What one pool thread made of one body.
 struct ScoredRecord {
     ratio: f64,
@@ -277,27 +267,44 @@ enum ScoringFailure {
     CohortSize(CohortSizeMismatch),
 }
 
-/// **The reading thread**: fill batches of compressed bodies from `reader` and hand each to the
-/// scoring side, until the spill ends, the reader fails, or the scoring side stops listening.
+/// **A batch of compressed spill items, as a reading thread hands it over** — pass two's bodies or
+/// pass three's entries. The first `filled` items are this batch's, the first of them the spill's
+/// item number `first`, counting from 0; the rest are buffers kept from an earlier, fuller batch.
+/// `ended_with` is the reader's failure, when the batch stopped short because of one.
+pub(super) struct ReadBatch<T> {
+    pub(super) items: Vec<T>,
+    pub(super) filled: usize,
+    pub(super) first: usize,
+    pub(super) ended_with: Option<SpillError>,
+}
+
+/// **The reading thread of passes two and three**: fill batches of `batch_len` items through
+/// `next_into`, number them, and hand each on, until the spill ends, the reader fails, or nothing
+/// is listening.
 ///
-/// It refills the batches the scoring side hands back rather than allocating new ones, so after
-/// the first few batches the thread allocates nothing. It never waits for one: a batch not yet
-/// returned is replaced by a fresh one, which is at most one extra.
-fn read_ahead<R: BufRead>(
-    mut reader: SpillReader<R>,
-    full_batches: SyncSender<ReadBatch>,
-    batches_to_refill: Receiver<Vec<CompressedSpillBody>>,
+/// `next_into` fills one buffer with the spill's next item — `None` at the end of the spill. The
+/// batch length is the caller's, because the two passes hold very different amounts per item.
+///
+/// It refills the batches handed back rather than allocating new ones, so after the first few
+/// batches the thread allocates nothing. It never waits for one: a batch not yet returned is
+/// replaced by a fresh one, which is at most one extra.
+pub(super) fn read_ahead<T: Default>(
+    batch_len: usize,
+    mut next_into: impl FnMut(&mut T) -> Option<Result<(), SpillError>>,
+    full_batches: SyncSender<ReadBatch<T>>,
+    batches_to_refill: Receiver<Vec<T>>,
 ) {
+    let mut first = 0;
     loop {
-        let mut bodies = batches_to_refill.try_recv().unwrap_or_default();
-        if bodies.len() < SCORING_BATCH {
-            bodies.resize_with(SCORING_BATCH, CompressedSpillBody::default);
+        let mut items = batches_to_refill.try_recv().unwrap_or_default();
+        if items.len() < batch_len {
+            items.resize_with(batch_len, T::default);
         }
         let mut filled = 0;
         let mut ended_with = None;
         let mut at_the_end = false;
-        while filled < SCORING_BATCH {
-            match reader.next_compressed_body(&mut bodies[filled]) {
+        while filled < batch_len {
+            match next_into(&mut items[filled]) {
                 Some(Ok(())) => filled += 1,
                 Some(Err(error)) => {
                     ended_with = Some(error);
@@ -314,10 +321,12 @@ fn read_ahead<R: BufRead>(
             return;
         }
         let handed_over = full_batches.send(ReadBatch {
-            bodies,
+            items,
             filled,
+            first,
             ended_with,
         });
+        first += filled;
         if handed_over.is_err() || at_the_end {
             return;
         }
@@ -365,7 +374,7 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
     config: &CalibrationConfig,
     windowed: Option<&WindowedPriorConfig>,
 ) -> Result<ParalogVerdicts, PassTwoError> {
-    let entries = spill.read().map_err(PassTwoError::Spill)?;
+    let mut entries = spill.read().map_err(PassTwoError::Spill)?;
 
     // **The shape is written down once and the histogram is built from it**, so the range the
     // run reports and the range the ratios were folded into cannot be two different ranges.
@@ -403,11 +412,19 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
     // order to be got wrong.
     let mut scored: Vec<Result<ScoredRecord, ScoringFailure>> = Vec::with_capacity(SCORING_BATCH);
     std::thread::scope(|scope| -> Result<(), PassTwoError> {
-        let (full_batches, batches_to_score) = mpsc::sync_channel::<ReadBatch>(1);
+        let (full_batches, batches_to_score) =
+            mpsc::sync_channel::<ReadBatch<CompressedSpillBody>>(1);
         let (empty_batches, batches_to_refill) = mpsc::channel::<Vec<CompressedSpillBody>>();
-        scope.spawn(move || read_ahead(entries, full_batches, batches_to_refill));
+        scope.spawn(move || {
+            read_ahead(
+                SCORING_BATCH,
+                |body| entries.next_compressed_body(body),
+                full_batches,
+                batches_to_refill,
+            );
+        });
         for batch in batches_to_score {
-            batch.bodies[..batch.filled]
+            batch.items[..batch.filled]
                 .par_iter()
                 .map_init(
                     || {
@@ -455,7 +472,7 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
                 return Err(PassTwoError::Spill(spill.naming_this_file(source)));
             }
             // The reader may already have finished; a batch it no longer wants is simply dropped.
-            let _ = empty_batches.send(batch.bodies);
+            let _ = empty_batches.send(batch.items);
         }
         Ok(())
     })?;
