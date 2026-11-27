@@ -992,6 +992,7 @@ mod classify {
         // there could be tract the mapper did not place, and goes to the delimiter as before.
         let tract_start = window_start + left as u32;
         let tract_end = tract_start + locus.repeat.tract_len() as u32;
+        let tract_on_reference = tract_start..tract_end;
         let (unaligned_before, unaligned_after) = unaligned_bases_at_the_ends(&read.cigar);
         let ends_before_the_tract = fp.ref_end <= tract_start && unaligned_after == 0;
         let starts_after_the_tract = fp.ref_start >= tract_end && unaligned_before == 0;
@@ -1073,7 +1074,7 @@ mod classify {
         // does. A deletion that fits wholly inside the tract — a stutter contraction, whichever
         // way the mapper or a left-aligner placed it — comes out as no flank deletion at all.
         let edge_deleted =
-            flank_bases_deleted_at_the_edges(cigar, fp.ref_start, tract_start, tract_end);
+            flank_bases_deleted_at_the_edges(cigar, fp.ref_start, &tract_on_reference);
         let flank_deletion = flank_deletion_of(edge_deleted)
             .filter(|deleted| deleted.left as usize <= left && deleted.right as usize <= right)
             .unwrap_or(FlankDeletion::NONE);
@@ -1085,8 +1086,7 @@ mod classify {
                     fp,
                     span,
                     flank_deletion,
-                    tract_start,
-                    tract_end,
+                    &tract_on_reference,
                     guarded_flank_widths(left, right),
                 );
                 let (span, deleted) = in_smallest_form(
@@ -1106,7 +1106,7 @@ mod classify {
         };
         if let Some(span) = &input_span {
             let (aligned_before, aligned_after) =
-                aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract_start, tract_end);
+                aligned_bases_beyond_the_tract(cigar, fp.ref_start, &tract_on_reference);
             if edge_deleted != (0, 0)
                 && aligned_before >= MIN_ALIGNED_FLANK_BASES
                 && aligned_after >= MIN_ALIGNED_FLANK_BASES
@@ -1204,16 +1204,14 @@ mod classify {
                     && indel_in_the_guarded_flank(
                         cigar,
                         fp.ref_start,
-                        tract_start,
-                        tract_end,
+                        &tract_on_reference,
                         guarded_flank_widths(left, right),
                     )
                     && {
                         let (before, after) = aligned_bases_beyond_the_tract(
                             cigar,
                             fp.ref_start,
-                            tract_start,
-                            tract_end,
+                            &tract_on_reference,
                         );
                         before >= MIN_ALIGNED_FLANK_BASES && after >= MIN_ALIGNED_FLANK_BASES
                     } =>
@@ -1300,7 +1298,7 @@ mod classify {
             return None;
         }
         let (aligned_before, aligned_after) =
-            aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract.start, tract.end);
+            aligned_bases_beyond_the_tract(cigar, fp.ref_start, &tract);
         if aligned_before < MIN_ALIGNED_FLANK_BASES || aligned_after < MIN_ALIGNED_FLANK_BASES {
             return None;
         }
@@ -1395,8 +1393,8 @@ mod classify {
     /// it crosses the tract's first base or ends at it, taking the flank bases before it; on the
     /// right when it crosses the tract's last base or starts just after it, taking the flank bases
     /// after; one covering the whole tract counts on both sides. Where two deletions count on one
-    /// side, the later one's count stands. `tract_start`/`tract_end` are 0-based reference
-    /// positions, the end exclusive, as is `ref_start`.
+    /// side, the later one's count stands. `tract` is the tract's 0-based reference positions,
+    /// the end exclusive; `ref_start` is 0-based too.
     ///
     /// Classification uses the one count two ways: whether it is `(0, 0)` decides whether a
     /// read's own alignment, deletion and all, counts as having crossed the tract, and
@@ -1414,9 +1412,9 @@ mod classify {
     fn flank_bases_deleted_at_the_edges(
         cigar: &[CigarOp],
         ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
     ) -> (u32, u32) {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         let (mut left, mut right, mut at) = (0_u32, 0_u32, ref_start);
         for op in cigar {
             match op {
@@ -1473,10 +1471,10 @@ mod classify {
         fp: Footprint,
         span: Range<usize>,
         deleted: FlankDeletion,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
         widths: (u32, u32),
     ) -> (Range<usize>, FlankDeletion) {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         // The farthest flank bases an indel in the guard reaches: `first` on the left (the
         // first base it takes or sits before), `last` on the right (one past the last).
         let mut first = tract_start - u32::from(deleted.left);
@@ -1568,10 +1566,10 @@ mod classify {
     fn indel_in_the_guarded_flank(
         cigar: &[CigarOp],
         ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
         widths: (u32, u32),
     ) -> bool {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         let left_guard = tract_start.saturating_sub(widths.0)..tract_start;
         let right_guard = tract_end..tract_end + widths.1;
         let mut at = ref_start;
@@ -1668,9 +1666,9 @@ mod classify {
     fn aligned_bases_beyond_the_tract(
         cigar: &[CigarOp],
         ref_start: u32,
-        tract_start: u32,
-        tract_end: u32,
+        tract: &Range<u32>,
     ) -> (u32, u32) {
+        let (tract_start, tract_end) = (tract.start, tract.end);
         let (mut before, mut after, mut at) = (0, 0, ref_start);
         for op in cigar {
             match op {
@@ -1978,8 +1976,7 @@ mod classify {
             flank_deletion_of(flank_bases_deleted_at_the_edges(
                 cigar,
                 ref_start,
-                tract_start,
-                tract_end,
+                &(tract_start..tract_end),
             ))
         }
 
@@ -1990,7 +1987,7 @@ mod classify {
             tract_start: u32,
             tract_end: u32,
         ) -> bool {
-            flank_bases_deleted_at_the_edges(cigar, ref_start, tract_start, tract_end) != (0, 0)
+            flank_bases_deleted_at_the_edges(cigar, ref_start, &(tract_start..tract_end)) != (0, 0)
         }
 
         fn locus() -> SsrLocus {
@@ -2744,7 +2741,7 @@ mod classify {
                 (vec![Match(40), Deletion(3), Match(40)], false),
             ] {
                 assert_eq!(
-                    indel_in_the_guarded_flank(&cigar, 0, 30, 60, widths),
+                    indel_in_the_guarded_flank(&cigar, 0, &(30..60), widths),
                     expected,
                     "{cigar:?}"
                 );
@@ -2764,8 +2761,7 @@ mod classify {
                     fp,
                     30..60,
                     FlankDeletion { left: 0, right: 2 },
-                    30,
-                    60,
+                    &(30..60),
                     widths,
                 ),
                 (30..63, FlankDeletion { left: 0, right: 4 })
@@ -2778,8 +2774,7 @@ mod classify {
                     fp,
                     30..60,
                     FlankDeletion { left: 0, right: 2 },
-                    30,
-                    60,
+                    &(30..60),
                     widths,
                 ),
                 (30..60, FlankDeletion { left: 0, right: 2 })
@@ -2904,7 +2899,7 @@ mod classify {
                 60
             ));
             assert_eq!(
-                aligned_bases_beyond_the_tract(&across_the_end, 0, 30, 60),
+                aligned_bases_beyond_the_tract(&across_the_end, 0, &(30..60)),
                 (30, 26)
             );
             let across_the_start = [Match(27), Deletion(6), Match(40)];
@@ -2939,7 +2934,7 @@ mod classify {
                 "a flank deletion starting just after the tract's last base touches the edge"
             );
             assert_eq!(
-                aligned_bases_beyond_the_tract(&[SoftClip(10), Match(80)], 10, 30, 60),
+                aligned_bases_beyond_the_tract(&[SoftClip(10), Match(80)], 10, &(30..60)),
                 (20, 30)
             );
         }
