@@ -1846,6 +1846,16 @@ struct ReadTally {
     reference: f64,
 }
 
+impl ReadTally {
+    /// Add one genotype's expected reads, `counts`, at its posterior `weight`.
+    #[inline(always)]
+    fn credit(&mut self, weight: f64, counts: ReadTally) {
+        self.candidate += weight * counts.candidate;
+        self.neither += weight * counts.neither;
+        self.reference += weight * counts.reference;
+    }
+}
+
 impl Statistics {
     fn new(groups: usize, samples: usize, nodes: usize) -> Self {
         Self {
@@ -4400,6 +4410,27 @@ impl Scratch {
 const RESCALE: f64 = 1e150;
 const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
 
+/// **`ln Π terms`, the product kept in range by [`RESCALE`]**: multiplied back up whenever it is
+/// about to underflow, and its logarithm taken once at the end. `None` where the product is zero
+/// or negative — a node no sample's reads allow.
+#[inline(always)]
+fn ln_of_product(terms: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut product = 1.0_f64;
+    let mut scale = 0.0_f64;
+    for term in terms {
+        product *= term;
+        if product < 1.0 / RESCALE {
+            product *= RESCALE;
+            scale -= LN_RESCALE;
+        }
+    }
+    if product <= 0.0 {
+        None
+    } else {
+        Some(float::ln(product) + scale)
+    }
+}
+
 /// One position: its likelihood, and its contribution to every accumulated count.
 #[allow(
     clippy::needless_range_loop,
@@ -4546,23 +4577,15 @@ fn one_position(
                 offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
             }
             for node in 0..nodes {
-                let mut product = 1.0_f64;
-                let mut scale = 0.0_f64;
-                for s in 0..samples {
+                let product_ln = ln_of_product((0..samples).map(|s| {
                     let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
                     let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                    let term = prior[0] * lik[0] + prior[1] * lik[1] + prior[2] * lik[2];
-                    product *= term;
-                    if product < 1.0 / RESCALE {
-                        product *= RESCALE;
-                        scale -= LN_RESCALE;
-                    }
-                }
+                    prior[0] * lik[0] + prior[1] * lik[1] + prior[2] * lik[2]
+                }));
                 let slot = scratch.node_at(class, candidate, node);
-                scratch.node_ln[slot] = if product <= 0.0 {
-                    f64::NEG_INFINITY
-                } else {
-                    float::ln(product) + scale + offset + quadrature.ln_weights[node]
+                scratch.node_ln[slot] = match product_ln {
+                    Some(product_ln) => product_ln + offset + quadrature.ln_weights[node],
+                    None => f64::NEG_INFINITY,
                 };
             }
         }
@@ -4584,9 +4607,7 @@ fn one_position(
                 }
                 for node in 0..carrier.nodes.len() {
                     let q = carrier.nodes[node];
-                    let mut product = 1.0_f64;
-                    let mut scale = 0.0_f64;
-                    for s in 0..samples {
+                    let product_ln = ln_of_product((0..samples).map(|s| {
                         let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
                         // Where the run has a coverage summary, this is the only place it
                         // enters: how much more likely this sample's read depth around here is
@@ -4594,18 +4615,12 @@ fn one_position(
                         // sample single-copy, so the one-copy factor is common to all of them
                         // and cancels out of the position entirely.
                         let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
-                        let term = (1.0 - q) * lik[0] + q * odds * lik[1];
-                        product *= term;
-                        if product < 1.0 / RESCALE {
-                            product *= RESCALE;
-                            scale -= LN_RESCALE;
-                        }
-                    }
+                        (1.0 - q) * lik[0] + q * odds * lik[1]
+                    }));
                     let slot = scratch.node_at(class, candidate, node);
-                    scratch.carrier_node_ln[slot] = if product <= 0.0 {
-                        f64::NEG_INFINITY
-                    } else {
-                        float::ln(product) + scale + offset + carrier.ln_weights[node]
+                    scratch.carrier_node_ln[slot] = match product_ln {
+                        Some(product_ln) => product_ln + offset + carrier.ln_weights[node],
+                        None => f64::NEG_INFINITY,
                     };
                 }
             }
@@ -4786,10 +4801,7 @@ fn one_position(
                             allele,
                             reference_read_probability(2, ploidy, rate),
                         );
-                        let tally = &mut statistics.reads[library][class][2];
-                        tally.candidate += share * counts.candidate;
-                        tally.neither += share * counts.neither;
-                        tally.reference += share * counts.reference;
+                        statistics.reads[library][class][2].credit(share, counts);
                     }
                     statistics.homozygous_alt[s] += share;
                     scratch.position_genotype[s * 3 + 1] += share;
@@ -4871,10 +4883,7 @@ fn one_position(
                                 allele,
                                 reference_read_probability(j as u8, ploidy, rate),
                             );
-                            let tally = &mut statistics.reads[library][class][j];
-                            tally.candidate += weight * counts.candidate;
-                            tally.neither += weight * counts.neither;
-                            tally.reference += weight * counts.reference;
+                            statistics.reads[library][class][j].credit(weight, counts);
                         }
                     }
                 }
@@ -4956,10 +4965,7 @@ fn one_position(
                                     allele,
                                     reference_read_probability(j as u8, ploidy, rate),
                                 );
-                                let tally = &mut statistics.reads[library][class][j];
-                                tally.candidate += weight * counts.candidate;
-                                tally.neither += weight * counts.neither;
-                                tally.reference += weight * counts.reference;
+                                statistics.reads[library][class][j].credit(weight, counts);
                             }
                         }
                     }
