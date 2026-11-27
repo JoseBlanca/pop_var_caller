@@ -1,6 +1,6 @@
 //! Active-set bookkeeping: the reads currently overlapping the
 //! walker's position, held so that iterating them yields **ascending
-//! `read_id`**. See `ia/specs/pileup_walker.md` §"Active read table"
+//! `read_id`**. See `doc/devel/specs/pileup_walker.md` §"Active read table"
 //! and §"Active-set bookkeeping".
 //!
 //! **Released from `copy_fidelity.rs` at D2** — this file is no longer

@@ -1,7 +1,7 @@
 //! Phase-chain identifier allocator: hands out a fresh, never-reused
 //! `u64` to each read (or read pair).
 //!
-//! See `ia/specs/phase_chain.md`. One read (or one read pair, with
+//! See `doc/devel/specs/phase_chain.md`. One read (or one read pair, with
 //! mates collapsed via `pending_mates`) gets one identifier. The
 //! identifier space is per-`.psp` file, monotonically allocated from
 //! zero, and never recycled. Overflow at `u64::MAX + 1` is caught and
@@ -260,7 +260,7 @@ impl ChainIdAllocator {
 
     /// Reset to the initial state. Called at chromosome boundaries
     /// (chains do not span chromosomes per
-    /// `ia/specs/calling_pipeline_architecture.md` §"Phase chain
+    /// `doc/devel/specs/per_sample_pileup.md` §"Phase chain
     /// identifiers"). `next_id` is *not* reset — chain ids stay
     /// unique across the whole file.
     pub fn reset(&mut self) {

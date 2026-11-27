@@ -90,14 +90,14 @@ pub struct PileupGeneratorConfig {
     // constants by name so a retune arrives as a diff, and a literal in the
     // prose here would go stale silently while every test stayed green (review).
     /// Reads of one read group folded at one position, whatever the reads show there.
-    /// Defaults to [`DEFAULT_MAX_READS_PER_POSITION`](super::DEFAULT_MAX_READS_PER_POSITION).
+    /// Defaults to [`DEFAULT_MAX_READS_PER_POSITION`].
     pub max_reads_per_position: u32,
     /// Widest record footprint before the walk fails. Defaults to
-    /// [`DEFAULT_MAX_RECORD_SPAN`](super::DEFAULT_MAX_RECORD_SPAN);
+    /// [`DEFAULT_MAX_RECORD_SPAN`];
     /// ng additionally rejects anything above [`MAX_RECORD_SPAN_CEILING`].
     pub max_record_span: u32,
     /// How far a first mate stays available for pairing. Defaults to
-    /// [`DEFAULT_MATE_LOOKUP_WINDOW`](super::DEFAULT_MATE_LOOKUP_WINDOW).
+    /// [`DEFAULT_MATE_LOOKUP_WINDOW`].
     pub mate_lookup_window: u32,
     /// Active-read ceiling: how many reads the walk will hold open at once. Defaults
     /// to [`DEFAULT_MAX_ACTIVE_READS`], **32,768 since 2026-08-05** (it was 4,096).
@@ -249,21 +249,18 @@ pub enum PileupGeneratorConfigError {
 /// Run-level counts for this generator, kept alongside the shared
 /// [`LocusCounts`](super::super::LocusCounts) the dispatcher owns.
 ///
-/// **Ten fields of three kinds**, and the kinds matter because only the first two come
+/// **Twenty-two fields of two kinds**, and the kinds matter because only the first comes
 /// off a walk at all:
 ///
-/// - **Seven mirror production's
-///   `RunSummary` field for field** (spec §7) —
-///   everything on it bar `records_emitted`.
-/// - **One mirrors ng's copy of `RunSummary` and has no production counterpart**:
-///   `reads_silent_over_footprint`, the ninth field D2 added, which `parity.rs`'s counter
-///   comparison drops by name for exactly that reason.
+/// - **Twenty mirror the walk's own `RunSummary` field for field** (spec §7) — everything
+///   on it bar `records_emitted`. Seven of them are counters the deleted caller's walker
+///   kept too; the other thirteen are ng's.
 /// - **Two are the generator's own, off the walk entirely**:
 ///   `reads_declined_by_preparer` (a read the preparer refused never reaches a walk) and
 ///   `records_outside_region` (the region clamp is the generator's, not the walker's).
 ///
-/// The link is to **production's** type deliberately: this module's `RunSummary`
-/// re-export is `#[cfg(test)]`, and a `pub` item's doc must not link into a private one.
+/// `RunSummary` is not linked because it is private to the walk, and a `pub` item's doc
+/// must not link into a private one.
 ///
 /// **`records_emitted` is deliberately not mirrored**: what a caller wants is loci
 /// *kept*, which is the walk's emissions minus
@@ -352,7 +349,7 @@ pub struct PileupGeneratorCounts {
     /// counted where it belongs and not here as well.
     pub reads_silent_over_footprint: u64,
     /// Reads the **preparer** declined — `Ok(None)` from
-    /// [`ReadPreparer::prepare_read`](crate::read::ReadPreparer::prepare_read),
+    /// [`ReadPreparer::prepare_read`],
     /// "no usable observation", which ends nothing and is not an error.
     ///
     /// **Added by D2, and it reads zero for a reason that is not a bug:** no v1
@@ -390,10 +387,10 @@ pub struct PileupGeneratorCounts {
 impl PileupGeneratorCounts {
     /// Fold one region's walk into the run's totals.
     ///
-    /// **Not [`RunSummary::merge`], and the difference is the trap spec §8
-    /// names.** Production builds a fresh walker — and so a fresh allocator —
-    /// per region, so `summary()` *assigns* the allocator's three counters and
-    /// summing region summaries is right. ng shares one allocator across
+    /// **Not a plain sum of region summaries, and the difference is the trap spec §8
+    /// names.** The deleted caller built a fresh walker — and so a fresh allocator —
+    /// per region, so `summary()` *assigned* the allocator's three counters and
+    /// summing region summaries was right. ng shares one allocator across
     /// regions and `reset()` deliberately preserves those counters, so every
     /// region's summary reports the **run-to-date** total: adding them up
     /// triangular-sums `chain_allocations` and `mate_lookup_evictions`, roughly
@@ -777,7 +774,7 @@ const REFERENCE_RELEASE_STRIDE_BP: u64 = 64 * 1024;
 
 /// ng's generic locus generator: a streaming pileup walk over one `Generic`
 /// region, emitting one
-/// [`SampleLocusObservations`](super::super::SampleLocusObservations) per covered
+/// [`SampleLocusObservations`] per covered
 /// position.
 ///
 /// # What it holds, and why it holds it
@@ -846,11 +843,11 @@ pub struct PileupGenerator<
     /// Lives across chromosomes so `next_id` never repeats — **`None` exactly while a
     /// [`ChromosomeWalk`] holds it**, which is the invariant `enter_chromosome` keeps.
     ///
-    /// **The window it is absent for widened at D2**, from a region to a chromosome: a
-    /// walker built per region borrowed it per region, and one built per chromosome borrows
-    /// it for the chromosome. `reset()` between regions still happens — inside the walker,
-    /// at [`WalkerState::begin_region`], where the counters it preserves are documented
-    /// along with what breaks if it is replaced instead.
+    /// **The window it is absent for is a chromosome**, not a region: a walker built per
+    /// region borrowed it per region, and one built per chromosome borrows it for the
+    /// chromosome. `reset()` between regions still happens — inside the walker, at
+    /// `genome_walk::WalkerState::begin_region`, where the counters it preserves are
+    /// documented along with what breaks if it is replaced instead.
     ///
     /// An `Option` rather than a swap with a fresh allocator: a placeholder
     /// starting at zero is the state this whole arrangement exists to avoid, and
@@ -882,7 +879,7 @@ pub struct PileupGenerator<
     walk: Option<RegionWalk>,
     /// **The sample this generator reads, and what its retired chromosomes' cursors did** —
     /// one sample per generator, refused in [`open_walk`](Self::open_walk), and the tallies
-    /// [`cursor_counts`](Self::cursor_counts) and [`read_filter_counts`](Self::read_filter_counts)
+    /// `cursor_counts` (tests only) and [`read_filter_counts`](Self::read_filter_counts)
     /// add the live cursor's to.
     ledger: CursorLedger,
     /// A fatal error that has happened and not yet been reported.
@@ -1037,13 +1034,14 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
     /// **The only place `walk` is cleared**, which is what keeps "a region is open exactly
     /// while `walk` is `Some`" true without anyone having to remember it.
     ///
-    /// **What it no longer does — D2.** It used to take the chain-id allocator back and
+    /// **What it no longer does.** It used to take the chain-id allocator back and
     /// `reset()` it, because the walker was dropped here. The walker now lives for the
     /// chromosome and keeps the allocator, so the reset moved to
-    /// [`WalkerState::begin_region`], which runs at the *next* region's start. The reset
-    /// itself is unchanged and still necessary: carried across regions un-reset, a pending
-    /// first mate from one region pairs with a read in another (the eviction test compares
-    /// raw positions) and `active_count` climbs toward `ActiveReadsExhausted` (spec §8).
+    /// `genome_walk::WalkerState::begin_region`, which runs at the *next* region's start.
+    /// The reset itself is unchanged and still necessary: carried across regions un-reset,
+    /// a pending first mate from one region pairs with a read in another (the eviction test
+    /// compares raw positions) and `active_count` climbs toward `ActiveReadsExhausted`
+    /// (spec §8).
     ///
     /// **The fold has to happen here and not there**, before the walker is pointed at
     /// anything else: it reads the walk's summary, which `begin_region` is about to clear.
@@ -1438,7 +1436,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
     }
 
     /// **The only way the per-read-group drop tallies are reachable once the generator is
-    /// boxed** — the same gap `counts` closed for the ten locus counters, one axis over.
+    /// boxed** — the same gap `counts` closed for the locus counters, one axis over.
     fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
         PileupGenerator::read_filter_counts(self)
     }

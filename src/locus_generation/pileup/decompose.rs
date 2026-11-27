@@ -1,6 +1,6 @@
 //! CIGAR decomposition: walk a `PreparedRead`'s CIGAR once and
 //! produce a sorted list of `ReadEvent`s — the read's per-position
-//! contributions to the pileup. See `ia/specs/pileup_walker.md`
+//! contributions to the pileup. See `doc/devel/specs/pileup_walker.md`
 //! §"Read decomposition" for the algorithm, edge cases, and rules.
 
 #[cfg(test)]
@@ -91,7 +91,7 @@ pub fn decompose(read: &PreparedRead) -> Vec<ReadEvent> {
                 for k in 0..len {
                     let base = read.seq[read_pos + k as usize];
                     // Read-N: no Match event emitted. See
-                    // `ia/specs/pileup_walker.md` §"N-base handling".
+                    // `doc/devel/specs/pileup_walker.md` §"N-base handling".
                     if base == b'N' {
                         continue;
                     }
@@ -99,7 +99,7 @@ pub fn decompose(read: &PreparedRead) -> Vec<ReadEvent> {
                     // G1 — drop bases past the mate-pair adaptor
                     // boundary so the parity oracle stays byte-clean
                     // against the lazy cursor. See
-                    // `ia/specs/pileup_walker.md`
+                    // `doc/devel/specs/pileup_walker.md`
                     // §"Adaptor-region per-base filter".
                     if let Some(boundary) = read.adaptor_boundary
                         && (if read.is_reverse_strand {

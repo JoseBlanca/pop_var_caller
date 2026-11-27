@@ -1,7 +1,7 @@
 //! End-to-end tests for the pileup walker plus shared helpers
 //! (`MockFasta`, fixture builders) used by inner-module tests.
 //!
-//! Tests exercise scenarios from `ia/specs/pileup_walker.md`: SNP
+//! Tests exercise scenarios from `doc/devel/specs/pileup_walker.md`: SNP
 //! folding, deletion anchoring, REF widening on overlap, mate
 //! overlap, phase-chain lifecycle markers, eager closure, etc.
 //!

@@ -1,98 +1,62 @@
-//! ng's generic locus generator — the pileup walk, copied from production.
+//! ng's generic locus generator — the pileup walk over a non-STR region.
 //!
-//! A **folder**, unlike its `ssr.rs` sibling, because it holds the whole copied
-//! walker plus (later) the generator that wraps it. Production is not edited:
-//! ng copies rather than reaches in, so there is no visibility lift and no field
-//! on a frozen type (`doc/devel/ng/spec/locus_generation_pileup.md` §3,
+//! A **folder**, unlike its `ssr` sibling's single entry file, because it holds a whole walker
+//! plus the generator that wraps it (`doc/devel/ng/spec/locus_generation_pileup.md`,
 //! `doc/devel/ng/arch/locus_generation_pileup.md` *Module home*).
 //!
-//! # Eight files were transcribed from production's walker
+//! # Where the walker came from
 //!
-//! [`genome_walk`], [`open_record`], [`cigar_cursor`], [`decompose`],
-//! [`active_read_set`], [`chain_id_allocator`] and [`errors`] — plus `tests.rs`,
-//! production's own end-to-end suite — were transcribed from `src/pileup/walker/`
-//! **unchanged**. The rule that paid three times on this branch is *transcribe first,
-//! change second*: a copy that is provably production is the baseline every later
-//! change is measured against, and without it the generator's deliberate divergences
-//! could not be told from transcription slips.
+//! [`genome_walk`], [`open_record`], [`cigar_cursor`], [`decompose`], [`active_read_set`],
+//! [`chain_id_allocator`] and [`errors`] — plus `tests.rs`, that walker's own end-to-end
+//! suite — were transcribed unchanged from the pileup walker of the caller deleted on
+//! 2026-09-13 (`src/pileup/walker/` at commit `d9e7b076`). The rule that paid on this branch
+//! was *transcribe first, change second*: a copy that provably matched the old walker was the
+//! baseline every later change was measured against, so the generator's deliberate
+//! divergences could be told from transcription slips. Every one of those files has changed
+//! since, and each says so in its own header. Only one was renamed on the way in: `driver.rs`
+//! became [`genome_walk`], which names the axis the walk advances along; its walker type keeps
+//! the old name, `PileupWalker`.
 //!
-//! **Plan 3 and the changes after it spent that baseline, file by file**, each releasing the file it
-//! changed from a textual guard (`copy_fidelity.rs`) and saying so in that file's own
-//! header: A0 released [`genome_walk`], [`open_record`] and [`errors`], B2 `tests.rs`,
-//! D2 [`active_read_set`], and the 2026-08-05 changes [`cigar_cursor`] and
-//! [`chain_id_allocator`]. [`decompose`] was the last still guarded. **The guard was
-//! retired at promotion step C2, and the stage-1 differential (`parity.rs`) was cut down at
-//! C1 to what does not need production's walker**; what either proved is in this module's
-//! history at `d9e7b076`.
+//! [`generator`], [`fast_column`], [`witnessed_ref`] and [`read_sampling`] are ng's own.
+//! `parity.rs` is what is left of the comparison against the old walker: determinism across
+//! processes, the generated cases' coverage floor, and the old walker's error stream, frozen.
 //!
-//! **The walk emits ng's own [`SampleLocusObservations`](crate::locus_generation::SampleLocusObservations)
-//! from B2 on**, not production's `PileupRecord` — and since Milestone D **nothing in this
-//! module sees it through anything else.** B2 adapted the 44 inherited tests through
-//! `to_pileup_record`, one reviewed back-projection rather than 67 hand-edited assertions
-//! (spec §12); that projection merged the observations ng splits and dropped the three fields
-//! production has no counterpart for, and at Milestone B its losses hid three live surfaces
-//! from the review. D1 removed the differential's need for it by projecting production
-//! *forward* instead, and the same commit that answers Checkpoint D removed the suite's:
-//! the inherited tests now assert on ng's type through two accessors that **panic** where
-//! production's positional idiom has no ng answer (`tests::Locus::reference_observation`,
-//! `first_alt_observation`), so a test landing on one of those cases has to be rewritten rather
-//! than quietly reinterpreted. `to_pileup_record` is deleted.
-//!
-//! **One file is renamed on the way in: `driver.rs` → [`genome_walk`]** — it is
-//! the only one of the seven named for a *role* rather than for what it owns,
-//! and "driver" answers *driver of what?* with nothing. `genome_walk` names the
-//! one job that file has and the others do not: advancing a position cursor
-//! along genome coordinates over an active read set. The **type** keeps
-//! production's `PileupWalker`, so the differential reads as a straight
-//! comparison. *(`genome_walk` names the axis it advances along, not the extent:
-//! since D1 a walker is pointed at one region after another and lives for a
-//! chromosome, and before that it covered a single region — the name was right
-//! for both.)*
+//! The walk emits ng's own [`SampleLocusObservations`](crate::locus_generation::SampleLocusObservations).
+//! The inherited tests assert on that type through two accessors that **panic** where the old
+//! walker's positional idiom has no ng answer (`tests::Locus::reference_observation`,
+//! `first_alt_observation`), so a test landing on one of those cases has to be rewritten
+//! rather than quietly reinterpreted.
 //!
 //! # What this module re-exports, and why
 //!
-//! The copied files reach their shared vocabulary through `super::` — that is
-//! how they were written against `pileup/walker/mod.rs`, and leaving those paths
-//! alone is what keeps the transcription verbatim. This module therefore stands
-//! in for production's `walker/mod.rs`, drawing each name from wherever it now
-//! lives:
+//! The transcribed files reach their shared vocabulary through `super::`, as they did in the
+//! old walker. This module therefore declares or re-exports each name they reach that way:
 //!
-//! - [`PreparedRead`], [`MateRole`], [`ReadLengthError`] — **ng's**, copied and
-//!   extended with `read_group` (spec §6). They are the reason the whole walker
-//!   is copied: every one of the seven names `PreparedRead` in its signatures.
-//! - [`CigarOp`] — **the decoder's** ([`crate::bam::alignment_input`]), which is where the
-//!   type moved on 2026-09-12: the input stage both builds a CIGAR run and reads it back, so
-//!   it owns the type, and ng reaches the same declaration production does. Re-exported here
-//!   only so the copied files' `super::CigarOp` keeps resolving.
-//! - [`WalkerConfig`] and the four `DEFAULT_*` limits — **ng's own**, declared below. They
-//!   were production's until 2026-09-12 and are its values transcribed, so what a run walks
-//!   under has not moved; what changed is that ng no longer reaches into a tree it is about
-//!   to delete for them.
-//!   **[`DEFAULT_MAX_ACTIVE_READS`] is the one that has genuinely diverged**, and it is
-//!   declared in `chain_id_allocator.rs` because the verbatim copy put it there: ng holds
-//!   32,768 reads open against production's 4,096, and
-//!   `the_copied_active_reads_cap_is_still_productions` is what records the pair rather than
-//!   pinning them equal.
+//! - [`PreparedRead`], [`MateRole`], [`ReadLengthError`] — **ng's**, extended with
+//!   `read_group` (spec §6). Every transcribed file names `PreparedRead` in its signatures.
+//! - [`CigarOp`] — **the decoder's** ([`crate::bam::alignment_input`]): the input stage both
+//!   builds a CIGAR run and reads it back, so it owns the type. Re-exported here only so the
+//!   transcribed files' `super::CigarOp` resolves.
+//! - [`WalkerConfig`] and the `DEFAULT_*` limits — **ng's own**, declared below. All but one
+//!   keep the old walker's values. **[`DEFAULT_MAX_ACTIVE_READS`] is the one that diverged**,
+//!   and it is declared in `chain_id_allocator.rs` because the transcription put it there: ng
+//!   holds 32,768 reads open against the old walker's 4,096, and
+//!   `the_copied_active_reads_cap_is_still_productions` records the pair rather than pinning
+//!   them equal.
 //!
 //! The vocabulary is bound `pub(crate)`, not `pub`: it is an internal aid for the
-//! copies, not a second public path to a name declared elsewhere. A consumer outside this
-//! module that wants `CigarOp` should say [`crate::bam::alignment_input::CigarOp`] and name
-//! the decoder that produced it.
+//! transcribed files, not a second public path to a name declared elsewhere. A consumer
+//! outside this module that wants `CigarOp` should say
+//! [`crate::bam::alignment_input::CigarOp`] and name the decoder that produced it.
 //!
 //! # The reference: ng's own, with no adaptor between
 //!
-//! The walk fetches through [`RefSeq`](crate::ref_seq::RefSeq) directly
-//! (A0). It used to go through a `RefSeqFetcher` newtype presenting ng's
-//! reference as production's `MultiChromRefFetcher` — a consequence of the
-//! transcription being verbatim, never a design choice, and one that stopped
-//! being true the moment the two walkers began to diverge. The newtype, its
-//! error translation and both of that translation's lossy spots (a contig *name*
-//! rendered as an id; a `u64 → u32` narrowing) are **deleted**, and **no file in
-//! this module** imports `MultiChromRefFetcher` or `ChromRefFetchError` outside
-//! `#[cfg(test)]` code. Scoped to this module deliberately: an earlier wording
-//! claimed it of ng's non-test code as a whole, which is false —
-//! [`raw_chrom_reader`](crate::raw_chrom_reader) names `MultiChromRefFetcher`
-//! in public signatures, and always did.
+//! The walk fetches through [`RefSeq`](crate::ref_seq::RefSeq) directly. It used to go
+//! through a newtype that presented ng's reference as the old walker's
+//! `MultiChromRefFetcher`; that newtype, its error translation and both of that translation's
+//! lossy spots (a contig *name* rendered as an id; a `u64 → u32` narrowing) are **deleted**,
+//! and no file in this module imports `MultiChromRefFetcher` or `ChromRefFetchError` outside
+//! `#[cfg(test)]` code.
 
 mod active_read_set;
 mod chain_id_allocator;
@@ -109,11 +73,9 @@ mod open_record;
 mod read_sampling;
 mod witnessed_ref;
 
-/// Production's own end-to-end suite, copied verbatim and run against the copy —
-/// Milestone A's gate (spec §12). `pub(crate)` because production's declaration is,
-/// so the two module trees stay comparable; its `MockFasta` / `snp_read` /
-/// `paired_snp_reads` fixtures are reachable from B1's parity harness either way,
-/// that being a descendant of this module.
+/// The deleted caller's end-to-end walker suite, transcribed and run against ng's walk
+/// (spec §12). Its `MockFasta` / `snp_read` / `paired_snp_reads` fixtures are what
+/// `parity.rs` builds on.
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -303,16 +265,9 @@ mod mock_reference;
 #[cfg(test)]
 mod parity;
 
-// The vocabulary the copied files resolve through `super::`. Production's own
-// `walker/mod.rs` declares the same names, around the same modules bar one: its
-// `pub(crate) mod indel_norm` is not copied, because none of the seven reaches it —
-// its consumers are production's `read_processor.rs` and ng's own `src/alignment/`,
-// neither of which is part of the walk.
-//
-// `DEFAULT_MAX_READS_PER_POSITION` is deliberately absent: no copied file reaches it
-// through `super::` (production's `WalkerConfig` holds the read cap and comes with its
-// own default), and an unused re-export is invisible to the compiler, so carrying it
-// would be shape without substance. `PileupGeneratorConfig` names it directly.
+// The vocabulary the transcribed files resolve through `super::` — the names the old
+// walker's `walker/mod.rs` declared, bar its `indel_norm` module, which none of the seven
+// reached.
 pub(crate) use crate::bam::alignment_input::CigarOp;
 pub(crate) use crate::read::prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
@@ -399,29 +354,18 @@ impl Default for WalkerConfig {
 
 // This module's own surface, as against the vocabulary above.
 //
-// **Audited by demoting each name in turn and rebuilding**, not by grepping: production
-// declares identically-named `WalkerError`, `PileupWalker`, `RunSummary`, `run` and
-// `DEFAULT_MAX_ACTIVE_READS`, so a bare-name search answers about the wrong crate. Four
-// of the ten were load-bearing (`E0603` on demotion), two have no build consumer but a
-// reason to stay, and four were surplus — the reverse of Checkpoint C's guess that nine
-// of ten had no consumer. The answering build is `cargo check --all-targets
-// --all-features` **without** `-D warnings`: demoting `PileupGenerator` makes the lib
-// target treat this module as dead, and that cascade stops cargo ever reaching the
-// example that actually consumes it.
-//
-// **Why the four went, and why `run` mattered most.** They put production's walker
-// vocabulary into ng's *public* API under production's own names — the thing the
-// vocabulary note above forbids, for the reason it gives: from plan 3 on, two live paths
-// to one name stop being harmless. And `run` had teeth. `to_walker_config` is
-// `pub(super)` precisely so every caller passes through
-// `PileupGeneratorConfig::check()` and its `MAX_RECORD_SPAN_CEILING`; with `run` public,
-// an external caller builds a `WalkerConfig` from production's `pub` `Default` and walks
-// straight past that. Measured from an external example before the change:
+// **Kept to what a consumer outside the module needs.** The walk itself — `run`,
+// `PileupWalker`, `RunSummary` — stays private, and `run` mattered most:
+// `to_walker_config` is `pub(super)` precisely so every caller passes through
+// `PileupGeneratorConfig::check()` and its `MAX_RECORD_SPAN_CEILING`. With `run` public, an
+// external caller could build a `WalkerConfig` from its `Default` and walk straight past
+// that check; measured from an external example when `run` was still public:
 // `max_record_span = 983_025`, **15× the ceiling `check()` enforces**.
 //
-// `generator.rs` imports `PileupWalker` and `RunSummary` from `genome_walk` directly, and
-// `parity.rs` calls `super::run`, so nothing needed a replacement
-// binding.
+// The surface was audited by demoting each name in turn and rebuilding with
+// `cargo check --all-targets --all-features`, **without** `-D warnings`: demoting
+// `PileupGenerator` makes the lib target treat this module as dead, and that cascade stops
+// cargo ever reaching the code that consumes it.
 pub use errors::WalkerError;
 pub use generator::{
     MAX_RECORD_SPAN_CEILING, PileupGenerator, PileupGeneratorConfig, PileupGeneratorConfigError,
