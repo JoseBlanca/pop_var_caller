@@ -103,9 +103,9 @@ pub enum LocusEvidence<'a> {
     /// scored against.
     ///
     /// **No sample is set aside here**, and the absence is structural rather than an
-    /// oversight. A tract's discovery round can put back a length the cap cut, so a sample
-    /// that lost one is not locked out of the locus for the rest of its calling
-    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
+    /// oversight. Allele discovery, a pre-pass inside candidate selection, can admit a length
+    /// one sample's own top-`ploidy` cut left out, so a sample that lost one is not locked out
+    /// of the locus (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1).
     Ssr {
         /// Where on the reference this locus is.
         region: GenomeRegion,
@@ -175,18 +175,7 @@ impl<'a> LocusEvidence<'a> {
     /// [`GenericSampleEvidence::empty`].
     #[must_use]
     pub fn generic(region: GenomeRegion, per_sample: &'a [GenericLocusSample<'a>]) -> Self {
-        assert!(
-            !per_sample.is_empty(),
-            "the SNP/indel evidence at {region} names no sample: a locus carries one entry \
-             per sample of the run and a run has at least one sample, so an empty list is \
-             evidence that went missing rather than a locus nobody covered — a sample with \
-             no reads gets GenericSampleEvidence::empty()"
-        );
-        Self::Generic {
-            region,
-            per_sample,
-            reference_beside: ReferenceBesideLocus::NONE,
-        }
+        Self::generic_beside_reference(region, per_sample, ReferenceBesideLocus::NONE)
     }
 
     /// A SNP/indel locus's evidence **with the reference beside it** — what the run hands the
@@ -203,13 +192,17 @@ impl<'a> LocusEvidence<'a> {
         per_sample: &'a [GenericLocusSample<'a>],
         reference_beside: ReferenceBesideLocus<'a>,
     ) -> Self {
-        match Self::generic(region, per_sample) {
-            Self::Generic { .. } => Self::Generic {
-                region,
-                per_sample,
-                reference_beside,
-            },
-            Self::Ssr { .. } => unreachable!("Self::generic builds the SNP/indel variant"),
+        assert!(
+            !per_sample.is_empty(),
+            "the SNP/indel evidence at {region} names no sample: a locus carries one entry \
+             per sample of the run and a run has at least one sample, so an empty list is \
+             evidence that went missing rather than a locus nobody covered — a sample with \
+             no reads gets GenericSampleEvidence::empty()"
+        );
+        Self::Generic {
+            region,
+            per_sample,
+            reference_beside,
         }
     }
 
