@@ -53,7 +53,8 @@ use crate::read::input::reference::OpenReference;
 use crate::read_phase::fragments::RecordFragments;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
-use crate::run::fragment_keeper::KeptRecord;
+use crate::run::edge_deletion_gathering::{EdgeDeletionGathering, EdgeDeletionGatheringCounts};
+use crate::run::fragment_keeper::{FragmentKeeper, KeptRecord};
 use crate::run::side_pool::SidePool;
 use crate::types::{Bp, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
@@ -810,47 +811,36 @@ impl PspVariantCaller {
             // records fold back in genome order. **The VCF is the same either way**, which is what
             // `the_round_driver_writes_what_the_streaming_driver_writes` holds them to.
         } = {
-            // **Every finished record passes the gathering of the calls before it is prepared**
-            // (`str_edge_deletion_alleles.md` §6): an STR record widened over a flank is
-            // reconciled with the generic records it overlaps, and held ones are released in
-            // the writer's order. So the drivers hand records over unprepared, and the records
-            // are prepared here, on this thread, as the gathering releases them.
-            let mut gathering =
-                crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
-            // **Then the fragment keeper** (read phase spec §2.4): released records come out of it in
-            // the same order, with only the read alleles of reads seen at two records or more —
-            // or, where the output reads no fragments, at once and with none. It takes them a batch
-            // of [`KEPT_A_BATCH`] at a time, waiting in `gathered`.
-            let mut keeper =
-                crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
-            // **Then prepared on the pool, a batch at a time, and handed over in order.**
-            // Preparing — the VCF line and, with the filter on, the spill entry — needs the record
-            // alone, so it need not wait its turn on this thread: at 2,176 tomato samples it cost
-            // 1.7 ms a record here, with most of the pool idle. Released records wait in `kept`
-            // until [`PREPARED_A_BATCH`] have, are prepared together, and are handed over in the
-            // order they were released, so the output is what preparing one at a time gave. A
-            // refusal is named at the locus of the record refused, not at the later one that
-            // filled the batch.
-            let mut kept = Vec::new();
-            let mut gathered = Vec::new();
-            // **Both on threads of their own** ([`hand_over_pool`]), so their tasks do not queue
-            // behind the region builds the merge's pool is running.
+            // **Every finished record passes the chain both modes share** ([`RecordRelease`]): the
+            // gathering of the calls, which reconciles an STR record widened over a flank with the
+            // generic records it overlaps, then the fragment keeper, then `prepare`, then
+            // `hand_over`. So the drivers hand records over unprepared.
+            //
+            // **Here in batches, prepared on the pool.** Preparing — the VCF line and, with the
+            // filter on, the spill entry — needs the record alone, so it need not wait its turn on
+            // this thread: at 2,176 tomato samples it cost 1.7 ms a record here, with most of the
+            // pool idle. The keeper takes [`KEPT_A_BATCH`] records at a time and the preparation
+            // [`PREPARED_A_BATCH`], both on threads of their own ([`hand_over_pool`]) so their
+            // tasks do not queue behind the region builds the merge's pool is running. The records
+            // are handed over in the order they were released, so the output is what preparing
+            // one at a time gave.
             let hand_over_pool = hand_over_pool(rayon::current_num_threads());
+            let mut release = RecordRelease::new(
+                gathers_fragments,
+                ReleaseBatching::Batched {
+                    pool: &hand_over_pool,
+                    kept_a_batch: KEPT_A_BATCH,
+                    prepared_a_batch: PREPARED_A_BATCH,
+                },
+                prepare,
+                hand_over,
+            );
             let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
-                Ok::<_, E>((record, windows.to_vec()))
+                Ok::<_, std::convert::Infallible>((record, windows.to_vec()))
             };
             let mut gather = |(record, windows): (VcfRecord, Vec<WindowCoverage>),
-                              _: &[WindowCoverage]|
-             -> Result<(), RunError> {
-                gathered.extend(gathering.accept(record, windows));
-                if gathered.len() >= KEPT_A_BATCH {
-                    let batch = std::mem::take(&mut gathered);
-                    hand_over_pool.run(|| keeper.accept_batch(batch, &mut kept));
-                }
-                if kept.len() >= PREPARED_A_BATCH {
-                    prepare_and_hand_over(&mut kept, &hand_over_pool, prepare, hand_over)?;
-                }
-                Ok(())
+                              _: &[WindowCoverage]| {
+                release.accept(record, windows)
             };
             let outcome = if merge_parameters
                 .cohort_locus_builder_regions_in_flight
@@ -873,35 +863,9 @@ impl PspVariantCaller {
                     &mut gather,
                 )?
             };
-            // What calling left in the batch goes first. Then the keeper takes the records the
-            // gathering released that it had not taken yet, and those the gathering still held,
-            // and releases everything: the order they were released in.
-            let mut released = kept;
-            gathered.extend(gathering.finish());
-            keeper.accept_batch(gathered, &mut released);
-            keeper.finish(&mut released);
-            if keeper.keeps_fragments() {
-                crate::run::fragment_keeper::log_counts(keeper.counts());
-            }
-            let mut released = released.into_iter();
-            loop {
-                let batch: Vec<_> = released.by_ref().take(PREPARED_A_BATCH).collect();
-                if batch.is_empty() {
-                    break;
-                }
-                let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
-                let prepared = prepare_on_the_pool(batch, prepare);
-                for (locus, prepared) in loci.into_iter().zip(prepared) {
-                    prepared
-                        .and_then(|(ready, windows)| hand_over(ready, &windows))
-                        .map_err(|source| RunError::RecordNotWritten {
-                            locus,
-                            source: Box::new(source),
-                        })?;
-                }
-            }
+            let gathering = release.finish()?;
             let mut outcome = outcome;
-            outcome.calling.after_gathering(gathering.counts());
+            outcome.calling.after_gathering(gathering);
             outcome
         };
         // **The sources come back so that a mode can turn them into per-sample facts**, and
@@ -1445,6 +1409,174 @@ fn hand_over_threads(workers: usize) -> usize {
 
 /// The fewest merge threads a run has before the hand-over gets threads of its own.
 const FEWEST_WORKERS_FOR_A_HAND_OVER_POOL: usize = 12;
+
+// ============================================================================================
+// The record hand-over chain, shared by both modes
+// ============================================================================================
+
+/// **How a [`RecordRelease`] takes its records through the keeper and the preparation**: one at
+/// a time on the calling thread, as direct mode does, or in batches on a side pool, as psp mode
+/// does. The records, their order and their fragments are the same either way.
+pub(crate) enum ReleaseBatching<'p> {
+    /// Each record released by the gathering goes through the keeper at once, and each record the
+    /// keeper releases is prepared and handed over at once, on the calling thread.
+    OneAtATime,
+    /// The keeper takes `kept_a_batch` gathered records at a time on `pool`, and the released
+    /// records are prepared `prepared_a_batch` at a time on `pool` and handed over in order.
+    Batched {
+        pool: &'p SidePool,
+        kept_a_batch: usize,
+        prepared_a_batch: usize,
+    },
+}
+
+/// **The chain every finished record passes between the calling driver and the output**: the
+/// gathering of the calls (`str_edge_deletion_alleles.md` §6), then the fragment keeper (read
+/// phase spec §2.4), then `prepare`, then `hand_over`, in genome order. Both modes build one; they
+/// differ only in [`ReleaseBatching`].
+///
+/// **A refusal is named at the record refused.** The gathering holds a record for up to 256
+/// bases and the keeper until reads move [`READ_REACH`](crate::read_phase::fragments::READ_REACH)
+/// past it, so the record `hand_over` refuses is usually not the locus the driver just called.
+/// Each error leaves as [`RunError::RecordNotWritten`] naming the refused record's own locus.
+pub(crate) struct RecordRelease<'a, Prepare, HandOver> {
+    gathering: EdgeDeletionGathering,
+    keeper: FragmentKeeper<Vec<WindowCoverage>>,
+    /// Released by the gathering, waiting for the keeper (batched only).
+    gathered: Vec<(VcfRecord, Vec<WindowCoverage>)>,
+    /// Released by the keeper, waiting to be prepared and handed over.
+    kept: Vec<KeptRecord<Vec<WindowCoverage>>>,
+    batching: ReleaseBatching<'a>,
+    prepare: &'a Prepare,
+    hand_over: &'a mut HandOver,
+}
+
+impl<'a, Prepare, HandOver, P, E> RecordRelease<'a, Prepare, HandOver>
+where
+    Prepare: Fn(VcfRecord, &[WindowCoverage], RecordFragments) -> Result<P, E> + Sync,
+    HandOver: FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    P: Send,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    /// A chain whose keeper keeps fragments only if `gathers_fragments`
+    /// ([`FragmentKeeper::for_a_run`]).
+    pub(crate) fn new(
+        gathers_fragments: bool,
+        batching: ReleaseBatching<'a>,
+        prepare: &'a Prepare,
+        hand_over: &'a mut HandOver,
+    ) -> Self {
+        Self {
+            gathering: EdgeDeletionGathering::default(),
+            keeper: FragmentKeeper::for_a_run(gathers_fragments),
+            gathered: Vec::new(),
+            kept: Vec::new(),
+            batching,
+            prepare,
+            hand_over,
+        }
+    }
+
+    /// **Take one finished record**, handing over whatever it releases.
+    ///
+    /// # Errors
+    ///
+    /// The first record `prepare` or `hand_over` refuses, as [`RunError::RecordNotWritten`] at
+    /// that record's locus.
+    pub(crate) fn accept(
+        &mut self,
+        record: VcfRecord,
+        windows: Vec<WindowCoverage>,
+    ) -> Result<(), RunError> {
+        match self.batching {
+            ReleaseBatching::OneAtATime => {
+                for (record, windows) in self.gathering.accept(record, windows) {
+                    self.keeper.accept(record, windows, &mut self.kept);
+                    Self::hand_over_in_order(self.kept.drain(..), self.prepare, self.hand_over)?;
+                }
+            }
+            ReleaseBatching::Batched {
+                pool,
+                kept_a_batch,
+                prepared_a_batch,
+            } => {
+                self.gathered.extend(self.gathering.accept(record, windows));
+                if self.gathered.len() >= kept_a_batch {
+                    let batch = std::mem::take(&mut self.gathered);
+                    let (keeper, kept) = (&mut self.keeper, &mut self.kept);
+                    pool.run(|| keeper.accept_batch(batch, kept));
+                }
+                if self.kept.len() >= prepared_a_batch {
+                    prepare_and_hand_over(&mut self.kept, pool, self.prepare, self.hand_over)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **Release everything still held and hand it over**, in the order it was released: what
+    /// waited to be prepared first, then what the keeper had not taken, then what the gathering
+    /// still held. Logs the keeper's counts where it keeps fragments, and returns the gathering's.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::accept`].
+    pub(crate) fn finish(mut self) -> Result<EdgeDeletionGatheringCounts, RunError> {
+        let mut released = std::mem::take(&mut self.kept);
+        let mut gathered = std::mem::take(&mut self.gathered);
+        gathered.extend(self.gathering.finish());
+        self.keeper.accept_batch(gathered, &mut released);
+        self.keeper.finish(&mut released);
+        if self.keeper.keeps_fragments() {
+            crate::run::fragment_keeper::log_counts(self.keeper.counts());
+        }
+        match self.batching {
+            ReleaseBatching::OneAtATime => {
+                Self::hand_over_in_order(released.into_iter(), self.prepare, self.hand_over)?;
+            }
+            ReleaseBatching::Batched {
+                prepared_a_batch, ..
+            } => {
+                let mut released = released.into_iter();
+                loop {
+                    let batch: Vec<_> = released.by_ref().take(prepared_a_batch).collect();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    let loci: Vec<_> = batch.iter().map(|(record, ..)| record.region()).collect();
+                    let prepared = prepare_on_the_pool(batch, self.prepare);
+                    for (locus, prepared) in loci.into_iter().zip(prepared) {
+                        prepared
+                            .and_then(|(ready, windows)| (self.hand_over)(ready, &windows))
+                            .map_err(|source| RunError::RecordNotWritten {
+                                locus,
+                                source: Box::new(source),
+                            })?;
+                    }
+                }
+            }
+        }
+        Ok(self.gathering.counts())
+    }
+
+    /// Prepare and hand over each of `records` on this thread, in order.
+    fn hand_over_in_order(
+        records: impl Iterator<Item = KeptRecord<Vec<WindowCoverage>>>,
+        prepare: &Prepare,
+        hand_over: &mut HandOver,
+    ) -> Result<(), RunError> {
+        for (record, windows, fragments) in records {
+            let locus = record.region();
+            prepare(record, &windows, fragments)
+                .and_then(|ready| hand_over(ready, &windows))
+                .map_err(|source| RunError::RecordNotWritten {
+                    locus,
+                    source: Box::new(source),
+                })?;
+        }
+        Ok(())
+    }
+}
 
 /// The merge's cache over `sources`, telling `prefetch` where every cover begins when there is
 /// one. **The prefetch moves into the hook**, so it stops when the calling pass drops the cache.

@@ -85,6 +85,7 @@ use super::explain::{
     ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows,
     ssr_evidence_rows, too_wide_rows,
 };
+use super::psp_caller::{RecordRelease, ReleaseBatching};
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
     base_before_left_flank, evidence_for_output, padding_base_beside, read_alleles_for_record,
@@ -786,55 +787,34 @@ impl AlignedFilesVariantCaller {
             sources,
             window_coverage_histograms,
         } = {
-            // Every finished record passes the gathering of the calls before it is handed over
-            // (`str_edge_deletion_alleles.md` §6), as in psp mode.
-            let mut gathering =
-                crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
-            // Then the fragment keeper (read phase spec §2.4), as in psp mode: one that keeps
-            // nothing where the output reads no fragments.
-            let mut keeper =
-                crate::run::fragment_keeper::FragmentKeeper::for_a_run(gathers_fragments);
-            let mut kept = Vec::new();
+            // **Every finished record passes the chain both modes share** ([`RecordRelease`]):
+            // the gathering of the calls (`str_edge_deletion_alleles.md` §6), then the fragment
+            // keeper (read phase spec §2.4), here one record at a time on this thread.
+            let prepare = |record: VcfRecord, _: &[WindowCoverage], fragments: RecordFragments| {
+                Ok::<_, E>((record, fragments))
+            };
+            let mut take = |(record, fragments): (VcfRecord, RecordFragments),
+                            windows: &[WindowCoverage]| {
+                hand_over(&record, windows, fragments)
+            };
+            let mut release = RecordRelease::new(
+                gathers_fragments,
+                ReleaseBatching::OneAtATime,
+                &prepare,
+                &mut take,
+            );
             let outcome = call_cohort_from_sources_handing_each_record_over(
                 ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
                 inputs,
                 genotyper,
-                &|record, _| Ok::<_, E>(record),
-                // **A refusal is named at the record refused**, which the gathering and the keeper
-                // may have held back past several later loci — not at the locus just called.
-                &mut |record: VcfRecord, windows| {
-                    for (record, windows) in gathering.accept(record, windows.to_vec()) {
-                        keeper.accept(record, windows, &mut kept);
-                        for (record, windows, fragments) in kept.drain(..) {
-                            hand_over(&record, &windows, fragments).map_err(|source| {
-                                RunError::RecordNotWritten {
-                                    locus: record.region(),
-                                    source: Box::new(source),
-                                }
-                            })?;
-                        }
-                    }
-                    Ok(())
+                &|record, _| Ok::<_, std::convert::Infallible>(record),
+                &mut |record: VcfRecord, windows: &[WindowCoverage]| {
+                    release.accept(record, windows.to_vec())
                 },
             )?;
-            let mut released = Vec::new();
-            for (record, windows) in gathering.finish() {
-                keeper.accept(record, windows, &mut released);
-            }
-            keeper.finish(&mut released);
-            if keeper.keeps_fragments() {
-                crate::run::fragment_keeper::log_counts(keeper.counts());
-            }
-            for (record, windows, fragments) in released {
-                hand_over(&record, &windows, fragments).map_err(|source| {
-                    RunError::RecordNotWritten {
-                        locus: record.region(),
-                        source: Box::new(source),
-                    }
-                })?;
-            }
+            let gathering = release.finish()?;
             let mut outcome = outcome;
-            outcome.calling.after_gathering(gathering.counts());
+            outcome.calling.after_gathering(gathering);
             outcome
         };
         Ok(WrittenCohort {
