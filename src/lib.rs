@@ -58,14 +58,13 @@
 //! were `src/pileup/`, `src/psp/`, `src/var_calling/`, `src/ssr/`, `src/vcf/` and their neighbours
 //! (`src/psp/` and `src/vcf/` now hold this crate's own modules of those names). ng
 //! copied production's code wherever it needed one of its behaviours, changed its own copy, and
-//! checked the copies against production in tests. Promotion Milestone C froze every answer those
-//! tests compared against into fixtures — production's answers as its code stood at commit
-//! `d9e7b076` — and Milestone D deleted production
-//! (`doc/devel/implementation_plans/promote_ng_to_production.md`). So a comment that says
-//! "production's", "ported from" or "copied from" means that caller, and its source is whole at
-//! commit `74e424ea`, the last before the deletion. Milestone E moved ng's modules from `src/ng/`
-//! up to the crate root; the design documents keep the name (`doc/devel/ng/`), and a comment that
-//! says "ng" means this caller.
+//! checked the copies against production in tests. Before production was deleted, every answer
+//! those tests compared against was frozen into fixtures — production's answers as its code stood
+//! at commit `d9e7b076` (`doc/devel/implementation_plans/promote_ng_to_production.md`). So a
+//! comment that says "production's", "ported from" or "copied from" means that caller, and its
+//! source is whole at commit `74e424ea`, the last before the deletion. ng's modules then moved
+//! from `src/ng/` up to the crate root; the design documents keep the name (`doc/devel/ng/`), and
+//! a comment that says "ng" means this caller.
 //!
 //! ## Feature flags
 //!

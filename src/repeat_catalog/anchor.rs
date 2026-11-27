@@ -13,8 +13,8 @@
 //! a point.
 //!
 //! **`#[cfg(test)]` in-crate, not `tests/`, for one reason:** the golden catalog's reader is
-//! `pub(crate)` and production is frozen (`typed_regions.md`, Revision), so an out-of-crate
-//! test cannot open the oracle at all. It still consumes only what a caller could.
+//! `pub(crate)` and test-only, so an out-of-crate test cannot open the oracle at all. It still
+//! consumes only what a caller could.
 //!
 //! What it asserts:
 //!
@@ -255,7 +255,7 @@ fn on_contig(regions: &[TypedRegion], contig: ContigId) -> Vec<TypedRegion> {
 /// the Parquet encoding, and the reader.
 #[test]
 fn the_catalog_reproduces_the_golden_catalog_through_the_shipping_stack() {
-    // Read by ng's own reader of the golden file since promotion step C19.
+    // Read by ng's own reader of the golden file (`crate::golden_catalog`).
     let catalog = crate::golden_catalog::golden_catalog();
     let cat_params = catalog.settings;
     let golden = catalog.loci;

@@ -57,8 +57,9 @@
 //! **It compares VCFs, so a stored locus that produces no record is not compared.** 578 of the
 //! fixture's 581 stored loci per sample carry no variant, and a psp route that dropped one of
 //! them would pass — the file has no record there either way. What holds the psp equal to the
-//! walk *field for field* is Milestone B's own oracle
-//! (`examples/ng_psp_gather_oracle.rs`), not this one.
+//! walk *field for field* was the psp gather oracle, `examples/ng_psp_gather_oracle.rs`, deleted
+//! with the code no subcommand reaches (commit `0f9281c5`). Look for a replacement before relying
+//! on this test for a change to what a psp stores.
 //!
 //! **A defaults run cannot see which read group a read belongs to**, because every group is
 //! then scored with the same numbers — so under `--defaults` alone a psp route that dropped the
@@ -157,7 +158,7 @@ mod tests {
     ///
     /// **The psps are named one by one in the order the alignment files were**, so both routes
     /// put the sample columns in one order. Whether *any* order gives the same calls is spec
-    /// §12.6's question and step F3's, not this one's.
+    /// §12.6's question, answered in `run_driver_psp_mode.md` step F3, not this one's.
     fn called_from_psps(cohort: &AVaryingCohort, output: &Path, samples: &[&str]) -> Vec<String> {
         // **The first route's file goes before the second route runs.** Without this the
         // comparison below can read one file twice and pass with the psp route writing nothing
@@ -226,7 +227,7 @@ mod tests {
     ///
     /// **The psps are named one by one in the order the alignment files were**, so both routes
     /// put the sample columns in one order. Whether *any* order gives the same calls is spec
-    /// §12.6's question and step F3's, not this one's.
+    /// §12.6's question, answered in `run_driver_psp_mode.md` step F3, not this one's.
     fn psps_args(
         cohort: &AVaryingCohort,
         output: &Path,

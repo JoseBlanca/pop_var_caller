@@ -13,7 +13,7 @@
 //! where ng takes a span of a larger file rather than a whole one, because production keeps this
 //! type in the same file as its spill-streaming driver, which ng does not want. Everything below
 //! the `use` is that span, line for line and byte for byte but for **seven** lines a textual guard
-//! (`copy_fidelity.rs`, deleted at promotion step C3) declared and checked: one path into
+//! (`copy_fidelity.rs`, deleted with production) declared and checked: one path into
 //! production, one rustdoc link to the driver ng leaves behind, and five items whose `pub(crate)`
 //! is widened to `pub` because ng re-exports them from a public module and a `pub use` cannot
 //! re-export a crate-private item. The file was guarded there like every other copy. Since

@@ -1,8 +1,8 @@
 //! `pvc` binary entry point. Parses the top-level command line and dispatches to the
 //! subcommand's driver; the logic lives in `src/cli/`, so this file is intentionally thin. Errors
-//! are rendered through the library's `format_error_chain` (spec T7a). This was the
-//! `pop_var_caller_exp` binary, `src/main_exp.rs`, until promotion step E2 gave it the name the
-//! deleted production binary had.
+//! are rendered through the library's `format_error_chain` (`typed_regions_cli.md`, T7a). This
+//! was the `pop_var_caller_exp` binary, `src/main_exp.rs`, until the older caller was deleted; it
+//! then took that caller's name, `pop_var_caller`, and was later renamed `pvc`.
 
 use std::process;
 

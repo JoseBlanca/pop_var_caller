@@ -40,7 +40,7 @@
 //! **one function no longer is**: [`log_add_exp`] skips its `log1p` where the series of
 //! `ln(1 + x)` is already exact in the sum it goes into. `log1p` was 52.6% of the
 //! hidden-duplication filter's scoring pass and that pass was 31% of a `call-from-psps` run.
-//! The textual guard released this file (and was itself deleted at promotion step C3); **what
+//! The textual guard released this file (and was itself deleted with production); **what
 //! replaced the textual guarantee is the numeric one**, below. The model's constants are the
 //! tomato2 prototype's, inherited and **not re-measured**
 //! (`doc/devel/ng/spec/hidden_paralog_filter.md` §3.2, plan step A2).
@@ -677,12 +677,12 @@ fn ln_normal(x: f64, mu: f64, sigma: f64) -> f64 {
 /// `ln(1 + x)` by less than `x⁴/4`, which at the threshold here is under 1e-16 — below half a
 /// unit in the last place of the sum for any log-likelihood of magnitude 1 or more.
 ///
-/// **Below half a unit in the last place is not the same as identical, and the test says which
-/// it is.** An error that small still moves the rounded answer where the exact one sits within
-/// it of a boundary, so the two spellings land on the same `f64` or on its neighbour, never
-/// further: [`the_series_shortcut_lands_on_log1ps_double_or_its_neighbour`] sweeps `x` from the
-/// threshold down to the smallest normal double against eight magnitudes of `hi` and measures
-/// **fewer than 1 pair in 500** landing on the neighbour.
+/// **Below half a unit in the last place is not the same as identical, and the test says which it
+/// is.** An error that small still moves the rounded answer where the exact one sits within it of a
+/// boundary, so the two spellings land on the same `f64` or on its neighbour, never further: the
+/// test `the_series_shortcut_lands_on_log1ps_double_or_its_neighbour` sweeps `x` from the threshold
+/// down to the smallest normal double against eight magnitudes of `hi` and measures **fewer than 1
+/// pair in 500** landing on the neighbour.
 ///
 /// **On the inputs a real cohort produces it does not move at all**, which is the claim that
 /// matters and is measured next door: `production_parity`'s differential scores 800 randomised loci

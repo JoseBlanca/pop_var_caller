@@ -44,11 +44,11 @@ use crate::tandem_repeat::{
 use crate::types::{Bp, ContigId, GenomeRegion};
 
 /// The buffer the typed-regions table is written through: 64 KiB, production's
-/// `pop_var_caller::common::DEFAULT_BUFFERED_IO_CAPACITY`, copied at promotion step C15.
+/// `pop_var_caller::common::DEFAULT_BUFFERED_IO_CAPACITY`, copied when production was deleted.
 const DEFAULT_BUFFERED_IO_CAPACITY: usize = 64 * 1024;
 
 /// `type-regions` arguments — the authoritative knob list; `run_typed_regions`
-/// (Milestone E) translates it into a `TypedRegionConfig`. Every knob defaults
+/// translates it into a `TypedRegionConfig`. Every knob defaults
 /// to the library `pub const` that defines it, so the CLI's `Default` tracks the
 /// short-read settings ng ships (spec §2.1, §2.3).
 ///
@@ -500,7 +500,7 @@ pub struct WalkInputs {
     pub verify: Option<VerificationHandle>,
 }
 
-/// Narrow the reference's contig lengths to the `u32` a [`RegionSet`] needs,
+/// Narrow the reference's contig lengths to the `u32` a [`RegionSet`](crate::regions::RegionSet) needs,
 /// **failing rather than folding** (spec T2).
 ///
 /// `ContigEntry::length` is `u64`; `ContigBounds::length` is `u32`. The only
@@ -1093,7 +1093,7 @@ mod tests {
         )
     }
 
-    /// **THE ROUND-TRIP ORACLE (plan C2, spec §7).** Format each kind, parse the
+    /// **THE ROUND-TRIP ORACLE (spec §7).** Format each kind, parse the
     /// row back, and assert it equals the input field for field — including a
     /// bundle, without which the member coordinates are never exercised.
     ///
@@ -1711,11 +1711,11 @@ mod tests {
         (inputs.contigs, regions)
     }
 
-    /// **THE ROUND-TRIP, on a real reference through the whole stack** (plan E2,
-    /// spec §7): the rows written to the file parse back equal, field for field,
-    /// to what the iterator itself emitted — including a bundle's members.
+    /// **THE ROUND-TRIP, on a real reference through the whole stack** (spec §7): the rows written
+    /// to the file parse back equal, field for field, to what the iterator itself emitted —
+    /// including a bundle's members.
     ///
-    /// C2's oracle pinned the formatter against hand-derived expectations; this
+    /// The round-trip oracle above pins the formatter against hand-derived expectations; this
     /// pins the *file* against the *walk*, so a dropped row, a header line
     /// miscounted as a row, or a truncated write is caught too.
     #[test]

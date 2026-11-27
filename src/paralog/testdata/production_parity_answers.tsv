@@ -1,4 +1,4 @@
-# Production's answers for src/ng/paralog/production_parity.rs — frozen at promotion plan step C4.
+# Production's answers for src/paralog/production_parity.rs — frozen before production was deleted.
 #
 # Every value below was computed by production's paralog filter — src/paralog/ and
 # src/var_calling/paralog_filter/calibrate.rs — at commit d9e7b076, on the inputs the named

@@ -1,6 +1,6 @@
 //! **Production's catalog post-filter, copied** — `src/ssr/catalog/postprocess.rs` at commit
-//! `d9e7b076`. Promotion step C12 moved it into `scanner_parity.rs` when production's deletion would
-//! otherwise have taken the golden path's second half with it, and step C24 moved it here so that
+//! `d9e7b076`. It was copied into `scanner_parity.rs` so production's deletion would not take the
+//! golden path's second half with it, and then moved here so that
 //! `region_typing::segment_criteria`'s port-fidelity differential can compare against it too.
 //!
 //! The code below is production's, line for line, with three changes and no others: it takes the

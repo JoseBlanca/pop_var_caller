@@ -768,7 +768,7 @@ fn a_file_holding_several_of_a_samples_read_groups_is_listed_once() {
 }
 
 // ---------------------------------------------------------------------
-// C2 — what the run says about itself
+// What the run says about itself
 // ---------------------------------------------------------------------
 
 /// **The report names every sample, what it stored, and how much of the ground it could
@@ -854,7 +854,7 @@ fn the_reports_sample_line_carries_what_that_sample_stored() {
 }
 
 // ---------------------------------------------------------------------
-// C3 — a psp already there, and what a stopped run leaves
+// A psp already there, and what a stopped run leaves
 // ---------------------------------------------------------------------
 
 /// **A second run refuses rather than replacing a psp**, naming the sample, the file and the

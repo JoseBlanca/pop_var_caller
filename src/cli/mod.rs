@@ -4,8 +4,9 @@
 //!
 //! This was `pop_var_caller_exp`, ng's experiment binary, kept apart from the production
 //! `pop_var_caller` binary so that ng's experiment knobs never grew it
-//! (`doc/devel/ng/spec/typed_regions_cli.md` §2). Promotion step E2 renamed the binary and moved
-//! this module from `src/pop_var_caller_exp/`; the subcommands kept their names.
+//! (`doc/devel/ng/spec/typed_regions_cli.md` §2). When production was deleted, the binary took
+//! its name (since renamed `pvc`) and this module moved from `src/pop_var_caller_exp/`; the
+//! subcommands kept their names.
 
 pub mod call_from_alignments;
 pub mod call_from_psps;

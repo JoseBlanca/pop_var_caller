@@ -194,7 +194,7 @@ pub(crate) fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usi
     compared_records_where(records, sample, |_| true)
 }
 
-/// [`compared_records`] among the records `walked` admits: those a window with thinned margins
+/// `compared_records` among the records `walked` admits: those a window with thinned margins
 /// walks (pass spec §6, thinned margins).
 pub(crate) fn compared_records_where(
     records: &[SiteRecord],

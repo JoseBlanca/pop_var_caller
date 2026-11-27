@@ -165,7 +165,7 @@ struct TractSpan {
 }
 
 // ---------------------------------------------------------------------
-// The interval finder (Milestone B) — lag-p scoring + Ruzzo–Tompa
+// The interval finder — lag-p scoring + Ruzzo–Tompa
 // ---------------------------------------------------------------------
 
 /// Whether `motif` is **primitive** — it does not tile under any shorter period that

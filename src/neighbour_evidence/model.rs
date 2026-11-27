@@ -740,7 +740,7 @@ impl From<Vec<HaplotypePair>> for PathHaplotypes {
 }
 
 /// **Every site's joint of the two copies' alleles along one path**, `A × A` numbers a site in one
-/// array, and whether the site has one (`None` in [`joint_along`]'s terms). Kept across a walk's
+/// array, and whether the site has one (`None` where a site has no joint). Kept across a walk's
 /// paths and refilled for each.
 #[derive(Default)]
 struct Joints {
@@ -2011,7 +2011,7 @@ fn copies_into(
     }
 }
 
-/// **The joint of [`copies_along`] at one site**, normalised to sum to one, written over `joint`,
+/// **The joint of `copies_along` at one site**, normalised to sum to one, written over `joint`,
 /// `A × A` zeros; `false` where every allele pair is ruled out.
 fn joint_into(
     state: State,
