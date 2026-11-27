@@ -2,7 +2,9 @@
 
 pvc writes one VCF (version 4.4) holding SNPs, indels and STRs, in genome order. A site appears
 only if at least one sample is called with an alternative allele, and its QUAL reaches
-`--min-site-quality` (1 by default).
+`--min-site-quality` (1 by default). pvc writes no invariant sites and no gVCF: a position
+where every sample matches the reference is not in the file, so the file cannot tell such a
+position from one with no reads. What the reads showed there is kept in the psp files.
 
 ## Header
 
@@ -12,20 +14,42 @@ Besides the usual lines, the header records how the file was made:
 |---|---|
 | `##source=pvc <version>` | the pvc version |
 | `##commandline=` | the command as typed |
+| `##reference=` | the path of the reference FASTA the run was called against |
 | `##pvcLog=` | the name of the run's log file, which holds every warning and the parameter values used |
 | `##pvcParameters=` | `defaults`, or the parameters file's name and MD5 checksum |
+| `##contig=` | one line per contig of the reference, with its length and, where pvc has it, its MD5 checksum |
 | `##paralogFilter=` | the hidden-duplication filter's settings and results, when it ran (the default) |
-| `##neighbourEvidence=` | whether the neighbour-evidence pass ran and why, and its settings when it did ([Genotypes from neighbouring sites](neighbour_evidence.md)) |
-| `##readBackedPhase=` | at ploidy two where the neighbour-evidence pass did not run: the settings the phase from reads was written with ([Phase from reads](#phase-from-reads)) |
+| `##neighbourEvidence=` | whether the refinement ran and why, and its settings when it did ([Genotypes from neighbouring sites](neighbour_evidence.md)) |
+| `##readBackedPhase=` | at ploidy two where the refinement did not run: the settings the phase from reads was written with ([Phase from reads](#phase-from-reads)) |
 
 ## QUAL and GQ
 
-- **QUAL**: the Phred-scaled probability that no sample in the cohort carries any alternative
-  allele at the site, after subtracting three penalties for looking like a sequencing artifact
-  (`ABPEN`, `SPPEN` and `BQPEN`, below). A QUAL of 20 means a 1 in 100 chance that the site is not
-  variable at all. It is at least 0 and at most 9999. QUAL does not grow with the number of
-  samples that match the reference.
+- **QUAL** starts as the Phred-scaled probability that no sample in the cohort carries any
+  alternative allele at the site, given all the reads. At that stage a value of 20 means a 1 in
+  100 chance that the site is not variable at all. Samples without reads do not change it. pvc
+  then subtracts three penalties, each a test of whether the alternative reads look like a
+  sequencing or mapping artifact, and writes what is left, at least 0 and at most 9999. **The
+  written QUAL is therefore a score, not a probability**: it ranks sites, and it keeps the
+  probability reading only where every penalty is 0. When QUAL is not 0, `QUAL + ABPEN + SPPEN +
+  BQPEN` is the value before penalties.
 - **GQ**: the Phred-scaled probability that this sample's genotype is wrong, at most 99.
+
+### The three penalties
+
+Each penalty compares the reads of the site's main alternative allele, pooled over the samples
+with a genotype, with what a real variant would show, and charges the Phred-scaled probability of
+a result at least that far from it. Each is 0 when the reads look as expected, and grows with
+the number of reads when they do not. STR records carry none.
+
+| Penalty | Applies when | What it compares | Size |
+|---|---|---|---|
+| `ABPEN`, allele balance | there are fewer alternative reads than the called genotypes predict (each heterozygote half its reads, a homozygote all of them); not where they predict 90% or more | the alternative reads against that share, a two-sided binomial test | the test's Phred, with no limit on the number of reads |
+| `SPPEN`, strand and read position | 4 or more alternative reads | the share of alternative reads on the forward strand, and the share placed mostly left of the site, each against the reference reads' share at the same site (beta-binomial tests, the reference share given a prior worth 10 reads) | 4 times the larger of the two Phreds; a quarter of that at 4 alternative reads, rising to the whole at 7 |
+| `BQPEN`, low base quality | 4 or more alternative reads, and `--low-base-quality-weight` above 0 | the share of alternative reads with a base quality below 20 against the reference reads' share (a one-sided beta-binomial test, prior worth 30 reads at 2 in 100); only an excess is charged | the test's Phred times `--low-base-quality-weight` (1 by default), with the same ramp from 4 to 7 reads as `SPPEN` |
+
+`SPPEN` is weighted 4 times because QUAL grows by about 30 with each alternative read and the
+test's Phred by only a few, so at a weight of one a lopsided artifact would pass at any depth.
+[Methods § QUAL and GQ](methods.md#9-qual-and-gq) gives the reasoning.
 
 ## INFO
 
@@ -44,8 +68,7 @@ Besides the usual lines, the header records how the file was made:
 | `PARALOG_LR`, `PARALOG_POST` | the hidden-duplication filter's evidence, and its probability that the site is a hidden duplication |
 
 `ABPEN`, `SPPEN` and `BQPEN` appear only when there were reads to test, and `BQPEN` only when
-`--low-base-quality-weight` is not 0. When QUAL is not 0, `QUAL + ABPEN + SPPEN + BQPEN` is the
-quality before penalties.
+`--low-base-quality-weight` is not 0.
 
 ## FORMAT
 
@@ -55,15 +78,18 @@ quality before penalties.
 | `GQ` | genotype quality (above) |
 | `DP` | every read of this sample at the locus. `DP` minus the sum of `AD` is the reads that match no written allele: stutter, noise, alleles left out |
 | `AD` | reads that match each allele exactly, reference first |
+| `PL` | genotype likelihoods: for each genotype, in the VCF's genotype order, the probability of the sample's reads under that genotype, Phred-scaled so that the most likely genotype is 0. No prior is in it, but where contamination was estimated the contamination term is ([Methods § 4](methods.md#4-region-types-and-their-read-models)) |
+| `GP` | genotype posteriors, in the same order, to three decimals: the likelihoods times the genotype prior, which is built from the other samples' genotypes and the sample's inbreeding coefficient ([Methods § 8](methods.md#8-calling)). Where the refinement ran, its posterior, and the header's `GP` line says so |
 | `REPCN` | STR records: each called allele's length in repeat units, in `GT` order |
 | `REPCNB` | STR-bundle records: each called allele's copies in every repeat of the bundle, joined by `_`, for example `20_8_8,21_8_8` |
 | `PS` | phase set, at ploidy two: the position of the first record of the block a phased genotype belongs to, `.` where the genotype is not phased |
 
 **A sample whose reads cannot tell the genotypes apart is not called** (`./.`, with `GQ` as `.`),
-and this includes samples with no reads. Its `DP` and `AD` are still written if it had reads. A
-sample is never called homozygous reference just because it has no evidence. A sample is also
-not called when an allele its own reads supported was among those left out at a site with too
-many alleles (`--max-generic-alleles`).
+and this includes samples with no reads. Its `DP` and `AD` are still written if it had reads; its
+`PL` is all 0 and its `GP` is the prior alone. A sample is never called homozygous reference just
+because it has no evidence. A sample is also not called when an allele its own reads supported
+was among those left out at a site with too many alleles (`--max-generic-alleles`); its `PL` and
+`GP` are then `.`.
 
 ## Phase from reads
 
@@ -71,18 +97,17 @@ At ploidy two, pvc writes the phase the reads show. A read pair comes from one m
 covers two heterozygous sites of a sample, the alleles it shows there lie on one chromosome copy.
 Two heterozygous genotypes are written phased together, `0|1` or `1|0` with one `PS`, when at least
 two read pairs that cover both agree on how, at odds of 199 to 1 or more. The odds allow for each
-base's quality, and never take a base's error to be below 1 in 100, whatever its quality says. Only `PASS` genotypes with
-`GQ` 30 or more are phased this way, because a genotype that is wrongly heterozygous gives a
+base's quality, and never take a base's error to be below 1 in 100, whatever its quality says.
+Only `PASS` genotypes with `GQ` 30 or more are phased this way, because a genotype that is wrongly heterozygous gives a
 confident link in a random direction. **Genotypes of one sample with the same `PS` are phased
 together**; nothing is said about two different `PS` values. A genotype linked to nothing is left
 unphased.
 
-Where the [neighbour-evidence pass](neighbour_evidence.md) runs, the reads are combined with the
-phase it estimates from the cohort, and its page says how. Elsewhere — one sample, a cohort the
-pass does not run on, or `--refine-genotypes off`, the default — the phase comes from the reads
-alone. Read
-pairs reach about a kilobase, so the phase sets are short: they join neighbouring heterozygotes,
-not whole genes. STR records are never phased from reads.
+Where the [refinement](neighbour_evidence.md) runs, the reads are combined with the phase it
+estimates from the cohort, and its page says how. Elsewhere — one sample, a cohort the
+refinement does not run on, or `--refine-genotypes off`, the default — the phase comes from the
+reads alone. Read pairs reach about a kilobase, so the phase sets are short: they join
+neighbouring heterozygotes, not whole genes. STR records are never phased from reads.
 
 How much is phased depends on depth and on how close the heterozygotes are. Measured on GIAB's
 HG002 in 100 random regions (452 kb), the phase scored against the one its parents' genotypes

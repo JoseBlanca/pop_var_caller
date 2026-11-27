@@ -6,10 +6,14 @@ inbred each sample is, how often a repeat stutters. pvc estimates them from your
 
 ## What is estimated
 
+The table lists the numbers calling uses. The fit estimates a few more that calling does not
+use, and some numbers are fixed rather than estimated; [Methods § 6](methods.md#6-parameters-estimated-from-the-data)
+lists both.
+
 | Quantity | For each | What it changes |
 |---|---|---|
 | Base-quality calibration: a correction to the error rates the sequencer reports | read group | how much a base that disagrees with the genotype counts against it |
-| Contamination: the share of reads that came from another individual | read group (a read group with too little data gets 0) | a few reads of another allele are less likely to be called a heterozygote |
+| Contamination: the share of reads that came from another individual | read group (one the fit cannot measure is treated as uncontaminated) | a few reads of another allele are less likely to be called a heterozygote |
 | Inbreeding coefficient F | sample | how likely a homozygote is compared with a heterozygote |
 | Population diversity | run | how likely a site is to be variable before the reads are seen |
 | Stutter rates | class of repeat (unit length × number of copies) | how many reads a unit short or long a genotype is expected to produce |
@@ -18,11 +22,12 @@ inbred each sample is, how often a repeat stutters. pvc estimates them from your
 
 **Inbreeding, and how much allele lengths spread between repeats, need a cohort.** One genome
 alone cannot show whether it carries too few heterozygotes, so with one sample F is set to 0 and
-marked as such in the file. If you prefer another value, state it with
+marked `defaulted` in the file. If you prefer another value, state it with
 `estimate-parameters --inbreeding F`.
 
 With one sample, pvc estimates which lengths each class of repeat carries, but not how much that
-varies from one repeat to the next; it holds those lengths at a between-repeat share of 1/2,
+varies from one repeat to the next. That variation is written as the *between-repeat share*, a
+number between 0 and 1 that grows as the lengths vary more; with one sample it is held at 1/2,
 marked `defaulted`. A class with no estimate at all gets the median of the run's other classes,
 or, when the run estimated none (as with one sample), an even spread at 1/11, as with
 `--defaults`.
@@ -34,10 +39,10 @@ or, when the run estimated none (as with one sample), an even spread at 1/11, as
 | base-quality calibration | every base's reported error probability is doubled (about 3 Phred lower), on the assumption that the sequencer's qualities are optimistic. The factor of 2 was chosen on three human Illumina genomes; a fitted file measures it for your own libraries |
 | contamination | none |
 | inbreeding F | 0, for every sample: outbred, Hardy–Weinberg proportions |
-| stutter | 1 read in 20 a unit short and 1 in 20 a unit long, for every repeat |
+| stutter | HipSTR's built-in values: 1 read in 20 a unit short and 1 in 20 a unit long, and 1 in 100 a part of a unit short and 1 in 100 long, for every repeat |
 | spread of allele lengths between repeats | a between-repeat share of 1/11 |
 | substitution rate inside repeats | 1 base in 1,000 |
-| weight given to a read that fits no allele at a repeat | 0.07 |
+| weight given to a read that fits no allele at a repeat | 0.07, a fixed value that no fit estimates |
 
 ## Reading the file
 
@@ -53,6 +58,12 @@ substitution rate inside repeats, and the weight of a read that fits no allele a
 
 Contamination appears only for read groups where it was estimated. A read group with no row is
 treated as uncontaminated.
+
+A number the fit measured also carries a `standard_error` where one could be computed: how far
+the number would typically move if the same kind of data were drawn again. No `standard_error`
+does not mean an error of zero: nothing determined the number, or no error is computed for it. If
+you edit a number, delete its `standard_error` too. The comments the file carries explain each
+section.
 
 ## Changing a value
 

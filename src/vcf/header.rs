@@ -631,7 +631,7 @@ const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Fl
 
 /// `GP`'s declaration where the neighbour-evidence pass rewrote it (`neighbour_evidence_pass.md`
 /// §4.1).
-const REFINED_GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">"#;
+const REFINED_GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after refinement (imputation), VCF genotype order">"#;
 
 /// **Every `FORMAT` field the file can carry, declared** — spec §7.
 const FORMAT_DECLARATIONS: &[&str] = &[

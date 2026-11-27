@@ -9,6 +9,17 @@
 - **Loci deeper than `--max-depth`** (1,000 reads a position in any read group), because such
   depth usually comes from collapsed duplications.
 
+## What pvc does not write or support
+
+- **No invariant sites and no gVCF.** A site is written only if at least one sample carries an
+  alternative allele. For statistics that need the callable sites, such as nucleotide diversity
+  (π), take them from elsewhere, for instance a depth mask.
+- **Estimated parameters only for diploids.** pvc calls any ploidy from 1 to 16, but
+  `estimate-parameters` refuses a ploidy other than 2; call other ploidies with `--defaults`.
+  Imputation (`--refine-genotypes`) also runs on diploid samples only.
+- **Long reads are untested.** pvc has been built and benchmarked on Illumina short reads. It
+  does not refuse PacBio or Oxford Nanopore reads, but its models have not been checked on them.
+
 ## Limits
 
 | Limit | Value |

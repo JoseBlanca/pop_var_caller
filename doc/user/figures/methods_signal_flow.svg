@@ -119,7 +119,7 @@
   </g>
 
   <g text-anchor="middle">
-    <text x="579" y="486" font-weight="bold">Neighbour-evidence pass</text>
+    <text x="579" y="486" font-weight="bold">Refinement (imputation)</text>
     <text x="579" y="507">each sample's genotype likelihoods, weighed against the haplotypes</text>
     <text x="579" y="524">the other samples carry along the chromosome</text>
     <text x="579" y="545">corrects low-depth genotypes, fills some genotypes that had no reads,</text>
