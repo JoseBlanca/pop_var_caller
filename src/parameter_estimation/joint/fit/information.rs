@@ -56,8 +56,8 @@
 //! # Which parameters a sample carries
 //!
 //! **Each library's reads are scored under that library's own two error rates**
-//! ([`one_position`](super::one_position)); a sample's libraries share its genotype and nothing
-//! else. So a sample read from `k` libraries carries `1 + 2k` parameters of its own: its
+//! ([`one_position`](super::expectation::one_position)); a sample's libraries share its genotype
+//! and nothing else. So a sample read from `k` libraries carries `1 + 2k` parameters of its own: its
 //! homozygote excess, and each library's clean and mismapped error rates.
 //!
 //! A library's rate's slope at a position is its own reads' slope in that rate, weighted by the
@@ -77,8 +77,9 @@
 
 use crate::float;
 
-use super::{
-    BetaQuadrature, BranchShares, MAX_CANDIDATES, PassModel, Scratch, candidate_read_probability,
+use super::BetaQuadrature;
+use super::expectation::{
+    BranchShares, MAX_CANDIDATES, PassModel, Scratch, candidate_read_probability,
     candidate_read_probability_slope, class_rate, expected_reference_reads,
     genotype_frequencies_slope_in_excess, genotype_frequencies_slope_in_frequency,
     reference_read_probability, reference_read_probability_slope,
@@ -318,8 +319,8 @@ const fn read_slope_index(
     ((class * MAX_CANDIDATES + candidate) * libraries + library) * 3 + genotype
 }
 
-/// Every parameter's slope at the position [`one_position`](super::one_position) has just
-/// scored, written into `into`.
+/// Every parameter's slope at the position
+/// [`one_position`](super::expectation::one_position) has just scored, written into `into`.
 ///
 /// **Reads the scratch `one_position` left behind and changes nothing in it**, so calling it or
 /// not calling it cannot move a fitted number; `model` must be the one `one_position` was given,
@@ -1073,14 +1074,18 @@ mod tests {
         DrawnCohort, DrawnLibrary, as_cohort, draw_cohort_of_libraries,
         draw_cohort_with_duplications,
     };
+    use crate::parameter_estimation::joint::fit::beta_quadrature::digamma;
+    use crate::parameter_estimation::joint::fit::expectation::{
+        MIN_POSITIONS_PER_CHUNK, PassKeeps, candidate_read_probability, expectation_pass,
+        fill_depth_weights, genotype_frequencies, one_position,
+    };
     use crate::parameter_estimation::joint::fit::standard_errors::{
         StandardError, StandardErrors, cohort_covariance, inverse_of_positive_definite,
     };
     use crate::parameter_estimation::joint::fit::{
         DensityReport, DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFit,
-        JointFitConfig, LibraryAtPosition, MAX_RECORDED_SPREAD, MIN_POSITIONS_PER_CHUNK,
-        Parameters, PassKeeps, Statistics, candidate_read_probability, digamma, expectation_pass,
-        fill_depth_weights, fit_jointly, genotype_frequencies, one_position,
+        JointFitConfig, LibraryAtPosition, MAX_RECORDED_SPREAD, Parameters, Statistics,
+        fit_jointly,
     };
 
     use super::*;

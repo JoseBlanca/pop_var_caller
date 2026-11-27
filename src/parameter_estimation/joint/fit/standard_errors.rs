@@ -3166,7 +3166,8 @@ mod tests {
     /// held only when exactly at its end never settled.
     #[test]
     fn a_rate_the_golden_section_leaves_beside_an_end_stops_there() {
-        use crate::parameter_estimation::joint::fit::{CLEAN_ERROR_BOUNDS, golden_section};
+        use crate::parameter_estimation::joint::fit::CLEAN_ERROR_BOUNDS;
+        use crate::parameter_estimation::joint::fit::maximisation::golden_section;
         let (low, high) = CLEAN_ERROR_BOUNDS;
         let beside = [
             golden_section(&|rate: f64| -rate, low, high),

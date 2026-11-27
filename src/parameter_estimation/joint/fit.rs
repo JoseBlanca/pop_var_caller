@@ -39,8 +39,8 @@
 //! Each iteration is meant not to lower the likelihood. Expectation-maximisation guarantees that
 //! for every update solved exactly, and a coordinate climb over a non-concave surface does not.
 //! The density's two shapes and the carrier Beta's take one step along the likelihood's own slope
-//! instead ([`step_beta_shapes`]); that the step does not lower it is measured
-//! (`plain_passes_never_lower_the_log_likelihood`), not guaranteed.
+//! instead ([`step_beta_shapes`](maximisation::step_beta_shapes)); that the step does not lower it
+//! is measured (`plain_passes_never_lower_the_log_likelihood`), not guaranteed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -61,20 +61,27 @@ use super::contamination::{
     ContaminationConfig, NotIdentifiedReason, SampleContaminationEstimates, fit_contamination_over,
     not_identified_anywhere,
 };
-use super::linear_algebra;
 
+mod beta_quadrature;
 mod determined;
+mod expectation;
 mod inbreeding;
 mod information;
+mod maximisation;
 mod settled;
 mod standard_errors;
 
+use beta_quadrature::BetaQuadrature;
 pub use determined::{
     DensityReport, DeterminedShare, DuplicatedReport, ReportedNumber, SEPARATION_LOG_LIKELIHOOD,
     STATED_FREQUENCY,
 };
+use expectation::{PassKeeps, expectation_pass_every, fill_depth_weights};
 pub use inbreeding::fitted_inbreeding_of;
-use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
+use information::InformationSums;
+use maximisation::{
+    GOLDEN_SECTION_WIDTH, fits_homozygote_excess, maximisation, samples_with_reads,
+};
 use settled::{
     AGREEMENT_FRACTION, DECREMENT_THRESHOLD, EarlierAnswer, SETTLED_FRACTION, agrees,
     describe_short_of_settled, furthest, has_converged, is_the_new_best, is_the_new_yardstick,
@@ -986,8 +993,8 @@ struct PositionEvidence {
     libraries: Vec<LibraryAtPosition>,
     /// Per library, `MAX_RECORDED_SPREAD` slots holding how much weight each depth in that
     /// library's range carries, relative to the shallowest — see
-    /// [`ln_reference_reads`]. Flat rather than per library so that one position's evidence is
-    /// one allocation reused over two million positions.
+    /// `expectation::ln_reference_reads`. Flat rather than per library so that one position's
+    /// evidence is one allocation reused over two million positions.
     depth_weights: Vec<f64>,
     /// Which non-reference bases any sample showed a read on. **The candidates the fit sums
     /// over are the three bases that are not the reference**, and the ones nobody showed a
@@ -1276,305 +1283,6 @@ impl<'a> EvidenceCursor<'a> {
     }
 }
 
-/// How many non-reference bases a position has, whatever the reference base is: three.
-const CANDIDATE_ALTERNATIVES: usize = 3;
-
-// ---------------------------------------------------------------------
-// The likelihood of one library's reads under one genotype
-// ---------------------------------------------------------------------
-
-/// `ln P(this library's reads | j of the sample's copies carry base k, the library's error rate
-/// ε)`. A sample's reads under a genotype are the sum of this over its libraries: the genotype is
-/// the sample's, the error rate each library's own.
-///
-/// A read is drawn from one of the individual's copies and may be misread into any of the
-/// other three bases, so the four bases form a multinomial with three distinct
-/// probabilities: the candidate allele, the reference base, and the two bases that are
-/// neither. The multinomial's coefficient is the same however the four categories are
-/// labelled, so it is the same for every genotype, every class **and every candidate
-/// allele**, and is dropped rather than computed.
-///
-/// The chance a read shows *anything* other than the reference base is
-/// `carried·(1 − ε/3) + (1 − carried)·ε`, which is
-/// [`alternative_read_probability`](crate::parameter_estimation::generic::noise_model)
-/// exactly — the two routes score a read the same way, which is what makes the comparison
-/// between them a comparison.
-/// **The reference-read term and the non-reference total are handed in rather than taken
-/// here**, because neither depends on which base the alternative is. [`ln_reference_reads`]
-/// reads the library, its depth weights and how many copies of the alternative the sample
-/// carries — and it is the one logarithm in this block — so the caller takes it once for the
-/// three copy counts and reuses it across every candidate allele and across the invariant branch
-/// beside them. Taken inside this function it was ten calls a library where three do.
-fn ln_reads_given_genotype(
-    library: &LibraryAtPosition,
-    non_reference: f64,
-    alt_copies: u8,
-    alternative: usize,
-    logs: &ReadLogs,
-    reference_term: f64,
-) -> f64 {
-    let copies = alt_copies as usize;
-    let candidate_reads = library.on[alternative];
-    // `Other` is neither the candidate nor the reference; it is held out of the model
-    // entirely, so the depth it occupied is removed with it.
-    let other_reads = non_reference - candidate_reads - library.on[4];
-
-    // **A count of zero needs no guard now.** `count_times_ln` branched on it only to keep
-    // `0 · −∞` out of the sum; the logarithms below are clamped at `MIN_POSITIVE` when they are
-    // built, so every one of them is finite and `0 · finite` is zero.
-    candidate_reads * logs.ln_candidate[copies] + other_reads * logs.ln_neither + reference_term
-}
-
-/// `ln P(this library's reads | every copy is the reference base)` — the term the invariant
-/// branch needs, and it does not depend on which base would have been the alternative. Its
-/// `reference_term` is the zero-copy entry of the same triple.
-fn ln_reads_given_all_reference(
-    library: &LibraryAtPosition,
-    non_reference: f64,
-    logs: &ReadLogs,
-    reference_term: f64,
-) -> f64 {
-    (non_reference - library.on[4]) * logs.ln_neither + reference_term
-}
-
-/// `ln P(the reference reads | the sample carries 0, 1 or 2 copies of the alternative)`.
-///
-/// **Candidate-invariant, which is why it is a function of its own.** Nothing in
-/// [`ln_reference_reads`] reads *which* base the alternative is — only the library's reference
-/// count, the depths its stored code allows and the per-copy probability from its read group's
-/// table — so one triple serves all three candidate alleles and the invariant branch.
-fn reference_terms(
-    library: &LibraryAtPosition,
-    depth_weights: &[f64],
-    logs: &ReadLogs,
-) -> [f64; 3] {
-    [
-        ln_reference_reads(
-            library,
-            depth_weights,
-            logs.reference[0],
-            logs.ln_reference[0],
-        ),
-        ln_reference_reads(
-            library,
-            depth_weights,
-            logs.reference[1],
-            logs.ln_reference[1],
-        ),
-        ln_reference_reads(
-            library,
-            depth_weights,
-            logs.reference[2],
-            logs.ln_reference[2],
-        ),
-    ]
-}
-
-/// Every logarithm the per-position kernel needs that depends on a read group's error rate
-/// rather than on the position.
-///
-/// **Built once for the whole pass**, for exactly the reason [`BetaQuadrature`] beside it is: an
-/// error rate is fixed for a pass, so `ln P(a read shows …)` is fixed with it. Taken per position
-/// it was up to eighteen logarithms a sample — two noise classes × three candidate alleles ×
-/// three genotypes — at every kept position of every pass.
-struct ReadLogs {
-    /// `ln P(a read shows the candidate allele)`, indexed by how many copies of it the sample
-    /// carries.
-    ln_candidate: [f64; 3],
-    /// `P(a read shows the reference base)` by the same index — the power series over a depth
-    /// range needs the probability itself and not only its logarithm.
-    reference: [f64; 3],
-    ln_reference: [f64; 3],
-    /// `ln P(a read shows one of the two bases that are neither)`. No genotype moves it.
-    ln_neither: f64,
-}
-
-impl ReadLogs {
-    fn of(error_rate: f64, ploidy: Ploidy) -> Self {
-        // The same clamp `count_times_ln` applied before taking a logarithm, so the table holds
-        // the values the per-call arithmetic held.
-        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
-        let mut ln_candidate = [0.0; 3];
-        let mut reference = [0.0; 3];
-        let mut ln_reference = [0.0; 3];
-        for copies in 0..3_usize {
-            let on_candidate = candidate_read_probability(copies as u8, ploidy, error_rate);
-            let on_reference = reference_read_probability(copies as u8, ploidy, error_rate);
-            ln_candidate[copies] = ln(on_candidate);
-            reference[copies] = on_reference;
-            ln_reference[copies] = ln(on_reference);
-        }
-        Self {
-            ln_candidate,
-            reference,
-            ln_reference,
-            ln_neither: ln(error_rate / 3.0),
-        }
-    }
-}
-
-/// How much weight each depth in a sample's range carries, relative to the shallowest.
-///
-/// # Why the depths in a range are not equally likely
-///
-/// Summing over the depths a stored code could stand for needs a statement about **which of
-/// them the position more probably had**, and *all of them equally* is not it. Two things pull
-/// the other way and they nearly cancel, which is why the answer is short: a deeper position
-/// has more ways to have produced the reads that were seen — the multinomial's own coefficient
-/// — and a deeper position is rarer, because a sample's read count at a position is a Poisson
-/// draw around its own coverage. Writing both down, the factorials cancel and what is left is
-/// that **the reference reads are themselves Poisson**, at this sample's coverage times the
-/// chance a read shows the reference base, cut to the depths the code allows.
-///
-/// So the weight on the `i`-th depth above the shallowest the code allows is
-/// `coverage^i / (fewest + i)!` divided through by the first, which needs no factorial: each
-/// step is one multiplication. Dividing through is a constant this sample contributes to every
-/// genotype alike, so it never has to be put back.
-///
-/// **Neither pull may be dropped.** With the coefficient alone the sum collapses onto the
-/// deepest depth in the range, and with the Poisson alone onto the shallowest — either way the
-/// fix becomes a second point-read at an edge of the bin, which is worse than the midpoint it
-/// replaced.
-fn fill_depth_weights(weights: &mut [f64], coverage: f64, fewest_reference: f64) {
-    let mut running = 1.0;
-    for (step, slot) in weights.iter_mut().enumerate() {
-        if step > 0 {
-            running *= coverage / (fewest_reference + step as f64);
-        }
-        *slot = running;
-    }
-}
-
-/// The chance one read shows the reference base, from an individual carrying `alt_copies`
-/// copies of the candidate allele.
-fn reference_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64) -> f64 {
-    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
-    (1.0 - carried) * (1.0 - error_rate) + carried * error_rate / 3.0
-}
-
-/// How [`reference_read_probability`] moves with the error rate. Kept beside it so the standard
-/// errors' slopes (`information`) follow any change to the read model.
-fn reference_read_probability_slope(alt_copies: u8, ploidy: Ploidy) -> f64 {
-    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
-    -(1.0 - carried) + carried / 3.0
-}
-
-/// The chance one read shows the candidate allele, from an individual carrying `alt_copies`
-/// copies of it — the probability [`ReadLogs::of`] takes the logarithm of.
-fn candidate_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64) -> f64 {
-    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
-    carried * (1.0 - error_rate) + (1.0 - carried) * error_rate / 3.0
-}
-
-/// How [`candidate_read_probability`] moves with the error rate.
-fn candidate_read_probability_slope(alt_copies: u8, ploidy: Ploidy) -> f64 {
-    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
-    -carried + (1.0 - carried) / 3.0
-}
-
-/// **How many reference reads this sample is expected to have had**, given its genotype and
-/// the range its stored code allows.
-///
-/// The counterpart of [`ln_reference_reads`], and it has to exist for the same reason: the
-/// error rate is maximised over expected read counts, and an expectation taken at the middle
-/// of the range while the likelihood sums over the range is not the same statement twice. Left
-/// inconsistent, the two disagree in one direction — the likelihood prefers a deeper position
-/// for a homozygous-reference sample that showed a couple of disagreeing reads, the middle of
-/// the range books it fewer reference reads than that, and the error rate comes back **24%
-/// above the truth on a drawn cohort at eight reads a position** where the consistent pair
-/// returns it to within 6%.
-fn expected_reference_reads(
-    library: &LibraryAtPosition,
-    depth_weights: &[f64],
-    on_reference: f64,
-) -> f64 {
-    if library.spread <= 1 {
-        return library.fewest_reference;
-    }
-    let probability = on_reference.max(f64::MIN_POSITIVE);
-    let (mut total, mut weighted, mut power) = (0.0, 0.0, 1.0);
-    for (step, weight) in depth_weights[..library.spread].iter().enumerate() {
-        let term = weight * power;
-        total += term;
-        weighted += term * (library.fewest_reference + step as f64);
-        power *= probability;
-    }
-    if total > 0.0 {
-        weighted / total
-    } else {
-        library.fewest_reference
-    }
-}
-
-/// `ln P(the reference reads | a read shows the reference base with probability p)`, summed
-/// over every depth the library's stored code could have come from.
-///
-/// The shallowest depth's term is factored out, which is what keeps the sum in range: what is
-/// left runs from one upwards and cannot underflow however small `p` is.
-fn ln_reference_reads(
-    library: &LibraryAtPosition,
-    depth_weights: &[f64],
-    on_reference: f64,
-    ln_on_reference: f64,
-) -> f64 {
-    let shallowest = library.fewest_reference * ln_on_reference;
-    if library.spread <= 1 {
-        return shallowest;
-    }
-    let probability = on_reference.max(f64::MIN_POSITIVE);
-    let mut total = 0.0;
-    let mut power = 1.0;
-    for weight in &depth_weights[..library.spread] {
-        total += weight * power;
-        power *= probability;
-    }
-    shallowest + float::ln(total)
-}
-
-/// `count · ln p`, with a count of zero contributing nothing — otherwise a category no read
-/// fell into, at probability zero, would be `0 · −∞ = NaN`, and a `NaN` does not lose loudly.
-fn count_times_ln(count: f64, probability: f64) -> f64 {
-    if count == 0.0 {
-        0.0
-    } else {
-        count * float::ln(probability.max(f64::MIN_POSITIVE))
-    }
-}
-
-/// How common each genotype is in a diploid drawn from a population at frequency `f`, when
-/// the individual is inbred by `excess`.
-///
-/// The heterozygote is depressed by `1 − excess` and the mass moves to the two homozygotes in
-/// proportion to the frequency, which is what an inbreeding coefficient means. **It is this
-/// departure from a pair of independent draws that forces the whole route to work with a
-/// frequency rather than a count in the panel** (spec §2.1.1): the cancellation the count form
-/// needs is exactly the factorisation that this breaks.
-fn genotype_frequencies(f: f64, excess: f64) -> [f64; 3] {
-    let heterozygous = 2.0 * f * (1.0 - f) * (1.0 - excess);
-    let shift = excess * f * (1.0 - f);
-    [(1.0 - f) * (1.0 - f) + shift, heterozygous, f * f + shift]
-}
-
-/// How [`genotype_frequencies`] moves as the frequency `f` moves, genotype by genotype — what the
-/// standard errors' slopes in the Beta shapes read (`information`). **Kept beside the function it
-/// differentiates**, so a change to one is made to both; a test compares the two by a finite
-/// difference.
-fn genotype_frequencies_slope_in_frequency(f: f64, excess: f64) -> [f64; 3] {
-    [
-        -2.0 * (1.0 - f) + excess * (1.0 - 2.0 * f),
-        2.0 * (1.0 - 2.0 * f) * (1.0 - excess),
-        2.0 * f + excess * (1.0 - 2.0 * f),
-    ]
-}
-
-/// How [`genotype_frequencies`] moves as the homozygote excess moves: the heterozygote loses
-/// `2f(1 − f)` and each homozygote gains `f(1 − f)`. Kept beside it for the same reason as its
-/// sibling above.
-fn genotype_frequencies_slope_in_excess(f: f64) -> [f64; 3] {
-    let moved = f * (1.0 - f);
-    [moved, -2.0 * moved, moved]
-}
-
 // ---------------------------------------------------------------------
 // The parameters, and one pass over the data
 // ---------------------------------------------------------------------
@@ -1740,7 +1448,8 @@ struct Statistics {
     /// **The log-likelihood's slope in the density's two shapes** `[a, b]`, summed over the
     /// positions: the slope of the likelihood the quadrature rule computes, as the rule's nodes
     /// and weights move with the shapes ([`information::RuleSlopes`]). What the shapes'
-    /// update steps on ([`step_beta_shapes`]); zero where the shapes are the likelihood's maximum.
+    /// update steps on ([`step_beta_shapes`](maximisation::step_beta_shapes)); zero where the
+    /// shapes are the likelihood's maximum.
     density_shape_slopes: [f64; 2],
     /// The same for the carrier Beta's two shapes, over the duplicated branch.
     carrier_shape_slopes: [f64; 2],
@@ -1976,26 +1685,6 @@ impl Statistics {
     }
 }
 
-/// The read counts one library contributes to its read group's tally, under one candidate allele
-/// and one genotype.
-///
-/// The counts on the candidate allele and on the two bases that are neither are exact; the
-/// reference count is the one that has to be taken in expectation, because the depth it is
-/// derived from is a range.
-fn tally_of(
-    library: &LibraryAtPosition,
-    depth_weights: &[f64],
-    alternative: usize,
-    on_reference: f64,
-) -> ReadTally {
-    let candidate = library.on[alternative];
-    ReadTally {
-        candidate,
-        neither: library.non_reference() - candidate - library.on[4],
-        reference: expected_reference_reads(library, depth_weights, on_reference),
-    }
-}
-
 // ---------------------------------------------------------------------
 // The entry point
 // ---------------------------------------------------------------------
@@ -2058,19 +1747,7 @@ pub fn fit_jointly(
         "SNP/indel fit: reading the evidence of {} sample(s)",
         names.len()
     ));
-    let FittedCohort {
-        parameters,
-        statistics,
-        passes,
-        converged,
-        starts,
-        trace,
-        contamination,
-        standard_errors,
-        density_report,
-        duplicated_report,
-        clean_rate_standard_error,
-    } = cohort.with_generic(&groups, |lent| {
+    let fitted = cohort.with_generic(&groups, |lent| {
         // Which read group each sample's own groups are, in the order the cursor visits them.
         let group_index: Vec<Vec<usize>> = lent
             .iter()
@@ -2097,390 +1774,479 @@ pub fn fit_jointly(
             depth_cap,
         );
 
-        // **What the evidence holds and how deep the samples are**, printed because both set
-        // this step's memory and neither is otherwise visible from a run's output.
-        let read_groups_held: usize = lent.iter().map(Vec::len).sum();
-        let evidence_bytes: usize = lent
-            .iter()
-            .flatten()
-            .map(|(_, records)| records.heap_bytes())
-            .sum();
-        let observations: usize = lent
-            .iter()
-            .flatten()
-            .map(|(_, records)| records.non_reference().len())
-            .sum();
-        // A sample with no walked position has no depth, and `mean_depth` stands it in at one
-        // read; it is counted apart so that it cannot read as a real sample at 1×.
-        let without_data = lent
-            .iter()
-            .filter(|sections| {
-                sections.iter().all(|(_, records)| {
-                    (0..records.depth().len())
-                        .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
-                })
+        log_the_evidence(lent, config, depth_cap, &stage);
+        let (winning_start, winner, starts) = run_the_starts(
+            lent,
+            depth_cap,
+            config,
+            &group_index,
+            &coverage,
+            &names,
+            &groups,
+            &stage,
+        );
+        the_winners_errors_and_contamination(
+            lent,
+            depth_cap,
+            config,
+            &group_index,
+            &groups,
+            &stage,
+            winning_start,
+            winner,
+            starts,
+        )
+    })?;
+    stage.always(|into| format!("SNP/indel fit: done; {into}"));
+    Ok(JointFit::from_fitted(fitted, &names, &groups))
+}
+
+/// The first phase of [`fit_jointly`]: one line of the run's log saying what the lent evidence
+/// holds and how deep the samples are.
+fn log_the_evidence(
+    lent: &[SampleGenericSections<'_>],
+    config: &JointFitConfig,
+    depth_cap: DepthCap,
+    stage: &StageProgress,
+) {
+    // **What the evidence holds and how deep the samples are**, printed because both set
+    // this step's memory and neither is otherwise visible from a run's output.
+    let read_groups_held: usize = lent.iter().map(Vec::len).sum();
+    let evidence_bytes: usize = lent
+        .iter()
+        .flatten()
+        .map(|(_, records)| records.heap_bytes())
+        .sum();
+    let observations: usize = lent
+        .iter()
+        .flatten()
+        .map(|(_, records)| records.non_reference().len())
+        .sum();
+    // A sample with no walked position has no depth, and `mean_depth` stands it in at one
+    // read; it is counted apart so that it cannot read as a real sample at 1×.
+    let without_data = lent
+        .iter()
+        .filter(|sections| {
+            sections.iter().all(|(_, records)| {
+                (0..records.depth().len())
+                    .all(|index| records.depth().get(index) == DepthCode::NeverWalked)
             })
-            .count();
-        let mut depths = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
-        depths.sort_by(f64::total_cmp);
-        let depth_at = |share: f64| {
-            depths
-                .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
-                .copied()
-                .unwrap_or(0.0)
-        };
+        })
+        .count();
+    let mut depths = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
+    depths.sort_by(f64::total_cmp);
+    let depth_at = |share: f64| {
+        depths
+            .get(((depths.len().saturating_sub(1)) as f64 * share).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    stage.always(|into| {
+        format!(
+            "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
+                 {} ({} a read group), {observations} non-reference observations; the \
+                 samples' mean depth, read from the stored codes after the cap, runs from \
+                 {:.1} to {:.1}, median {:.1}, and {without_data} sample(s) have no walked \
+                 position (read there as 1.0); fitting from {} starting point(s), at most {} \
+                 passes each",
+            crate::parameter_estimation::progress::size(evidence_bytes as u64),
+            crate::parameter_estimation::progress::size(
+                (evidence_bytes / read_groups_held.max(1)) as u64
+            ),
+            depth_at(0.0),
+            depth_at(1.0),
+            depth_at(0.5),
+            config.starting_points.len(),
+            config.max_passes
+        )
+    });
+}
+
+/// The second phase of [`fit_jointly`]: every run of [`maximise`] — the starts, the winner's finish
+/// on every position, or the one run from an earlier fit's numbers — and the start that won, with
+/// how each start ended.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lent evidence and what it means, the cohort's names, and the stage clock"
+)]
+fn run_the_starts(
+    lent: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    coverage: &[f64],
+    names: &[String],
+    groups: &[ReadGroupId],
+    stage: &StageProgress,
+) -> (usize, StartOutcome, Vec<StartRecord>) {
+    let mut best: Option<(usize, StartOutcome)> = None;
+    let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
+    // The best-scoring converged start so far.
+    let mut earlier: Option<EarlierAnswer> = None;
+    // **The starts explore on a thinned census** when the census is large enough to thin
+    // ([`JointFitConfig::explore_on`]); the winner then finishes on every position, below.
+    let census = EvidenceCursor::position_count(lent);
+    let stride = census
+        .checked_div(config.explore_on)
+        .map_or(1, |stride| stride.max(1));
+    // The runs: each start on the thinned census, then, when it was thinned, the winner's
+    // finish on every position, which continues from where that start stood.
+    // **Or one run, on every position, from an earlier run's numbers**, when they describe most
+    // of this cohort.
+    let continuing = config.earlier_fit.as_ref().filter(|earlier| {
+        let EarlierFitCoverage {
+            held_samples,
+            held_groups,
+            enough,
+        } = earlier.coverage(names, groups);
         stage.always(|into| {
             format!(
-                "SNP/indel fit: evidence read, {into}; {read_groups_held} read group(s) hold \
-                     {} ({} a read group), {observations} non-reference observations; the \
-                     samples' mean depth, read from the stored codes after the cap, runs from \
-                     {:.1} to {:.1}, median {:.1}, and {without_data} sample(s) have no walked \
-                     position (read there as 1.0); fitting from {} starting point(s), at most {} \
-                     passes each",
-                crate::parameter_estimation::progress::size(evidence_bytes as u64),
-                crate::parameter_estimation::progress::size(
-                    (evidence_bytes / read_groups_held.max(1)) as u64
-                ),
-                depth_at(0.0),
-                depth_at(1.0),
-                depth_at(0.5),
-                config.starting_points.len(),
-                config.max_passes
+                "SNP/indel fit: an earlier run's numbers hold {held_samples} of the {} \
+                 sample(s) and {held_groups} of the {} read group(s); {}; {into}",
+                names.len(),
+                groups.len(),
+                if enough {
+                    "the fit starts from them, the rest at their median, on every position"
+                } else {
+                    "too few to start from, so the fit starts from its usual starting points"
+                }
             )
         });
-        let mut best: Option<(usize, StartOutcome)> = None;
-        let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
-        // The best-scoring converged start so far.
-        let mut earlier: Option<EarlierAnswer> = None;
-        // **The starts explore on a thinned census** when the census is large enough to thin
-        // ([`JointFitConfig::explore_on`]); the winner then finishes on every position, below.
-        let census = EvidenceCursor::position_count(lent);
-        let stride = census
-            .checked_div(config.explore_on)
-            .map_or(1, |stride| stride.max(1));
-        // The runs: each start on the thinned census, then, when it was thinned, the winner's
-        // finish on every position, which continues from where that start stood.
-        // **Or one run, on every position, from an earlier run's numbers**, when they describe most
-        // of this cohort.
-        let continuing = config.earlier_fit.as_ref().filter(|earlier| {
-            let EarlierFitCoverage {
-                held_samples,
-                held_groups,
-                enough,
-            } = earlier.coverage(&names, &groups);
+        enough
+    });
+    // The starts on the thinned census and, when it was thinned, the winner's finish: every run
+    // of a fit without earlier numbers, and what a run from them falls back on.
+    let usual_runs = || {
+        let mut runs: Vec<StartRun> = config
+            .starting_points
+            .iter()
+            .enumerate()
+            .map(|(index, _)| StartRun::Start {
+                number: index + 1,
+                stride,
+            })
+            .collect();
+        if stride > 1 {
+            runs.push(StartRun::Finish);
+        }
+        runs
+    };
+    let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
+        [StartRun::Continuing].into()
+    } else {
+        usual_runs().into()
+    };
+    while let Some(run) = runs.pop_front() {
+        let finishing = run == StartRun::Finish;
+        let (number, initial, which_earlier, run_stride) = match run {
+            StartRun::Start { number, stride } => (
+                number,
+                Parameters::at_start(
+                    &config.starting_points[number - 1],
+                    groups.len(),
+                    lent.len(),
+                    config,
+                ),
+                earlier.as_ref(),
+                stride,
+            ),
+            StartRun::Finish => {
+                // PANIC-FREE: the first start has no earlier answer to agree with, so it
+                // always competes.
+                let (winner, outcome) = best.take().expect("the first start always competes");
+                // The finish replaces the winner: its answer is the full census's, and the
+                // thinned census's statistics are not comparable with it.
+                earlier = None;
+                (winner, outcome.parameters, None, 1)
+            }
+            StartRun::Continuing => (
+                1,
+                Parameters::continuing(
+                    continuing.expect("only queued with an earlier fit"),
+                    groups,
+                    names,
+                    config,
+                ),
+                None,
+                1,
+            ),
+        };
+        let which = WhichStart {
+            number,
+            of: config.starting_points.len(),
+            stride: run_stride,
+            finishing,
+            continuing: run == StartRun::Continuing,
+            earlier: which_earlier,
+            sample_names: names,
+            stage,
+        };
+        let began = std::time::Instant::now();
+        let outcome = maximise(
+            lent,
+            depth_cap,
+            config,
+            group_index,
+            coverage,
+            &which,
+            initial,
+            run_stride,
+        );
+        let score = outcome.statistics.log_likelihood;
+        stage.always(|into| {
+            let (how, last_pass) = match outcome.ended {
+                StartEnding::Converged => ("converged".to_owned(), None),
+                StartEnding::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
+                StartEnding::Agreed { with_start } => (
+                    format!(
+                        "stopped, heading where start {with_start} converged (its projected \
+                         endpoint within {} of that start's standard error on every parameter \
+                         it gives one)",
+                        config.agreement_fraction
+                    ),
+                    Some("no last pass of its own, as it does not compete".to_owned()),
+                ),
+            };
+            let last_pass = last_pass.unwrap_or_else(|| {
+                format!(
+                    "its last pass, which also collects what the standard errors are \
+                     computed from, {}",
+                    cost_of_the_last_pass(
+                        began.elapsed().saturating_sub(outcome.judging_took),
+                        outcome.last_pass_took,
+                        outcome.passes - outcome.judging_passes,
+                    )
+                )
+            });
+            // Why a start that did not converge had not, at the values it returned.
+            let short_of_settled = describe_short_of_settled(
+                outcome.ended,
+                outcome.furthest_from_settled.as_ref(),
+                config.settled_fraction,
+            );
+            format!(
+                "SNP/indel fit, {}: {how} after {} pass(es), log-likelihood \
+                     {score:.6e}{short_of_settled}; {last_pass}; {into}",
+                which.label(),
+                outcome.passes,
+            )
+        });
+        let record = StartRecord {
+            number,
+            ended: outcome.ended,
+            passes: outcome.passes,
+            judging_passes: outcome.judging_passes,
+            log_likelihood: score,
+            furthest_from_settled: outcome.furthest_from_settled.clone(),
+        };
+        // The finish is the winning start continued, and a start run again on every position is
+        // that start, so each takes its start's place in the record rather than adding one.
+        if number <= starts.len() {
+            starts[number - 1] = record;
+        } else {
+            starts.push(record);
+        }
+        // **A finish that does not converge leaves no answer to have agreed with**, so the
+        // other starts run again on every position, as every start did before the census was
+        // thinned when none converged: each to its own end, or until it heads where a later
+        // one of them converged.
+        if finishing {
+            runs.extend(runs_after_the_finish(
+                outcome.ended,
+                number,
+                config.starting_points.len(),
+            ));
+        }
+        // **A run from earlier numbers is set aside for the starting points** when it did not
+        // converge — they exist for a maximum that one start does not reach — or when fewer
+        // than two samples have reads: the fit then holds each excess where it starts, and a
+        // run from the starting points holds it at no excess, not at the earlier run's number.
+        if run == StartRun::Continuing
+            && (outcome.ended != StartEnding::Converged
+                || !fits_homozygote_excess(samples_with_reads(&outcome.statistics)))
+        {
             stage.always(|into| {
                 format!(
-                    "SNP/indel fit: an earlier run's numbers hold {held_samples} of the {} \
-                     sample(s) and {held_groups} of the {} read group(s); {}; {into}",
-                    names.len(),
-                    groups.len(),
-                    if enough {
-                        "the fit starts from them, the rest at their median, on every position"
+                    "SNP/indel fit: the run from the earlier run's numbers is set aside ({}), \
+                     so the fit starts from its usual starting points; {into}",
+                    if outcome.ended == StartEnding::Converged {
+                        "fewer than two samples have reads, so no excess is fitted"
                     } else {
-                        "too few to start from, so the fit starts from its usual starting points"
+                        "it did not converge"
                     }
                 )
             });
-            enough
-        });
-        // The starts on the thinned census and, when it was thinned, the winner's finish: every run
-        // of a fit without earlier numbers, and what a run from them falls back on.
-        let usual_runs = || {
-            let mut runs: Vec<StartRun> = config
-                .starting_points
-                .iter()
-                .enumerate()
-                .map(|(index, _)| StartRun::Start {
-                    number: index + 1,
-                    stride,
-                })
-                .collect();
-            if stride > 1 {
-                runs.push(StartRun::Finish);
-            }
-            runs
-        };
-        let mut runs: std::collections::VecDeque<StartRun> = if continuing.is_some() {
-            [StartRun::Continuing].into()
-        } else {
-            usual_runs().into()
-        };
-        while let Some(run) = runs.pop_front() {
-            let finishing = run == StartRun::Finish;
-            let (number, initial, which_earlier, run_stride) = match run {
-                StartRun::Start { number, stride } => (
-                    number,
-                    Parameters::at_start(
-                        &config.starting_points[number - 1],
-                        groups.len(),
-                        lent.len(),
-                        config,
-                    ),
-                    earlier.as_ref(),
-                    stride,
-                ),
-                StartRun::Finish => {
-                    // PANIC-FREE: the first start has no earlier answer to agree with, so it
-                    // always competes.
-                    let (winner, outcome) = best.take().expect("the first start always competes");
-                    // The finish replaces the winner: its answer is the full census's, and the
-                    // thinned census's statistics are not comparable with it.
-                    earlier = None;
-                    (winner, outcome.parameters, None, 1)
-                }
-                StartRun::Continuing => (
-                    1,
-                    Parameters::continuing(
-                        continuing.expect("only queued with an earlier fit"),
-                        &groups,
-                        &names,
-                        config,
-                    ),
-                    None,
-                    1,
-                ),
-            };
-            let which = WhichStart {
-                number,
-                of: config.starting_points.len(),
-                stride: run_stride,
-                finishing,
-                continuing: run == StartRun::Continuing,
-                earlier: which_earlier,
-                sample_names: &names,
-                stage: &stage,
-            };
-            let began = std::time::Instant::now();
-            let outcome = maximise(
-                lent,
-                depth_cap,
-                config,
-                &group_index,
-                &coverage,
-                &which,
-                initial,
-                run_stride,
-            );
-            let score = outcome.statistics.log_likelihood;
-            stage.always(|into| {
-                let (how, last_pass) = match outcome.ended {
-                    StartEnding::Converged => ("converged".to_owned(), None),
-                    StartEnding::AtTheLimit => ("stopped at the pass limit".to_owned(), None),
-                    StartEnding::Agreed { with_start } => (
-                        format!(
-                            "stopped, heading where start {with_start} converged (its projected \
-                             endpoint within {} of that start's standard error on every parameter \
-                             it gives one)",
-                            config.agreement_fraction
-                        ),
-                        Some("no last pass of its own, as it does not compete".to_owned()),
-                    ),
-                };
-                let last_pass = last_pass.unwrap_or_else(|| {
-                    format!(
-                        "its last pass, which also collects what the standard errors are \
-                         computed from, {}",
-                        cost_of_the_last_pass(
-                            began.elapsed().saturating_sub(outcome.judging_took),
-                            outcome.last_pass_took,
-                            outcome.passes - outcome.judging_passes,
-                        )
-                    )
-                });
-                // Why a start that did not converge had not, at the values it returned.
-                let short_of_settled = describe_short_of_settled(
-                    outcome.ended,
-                    outcome.furthest_from_settled.as_ref(),
-                    config.settled_fraction,
-                );
-                format!(
-                    "SNP/indel fit, {}: {how} after {} pass(es), log-likelihood \
-                         {score:.6e}{short_of_settled}; {last_pass}; {into}",
-                    which.label(),
-                    outcome.passes,
-                )
-            });
-            let record = StartRecord {
-                number,
-                ended: outcome.ended,
-                passes: outcome.passes,
-                judging_passes: outcome.judging_passes,
-                log_likelihood: score,
-                furthest_from_settled: outcome.furthest_from_settled.clone(),
-            };
-            // The finish is the winning start continued, and a start run again on every position is
-            // that start, so each takes its start's place in the record rather than adding one.
-            if number <= starts.len() {
-                starts[number - 1] = record;
-            } else {
-                starts.push(record);
-            }
-            // **A finish that does not converge leaves no answer to have agreed with**, so the
-            // other starts run again on every position, as every start did before the census was
-            // thinned when none converged: each to its own end, or until it heads where a later
-            // one of them converged.
-            if finishing {
-                runs.extend(runs_after_the_finish(
-                    outcome.ended,
-                    number,
-                    config.starting_points.len(),
-                ));
-            }
-            // **A run from earlier numbers is set aside for the starting points** when it did not
-            // converge — they exist for a maximum that one start does not reach — or when fewer
-            // than two samples have reads: the fit then holds each excess where it starts, and a
-            // run from the starting points holds it at no excess, not at the earlier run's number.
-            if run == StartRun::Continuing
-                && (outcome.ended != StartEnding::Converged
-                    || !fits_homozygote_excess(samples_with_reads(&outcome.statistics)))
-            {
-                stage.always(|into| {
-                    format!(
-                        "SNP/indel fit: the run from the earlier run's numbers is set aside ({}), \
-                         so the fit starts from its usual starting points; {into}",
-                        if outcome.ended == StartEnding::Converged {
-                            "fewer than two samples have reads, so no excess is fitted"
-                        } else {
-                            "it did not converge"
-                        }
-                    )
-                });
-                runs.extend(usual_runs());
-                continue;
-            }
-            if is_the_new_yardstick(
-                outcome.ended,
-                score,
-                earlier.as_ref().map(|answer| answer.log_likelihood),
-            ) {
-                earlier = Some(EarlierAnswer::of(number, &outcome, &group_index));
-            }
-            if is_the_new_best(
-                outcome.ended,
-                score,
-                best.as_ref()
-                    .map(|(_, current)| current.statistics.log_likelihood),
-            ) {
-                best = Some((number, outcome));
-            }
+            runs.extend(usual_runs());
+            continue;
         }
-        // PANIC-FREE: the first start has no earlier answer to agree with, so it always competes.
-        let (
-            winning_start,
-            StartOutcome {
-                parameters,
-                statistics,
-                information,
-                passes,
-                ended,
-                furthest_from_settled: _,
-                trace,
-                last_pass_took: _,
-                judging_passes: _,
-                judging_took: _,
-            },
-        ) = best.expect("the first start always competes");
-        // The winner's statistics come from a final pass, the only pass that keeps each position's
-        // posteriors, which contamination and the returned fit read; a start that agreed has none
-        // and never competes.
-        assert!(
-            statistics.collect_noisy_posterior,
-            "the winning start's statistics are those of its final pass"
-        );
+        if is_the_new_yardstick(
+            outcome.ended,
+            score,
+            earlier.as_ref().map(|answer| answer.log_likelihood),
+        ) {
+            earlier = Some(EarlierAnswer::of(number, &outcome, group_index));
+        }
+        if is_the_new_best(
+            outcome.ended,
+            score,
+            best.as_ref()
+                .map(|(_, current)| current.statistics.log_likelihood),
+        ) {
+            best = Some((number, outcome));
+        }
+    }
+    // PANIC-FREE: the first start has no earlier answer to agree with, so it always competes.
+    let (winning_start, winner) = best.expect("the first start always competes");
+    (winning_start, winner, starts)
+}
 
-        // **Every parameter's standard error, at the parameters the fit returns**, from the
-        // information the winning start's final pass summed (spec §3.3).
-        let standard_errors = StandardErrors::of(&information);
-        // **What the data determine about the density and the duplicated class** (spec §2.1.3),
-        // from the cohort's covariance over the same information: the errors' diagonal is not
-        // enough, since the verdicts and the derived shares' errors need how the numbers move
-        // together.
-        let covariance = cohort_covariance(&information);
-        let cohort_errors = standard_errors.cohort.map(StandardError::value);
-        let density_report = DensityReport::of(&parameters.density, &cohort_errors, &covariance);
-        let duplicated_report = parameters
-            .duplicated
-            .map(|duplicated| DuplicatedReport::of(&duplicated, &cohort_errors, &covariance));
+/// The third phase of [`fit_jointly`]: the winning start's standard errors, what the data determine
+/// about the density and the duplicated class, and each sample's contamination.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lent evidence and what it means, the stage clock, and the winning start"
+)]
+fn the_winners_errors_and_contamination(
+    lent: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    groups: &[ReadGroupId],
+    stage: &StageProgress,
+    winning_start: usize,
+    winner: StartOutcome,
+    starts: Vec<StartRecord>,
+) -> FittedCohort {
+    let StartOutcome {
+        parameters,
+        statistics,
+        information,
+        passes,
+        ended,
+        furthest_from_settled: _,
+        trace,
+        last_pass_took: _,
+        judging_passes: _,
+        judging_took: _,
+    } = winner;
+    // The winner's statistics come from a final pass, the only pass that keeps each position's
+    // posteriors, which contamination and the returned fit read; a start that agreed has none
+    // and never competes.
+    assert!(
+        statistics.collect_noisy_posterior,
+        "the winning start's statistics are those of its final pass"
+    );
+
+    // **Every parameter's standard error, at the parameters the fit returns**, from the
+    // information the winning start's final pass summed (spec §3.3).
+    let standard_errors = StandardErrors::of(&information);
+    // **What the data determine about the density and the duplicated class** (spec §2.1.3),
+    // from the cohort's covariance over the same information: the errors' diagonal is not
+    // enough, since the verdicts and the derived shares' errors need how the numbers move
+    // together.
+    let covariance = cohort_covariance(&information);
+    let cohort_errors = standard_errors.cohort.map(StandardError::value);
+    let density_report = DensityReport::of(&parameters.density, &cohort_errors, &covariance);
+    let duplicated_report = parameters
+        .duplicated
+        .map(|duplicated| DuplicatedReport::of(&duplicated, &cohort_errors, &covariance));
+    stage.always(|into| {
+        format!(
+            "SNP/indel fit: standard errors at the returned values: {}; {into}",
+            standard_errors.described(
+                &parameters,
+                group_index,
+                &density_report,
+                duplicated_report.as_ref(),
+            )
+        )
+    });
+    if let Some(note) = note_on_inverted_rates(&parameters, groups) {
+        stage.always(|into| format!("SNP/indel fit: {note}; {into}"));
+    }
+    trace_the_returned_fit(
+        winning_start,
+        passes,
+        statistics.log_likelihood,
+        &parameters,
+        &standard_errors,
+        group_index,
+    );
+
+    // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
+    // the converged error rates and the converged homozygote excess, and nothing it produces
+    // feeds back into them — a sample's stray reads are a property of the tube it was in
+    // rather than of the population, so the density has no business being told about them.
+    // It runs here, inside the same call, so that the sections are lent once rather than
+    // twice.
+    // **The error rate goes in per read group, which is the grain it was fitted at.**
+    // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
+    // group's — which was exact only because every benchmark sample has one library.
+    let error_rate: BTreeMap<ReadGroupId, f64> = groups
+        .iter()
+        .zip(&parameters.clean)
+        .map(|(group, rate)| (*group, *rate))
+        .collect();
+    // **The mismapped positions are kept out of it.** A position where two stretches of
+    // genome pile up on one place puts a small share of unexpected reads into *every*
+    // sample, which is the contamination signature exactly; measured over 63 tomato
+    // accessions with those positions left in, the median accession came back 6.5%
+    // contaminated.
+    let contamination = if config.estimate_contamination {
+        stage.always(|into| format!("SNP/indel fit: fitting each sample's contamination; {into}"));
+        fit_contamination_over(
+            lent,
+            depth_cap,
+            &config.edges,
+            &error_rate,
+            &parameters.hom_excess,
+            &statistics.noisy_posterior,
+            &config.contamination,
+        )
+    } else {
         stage.always(|into| {
             format!(
-                "SNP/indel fit: standard errors at the returned values: {}; {into}",
-                standard_errors.described(
-                    &parameters,
-                    &group_index,
-                    &density_report,
-                    duplicated_report.as_ref(),
-                )
+                "SNP/indel fit: contamination not estimated, as the run asked; every \
+                     read group is taken as uncontaminated; {into}"
             )
         });
-        if let Some(note) = note_on_inverted_rates(&parameters, &groups) {
-            stage.always(|into| format!("SNP/indel fit: {note}; {into}"));
+        not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
+    };
+    // **Each read group's ordinary-position rate's error, found through its sample**: the
+    // errors are laid out a sample at a time, and a read group is one section of one sample. A
+    // read group no sample lends an ordinary-position section for — a sample whose census
+    // holds repeat tracts only — keeps no information: nothing scored it.
+    let mut clean_rate_standard_error = vec![StandardError::NoInformation; groups.len()];
+    for (s, own) in group_index.iter().enumerate() {
+        for (section, &group) in own.iter().enumerate() {
+            clean_rate_standard_error[group] =
+                standard_errors.samples[s][information::sample::rate(section, 0)];
         }
-        trace_the_returned_fit(
-            winning_start,
-            passes,
-            statistics.log_likelihood,
-            &parameters,
-            &standard_errors,
-            &group_index,
-        );
+    }
+    FittedCohort {
+        parameters,
+        statistics,
+        passes,
+        converged: ended == StartEnding::Converged,
+        starts,
+        trace,
+        contamination,
+        standard_errors,
+        density_report,
+        duplicated_report,
+        clean_rate_standard_error,
+    }
+}
 
-        // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
-        // the converged error rates and the converged homozygote excess, and nothing it produces
-        // feeds back into them — a sample's stray reads are a property of the tube it was in
-        // rather than of the population, so the density has no business being told about them.
-        // It runs here, inside the same call, so that the sections are lent once rather than
-        // twice.
-        // **The error rate goes in per read group, which is the grain it was fitted at.**
-        // Until 2026-08-20 this handed the estimator one rate a sample — its *first* read
-        // group's — which was exact only because every benchmark sample has one library.
-        let error_rate: BTreeMap<ReadGroupId, f64> = groups
-            .iter()
-            .zip(&parameters.clean)
-            .map(|(group, rate)| (*group, *rate))
-            .collect();
-        // **The mismapped positions are kept out of it.** A position where two stretches of
-        // genome pile up on one place puts a small share of unexpected reads into *every*
-        // sample, which is the contamination signature exactly; measured over 63 tomato
-        // accessions with those positions left in, the median accession came back 6.5%
-        // contaminated.
-        let contamination = if config.estimate_contamination {
-            stage.always(|into| {
-                format!("SNP/indel fit: fitting each sample's contamination; {into}")
-            });
-            fit_contamination_over(
-                lent,
-                depth_cap,
-                &config.edges,
-                &error_rate,
-                &parameters.hom_excess,
-                &statistics.noisy_posterior,
-                &config.contamination,
-            )
-        } else {
-            stage.always(|into| {
-                format!(
-                    "SNP/indel fit: contamination not estimated, as the run asked; every \
-                         read group is taken as uncontaminated; {into}"
-                )
-            });
-            not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
-        };
-        // **Each read group's ordinary-position rate's error, found through its sample**: the
-        // errors are laid out a sample at a time, and a read group is one section of one sample. A
-        // read group no sample lends an ordinary-position section for — a sample whose census
-        // holds repeat tracts only — keeps no information: nothing scored it.
-        let mut clean_rate_standard_error = vec![StandardError::NoInformation; groups.len()];
-        for (s, own) in group_index.iter().enumerate() {
-            for (section, &group) in own.iter().enumerate() {
-                clean_rate_standard_error[group] =
-                    standard_errors.samples[s][information::sample::rate(section, 0)];
-            }
-        }
-        FittedCohort {
+impl JointFit {
+    /// The last phase of [`fit_jointly`]: the fit's numbers as the returned [`JointFit`], each
+    /// with its provenance. It reads nothing of the evidence.
+    fn from_fitted(fitted: FittedCohort, names: &[String], groups: &[ReadGroupId]) -> Self {
+        let FittedCohort {
             parameters,
             statistics,
             passes,
-            converged: ended == StartEnding::Converged,
+            converged,
             starts,
             trace,
             contamination,
@@ -2488,151 +2254,150 @@ pub fn fit_jointly(
             density_report,
             duplicated_report,
             clean_rate_standard_error,
-        }
-    })?;
-    stage.always(|into| format!("SNP/indel fit: done; {into}"));
-    let score = statistics.log_likelihood;
-    let mut statistics = statistics;
-    let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
-    let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
+        } = fitted;
+        let score = statistics.log_likelihood;
+        let mut statistics = statistics;
+        let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
+        let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
 
-    let observations = statistics.positions as u64;
-    // **A read group the data never touched is a default, not a fit** (spec `fit_precision.md` §8,
-    // question 1): no position depends on its rates — a library with no reads, or one whose sample
-    // lent no ordinary-position section at all. Its rates are the start's, and calling them fitted
-    // from the run's every position would be the confident-and-wrong case the project rules out.
-    // So it is `Defaulted`, from no observation, at the stated rate; its mismapped rate, read by
-    // nothing, stays where the fit held it.
-    let noise = groups
-        .iter()
-        .enumerate()
-        .map(|(g, id)| {
-            let informed = clean_rate_standard_error[g] != StandardError::NoInformation;
-            (
-                *id,
-                Estimate {
-                    value: SiteClassNoise {
-                        clean: if informed {
-                            parameters.clean[g]
-                        } else {
-                            DEFAULT_ERROR_RATE
-                        },
-                        noisy: parameters.noisy[g],
-                    },
-                    provenance: if informed {
-                        Provenance::FittedHere
-                    } else {
-                        Provenance::Defaulted
-                    },
-                    observations: if informed { observations } else { 0 },
-                    standard_error: None,
-                },
-            )
-        })
-        .collect();
-    let hom_excess = names
-        .iter()
-        .enumerate()
-        .map(|(s, name)| {
-            // **A sample with no reads at an ordinary position has no excess to measure**, so it
-            // is `Defaulted` at no excess, from no observation — as a read group with no reads is
-            // above — rather than written as fitted. **The default value is written, not the fit's**:
-            // no read informs the excess, yet the fit's accelerated steps can still move it off its
-            // start, so the fit's value is not the default.
-            let informed = standard_errors.samples[s][information::sample::HOMOZYGOTE_EXCESS]
-                != StandardError::NoInformation;
-            (
-                name.clone(),
-                Estimate {
-                    value: HomozygoteExcess::try_new(if informed {
-                        parameters.hom_excess[s]
-                    } else {
-                        DEFAULTED_HOMOZYGOTE_EXCESS
-                    })
-                    .expect("the maximisation is confined to [0, 1]"),
-                    provenance: if informed
-                        && fits_homozygote_excess(samples_with_reads(&statistics))
-                    {
-                        Provenance::FittedHere
-                    } else {
-                        Provenance::Defaulted
-                    },
-                    observations: if informed {
-                        statistics.with_reads[s]
-                    } else {
-                        0
-                    },
-                    // `None` where the fit gives it none — at one sample, where the fit holds the
-                    // excess at its start, among others ([`StandardErrors`]).
-                    standard_error: standard_errors.samples[s]
-                        [information::sample::HOMOZYGOTE_EXCESS]
-                        .value(),
-                },
-            )
-        })
-        .collect();
-    // A census with no position leaves every count at zero: zero rates, not NaN.
-    let positions = statistics.positions.max(1.0);
-    let rates = names
-        .iter()
-        .enumerate()
-        .map(|(s, name)| {
-            (
-                name.clone(),
-                Estimate {
-                    value: SampleGenotypeRates {
-                        heterozygous: statistics.heterozygous[s] / positions,
-                        homozygous_alt: statistics.homozygous_alt[s] / positions,
-                        duplicated_carrier: statistics.carrier[s] / positions,
-                        positions_with_reads: statistics.with_reads[s],
-                        positions_with_two_reads: statistics.with_two_reads[s],
-                    },
-                    provenance: Provenance::FittedHere,
-                    observations: statistics.with_reads[s],
-                    standard_error: None,
-                },
-            )
-        })
-        .collect();
-    let contamination = names.iter().cloned().zip(contamination).collect();
-
-    Ok(JointFit {
-        noise,
-        clean_rate_standard_error: groups
+        let observations = statistics.positions as u64;
+        // **A read group the data never touched is a default, not a fit** (spec `fit_precision.md` §8,
+        // question 1): no position depends on its rates — a library with no reads, or one whose sample
+        // lent no ordinary-position section at all. Its rates are the start's, and calling them fitted
+        // from the run's every position would be the confident-and-wrong case the project rules out.
+        // So it is `Defaulted`, from no observation, at the stated rate; its mismapped rate, read by
+        // nothing, stays where the fit held it.
+        let noise = groups
             .iter()
-            .copied()
-            .zip(clean_rate_standard_error.iter().map(|error| error.value()))
-            .collect(),
-        noisy_share: parameters.noisy_share,
-        density: Estimate {
-            value: parameters.density,
-            provenance: Provenance::FittedHere,
-            observations,
-            standard_error: None,
-        },
-        hom_excess,
-        rates,
-        contamination,
-        expected_heterozygosity: parameters.density.expected_heterozygosity(),
-        census_moments: statistics.census_moments.clone(),
-        duplicated: parameters.duplicated.map(|value| Estimate {
-            value,
-            provenance: Provenance::FittedHere,
-            observations,
-            standard_error: None,
-        }),
-        density_report,
-        duplicated_report,
-        noisy_posterior: statistics.noisy_posterior,
-        genotype_posterior,
-        duplicated_posterior,
-        trace,
-        passes,
-        converged,
-        starts,
-        log_likelihood: score,
-        standard_errors,
-    })
+            .enumerate()
+            .map(|(g, id)| {
+                let informed = clean_rate_standard_error[g] != StandardError::NoInformation;
+                (
+                    *id,
+                    Estimate {
+                        value: SiteClassNoise {
+                            clean: if informed {
+                                parameters.clean[g]
+                            } else {
+                                DEFAULT_ERROR_RATE
+                            },
+                            noisy: parameters.noisy[g],
+                        },
+                        provenance: if informed {
+                            Provenance::FittedHere
+                        } else {
+                            Provenance::Defaulted
+                        },
+                        observations: if informed { observations } else { 0 },
+                        standard_error: None,
+                    },
+                )
+            })
+            .collect();
+        let hom_excess = names
+            .iter()
+            .enumerate()
+            .map(|(s, name)| {
+                // **A sample with no reads at an ordinary position has no excess to measure**, so it
+                // is `Defaulted` at no excess, from no observation — as a read group with no reads is
+                // above — rather than written as fitted. **The default value is written, not the fit's**:
+                // no read informs the excess, yet the fit's accelerated steps can still move it off its
+                // start, so the fit's value is not the default.
+                let informed = standard_errors.samples[s][information::sample::HOMOZYGOTE_EXCESS]
+                    != StandardError::NoInformation;
+                (
+                    name.clone(),
+                    Estimate {
+                        value: HomozygoteExcess::try_new(if informed {
+                            parameters.hom_excess[s]
+                        } else {
+                            DEFAULTED_HOMOZYGOTE_EXCESS
+                        })
+                        .expect("the maximisation is confined to [0, 1]"),
+                        provenance: if informed
+                            && fits_homozygote_excess(samples_with_reads(&statistics))
+                        {
+                            Provenance::FittedHere
+                        } else {
+                            Provenance::Defaulted
+                        },
+                        observations: if informed {
+                            statistics.with_reads[s]
+                        } else {
+                            0
+                        },
+                        // `None` where the fit gives it none — at one sample, where the fit holds the
+                        // excess at its start, among others ([`StandardErrors`]).
+                        standard_error: standard_errors.samples[s]
+                            [information::sample::HOMOZYGOTE_EXCESS]
+                            .value(),
+                    },
+                )
+            })
+            .collect();
+        // A census with no position leaves every count at zero: zero rates, not NaN.
+        let positions = statistics.positions.max(1.0);
+        let rates = names
+            .iter()
+            .enumerate()
+            .map(|(s, name)| {
+                (
+                    name.clone(),
+                    Estimate {
+                        value: SampleGenotypeRates {
+                            heterozygous: statistics.heterozygous[s] / positions,
+                            homozygous_alt: statistics.homozygous_alt[s] / positions,
+                            duplicated_carrier: statistics.carrier[s] / positions,
+                            positions_with_reads: statistics.with_reads[s],
+                            positions_with_two_reads: statistics.with_two_reads[s],
+                        },
+                        provenance: Provenance::FittedHere,
+                        observations: statistics.with_reads[s],
+                        standard_error: None,
+                    },
+                )
+            })
+            .collect();
+        let contamination = names.iter().cloned().zip(contamination).collect();
+
+        JointFit {
+            noise,
+            clean_rate_standard_error: groups
+                .iter()
+                .copied()
+                .zip(clean_rate_standard_error.iter().map(|error| error.value()))
+                .collect(),
+            noisy_share: parameters.noisy_share,
+            density: Estimate {
+                value: parameters.density,
+                provenance: Provenance::FittedHere,
+                observations,
+                standard_error: None,
+            },
+            hom_excess,
+            rates,
+            contamination,
+            expected_heterozygosity: parameters.density.expected_heterozygosity(),
+            census_moments: statistics.census_moments.clone(),
+            duplicated: parameters.duplicated.map(|value| Estimate {
+                value,
+                provenance: Provenance::FittedHere,
+                observations,
+                standard_error: None,
+            }),
+            density_report,
+            duplicated_report,
+            noisy_posterior: statistics.noisy_posterior,
+            genotype_posterior,
+            duplicated_posterior,
+            trace,
+            passes,
+            converged,
+            starts,
+            log_likelihood: score,
+            standard_errors,
+        }
+    }
 }
 
 /// One run of [`maximise`] in [`fit_jointly`]: a start from its starting point on every `stride`-th
@@ -2800,12 +2565,11 @@ fn maximise(
     // A pass an accepted Newton step already ran at `parameters`, with the information, and the
     // maximisation step from it: the next cycle's judging pass and first step.
     let mut accepted_pass: Option<(Parameters, Statistics)> = None;
-    // The fraction of its Newton step this start tries first: the whole step before any is kept,
-    // then where the last kept try put the log-likelihood's peak along its step (§3.3.1 point 2).
-    let mut first_fraction = 1.0_f64;
-    // The last kept step, which the next step is blended with (§3.3.1 point 1); `None` before any
-    // and after a step no try kept.
-    let mut previous_step: Option<PreviousStep> = None;
+    // What this start's Newton steps carry from one judging pass to the next.
+    let mut newton = NewtonHistory {
+        first_fraction: 1.0,
+        previous_step: None,
+    };
     // A cycle needs three passes in hand — its first, the second plain one, the jump's — but one
     // that begins with an accepted try's pass has run its first already, and judging that pass
     // costs none: it is always judged, and the guard before the SQUAREM cycle ends the start
@@ -2819,44 +2583,12 @@ fn maximise(
         let judging_pass = alternation.passes;
         // What this cycle's information pass found, at the parameters it judged; `None` before the
         // fit judges them.
-        let judged_here = entering.information.as_ref().map(|information| {
-            let standard_errors = StandardErrors::of(information);
-            let errors = standard_errors.by_coordinate(&parameters, group_index);
-            let step = newton_step(information, &standard_errors, &parameters, group_index);
-            let converged = has_converged(step.decrement, config.decrement_threshold);
-            // A start that has converged is never stopped by agreement: it competes to be the
-            // fit's answer. Agreement stops only a start still on its way.
-            let heading_to = which
-                .earlier
-                .filter(|answer| {
-                    !converged
-                        && agrees(
-                            &parameters.values(),
-                            &step.distances,
-                            answer,
-                            config.agreement_fraction,
-                        )
-                })
-                .map(|answer| answer.start);
-            Judgement {
-                decrement: step.decrement,
-                converged,
-                not_settled: not_settled(&errors, &step.distances, config.settled_fraction),
-                furthest: furthest(&errors, &step.distances),
-                heading_to,
-                distances: step.distances,
-                slopes: step.slopes,
-            }
-        });
+        let judged_here = entering
+            .information
+            .as_ref()
+            .map(|information| Judgement::of(information, &parameters, config, group_index, which));
         // The traced pass that judged records its verdict.
-        if let (Some(judgement), Some(traced)) = (
-            &judged_here,
-            alternation
-                .trace
-                .iter_mut()
-                .rev()
-                .find(|summary| summary.pass == judging_pass),
-        ) {
+        if let (Some(judgement), Some(traced)) = (&judged_here, alternation.traced(judging_pass)) {
             traced.not_settled = Some(judgement.not_settled);
             traced.decrement = Some(judgement.decrement);
         }
@@ -2888,94 +2620,24 @@ fn maximise(
         if let Some(judgement) = &judged_here
             && alternation.passes < config.max_passes
         {
-            let distances = match &previous_step {
-                Some(previous) => previous.blended(&judgement.distances, &judgement.slopes),
-                None => judgement.distances.clone(),
-            };
-            let target = parameters.newton_target(&distances);
-            // The log-likelihood's slope along the whole step, clamped as the target is: what the
-            // tries fit their parabola from (§3.3.1 point 4).
-            let slope_along: f64 = parameters
-                .coordinates()
-                .iter()
-                .zip(&target)
-                .zip(&judgement.slopes)
-                .map(|((coordinate, full), slope)| {
-                    slope.map_or(0.0, |slope| slope * (full - coordinate.value))
-                })
-                .sum();
-            let outcome = try_the_newton_step(
+            match alternation.take_the_newton_step(
+                judgement,
                 &parameters,
-                &target,
-                first_fraction,
                 entering.log_likelihood,
-                slope_along,
-                |candidate| {
-                    (alternation.passes < config.max_passes).then(|| {
-                        let (next, at_candidate) = alternation.step(candidate, true);
-                        (at_candidate.log_likelihood, (next, at_candidate))
-                    })
-                },
-            );
-            let trial = NewtonTrial {
-                first_fraction,
-                accepted: match &outcome {
-                    NewtonOutcome::Accepted { fraction, .. } => Some(*fraction),
-                    NewtonOutcome::Rejected { .. } => None,
-                },
-                last_pass: alternation.passes,
-            };
-            if let Some(traced) = alternation
-                .trace
-                .iter_mut()
-                .rev()
-                .find(|summary| summary.pass == judging_pass)
-            {
-                traced.newton = Some(trial);
-            }
-            match outcome {
+                &mut newton,
+                judging_pass,
+                cycle_began,
+            ) {
                 NewtonOutcome::Accepted {
-                    fraction,
                     parameters: candidate,
                     pass,
-                    best,
+                    ..
                 } => {
-                    let gain = pass.1.log_likelihood - entering.log_likelihood;
-                    // Where the kept try put the peak, but at most twice the fraction kept: a peak
-                    // read from a short try sees too little of the curvature to be trusted further
-                    // (§3.3.1 point 2).
-                    let doubled = first_newton_fraction(fraction);
-                    first_fraction = best.map_or(doubled, |best| best.min(doubled));
-                    previous_step = Some(PreviousStep::of(
-                        &distances,
-                        &judgement.distances,
-                        &judgement.slopes,
-                    ));
                     parameters = candidate;
                     accepted_pass = Some(pass);
-                    print_the_cycle(
-                        which,
-                        config,
-                        alternation.passes,
-                        gain,
-                        Some(&format!(
-                            "Newton step at {} accepted",
-                            as_a_fraction(fraction)
-                        )),
-                        || {
-                            judgement.described(
-                                &parameters.plain_names(which.sample_names, group_index),
-                                config,
-                            )
-                        },
-                        cycle_began,
-                    );
                     continue;
                 }
-                NewtonOutcome::Rejected { tries } => {
-                    newton_rejected = Some(tries);
-                    previous_step = None;
-                }
+                NewtonOutcome::Rejected { tries } => newton_rejected = Some(tries),
             }
         }
         // The SQUAREM cycle needs two passes more; refused tries that spent them, or a cycle that
@@ -2984,38 +2646,8 @@ fn maximise(
         if alternation.passes + 2 > config.max_passes {
             break;
         }
-        let (second, _) = alternation.step(&first, false);
-        let mut alpha = squarem_step_length(&parameters, &first, &second).clamp(1.0, reach);
-        let (landed, landed_at) = loop {
-            let jumped = if alpha > 1.0 {
-                parameters.extrapolated(&first, &second, alpha)
-            } else {
-                Some(second.clone())
-            };
-            if let Some(jumped) = jumped {
-                let (steadied, at_jump) = alternation.step(&jumped, false);
-                if at_jump.log_likelihood >= entering.log_likelihood - JUMP_SLACK || alpha <= 1.0 {
-                    if alpha >= reach {
-                        reach *= 4.0;
-                    }
-                    break (steadied, at_jump.log_likelihood);
-                }
-                reach = (reach / 4.0).max(1.0);
-            }
-            // Shortened towards the plain step, and taken as the plain step once close to it
-            // or once the passes are spent — `θ₂` is not checked, on the alternation's guarantee
-            // that a plain step does not lower the log-likelihood. That guarantee holds only to
-            // within the drift `JUMP_SLACK` describes, and it held not at all while the
-            // maximisation swapped a library's two error rates (deleted 2026-10-17): every other
-            // cycle then landed on a point tens of units lower.
-            alpha = (1.0 + alpha) / 2.0;
-            if alpha < 1.01 || alternation.passes >= config.max_passes {
-                alpha = 1.0;
-                if alternation.passes >= config.max_passes {
-                    break (second.clone(), entering.log_likelihood);
-                }
-            }
-        };
+        let (landed, landed_at) =
+            alternation.squarem_jump(&parameters, &first, entering.log_likelihood, &mut reach);
         let gain = landed_at - entering.log_likelihood;
         let gain_to_judge = config.log_likelihood_stillness * entering.positions.max(1.0);
         judging |= gain.abs() < gain_to_judge;
@@ -3045,66 +2677,248 @@ fn maximise(
             cycle_began,
         );
     }
-    // The reported statistics must be the ones the reported parameters produce, so the last
-    // cycle is followed by one more pass rather than by a pass that preceded it — and it is
-    // this pass, at the parameters that will be reported, that keeps each position's
-    // probability of being mismapped, and the information their standard errors come from.
-    // **A start that agreed has that pass already** — the one that judged it, at the parameters
-    // it returns — and no use for the posteriors, since it does not compete to be the answer.
-    let last_pass_began = std::time::Instant::now();
-    let mut statistics = agreed_at.unwrap_or_else(|| {
-        expectation_pass_every(
-            samples,
-            depth_cap,
-            config,
-            group_index,
-            coverage,
-            &parameters,
-            PassKeeps {
-                per_position_posteriors: true,
-                information: true,
+    alternation.finish(parameters, ended, agreed_at)
+}
+
+/// **What one start's Newton steps carry from one judging pass to the next**
+/// (`parameter_prepass_joint_fit.md` §3.3.1 points 1 and 2).
+struct NewtonHistory {
+    /// The fraction of its Newton step this start tries first: the whole step before any is kept,
+    /// then where the last kept try put the log-likelihood's peak along its step (point 2).
+    first_fraction: f64,
+    /// The last kept step, which the next step is blended with (point 1); `None` before any and
+    /// after a step no try kept.
+    previous_step: Option<PreviousStep>,
+}
+
+impl Alternation<'_, '_> {
+    /// The trace's record of pass `pass`, when the run keeps a trace.
+    fn traced(&mut self, pass: u32) -> Option<&mut PassSummary> {
+        self.trace
+            .iter_mut()
+            .rev()
+            .find(|summary| summary.pass == pass)
+    }
+
+    /// **The Newton step of one judging pass** ([`maximise`]): from `judged`, the parameters the
+    /// pass at `judging_pass` judged, towards where `judgement` puts the maximum, blended with the
+    /// last kept step ([`try_the_newton_step`]). The try is recorded in the trace and `history`
+    /// updated; a kept try also prints the cycle's progress line, since its cycle ends there.
+    fn take_the_newton_step(
+        &mut self,
+        judgement: &Judgement,
+        judged: &Parameters,
+        judged_log_likelihood: f64,
+        history: &mut NewtonHistory,
+        judging_pass: u32,
+        cycle_began: std::time::Instant,
+    ) -> NewtonOutcome<(Parameters, Statistics)> {
+        let config = self.config;
+        let distances = match &history.previous_step {
+            Some(previous) => previous.blended(&judgement.distances, &judgement.slopes),
+            None => judgement.distances.clone(),
+        };
+        let target = judged.newton_target(&distances);
+        // The log-likelihood's slope along the whole step, clamped as the target is: what the
+        // tries fit their parabola from (§3.3.1 point 4).
+        let slope_along: f64 = judged
+            .coordinates()
+            .iter()
+            .zip(&target)
+            .zip(&judgement.slopes)
+            .map(|((coordinate, full), slope)| {
+                slope.map_or(0.0, |slope| slope * (full - coordinate.value))
+            })
+            .sum();
+        let outcome = try_the_newton_step(
+            judged,
+            &target,
+            history.first_fraction,
+            judged_log_likelihood,
+            slope_along,
+            |candidate| {
+                (self.passes < config.max_passes).then(|| {
+                    let (next, at_candidate) = self.step(candidate, true);
+                    (at_candidate.log_likelihood, (next, at_candidate))
+                })
             },
-            stride,
-        )
-    });
-    let last_pass_took = last_pass_began.elapsed();
-    // PANIC-FREE: the final pass was asked to keep the information, and a pass that is asked
-    // starts every chunk's statistics, and its empty total, with the sums in place; an agreeing
-    // start's statistics are those of a pass that judged it, which kept the information too.
-    let information = statistics
-        .information
-        .take()
-        .expect("the pass above keeps the information");
-    // Why a start that did not converge had not, at the values it returns (spec §3.5).
-    let furthest_from_settled = (ended != StartEnding::Converged)
-        .then(|| {
-            how_far_from_settled(
-                &information,
+        );
+        let trial = NewtonTrial {
+            first_fraction: history.first_fraction,
+            accepted: match &outcome {
+                NewtonOutcome::Accepted { fraction, .. } => Some(*fraction),
+                NewtonOutcome::Rejected { .. } => None,
+            },
+            last_pass: self.passes,
+        };
+        if let Some(traced) = self.traced(judging_pass) {
+            traced.newton = Some(trial);
+        }
+        match outcome {
+            NewtonOutcome::Accepted {
+                fraction,
+                parameters: candidate,
+                pass,
+                best,
+            } => {
+                let gain = pass.1.log_likelihood - judged_log_likelihood;
+                // Where the kept try put the peak, but at most twice the fraction kept: a peak
+                // read from a short try sees too little of the curvature to be trusted further
+                // (§3.3.1 point 2).
+                let doubled = first_newton_fraction(fraction);
+                history.first_fraction = best.map_or(doubled, |best| best.min(doubled));
+                history.previous_step = Some(PreviousStep::of(
+                    &distances,
+                    &judgement.distances,
+                    &judgement.slopes,
+                ));
+                print_the_cycle(
+                    self.which,
+                    config,
+                    self.passes,
+                    gain,
+                    Some(&format!(
+                        "Newton step at {} accepted",
+                        as_a_fraction(fraction)
+                    )),
+                    || {
+                        judgement.described(
+                            &candidate.plain_names(self.which.sample_names, self.group_index),
+                            config,
+                        )
+                    },
+                    cycle_began,
+                );
+                NewtonOutcome::Accepted {
+                    fraction,
+                    parameters: candidate,
+                    pass,
+                    best,
+                }
+            }
+            NewtonOutcome::Rejected { tries } => {
+                history.previous_step = None;
+                NewtonOutcome::Rejected { tries }
+            }
+        }
+    }
+
+    /// **The rest of a SQUAREM cycle** from `start`, whose plain step reached `first`: the second
+    /// plain step, the jump — shortened towards the plain step while it loses more than
+    /// [`JUMP_SLACK`] against `start_log_likelihood` — and the step that steadies it. Returns where
+    /// the cycle landed and the log-likelihood there. `reach`, how far the jump may go, is carried
+    /// from cycle to cycle ([`maximise`]).
+    fn squarem_jump(
+        &mut self,
+        start: &Parameters,
+        first: &Parameters,
+        start_log_likelihood: f64,
+        reach: &mut f64,
+    ) -> (Parameters, f64) {
+        let (second, _) = self.step(first, false);
+        let mut alpha = squarem_step_length(start, first, &second).clamp(1.0, *reach);
+        loop {
+            let jumped = if alpha > 1.0 {
+                start.extrapolated(first, &second, alpha)
+            } else {
+                Some(second.clone())
+            };
+            if let Some(jumped) = jumped {
+                let (steadied, at_jump) = self.step(&jumped, false);
+                if at_jump.log_likelihood >= start_log_likelihood - JUMP_SLACK || alpha <= 1.0 {
+                    if alpha >= *reach {
+                        *reach *= 4.0;
+                    }
+                    break (steadied, at_jump.log_likelihood);
+                }
+                *reach = (*reach / 4.0).max(1.0);
+            }
+            // Shortened towards the plain step, and taken as the plain step once close to it
+            // or once the passes are spent — `θ₂` is not checked, on the alternation's guarantee
+            // that a plain step does not lower the log-likelihood. That guarantee holds only to
+            // within the drift `JUMP_SLACK` describes, and it held not at all while the
+            // maximisation swapped a library's two error rates (deleted 2026-10-17): every other
+            // cycle then landed on a point tens of units lower.
+            alpha = (1.0 + alpha) / 2.0;
+            if alpha < 1.01 || self.passes >= self.config.max_passes {
+                alpha = 1.0;
+                if self.passes >= self.config.max_passes {
+                    break (second.clone(), start_log_likelihood);
+                }
+            }
+        }
+    }
+
+    /// **A start's last pass and what the start hands back**, at the `parameters` it returns:
+    /// `agreed_at` stands in for the pass when the start stopped as heading where an earlier one
+    /// converged.
+    fn finish(
+        self,
+        parameters: Parameters,
+        ended: StartEnding,
+        agreed_at: Option<Statistics>,
+    ) -> StartOutcome {
+        // The reported statistics must be the ones the reported parameters produce, so the last
+        // cycle is followed by one more pass rather than by a pass that preceded it — and it is
+        // this pass, at the parameters that will be reported, that keeps each position's
+        // probability of being mismapped, and the information their standard errors come from.
+        // **A start that agreed has that pass already** — the one that judged it, at the parameters
+        // it returns — and no use for the posteriors, since it does not compete to be the answer.
+        let last_pass_began = std::time::Instant::now();
+        let mut statistics = agreed_at.unwrap_or_else(|| {
+            expectation_pass_every(
+                self.samples,
+                self.depth_cap,
+                self.config,
+                self.group_index,
+                self.coverage,
                 &parameters,
-                group_index,
-                which.sample_names,
-                config.settled_fraction,
+                PassKeeps {
+                    per_position_posteriors: true,
+                    information: true,
+                },
+                self.stride,
             )
-        })
-        .flatten();
-    let Alternation {
-        passes,
-        judging_passes,
-        judging_took,
-        trace,
-        ..
-    } = alternation;
-    StartOutcome {
-        parameters,
-        statistics,
-        information,
-        passes,
-        ended,
-        furthest_from_settled,
-        trace,
-        last_pass_took,
-        judging_passes,
-        judging_took,
+        });
+        let last_pass_took = last_pass_began.elapsed();
+        // PANIC-FREE: the final pass was asked to keep the information, and a pass that is asked
+        // starts every chunk's statistics, and its empty total, with the sums in place; an agreeing
+        // start's statistics are those of a pass that judged it, which kept the information too.
+        let information = statistics
+            .information
+            .take()
+            .expect("the pass above keeps the information");
+        // Why a start that did not converge had not, at the values it returns (spec §3.5).
+        let furthest_from_settled = (ended != StartEnding::Converged)
+            .then(|| {
+                how_far_from_settled(
+                    &information,
+                    &parameters,
+                    self.group_index,
+                    self.which.sample_names,
+                    self.config.settled_fraction,
+                )
+            })
+            .flatten();
+        let Alternation {
+            passes,
+            judging_passes,
+            judging_took,
+            trace,
+            ..
+        } = self;
+        StartOutcome {
+            parameters,
+            statistics,
+            information,
+            passes,
+            ended,
+            furthest_from_settled,
+            trace,
+            last_pass_took,
+            judging_passes,
+            judging_took,
+        }
     }
 }
 
@@ -3130,6 +2944,45 @@ struct Judgement {
 }
 
 impl Judgement {
+    /// What the judging pass that summed `information` found at `parameters`: the Newton step's
+    /// worth and distances, how far each parameter is from settled, and whether the start is
+    /// heading where an earlier one converged (`which.earlier`).
+    fn of(
+        information: &InformationSums,
+        parameters: &Parameters,
+        config: &JointFitConfig,
+        group_index: &[Vec<usize>],
+        which: &WhichStart<'_>,
+    ) -> Self {
+        let standard_errors = StandardErrors::of(information);
+        let errors = standard_errors.by_coordinate(parameters, group_index);
+        let step = newton_step(information, &standard_errors, parameters, group_index);
+        let converged = has_converged(step.decrement, config.decrement_threshold);
+        // A start that has converged is never stopped by agreement: it competes to be the
+        // fit's answer. Agreement stops only a start still on its way.
+        let heading_to = which
+            .earlier
+            .filter(|answer| {
+                !converged
+                    && agrees(
+                        &parameters.values(),
+                        &step.distances,
+                        answer,
+                        config.agreement_fraction,
+                    )
+            })
+            .map(|answer| answer.start);
+        Self {
+            decrement: step.decrement,
+            converged,
+            not_settled: not_settled(&errors, &step.distances, config.settled_fraction),
+            furthest: furthest(&errors, &step.distances),
+            heading_to,
+            distances: step.distances,
+            slopes: step.slopes,
+        }
+    }
+
     /// The progress line's account of the judgement: the decrement against the threshold, then how
     /// many parameters are not yet settled and the furthest, named by `names`.
     fn described(&self, names: &[String], config: &JointFitConfig) -> String {
@@ -3659,7 +3512,7 @@ fn squarem_step_length(start: &Parameters, first: &Parameters, second: &Paramete
 }
 
 /// One fitted number, the interval its maximisation keeps it in, and whether that maximisation is
-/// a [`golden_section`] search.
+/// a [`golden_section`](maximisation::golden_section) search.
 #[derive(Copy, Clone)]
 struct Coordinate {
     value: f64,
@@ -3671,8 +3524,8 @@ impl Coordinate {
     /// **The interval a Newton step may put this number in.** For a number the closed forms or the
     /// projected Beta step maximise, its whole interval: those land on an end themselves.
     ///
-    /// For one a [`golden_section`] search maximises — each library's two error rates and each
-    /// sample's homozygote excess — **never an end**. That search reports the middle of a bracket
+    /// For one a [`golden_section`](maximisation::golden_section) search maximises — each
+    /// library's two error rates and each sample's homozygote excess — **never an end**. That search reports the middle of a bracket
     /// narrower than its stopping width ([`GOLDEN_SECTION_WIDTH`]), so for a maximum on an end it
     /// returns a point between about a third and a half of the width beside the end, never the end
     /// itself, and the code that reads these numbers may rely on that. The one that does turns an
@@ -3876,1599 +3729,9 @@ const NOISY_ERROR_BOUNDS: (f64, f64) = (1e-4, 0.45);
 const BETA_SHAPE_BOUNDS: (f64, f64) = (0.02, 50.0);
 const HOM_EXCESS_BOUNDS: (f64, f64) = (0.0, 1.0);
 
-/// **What a pass holds fixed while it visits positions**: the parameters, which read group each
-/// sample's reads are scored under, and the tables built from the parameters once a pass — each
-/// read group's read log-probabilities and the two quadrature rules.
-///
-/// One value, handed both to [`one_position`] and to the scorer that reads what it leaves behind
-/// ([`information::score_position`]), so the two cannot be given different inputs.
-struct PassModel<'a> {
-    /// Per sample, the read groups its sections are, in the order the cursor visits them.
-    group_index: &'a [Vec<usize>],
-    ploidy: Ploidy,
-    /// `[class][read group]`.
-    read_logs: Vec<Vec<ReadLogs>>,
-    /// The frequency density's rule, with each sample's genotype priors at its nodes.
-    quadrature: BetaQuadrature,
-    /// The carrier Beta's rule and its slopes, when the run fits the duplicated class.
-    carrier: Option<CarrierRule>,
-    /// How the density's rule's nodes and weights move with its two shapes — what the
-    /// likelihood's slope in the shapes is made of, taken every pass for the shapes' update.
-    density_slopes: RuleSlopes,
-    /// The log of each branch's and each noise class's share, and the `ln 3` and `ln k` the
-    /// candidates are weighted by.
-    branches: BranchShares,
-    parameters: &'a Parameters,
-}
-
-/// **The logarithms a position's branches are weighted by, which depend on the parameters
-/// alone**: each branch's share, each noise class's share, and how many alleles a candidate
-/// stands for. The same at every position of a pass, so they are taken once a pass, beside the
-/// read tables. Each share is floored at `f64::MIN_POSITIVE` before its logarithm is taken.
-#[derive(Debug)]
-struct BranchShares {
-    /// Whether the run fits the duplicated class.
-    duplicated_fitted: bool,
-    /// `ln(1 − duplicated share)`: what the three ordinary branches share between them.
-    ln_ordinary: f64,
-    /// The log of the invariant, fixed-non-reference, segregating and duplicated shares.
-    ln_invariant: f64,
-    ln_fixed_alt: f64,
-    ln_segregating: f64,
-    ln_duplicated: f64,
-    /// The log of the three non-reference bases a fixed or segregating branch spreads over.
-    ln_three: f64,
-    /// `[class]` — the log of the ordinary (0) and the mismapped (1) class's share.
-    ln_class: [f64; 2],
-    /// `ln k`, indexed by how many alleles `k` a candidate stands for (one to three).
-    ln_multiplicity: [f64; CANDIDATE_ALTERNATIVES + 1],
-}
-
-impl BranchShares {
-    fn of(parameters: &Parameters, duplicated_fitted: bool) -> Self {
-        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
-        let density = &parameters.density;
-        let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
-        Self {
-            duplicated_fitted,
-            ln_ordinary: ln(1.0 - duplicated_share),
-            ln_invariant: ln(density.p_invariant),
-            ln_fixed_alt: ln(density.p_fixed_alt),
-            ln_segregating: ln(density.p_segregating()),
-            ln_duplicated: ln(duplicated_share),
-            ln_three: float::ln(CANDIDATE_ALTERNATIVES as f64),
-            ln_class: [ln(1.0 - parameters.noisy_share), ln(parameters.noisy_share)],
-            ln_multiplicity: std::array::from_fn(|k| float::ln(k as f64)),
-        }
-    }
-}
-
-/// **The carrier Beta's rule and how it moves with the carrier's two shapes**, held together so
-/// that a pass cannot have one without the other: a rule without its slopes would leave the
-/// carrier's shapes where they started, and nothing would say so.
-struct CarrierRule {
-    quadrature: BetaQuadrature,
-    slopes: RuleSlopes,
-}
-
-impl<'a> PassModel<'a> {
-    fn new(
-        parameters: &'a Parameters,
-        config: &JointFitConfig,
-        group_index: &'a [Vec<usize>],
-    ) -> Self {
-        let quadrature = BetaQuadrature::with_genotype_priors(
-            parameters.density.a,
-            parameters.density.b,
-            config.quadrature_nodes,
-            &parameters.hom_excess,
-        );
-        let carrier = parameters.duplicated.map(|duplicated| {
-            let quadrature = BetaQuadrature::new(
-                duplicated.carrier_a,
-                duplicated.carrier_b,
-                config.quadrature_nodes,
-            );
-            let slopes = RuleSlopes::of(
-                duplicated.carrier_a,
-                duplicated.carrier_b,
-                quadrature.nodes.len(),
-            );
-            CarrierRule { quadrature, slopes }
-        });
-        // One table a noise class a read group, beside the quadratures and for the same reason.
-        let read_logs: Vec<Vec<ReadLogs>> = (0..2)
-            .map(|class| {
-                (0..parameters.clean.len())
-                    .map(|group| ReadLogs::of(class_rate(parameters, class, group), config.ploidy))
-                    .collect()
-            })
-            .collect();
-        let density_slopes = RuleSlopes::of(
-            parameters.density.a,
-            parameters.density.b,
-            quadrature.nodes.len(),
-        );
-        Self {
-            group_index,
-            ploidy: config.ploidy,
-            read_logs,
-            branches: BranchShares::of(parameters, carrier.is_some()),
-            quadrature,
-            carrier,
-            density_slopes,
-            parameters,
-        }
-    }
-}
-
-/// One pass over every position: the posteriors, and every count the maximisations need.
-///
-/// **Split across cores by position.** Positions are independent given the parameters, and a
-/// chunk's counts add to another chunk's, so the pass is a map and a sum. The fit's own passes
-/// call [`expectation_pass`], which may also keep the information; this plain one is the tests'.
-#[cfg(test)]
-fn expectation(
-    samples: &[SampleGenericSections<'_>],
-    depth_cap: DepthCap,
-    config: &JointFitConfig,
-    group_index: &[Vec<usize>],
-    coverage: &[f64],
-    parameters: &Parameters,
-) -> Statistics {
-    expectation_pass(
-        samples,
-        depth_cap,
-        config,
-        group_index,
-        coverage,
-        parameters,
-        PassKeeps::SUMS_ONLY,
-    )
-}
-
-/// **What a pass keeps beyond the sums every maximisation reads.**
-#[derive(Copy, Clone, Debug)]
-struct PassKeeps {
-    /// Each position's probability of being mismapped and, when the run asks for them, each
-    /// sample's genotype posteriors there — one value a position, kept only on the pass whose
-    /// parameters are reported. A pass that keeps them joins its chunks in position order.
-    per_position_posteriors: bool,
-    /// The information the standard errors are computed from ([`InformationSums`]): a score per
-    /// position and parameter, summed into a few hundred bytes a sample. Kept only when a pass
-    /// asks for it.
-    information: bool,
-}
-
-impl PassKeeps {
-    /// The sums, and nothing else — what the tests' plain pass keeps.
-    #[cfg(test)]
-    const SUMS_ONLY: Self = Self {
-        per_position_posteriors: false,
-        information: false,
-    };
-}
-
-/// The same pass, told what to keep beyond its sums ([`PassKeeps`]).
-///
-/// Every pass joins its chunks' totals in an order fixed by the number of positions, so the
-/// totals do not depend on the pool's width.
-#[cfg(test)]
-fn expectation_pass(
-    samples: &[SampleGenericSections<'_>],
-    depth_cap: DepthCap,
-    config: &JointFitConfig,
-    group_index: &[Vec<usize>],
-    coverage: &[f64],
-    parameters: &Parameters,
-    keeps: PassKeeps,
-) -> Statistics {
-    expectation_pass_every(
-        samples,
-        depth_cap,
-        config,
-        group_index,
-        coverage,
-        parameters,
-        keeps,
-        1,
-    )
-}
-
-/// The same pass over only every `stride`-th position ([`EvidenceCursor::every`]); one is every
-/// position.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "expectation_pass's arguments and the stride"
-)]
-fn expectation_pass_every(
-    samples: &[SampleGenericSections<'_>],
-    depth_cap: DepthCap,
-    config: &JointFitConfig,
-    group_index: &[Vec<usize>],
-    coverage: &[f64],
-    parameters: &Parameters,
-    keeps: PassKeeps,
-    stride: usize,
-) -> Statistics {
-    let collect_noisy_posterior = keeps.per_position_posteriors;
-    let model = PassModel::new(parameters, config, group_index);
-    let quadrature = &model.quadrature;
-    // What the scorer needs that depends on the parameters alone: once a pass.
-    let scoring_tables = keeps.information.then(|| ScoringTables::of(&model));
-    let positions = EvidenceCursor::position_count(samples);
-    // **The chunks do not depend on the pool's width.** Every total below is a floating-point sum,
-    // and a sum's last bits depend on where it is split and in what order the parts are added.
-    // Chunks sized from the thread count, joined by `reduce` in whatever tree the pool chose, made
-    // the same census fit to a different file at one, four and eight threads (measured on the
-    // two-sample fixture of `cli::cross_platform_digests`). The test
-    // `a_census_of_many_chunks_fits_to_the_same_bits_at_any_pool_width` holds it.
-    let chunk = positions
-        .div_ceil(CHUNKS_PER_CENSUS)
-        .max(MIN_POSITIONS_PER_CHUNK);
-    let bounds: Vec<(usize, usize)> = (0..positions)
-        .step_by(chunk)
-        .map(|first| (first, (first + chunk).min(positions)))
-        .collect();
-
-    // The per-position lists are kept only on the pass whose parameters will be reported.
-    let collect_genotype_posterior = collect_noisy_posterior && config.genotype_posteriors;
-    let empty = || {
-        let mut statistics = Statistics::new(
-            parameters.clean.len(),
-            samples.len(),
-            quadrature.nodes.len(),
-        );
-        statistics.collect_noisy_posterior = collect_noisy_posterior;
-        statistics.collect_genotype_posterior = collect_genotype_posterior;
-        if keeps.information {
-            statistics.information = Some(InformationSums::for_a_cohort_of(group_index));
-        }
-        statistics
-    };
-    let one_chunk = |(first, end): (usize, usize)| {
-        let mut statistics = empty();
-        if collect_noisy_posterior {
-            statistics.noisy_posterior.reserve(end - first);
-        }
-        if collect_genotype_posterior {
-            statistics
-                .genotype_posterior
-                .reserve((end - first) * samples.len() * 3);
-            statistics.duplicated_posterior.reserve(end - first);
-        }
-        let mut cursor = EvidenceCursor::over(
-            samples,
-            group_index,
-            &config.edges,
-            depth_cap,
-            coverage,
-            config.depth_as_a_range,
-            first,
-            end,
-        )
-        .every(stride);
-        let mut scratch = Scratch::new(
-            samples.len(),
-            parameters.clean.len(),
-            quadrature.nodes.len(),
-        );
-        let mut odds = vec![
-            1.0_f64;
-            if config.coverage_odds.is_empty() {
-                0
-            } else {
-                samples.len()
-            }
-        ];
-        // Whether this pass scores its positions, and the row it scores them into.
-        let mut scoring = scoring_tables.as_ref().map(|tables| {
-            (
-                tables,
-                PositionScores::new(group_index, parameters.clean.len()),
-            )
-        });
-        let mut index = first.next_multiple_of(stride);
-        while cursor.next_position(&mut scratch.evidence) {
-            for (slot, sample) in odds.iter_mut().enumerate() {
-                *sample = float::exp(f64::from(
-                    config.coverage_odds[slot]
-                        .get(index)
-                        .copied()
-                        .unwrap_or(0.0),
-                ));
-            }
-            one_position(&mut scratch, &model, &odds, &mut statistics);
-            if let Some((tables, scores)) = scoring.as_mut() {
-                score_position(&scratch, &model, tables, &odds, scores);
-                statistics
-                    .information
-                    .as_mut()
-                    .expect("a pass that scores its positions keeps their sums")
-                    .add_position(scores);
-            }
-            index += stride;
-        }
-        statistics
-    };
-
-    if bounds.is_empty() {
-        return empty();
-    }
-    // **The chunks' totals are joined in an order that depends only on how many chunks there are.**
-    // `reduce` may join them in any tree it likes, which is wrong for the per-position lists and,
-    // for the sums, makes their last bits depend on the pool.
-    if collect_noisy_posterior {
-        // The reported pass: the chunks are added once each, in position order, into a total sized
-        // for the whole census, so each per-position list is copied once.
-        //
-        // **A window of chunks at a time, not every chunk at once.** Collecting all of them before
-        // adding any held every chunk's per-position lists — a second copy of the whole census's,
-        // 8 MB at two million positions — and every chunk's sums, whose genotype counts and
-        // information grow with the cohort: about a kilobyte a sample a chunk, so 0.2 to 0.3 GB of
-        // chunks at 2,000 samples. The window only decides how many chunks are held at once; they
-        // are still added in position order, so the totals are the same bits at any window and
-        // any pool.
-        use rayon::prelude::*;
-        let mut into = empty();
-        into.noisy_posterior.reserve(positions);
-        if collect_genotype_posterior {
-            into.genotype_posterior
-                .reserve(positions * samples.len() * 3);
-            into.duplicated_posterior.reserve(positions);
-        }
-        let window = 2 * rayon::current_num_threads().max(1);
-        for some in bounds.chunks(window) {
-            let chunks: Vec<Statistics> = some.par_iter().copied().map(one_chunk).collect();
-            for chunk in &chunks {
-                into.absorb(chunk);
-            }
-        }
-        return into;
-    }
-    // The iterating passes, which keep sums only: the chunk list is halved at fixed points, the
-    // halves are computed with `rayon::join`, and the right half's totals are added to the left's.
-    // The same additions in the same order at any width, and one partial total held per level.
-    fn joined<S, F>(bounds: &[(usize, usize)], one_chunk: &F, absorb: fn(&mut S, &S)) -> S
-    where
-        S: Send,
-        F: Fn((usize, usize)) -> S + Sync,
-    {
-        if let [only] = bounds {
-            return one_chunk(*only);
-        }
-        let (left, right) = bounds.split_at(bounds.len() / 2);
-        let (mut into, from) = rayon::join(
-            || joined(left, one_chunk, absorb),
-            || joined(right, one_chunk, absorb),
-        );
-        absorb(&mut into, &from);
-        into
-    }
-    joined(&bounds, &one_chunk, Statistics::absorb)
-}
-
-/// How many chunks a census is cut into. **The chunk size comes from the census's length and
-/// these two constants, never from the pool's width**, so a census is cut at the same positions on
-/// every machine.
-///
-/// **What sets the number: the wait at the end of every pass.** A pass ends when its last chunk
-/// does, and the chunks cost the same to within about 2%, so with too few of them most threads
-/// finish their last chunk and wait while a few run one more. At 128 chunks on 18 threads (7.1
-/// chunks a thread) the workers idled 6.6% of a 59-sample fit; on four samples, 5.8 of the 6.4
-/// idle points were that tail. 512 chunks are a quarter the size, so the tail is about a quarter
-/// as long, and took the 59-sample fit (18 threads, two runs each, interleaved) from 880.9 and
-/// 866.9 s to 827.8 and 829.6 s with the same instructions retired
-/// (`doc/devel/reports/reviews/perf_snp-fit_2026-10-18.md`, L3). That leaves about 28 chunks a
-/// thread at 18 threads and 4 at 128. Each chunk's setup — a scratch, a set of totals, one binary
-/// search into each sample's sparse list — stays small against its work at 512: about 3,900
-/// positions a chunk at two million positions; a census under 131,072 positions gets fewer chunks
-/// than 512, because no chunk is shorter than `MIN_POSITIONS_PER_CHUNK`. The iterating passes'
-/// join tree is two levels deeper than at 128, so each thread holds up to two more partial totals.
-/// Far more chunks are too many: 7,813 chunks of 256 positions made the four-sample fit 28% slower
-/// than 123 chunks of 16,384 (one run each, not interleaved).
-const CHUNKS_PER_CENSUS: usize = 512;
-
-/// The smallest chunk, so a census of a few thousand positions is not cut into chunks whose setup
-/// outweighs their work. Measured on the joint-fit bench at four threads: 256-position chunks
-/// matched the thread-sized chunks they replaced to within about 2% on every SNP/indel case.
-const MIN_POSITIONS_PER_CHUNK: usize = 256;
-
-/// At most three non-reference bases can be the segregating one, so the candidate list never
-/// exceeds three however many the samples showed reads on.
-const MAX_CANDIDATES: usize = CANDIDATE_ALTERNATIVES;
-
-/// What a position can be, within a noise class: the population carries one allele, it is fixed
-/// on a non-reference one, it segregates, or it is a stretch some samples carry twice.
-const BRANCHES: usize = 4;
-const DUPLICATED: usize = 3;
-
-/// Everything one position needs, sized once and reused, so a two-million-position pass
-/// allocates nothing.
-struct Scratch {
-    evidence: PositionEvidence,
-    samples: usize,
-    nodes: usize,
-    /// `[class][candidate][sample][genotype]` — `ln P(reads | genotype)`, and the same thing
-    /// exponentiated after its own per-sample maximum is taken out.
-    ///
-    /// **This is the whole reason the program can be run.** The read likelihoods depend on the
-    /// genotype and the error rate but **not on the allele frequency**, so they are computed
-    /// once per candidate and reused across every quadrature node — which is the fix the
-    /// previous session had to make to its repeat-tract program after it turned out to take
-    /// hours (`joint_route_research_narrative_2026-08-13.md` §7).
-    ell: Vec<f64>,
-    lik: Vec<f64>,
-    /// `[class][candidate][sample]` — the maximum taken out of `lik`.
-    lik_max: Vec<f64>,
-    /// `[class][candidate][node]`, and `[class][candidate]`.
-    node_ln: Vec<f64>,
-    /// The same, over the carrier frequency the duplicated class integrates.
-    carrier_node_ln: Vec<f64>,
-    fixed_ln: Vec<f64>,
-    /// `[class]` — the invariant branch, and the four branches combined.
-    invariant_ln: Vec<f64>,
-    branch_ln: Vec<f64>,
-    class_ln: Vec<f64>,
-    /// `[class]` — the log-likelihood of the branch where every sample is fixed for a
-    /// non-reference base, before its share multiplies it. **Kept for the scores**
-    /// ([`information`]), which differentiate the position's likelihood in the shares and need
-    /// each branch apart from the share it is weighted by; likewise the next two fields.
-    fixed_alt_ln: [f64; 2],
-    /// `[class]` — the integral over a segregating frequency, before its share multiplies it.
-    segregating_ln: [f64; 2],
-    /// `[class]` — the integral over how much of the panel carries an extra copy, before the
-    /// duplicated share multiplies it; `−∞` when the class is not fitted.
-    duplicated_ln: [f64; 2],
-    /// `[class]` — each branch's log-sum over its candidates (and nodes) before `ln 3` is taken
-    /// off: **the totals the attribution divides each share by**, kept so it does not sum the
-    /// same terms a second time. Likewise the next two fields.
-    fixed_sum_ln: [f64; 2],
-    segregating_sum_ln: [f64; 2],
-    /// `−∞` when the duplicated class is not fitted.
-    duplicated_sum_ln: [f64; 2],
-    /// `[class]` — the four branches' log-sum, which the attribution and the scorer divide by.
-    within_ln: [f64; 2],
-    /// The position's whole log-likelihood, once [`one_position`] has computed it.
-    position_ln: f64,
-    /// The candidate alleles this position sums over, and the log of how many alleles each stands
-    /// for — the only form the multiplicity is ever read in.
-    candidates: Vec<usize>,
-    ln_multiplicity: Vec<f64>,
-    /// `[sample][genotype]` — the segregating branch's genotype weight, collapsed over the
-    /// nodes and candidates it was spread across.
-    genotype_weight: Vec<f64>,
-    /// `[sample]` — the same for the duplicated branch, where a sample has two states rather
-    /// than three: it carries the extra copy or it does not.
-    carrier_weight: Vec<f64>,
-    /// `[sample][heterozygous, homozygous non-reference, carries an extra copy]` — this one
-    /// position's posteriors, summed over both classes and every branch, so that a run asking
-    /// to keep them has a value to keep. Zeroed per position.
-    position_genotype: Vec<f64>,
-    /// `[candidate][sample][genotype]`, the same before the candidates are collapsed, because
-    /// which reads count as the allele depends on which allele it is.
-    per_candidate_weight: Vec<f64>,
-    shares: Vec<f64>,
-}
-
-impl Scratch {
-    /// Room for `samples` samples holding `libraries` read groups between them, at a rule of
-    /// `nodes` nodes.
-    fn new(samples: usize, libraries: usize, nodes: usize) -> Self {
-        Self {
-            evidence: PositionEvidence {
-                libraries: vec![LibraryAtPosition::default(); libraries],
-                depth_weights: vec![0.0; libraries * MAX_RECORDED_SPREAD],
-                observed_alternatives: Vec::with_capacity(MAX_CANDIDATES),
-            },
-            samples,
-            nodes,
-            ell: vec![0.0; 2 * MAX_CANDIDATES * samples * 3],
-            lik: vec![0.0; 2 * MAX_CANDIDATES * samples * 3],
-            lik_max: vec![0.0; 2 * MAX_CANDIDATES * samples],
-            node_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES * nodes],
-            carrier_node_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES * nodes],
-            fixed_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES],
-            invariant_ln: vec![0.0; 2],
-            branch_ln: vec![0.0; BRANCHES * 2],
-            class_ln: vec![0.0; 2],
-            fixed_alt_ln: [f64::NEG_INFINITY; 2],
-            segregating_ln: [f64::NEG_INFINITY; 2],
-            duplicated_ln: [f64::NEG_INFINITY; 2],
-            fixed_sum_ln: [f64::NEG_INFINITY; 2],
-            segregating_sum_ln: [f64::NEG_INFINITY; 2],
-            duplicated_sum_ln: [f64::NEG_INFINITY; 2],
-            within_ln: [f64::NEG_INFINITY; 2],
-            position_ln: f64::NEG_INFINITY,
-            candidates: Vec::with_capacity(MAX_CANDIDATES),
-            ln_multiplicity: Vec::with_capacity(MAX_CANDIDATES),
-            genotype_weight: vec![0.0; samples * 3],
-            carrier_weight: vec![0.0; samples],
-            position_genotype: vec![0.0; samples * 3],
-            per_candidate_weight: vec![0.0; MAX_CANDIDATES * samples * 3],
-            shares: Vec::with_capacity(MAX_CANDIDATES * nodes),
-        }
-    }
-
-    fn ell_at(&self, class: usize, candidate: usize, sample: usize) -> usize {
-        ((class * MAX_CANDIDATES + candidate) * self.samples + sample) * 3
-    }
-
-    fn max_at(&self, class: usize, candidate: usize, sample: usize) -> usize {
-        (class * MAX_CANDIDATES + candidate) * self.samples + sample
-    }
-
-    fn node_at(&self, class: usize, candidate: usize, node: usize) -> usize {
-        (class * MAX_CANDIDATES + candidate) * self.nodes + node
-    }
-}
-
-/// The scale a running product is multiplied back up by when it is about to underflow, and its
-/// logarithm. Sixty-three samples' likelihoods multiplied together will underflow a `f64`
-/// several times over; rescaling keeps the product in range with **one logarithm per node
-/// instead of one per sample**, which is a sixty-fold saving in the innermost loop.
-const RESCALE: f64 = 1e150;
-const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
-
-/// **`ln Π terms`, the product kept in range by [`RESCALE`]**: multiplied back up whenever it is
-/// about to underflow, and its logarithm taken once at the end. `None` where the product is zero
-/// or negative — a node no sample's reads allow.
-#[inline(always)]
-fn ln_of_product(terms: impl Iterator<Item = f64>) -> Option<f64> {
-    let mut product = 1.0_f64;
-    let mut scale = 0.0_f64;
-    for term in terms {
-        product *= term;
-        if product < 1.0 / RESCALE {
-            product *= RESCALE;
-            scale -= LN_RESCALE;
-        }
-    }
-    if product <= 0.0 {
-        None
-    } else {
-        Some(float::ln(product) + scale)
-    }
-}
-
-/// One position: its likelihood, and its contribution to every accumulated count.
-#[allow(
-    clippy::needless_range_loop,
-    reason = "the sample index addresses four parallel arrays at once — the evidence, the \
-              scratch, the read-group map and the accumulated counts — and zipping them would \
-              hide which of the four the loop is really walking"
-)]
-fn one_position(
-    scratch: &mut Scratch,
-    model: &PassModel<'_>,
-    coverage_odds: &[f64],
-    statistics: &mut Statistics,
-) {
-    let group_index = model.group_index;
-    let ploidy = model.ploidy;
-    let read_logs = model.read_logs.as_slice();
-    let quadrature = &model.quadrature;
-    let carrier = model.carrier.as_ref().map(|rule| &rule.quadrature);
-    let parameters = model.parameters;
-    let shares = &model.branches;
-    let samples = scratch.samples;
-    let nodes = scratch.nodes;
-    statistics.positions += 1.0;
-    for s in 0..samples {
-        let depth: f64 = group_index[s]
-            .iter()
-            .map(|&library| scratch.evidence.libraries[library].depth)
-            .sum();
-        if depth >= 1.0 {
-            statistics.with_reads[s] += 1;
-        }
-        if depth >= 2.0 {
-            statistics.with_two_reads[s] += 1;
-        }
-    }
-
-    // ---- which alleles the position sums over ---------------------------------------------
-    //
-    // The three non-reference bases, with the ones no sample showed a read on folded into one
-    // term counted as many times as there are of them: they give the identical likelihood.
-    scratch.candidates.clear();
-    scratch.ln_multiplicity.clear();
-    for &code in &scratch.evidence.observed_alternatives {
-        scratch.candidates.push(code);
-        scratch.ln_multiplicity.push(shares.ln_multiplicity[1]);
-    }
-    let unobserved = CANDIDATE_ALTERNATIVES.saturating_sub(scratch.candidates.len());
-    if unobserved > 0 {
-        let stand_in = (0..4)
-            .find(|code| !scratch.candidates.contains(code))
-            .expect("with an unobserved allele left there is a base no read fell on");
-        scratch.candidates.push(stand_in);
-        scratch
-            .ln_multiplicity
-            .push(shares.ln_multiplicity[unobserved]);
-    }
-    let candidates = scratch.candidates.len();
-
-    // ---- the read likelihoods, once per candidate and reused across every node -------------
-    //
-    // **The library loop is outside the candidate loop so that the two candidate-invariant
-    // quantities are taken once.** [`reference_terms`] holds this block's only logarithms and
-    // `non_reference()` is a sum over four counts; neither reads which base the alternative
-    // is, so with the candidate loop outermost both were recomputed for every candidate — ten
-    // reference terms a library where three do the same job. `invariant` and each candidate's
-    // `fixed` accumulate over the samples in the samples' order.
-    //
-    // **A sample's reads under a genotype are its libraries' reads under that genotype, each
-    // library scored under its own two error rates**, and added: the genotype is one a sample,
-    // the rates are one a library. The first library's terms are taken as they are and each
-    // later library's added to them, so a sample of one library is scored with exactly the
-    // arithmetic it was scored with before its libraries were kept apart.
-    for class in 0..2 {
-        let mut invariant = 0.0;
-        let mut fixed = [0.0_f64; MAX_CANDIDATES];
-        for s in 0..samples {
-            let mut sample_invariant = 0.0;
-            if group_index[s].is_empty() {
-                // A sample with no library has no reads: every genotype explains them alike.
-                for candidate in 0..candidates {
-                    let base = scratch.ell_at(class, candidate, s);
-                    scratch.ell[base..base + 3].fill(0.0);
-                }
-            }
-            for (section, &library) in group_index[s].iter().enumerate() {
-                let logs = &read_logs[class][library];
-                let reads = &scratch.evidence.libraries[library];
-                let weights = scratch.evidence.weights_of(library);
-                let non_reference = reads.non_reference();
-                let reference_term = reference_terms(reads, weights, logs);
-                let all_reference =
-                    ln_reads_given_all_reference(reads, non_reference, logs, reference_term[0]);
-                sample_invariant = if section == 0 {
-                    all_reference
-                } else {
-                    sample_invariant + all_reference
-                };
-                for candidate in 0..candidates {
-                    let allele = scratch.candidates[candidate];
-                    let base = scratch.ell_at(class, candidate, s);
-                    for j in 0..3 {
-                        let value = ln_reads_given_genotype(
-                            reads,
-                            non_reference,
-                            j as u8,
-                            allele,
-                            logs,
-                            reference_term[j],
-                        );
-                        scratch.ell[base + j] = if section == 0 {
-                            value
-                        } else {
-                            scratch.ell[base + j] + value
-                        };
-                    }
-                }
-            }
-            invariant += sample_invariant;
-            for candidate in 0..candidates {
-                let base = scratch.ell_at(class, candidate, s);
-                let largest = scratch.ell[base..base + 3]
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                fixed[candidate] += scratch.ell[base + 2];
-                let slot = scratch.max_at(class, candidate, s);
-                scratch.lik_max[slot] = largest;
-                for j in 0..3 {
-                    scratch.lik[base + j] = float::exp(scratch.ell[base + j] - largest);
-                }
-            }
-        }
-        scratch.invariant_ln[class] = invariant;
-        for candidate in 0..candidates {
-            scratch.fixed_ln[class * MAX_CANDIDATES + candidate] = fixed[candidate];
-        }
-    }
-
-    // ---- the integral over the position's own allele frequency ------------------------------
-    for class in 0..2 {
-        for candidate in 0..candidates {
-            let mut offset = 0.0;
-            for s in 0..samples {
-                offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
-            }
-            for node in 0..nodes {
-                let product_ln = ln_of_product((0..samples).map(|s| {
-                    let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
-                    let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                    prior[0] * lik[0] + prior[1] * lik[1] + prior[2] * lik[2]
-                }));
-                let slot = scratch.node_at(class, candidate, node);
-                scratch.node_ln[slot] = match product_ln {
-                    Some(product_ln) => product_ln + offset + quadrature.ln_weights[node],
-                    None => f64::NEG_INFINITY,
-                };
-            }
-        }
-    }
-
-    // ---- the integral over how much of the panel carries the extra copy ---------------------
-    //
-    // The same shape as the branch above with one difference: a sample here has two states
-    // rather than three. It carries the duplication, in which case about half its reads
-    // disagree — the identical read likelihood a heterozygote has, already computed — or it
-    // does not, and is homozygous reference. **There is no third state, and that absence is
-    // what tells the class from a real variant across a cohort.**
-    if let Some(carrier) = carrier {
-        for class in 0..2 {
-            for candidate in 0..candidates {
-                let mut offset = 0.0;
-                for s in 0..samples {
-                    offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
-                }
-                for node in 0..carrier.nodes.len() {
-                    let q = carrier.nodes[node];
-                    let product_ln = ln_of_product((0..samples).map(|s| {
-                        let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                        // Where the run has a coverage summary, this is the only place it
-                        // enters: how much more likely this sample's read depth around here is
-                        // if it has two copies rather than one. Every other branch has every
-                        // sample single-copy, so the one-copy factor is common to all of them
-                        // and cancels out of the position entirely.
-                        let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
-                        (1.0 - q) * lik[0] + q * odds * lik[1]
-                    }));
-                    let slot = scratch.node_at(class, candidate, node);
-                    scratch.carrier_node_ln[slot] = match product_ln {
-                        Some(product_ln) => product_ln + offset + carrier.ln_weights[node],
-                        None => f64::NEG_INFINITY,
-                    };
-                }
-            }
-        }
-    }
-
-    // ---- the four branches, and the two classes ---------------------------------------------
-    let ln_three = shares.ln_three;
-    for class in 0..2 {
-        scratch.shares.clear();
-        for candidate in 0..candidates {
-            scratch.shares.push(
-                scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                    + scratch.ln_multiplicity[candidate],
-            );
-        }
-        let fixed_sum = float::ln_sum_exp(&scratch.shares);
-        scratch.fixed_sum_ln[class] = fixed_sum;
-        let fixed_alt = fixed_sum - ln_three;
-        scratch.shares.clear();
-        for candidate in 0..candidates {
-            let multiplicity = scratch.ln_multiplicity[candidate];
-            for node in 0..nodes {
-                scratch
-                    .shares
-                    .push(scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity);
-            }
-        }
-        let segregating_sum = float::ln_sum_exp(&scratch.shares);
-        scratch.segregating_sum_ln[class] = segregating_sum;
-        let segregating = segregating_sum - ln_three;
-        scratch.fixed_alt_ln[class] = fixed_alt;
-        scratch.segregating_ln[class] = segregating;
-        // The three ordinary branches share what is left when the duplicated class has taken
-        // its share, so the four still sum to one.
-        let ordinary = shares.ln_ordinary;
-        scratch.branch_ln[class * BRANCHES] =
-            ordinary + shares.ln_invariant + scratch.invariant_ln[class];
-        scratch.branch_ln[class * BRANCHES + 1] = ordinary + shares.ln_fixed_alt + fixed_alt;
-        scratch.branch_ln[class * BRANCHES + 2] = ordinary + shares.ln_segregating + segregating;
-        scratch.branch_ln[class * BRANCHES + DUPLICATED] = if let Some(carrier) = carrier {
-            scratch.shares.clear();
-            for candidate in 0..candidates {
-                let multiplicity = scratch.ln_multiplicity[candidate];
-                for node in 0..carrier.nodes.len() {
-                    scratch.shares.push(
-                        scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
-                            + multiplicity,
-                    );
-                }
-            }
-            let summed = float::ln_sum_exp(&scratch.shares);
-            scratch.duplicated_sum_ln[class] = summed;
-            // `duplicated_ln` is kept for the scores and not reused in the branch's own sum:
-            // `ln d + summed − ln 3` is added left to right, and taking `summed − ln 3` first
-            // would move the branch's last bits.
-            scratch.duplicated_ln[class] = summed - ln_three;
-            shares.ln_duplicated + summed - ln_three
-        } else {
-            scratch.duplicated_sum_ln[class] = f64::NEG_INFINITY;
-            scratch.duplicated_ln[class] = f64::NEG_INFINITY;
-            f64::NEG_INFINITY
-        };
-        let within = float::ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
-        scratch.within_ln[class] = within;
-        scratch.class_ln[class] = shares.ln_class[class] + within;
-    }
-    let position_ln = float::ln_sum_exp(&scratch.class_ln);
-    scratch.position_ln = position_ln;
-    if !position_ln.is_finite() {
-        // A position whose likelihood underflowed contributes nothing to any parameter, and it
-        // must still contribute an entry, or every position after it in the chunk would be
-        // attributed to its neighbour.
-        if statistics.collect_noisy_posterior {
-            statistics.noisy_posterior.push(0.0);
-        }
-        if statistics.collect_genotype_posterior {
-            statistics
-                .genotype_posterior
-                .extend(std::iter::repeat_n(0.0_f32, samples * 3));
-            statistics.duplicated_posterior.push(0.0);
-        }
-        // **And it counts as a position for the two population moments, carrying nothing.** Both
-        // routes to those moments have to see the same census: the stored array records this
-        // position as all-zero posteriors, so the running sums must record a position of no
-        // alternative copies rather than skip it, or the two would divide by different counts.
-        //
-        // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
-        // way here is taken through `float::ln(p.max(f64::MIN_POSITIVE))`, which floors a read's
-        // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one —
-        // so reaching `!position_ln.is_finite()` from well-formed evidence would take on the order
-        // of 1e305 reads at a position. What the two lines below maintain is tested where it can be:
-        // an all-zero position counts and contributes nothing, in `census_moments`'s
-        // all-reference fixtures, which build the identical buffer. Replacing this block with a
-        // `panic!` leaves the suite green, and that is a statement about the branch's
-        // reachability, not about the bookkeeping.
-        scratch.position_genotype.fill(0.0);
-        statistics
-            .census_moments
-            .add_position(&scratch.position_genotype);
-        return;
-    }
-    scratch.position_genotype.fill(0.0);
-    let mut duplicated_here = 0.0_f64;
-    statistics.log_likelihood += position_ln;
-    if statistics.collect_noisy_posterior {
-        statistics
-            .noisy_posterior
-            .push(float::exp(scratch.class_ln[1] - position_ln) as f32);
-    }
-
-    // ---- attribute it -------------------------------------------------------------------------
-    for class in 0..2 {
-        let class_posterior = float::exp(scratch.class_ln[class] - position_ln);
-        if class_posterior <= 1e-12 {
-            continue;
-        }
-        if class == 1 {
-            statistics.noisy += class_posterior;
-        }
-        let branches = &scratch.branch_ln[class * BRANCHES..][..BRANCHES];
-        let within = scratch.within_ln[class];
-        let branch = [
-            class_posterior * float::exp(branches[0] - within),
-            class_posterior * float::exp(branches[1] - within),
-            class_posterior * float::exp(branches[2] - within),
-            class_posterior * float::exp(branches[DUPLICATED] - within),
-        ];
-        statistics.invariant += branch[0];
-        statistics.fixed_alt += branch[1];
-        statistics.segregating += branch[2];
-        statistics.duplicated += branch[DUPLICATED];
-        duplicated_here += branch[DUPLICATED];
-
-        // The invariant branch: every sample is homozygous reference, and every read that is
-        // not on the reference base is an error, so none of them is "the allele".
-        //
-        // **Here and in every branch below, a library's tally is credited with that library's
-        // reads alone, at its own rate** — so each library's rates are fitted from its own
-        // evidence, where crediting every library of a sample with the sample's reads gave them
-        // one rate between them.
-        if branch[0] > 1e-12 {
-            for &library in group_index.iter().flatten() {
-                let reads = &scratch.evidence.libraries[library];
-                let rate = class_rate(parameters, class, library);
-                let neither = reads.non_reference() - reads.on[4];
-                let reference = expected_reference_reads(
-                    reads,
-                    scratch.evidence.weights_of(library),
-                    1.0 - rate,
-                );
-                let tally = &mut statistics.reads[library][class][0];
-                tally.neither += branch[0] * neither;
-                tally.reference += branch[0] * reference;
-            }
-        }
-
-        // The fixed-alternative branch: every sample carries two copies of the candidate.
-        if branch[1] > 1e-12 {
-            let branch_sum_ln = scratch.fixed_sum_ln[class];
-            for candidate in 0..candidates {
-                let share = branch[1]
-                    * float::exp(
-                        scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                            + scratch.ln_multiplicity[candidate]
-                            - branch_sum_ln,
-                    );
-                if share <= 1e-12 {
-                    continue;
-                }
-                let allele = scratch.candidates[candidate];
-                for s in 0..samples {
-                    for &library in &group_index[s] {
-                        let rate = class_rate(parameters, class, library);
-                        let counts = tally_of(
-                            &scratch.evidence.libraries[library],
-                            scratch.evidence.weights_of(library),
-                            allele,
-                            reference_read_probability(2, ploidy, rate),
-                        );
-                        statistics.reads[library][class][2].credit(share, counts);
-                    }
-                    statistics.homozygous_alt[s] += share;
-                    scratch.position_genotype[s * 3 + 1] += share;
-                }
-            }
-        }
-
-        // The segregating branch. The genotype weights are collapsed over the nodes before the
-        // read counts are touched: which reads are "the allele" depends on the candidate and
-        // not on the node, so the inner loop over read groups runs once per candidate rather
-        // than once per candidate per node.
-        if branch[2] > 1e-12 {
-            let branch_sum_ln = scratch.segregating_sum_ln[class];
-            scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
-            scratch.genotype_weight.fill(0.0);
-            for candidate in 0..candidates {
-                let multiplicity = scratch.ln_multiplicity[candidate];
-                for node in 0..nodes {
-                    let share = branch[2]
-                        * float::exp(
-                            scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity
-                                - branch_sum_ln,
-                        );
-                    if share <= 1e-12 {
-                        continue;
-                    }
-                    #[cfg(test)]
-                    {
-                        statistics.sum_ln_f += share * quadrature.ln_nodes[node];
-                    }
-                    // How this node's product over samples moves as its frequency moves: each
-                    // sample's term's slope in `f` over the term, summed.
-                    let mut along_frequency = 0.0;
-                    for s in 0..samples {
-                        let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
-                        let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                        let joint = [prior[0] * lik[0], prior[1] * lik[1], prior[2] * lik[2]];
-                        let total = joint[0] + joint[1] + joint[2];
-                        if total <= 0.0 {
-                            continue;
-                        }
-                        let prior_slope = &quadrature.prior_slopes[(node * samples + s) * 3..][..3];
-                        along_frequency += (prior_slope[0] * lik[0]
-                            + prior_slope[1] * lik[1]
-                            + prior_slope[2] * lik[2])
-                            / total;
-                        let base = (candidate * samples + s) * 3;
-                        for j in 0..3 {
-                            let weight = share * joint[j] / total;
-                            scratch.per_candidate_weight[base + j] += weight;
-                            scratch.genotype_weight[s * 3 + j] += weight;
-                            statistics.genotypes[s][node][j] += weight;
-                        }
-                    }
-                    // The node's share of the likelihood's slope in each shape: its weight moves
-                    // and it moves along the frequency axis ([`information::RuleSlopes`]).
-                    let rule = &model.density_slopes;
-                    for (shape, slope) in statistics.density_shape_slopes.iter_mut().enumerate() {
-                        *slope += share
-                            * (rule.ln_weight_slope[shape][node]
-                                + along_frequency * rule.node_slope[shape][node]);
-                    }
-                }
-            }
-            for candidate in 0..candidates {
-                let allele = scratch.candidates[candidate];
-                for s in 0..samples {
-                    let base = (candidate * samples + s) * 3;
-                    for j in 0..3 {
-                        let weight = scratch.per_candidate_weight[base + j];
-                        if weight <= 0.0 {
-                            continue;
-                        }
-                        for &library in &group_index[s] {
-                            let rate = class_rate(parameters, class, library);
-                            let counts = tally_of(
-                                &scratch.evidence.libraries[library],
-                                scratch.evidence.weights_of(library),
-                                allele,
-                                reference_read_probability(j as u8, ploidy, rate),
-                            );
-                            statistics.reads[library][class][j].credit(weight, counts);
-                        }
-                    }
-                }
-            }
-            for s in 0..samples {
-                statistics.heterozygous[s] += scratch.genotype_weight[s * 3 + 1];
-                statistics.homozygous_alt[s] += scratch.genotype_weight[s * 3 + 2];
-                scratch.position_genotype[s * 3] += scratch.genotype_weight[s * 3 + 1];
-                scratch.position_genotype[s * 3 + 1] += scratch.genotype_weight[s * 3 + 2];
-            }
-        }
-
-        // The duplicated branch. A carrier's reads are scored exactly as a heterozygote's, so
-        // they go into the same tally the error rate is maximised over — what differs is where
-        // the position's own weight is booked, and **a carrier is not counted heterozygous**.
-        if let Some(CarrierRule {
-            quadrature: carrier,
-            slopes: rule,
-        }) = model
-            .carrier
-            .as_ref()
-            .filter(|_| branch[DUPLICATED] > 1e-12)
-        {
-            {
-                let carrier_nodes = carrier.nodes.len();
-                let branch_sum_ln = scratch.duplicated_sum_ln[class];
-                scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
-                scratch.carrier_weight.fill(0.0);
-                for candidate in 0..candidates {
-                    let multiplicity = scratch.ln_multiplicity[candidate];
-                    for node in 0..carrier_nodes {
-                        let share = branch[DUPLICATED]
-                            * float::exp(
-                                scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
-                                    + multiplicity
-                                    - branch_sum_ln,
-                            );
-                        if share <= 1e-12 {
-                            continue;
-                        }
-                        let q = carrier.nodes[node];
-                        let mut along_frequency = 0.0;
-                        for s in 0..samples {
-                            let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                            let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
-                            let joint = [(1.0 - q) * lik[0], q * odds * lik[1]];
-                            let total = joint[0] + joint[1];
-                            if total <= 0.0 {
-                                continue;
-                            }
-                            along_frequency += (odds * lik[1] - lik[0]) / total;
-                            let base = (candidate * samples + s) * 3;
-                            scratch.per_candidate_weight[base] += share * joint[0] / total;
-                            scratch.per_candidate_weight[base + 1] += share * joint[1] / total;
-                            scratch.carrier_weight[s] += share * joint[1] / total;
-                        }
-                        for (shape, slope) in statistics.carrier_shape_slopes.iter_mut().enumerate()
-                        {
-                            *slope += share
-                                * (rule.ln_weight_slope[shape][node]
-                                    + along_frequency * rule.node_slope[shape][node]);
-                        }
-                    }
-                }
-                for candidate in 0..candidates {
-                    let allele = scratch.candidates[candidate];
-                    for s in 0..samples {
-                        let base = (candidate * samples + s) * 3;
-                        for j in 0..2 {
-                            let weight = scratch.per_candidate_weight[base + j];
-                            if weight <= 0.0 {
-                                continue;
-                            }
-                            for &library in &group_index[s] {
-                                let rate = class_rate(parameters, class, library);
-                                let counts = tally_of(
-                                    &scratch.evidence.libraries[library],
-                                    scratch.evidence.weights_of(library),
-                                    allele,
-                                    reference_read_probability(j as u8, ploidy, rate),
-                                );
-                                statistics.reads[library][class][j].credit(weight, counts);
-                            }
-                        }
-                    }
-                }
-                for s in 0..samples {
-                    statistics.carrier[s] += scratch.carrier_weight[s];
-                    scratch.position_genotype[s * 3 + 2] += scratch.carrier_weight[s];
-                }
-            }
-        }
-    }
-
-    // **The two population moments, summed here rather than stored and reduced afterwards.**
-    // `scratch.position_genotype` is the buffer this position just filled; nothing is copied and
-    // nothing is kept (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
-    statistics
-        .census_moments
-        .add_position(&scratch.position_genotype);
-    if statistics.collect_genotype_posterior {
-        statistics
-            .genotype_posterior
-            .extend(scratch.position_genotype.iter().map(|v| *v as f32));
-        statistics.duplicated_posterior.push(duplicated_here as f32);
-    }
-}
-
-fn class_rate(parameters: &Parameters, class: usize, group: usize) -> f64 {
-    if class == 0 {
-        parameters.clean[group]
-    } else {
-        parameters.noisy[group]
-    }
-}
-
-/// Every parameter's own maximisation, over the counts one pass accumulated. Returns the
-/// largest relative move any parameter made — what the per-pass trace ([`PassSummary`]) records;
-/// since plan step B1 it no longer decides when the fit stops.
-fn maximisation(
-    parameters: &mut Parameters,
-    statistics: &Statistics,
-    config: &JointFitConfig,
-) -> f64 {
-    let moved = std::cell::Cell::new(0.0_f64);
-    let note = |before: f64, after: f64| {
-        let scale = before.abs().max(1e-6);
-        moved.set(moved.get().max((after - before).abs() / scale));
-    };
-    // **A share is judged against a floor rather than against itself.** A class the data does
-    // not want shrinks geometrically — halving on every pass — and halving is a relative move
-    // of one half however small the number has become, so the move of such a share would read as
-    // large forever. One position in ten thousand is the point below which a share stops being a
-    // quantity anyone reads.
-    let note_share = |before: f64, after: f64| {
-        let scale = before.abs().max(1e-4);
-        moved.set(moved.get().max((after - before).abs() / scale));
-    };
-
-    // The share of positions that are mismapped, and the density's two masses: closed form.
-    let positions = statistics.positions.max(1.0);
-    let before = parameters.noisy_share;
-    parameters.noisy_share =
-        (statistics.noisy / positions).clamp(NOISY_SHARE_BOUNDS.0, NOISY_SHARE_BOUNDS.1);
-    note_share(before, parameters.noisy_share);
-
-    let branch_total = (statistics.invariant + statistics.fixed_alt + statistics.segregating)
-        .max(f64::MIN_POSITIVE);
-    let before = parameters.density.p_invariant;
-    parameters.density.p_invariant =
-        (statistics.invariant / branch_total).clamp(P_INVARIANT_BOUNDS.0, P_INVARIANT_BOUNDS.1);
-    note(before, parameters.density.p_invariant);
-    let before = parameters.density.p_fixed_alt;
-    parameters.density.p_fixed_alt =
-        (statistics.fixed_alt / branch_total).clamp(P_FIXED_ALT_BOUNDS.0, P_FIXED_ALT_BOUNDS.1);
-    note(before, parameters.density.p_fixed_alt);
-
-    // The duplicated class's share of positions, and the Beta its carrier frequency is drawn
-    // from. **Bounded well below a half**: a class that grows without bound starts explaining
-    // real variants, which is the failure mode measured when duplications are mostly private.
-    if let Some(duplicated) = parameters.duplicated.as_mut() {
-        let before = duplicated.share;
-        duplicated.share = (statistics.duplicated / positions)
-            .clamp(DUPLICATED_SHARE_BOUNDS.0, DUPLICATED_SHARE_BOUNDS.1);
-        note_share(before, duplicated.share);
-        if statistics.duplicated > 0.0 {
-            let (a, b) = step_beta_shapes(
-                statistics.carrier_shape_slopes,
-                statistics.duplicated,
-                duplicated.carrier_a,
-                duplicated.carrier_b,
-            );
-            note(duplicated.carrier_a, a);
-            note(duplicated.carrier_b, b);
-            duplicated.carrier_a = a;
-            duplicated.carrier_b = b;
-        }
-    }
-
-    // The Beta's two shapes, one step along the log-likelihood's own slope in them.
-    if statistics.segregating > 0.0 {
-        let (a, b) = step_beta_shapes(
-            statistics.density_shape_slopes,
-            statistics.segregating,
-            parameters.density.a,
-            parameters.density.b,
-        );
-        note(parameters.density.a, a);
-        note(parameters.density.b, b);
-        parameters.density.a = a;
-        parameters.density.b = b;
-    }
-
-    // Each read group's two error rates, each over nine accumulated read counts.
-    for group in 0..parameters.clean.len() {
-        for (class, bounds) in [(0_usize, CLEAN_ERROR_BOUNDS), (1, NOISY_ERROR_BOUNDS)] {
-            let tallies = &statistics.reads[group][class];
-            let current = if class == 0 {
-                parameters.clean[group]
-            } else {
-                parameters.noisy[group]
-            };
-            let fitted = maximise_error_rate(tallies, config.ploidy, bounds, current);
-            note(current, fitted);
-            if class == 0 {
-                parameters.clean[group] = fitted;
-            } else {
-                parameters.noisy[group] = fitted;
-            }
-        }
-    }
-    // **The two rates are not put in order** (`parameter_prepass_joint_fit.md` §3.3, decided
-    // 2026-10-17). A library whose mismapped-position rate comes out below its ordinary one keeps
-    // both: swapping them alone, with the share and the other libraries' rates unswapped, handed
-    // the ordinary positions a rate fitted to the few mismapped ones and lowered the
-    // log-likelihood by tens of units a pass. The cap of 0.5 on the mismapped share is what makes
-    // that class the minority one.
-
-    // Each sample's homozygote excess, over its expected genotype counts at each node.
-    let quadrature = BetaQuadrature::new(
-        parameters.density.a,
-        parameters.density.b,
-        config.quadrature_nodes,
-    );
-    // **At one sample the homozygote excess is not identified and is not moved.** Nothing
-    // separates "this individual is inbred" from "the population's frequencies are what they
-    // are" when there is one individual, so a fit that searched it anyway would wander without
-    // converging and hand back a plausible number. `fit_jointly` marks it as not fitted.
-    if fits_homozygote_excess(samples_with_reads(statistics)) {
-        for (s, counts) in statistics.genotypes.iter().enumerate() {
-            let fitted = maximise_hom_excess(counts, &quadrature, parameters.hom_excess[s]);
-            note(parameters.hom_excess[s], fitted);
-            parameters.hom_excess[s] = fitted;
-        }
-    }
-    moved.get()
-}
-
-/// The error rate that best explains the expected read counts, by golden-section search over
-/// a concave one-dimensional objective.
-///
-/// **This is where the cost of the route is contained.** The objective reads nine numbers, so
-/// the twenty evaluations a search costs are twenty passes over nine numbers rather than
-/// twenty passes over the reads.
-fn maximise_error_rate(
-    tallies: &[ReadTally; 3],
-    ploidy: Ploidy,
-    bounds: (f64, f64),
-    current: f64,
-) -> f64 {
-    let score = |rate: f64| {
-        let mut total = 0.0;
-        for (j, tally) in tallies.iter().enumerate() {
-            let on_candidate = candidate_read_probability(j as u8, ploidy, rate);
-            let on_reference = reference_read_probability(j as u8, ploidy, rate);
-            total += count_times_ln(tally.candidate, on_candidate)
-                + count_times_ln(tally.neither, rate / 3.0)
-                + count_times_ln(tally.reference, on_reference);
-        }
-        total
-    };
-    let observations: f64 = tallies
-        .iter()
-        .map(|t| t.candidate + t.neither + t.reference)
-        .sum();
-    if observations <= 0.0 {
-        return current;
-    }
-    golden_section(&score, bounds.0, bounds.1)
-}
-
-/// **Whether the fit moves each sample's homozygote excess**: only with two samples or more that
-/// carry reads at an ordinary position. At one sample nothing separates an inbred individual from a
-/// population whose frequencies are what they are, so the excess is held where it starts — and,
-/// holding it, the fit has no standard error for it either ([`standard_errors`]). **A sample with no
-/// such read is not counted**: one sample with reads beside one whose census holds repeat tracts
-/// only is a one-sample cohort, and counting both had the first sample's excess come back fitted,
-/// with an error, where alone it is held.
-fn fits_homozygote_excess(samples_with_reads: usize) -> bool {
-    samples_with_reads >= 2
-}
-
-/// How many samples have at least one read at an ordinary position — what
-/// [`fits_homozygote_excess`] counts.
-fn samples_with_reads(statistics: &Statistics) -> usize {
-    statistics
-        .with_reads
-        .iter()
-        .filter(|&&reads| reads > 0)
-        .count()
-}
-
-/// The homozygote excess that best explains one sample's expected genotype counts.
-fn maximise_hom_excess(counts: &[[f64; 3]], quadrature: &BetaQuadrature, current: f64) -> f64 {
-    let observations: f64 = counts.iter().flatten().sum();
-    if observations <= 0.0 {
-        return current;
-    }
-    let score = |excess: f64| {
-        let mut total = 0.0;
-        for (node, row) in counts.iter().enumerate() {
-            let prior = genotype_frequencies(quadrature.nodes[node], excess);
-            for (j, count) in row.iter().enumerate() {
-                total += count_times_ln(*count, prior[j]);
-            }
-        }
-        total
-    };
-    golden_section(&score, HOM_EXCESS_BOUNDS.0, HOM_EXCESS_BOUNDS.1)
-}
-
-/// **How narrow the golden section's bracket must be for it to stop**, as a share of one plus the
-/// size of its upper end. It returns the bracket's middle, so a maximum on an end of the interval
-/// comes back up to half this beside the end rather than on it — which the box solve of the Newton
-/// step treats as on it (`standard_errors::BESIDE_AN_END`).
-const GOLDEN_SECTION_WIDTH: f64 = 1e-9;
-
-/// The maximum of a unimodal function on `[low, high]`, to about six figures.
-fn golden_section(score: &dyn Fn(f64) -> f64, low: f64, high: f64) -> f64 {
-    const INVERSE_PHI: f64 = 0.618_033_988_749_895;
-    let (mut low, mut high) = (low, high);
-    let mut c = high - INVERSE_PHI * (high - low);
-    let mut d = low + INVERSE_PHI * (high - low);
-    let (mut fc, mut fd) = (score(c), score(d));
-    for _ in 0..60 {
-        if high - low < GOLDEN_SECTION_WIDTH * (1.0 + high.abs()) {
-            break;
-        }
-        if fc > fd {
-            high = d;
-            d = c;
-            fd = fc;
-            c = high - INVERSE_PHI * (high - low);
-            fc = score(c);
-        } else {
-            low = c;
-            c = d;
-            fc = fd;
-            d = low + INVERSE_PHI * (high - low);
-            fd = score(d);
-        }
-    }
-    0.5 * (low + high)
-}
-
-/// **A Beta's two shapes, one Newton step along the log-likelihood's own slope in them.**
-///
-/// `slope` is the log-likelihood's slope in `[a, b]` summed over the positions — the slope of
-/// the likelihood the quadrature rule computes, nodes and weights moving with the shapes
-/// ([`Statistics::density_shape_slopes`]). The step divides it by the curvature `positions` Beta
-/// draws would give if each position's frequency were seen — `positions` times the matrix of
-/// trigamma terms `[[ψ′(a) − ψ′(a+b), −ψ′(a+b)], [−ψ′(a+b), ψ′(b) − ψ′(a+b)]]`, with `positions`
-/// the posterior count of positions the Beta covers. That curvature is the complete-data one, so
-/// this is one step of the EM gradient algorithm (Lange 1995), **at rest only where the
-/// likelihood's slope is zero** — where the update it replaces solved the digamma form, whose
-/// integral on the rule misses that slope (`information` module doc, "The Beta shapes' slopes"),
-/// and came to rest 0.65 to 2.3 standard errors from the likelihood's flat point
-/// (`fit_precision_a4_2026-09-27.md` §2.3).
-///
-/// **It takes more passes than the update it replaces**: one step a pass, where that update solved
-/// its two equations to convergence each pass. Measured on drawn cohorts of 20 samples at 3 reads,
-/// an accelerated start converges in 18 to 30 passes where it took 12 to 18
-/// (`fit_precision_a7_2026-09-28.md` §3).
-///
-/// **At a bound the step is projected.** A shape whose step would leave its interval is held at the
-/// bound it crosses, and the other takes the step the same curvature gives with that shape held —
-/// so the free shape still comes to rest only where its own slope is zero. Clamping each shape of
-/// the joint step instead left the free one where its slope was not zero: a joint step's cross term
-/// assumes both shapes move (plan step A7's review, where a density wanting its second shape above
-/// 50 stopped its first 4.1 units from the maximum and lost log-likelihood from pass to pass). A
-/// slope that is not a number moves nothing.
-fn step_beta_shapes(slope: [f64; 2], positions: f64, a: f64, b: f64) -> (f64, f64) {
-    let (low, high) = BETA_SHAPE_BOUNDS;
-    let within = |shape: f64| (low..=high).contains(&shape);
-    if !(slope[0].is_finite() && slope[1].is_finite()) {
-        return (a, b);
-    }
-    let ab = a + b;
-    let h11 = positions * (trigamma(a) - trigamma(ab));
-    let h22 = positions * (trigamma(b) - trigamma(ab));
-    let h12 = -positions * trigamma(ab);
-    let determinant = h11 * h22 - h12 * h12;
-    if !(determinant > 0.0 && determinant.is_finite()) {
-        return (a, b);
-    }
-    let joint = (
-        a + (slope[0] * h22 - slope[1] * h12) / determinant,
-        b + (slope[1] * h11 - slope[0] * h12) / determinant,
-    );
-    if within(joint.0) && within(joint.1) {
-        return joint;
-    }
-    // One shape held at the bound its step crosses; the other's step with it held.
-    let a_given = |held_b: f64| a + (slope[0] - h12 * (held_b - b)) / h11;
-    let b_given = |held_a: f64| b + (slope[1] - h12 * (held_a - a)) / h22;
-    if !within(joint.1) {
-        let held_b = joint.1.clamp(low, high);
-        let free_a = a_given(held_b);
-        if within(free_a) {
-            return (free_a, held_b);
-        }
-    }
-    if !within(joint.0) {
-        let held_a = joint.0.clamp(low, high);
-        let free_b = b_given(held_a);
-        if within(free_b) {
-            return (held_a, free_b);
-        }
-    }
-    (joint.0.clamp(low, high), joint.1.clamp(low, high))
-}
-
-// ---------------------------------------------------------------------
-// The integral over a position's allele frequency
-// ---------------------------------------------------------------------
-
-/// A Gauss–Jacobi rule for `∫₀¹ Beta(f; a, b) · h(f) df`, normalised so the weights sum to one.
-///
-/// **Gauss–Jacobi rather than a grid**, because a Beta with a shape below one — which is what
-/// a population with many rare alleles has — is unbounded at zero, and a uniform grid puts no
-/// node where nearly all the mass is. The rule absorbs the singularity into its weight
-/// function, so the nodes are placed by the density itself.
-struct BetaQuadrature {
-    nodes: Vec<f64>,
-    /// The rule's weights, summing to one. **The pass reads `ln_weights`**; these are what the
-    /// tests integrate a known Beta with, which is the only check that the rule is the right
-    /// rule rather than merely a consistent one.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "read by this module's own tests")
-    )]
-    weights: Vec<f64>,
-    ln_weights: Vec<f64>,
-    /// `ln f` at each node, for the test that measures the digamma form ([`Statistics`]).
-    #[cfg(test)]
-    ln_nodes: Vec<f64>,
-    /// `[node][sample][genotype]` — how common each genotype is at that node's frequency for
-    /// that sample's own inbreeding. **Computed once for the whole pass**, because it depends
-    /// on nothing that varies from position to position, and it sits in the innermost loop.
-    priors: Vec<f64>,
-    /// `[node][sample][genotype]` — how that genotype frequency moves with the node's frequency
-    /// (`genotype_frequencies_slope_in_frequency`), laid out as `priors`: what the likelihood's
-    /// slope in the density's shapes reads as the rule's nodes move.
-    prior_slopes: Vec<f64>,
-}
-
-impl BetaQuadrature {
-    /// The rule, plus the genotype priors every position will read.
-    fn with_genotype_priors(a: f64, b: f64, count: usize, hom_excess: &[f64]) -> Self {
-        let mut rule = Self::new(a, b, count);
-        rule.priors = Vec::with_capacity(rule.nodes.len() * hom_excess.len() * 3);
-        rule.prior_slopes = Vec::with_capacity(rule.nodes.len() * hom_excess.len() * 3);
-        for &f in &rule.nodes {
-            for &excess in hom_excess {
-                rule.priors
-                    .extend_from_slice(&genotype_frequencies(f, excess));
-                rule.prior_slopes
-                    .extend_from_slice(&genotype_frequencies_slope_in_frequency(f, excess));
-            }
-        }
-        rule
-    }
-
-    fn new(a: f64, b: f64, count: usize) -> Self {
-        // Mapping `f = (1 + x)/2` turns the Beta's weight into the Jacobi weight
-        // `(1 − x)^(b−1) (1 + x)^(a−1)`.
-        let (alpha, beta) = (b - 1.0, a - 1.0);
-        let (x, w) = gauss_jacobi(alpha, beta, count);
-        let nodes: Vec<f64> = x
-            .iter()
-            .map(|x| (0.5 * (1.0 + x)).clamp(1e-12, 1.0 - 1e-12))
-            .collect();
-        let total: f64 = w.iter().sum();
-        let weights: Vec<f64> = w.iter().map(|w| w / total).collect();
-        #[cfg(test)]
-        let ln_nodes = nodes.iter().map(|f| float::ln(*f)).collect();
-        let ln_weights = weights
-            .iter()
-            .map(|w| float::ln(w.max(f64::MIN_POSITIVE)))
-            .collect();
-        Self {
-            nodes,
-            weights,
-            ln_weights,
-            #[cfg(test)]
-            ln_nodes,
-            priors: Vec::new(),
-            prior_slopes: Vec::new(),
-        }
-    }
-}
-
-/// Nodes and weights of the `count`-point Gauss–Jacobi rule on `[-1, 1]` with weight
-/// `(1 − x)^α (1 + x)^β`, by the Golub–Welsch construction: the rule's nodes are the
-/// eigenvalues of the recurrence's tridiagonal matrix and its weights come from the first
-/// component of each eigenvector.
-fn gauss_jacobi(alpha: f64, beta: f64, count: usize) -> (Vec<f64>, Vec<f64>) {
-    let n = count.max(2);
-    let mut matrix = vec![0.0; n * n];
-    for i in 0..n {
-        let k = i as f64;
-        let s = 2.0 * k + alpha + beta;
-        let diagonal = if s.abs() < 1e-12 || (s + 2.0).abs() < 1e-12 {
-            (beta - alpha) / (alpha + beta + 2.0)
-        } else {
-            (beta * beta - alpha * alpha) / (s * (s + 2.0))
-        };
-        matrix[i * n + i] = diagonal;
-        if i + 1 < n {
-            let k = (i + 1) as f64;
-            let s = 2.0 * k + alpha + beta;
-            let numerator = 4.0 * k * (k + alpha) * (k + beta) * (k + alpha + beta);
-            let denominator = s * s * (s + 1.0) * (s - 1.0);
-            let off = if denominator.abs() < 1e-12 {
-                0.0
-            } else {
-                (numerator / denominator).max(0.0).sqrt()
-            };
-            matrix[i * n + i + 1] = off;
-            matrix[(i + 1) * n + i] = off;
-        }
-    }
-    let (values, vectors) = symmetric_eigen(&matrix, n);
-    // The rule's weight is the **first component** of each eigenvector, squared — and
-    // `vectors` is laid out eigenvector-major, so that component is at `k * n` and not at `k`.
-    let weights: Vec<f64> = (0..n).map(|k| vectors[k * n] * vectors[k * n]).collect();
-    (values, weights)
-}
-
-/// Eigenvalues and eigenvectors of a small symmetric matrix, by cyclic Jacobi rotations
-/// ([`linear_algebra::jacobi_rotations`]), in ascending order of eigenvalue.
-///
-/// `vectors[k * n + s]` is component `s` of the eigenvector for eigenvalue `k`; the rule above
-/// reads only the first component of each, which is why they are returned that way round.
-fn symmetric_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let (diagonal, v) = linear_algebra::jacobi_rotations(matrix, n, 1e-22, 1e-18);
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| {
-        diagonal[i]
-            .partial_cmp(&diagonal[j])
-            .expect("no NaN in a Jacobi recurrence")
-    });
-    let values = order.iter().map(|&i| diagonal[i]).collect();
-    let mut vectors = vec![0.0; n * n];
-    for (k, &i) in order.iter().enumerate() {
-        for s in 0..n {
-            vectors[k * n + s] = v[s * n + i];
-        }
-    }
-    (values, vectors)
-}
-
-/// `ψ(x)`, the derivative of `ln Γ(x)`, by recurrence up to eight and then an asymptotic
-/// series. Only the tests read it: the shapes' update steps on the rule's own slope instead of
-/// solving the digamma form ([`step_beta_shapes`]).
-#[cfg(test)]
-fn digamma(x: f64) -> f64 {
-    let mut x = x;
-    let mut result = 0.0;
-    while x < 8.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let square = inverse * inverse;
-    result + float::ln(x)
-        - 0.5 * inverse
-        - square * (1.0 / 12.0 - square * (1.0 / 120.0 - square / 252.0))
-}
-
-/// `ψ'(x)`, by the same shape.
-fn trigamma(x: f64) -> f64 {
-    let mut x = x;
-    let mut result = 0.0;
-    while x < 8.0 {
-        result += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inverse = 1.0 / x;
-    let square = inverse * inverse;
-    result + inverse * (1.0 + 0.5 * inverse + square * (1.0 / 6.0 - square / 30.0))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::maximisation::golden_section;
     use super::*;
 
     // ---- the Newton step's tries (`parameter_prepass_joint_fit.md` §3.3.1, §12 test 11) -----
@@ -5848,151 +4111,6 @@ mod tests {
     // ---- the pieces, each on its own ------------------------------------------
 
     #[test]
-    fn the_quadrature_integrates_a_beta_to_one_and_gets_its_mean_right() {
-        for (a, b) in [(0.3, 2.0), (1.0, 1.0), (2.5, 5.0), (0.1, 0.9)] {
-            let rule = BetaQuadrature::new(a, b, 24);
-            let total: f64 = rule.weights.iter().sum();
-            assert!(
-                (total - 1.0).abs() < 1e-10,
-                "Beta({a}, {b}) weights sum to {total}"
-            );
-            let mean: f64 = rule
-                .nodes
-                .iter()
-                .zip(rule.weights.iter())
-                .map(|(f, w)| f * w)
-                .sum();
-            let truth = a / (a + b);
-            assert!(
-                (mean - truth).abs() < 1e-8,
-                "Beta({a}, {b}) mean {mean} against {truth}"
-            );
-        }
-    }
-
-    /// **The shape a neutral population has is the one a uniform grid cannot integrate**, so
-    /// it is the one to check: `Beta(0.2, 1)` puts nearly all its mass below `f = 0.01`.
-    #[test]
-    fn the_quadrature_handles_the_rare_allele_pile_up() {
-        let rule = BetaQuadrature::new(0.2, 1.0, 24);
-        // E[2 f (1 − f)] under Beta(a, b) is 2ab / ((a+b)(a+b+1)).
-        let heterozygosity: f64 = rule
-            .nodes
-            .iter()
-            .zip(rule.weights.iter())
-            .map(|(f, w)| w * 2.0 * f * (1.0 - f))
-            .sum();
-        let truth = 2.0 * 0.2 * 1.0 / (1.2 * 2.2);
-        assert!(
-            (heterozygosity - truth).abs() < 1e-8,
-            "{heterozygosity} against {truth}"
-        );
-    }
-
-    /// **The shapes' step is a Newton step with the complete-data curvature, at rest where the
-    /// slope is zero, and projected at a bound.** A slope built as the curvature times a known move
-    /// lands on that move exactly; a zero slope moves nothing, to the bit; a slope far beyond both
-    /// bounds stops at them; a slope that is not a number moves nothing. **With the second shape at
-    /// its bound and its slope pushing out**, the second stays and the first takes its own step,
-    /// `slope / curvature` — so it moves not at all where its own slope is zero, which clamping each
-    /// shape of the joint step does not give.
-    #[test]
-    fn the_shapes_step_follows_the_slope_by_the_complete_data_curvature() {
-        let (a, b, weight) = (0.7, 2.5, 1_000.0);
-        let (to_a, to_b) = (0.8, 2.3);
-        let ab = a + b;
-        let h11 = weight * (trigamma(a) - trigamma(ab));
-        let h22 = weight * (trigamma(b) - trigamma(ab));
-        let h12 = -weight * trigamma(ab);
-        let slope = [
-            h11 * (to_a - a) + h12 * (to_b - b),
-            h12 * (to_a - a) + h22 * (to_b - b),
-        ];
-        let (stepped_a, stepped_b) = step_beta_shapes(slope, weight, a, b);
-        assert!(
-            (stepped_a - to_a).abs() < 1e-12 && (stepped_b - to_b).abs() < 1e-12,
-            "stepped to ({stepped_a}, {stepped_b})"
-        );
-        assert_eq!(step_beta_shapes([0.0, 0.0], weight, a, b), (a, b));
-        // A slope pointing at (100, 100), past the upper bound of both shapes, stops at it.
-        let (far_a, far_b) = (100.0, 100.0);
-        let towards_far = [
-            h11 * (far_a - a) + h12 * (far_b - b),
-            h12 * (far_a - a) + h22 * (far_b - b),
-        ];
-        assert_eq!(
-            step_beta_shapes(towards_far, weight, a, b),
-            (BETA_SHAPE_BOUNDS.1, BETA_SHAPE_BOUNDS.1)
-        );
-        assert_eq!(step_beta_shapes([f64::NAN, 1.0], weight, a, b), (a, b));
-        // A count of positions so small that the curvature's determinant underflows to zero.
-        assert_eq!(step_beta_shapes([1.0, -1.0], 1e-170, a, b), (a, b));
-        // One step worked by hand rather than from the code's own trigamma: at (1, 1), one position's
-        // curvature is [[1, −c], [−c, 1]] with c = ψ′(2) = π²/6 − 1, so a slope of (1, 0) moves the
-        // shapes by (1, c) / (1 − c²).
-        let c = std::f64::consts::PI * std::f64::consts::PI / 6.0 - 1.0;
-        let (by_hand_a, by_hand_b) = step_beta_shapes([1.0, 0.0], 1.0, 1.0, 1.0);
-        assert!(
-            (by_hand_a - (1.0 + 1.0 / (1.0 - c * c))).abs() < 1e-6
-                && (by_hand_b - (1.0 + c / (1.0 - c * c))).abs() < 1e-6,
-            "from (1, 1) the step reached ({by_hand_a}, {by_hand_b})"
-        );
-
-        let (a, b) = (0.7, BETA_SHAPE_BOUNDS.1);
-        let ab = a + b;
-        let h11 = weight * (trigamma(a) - trigamma(ab));
-        for slope_in_a in [0.0, 30.0, -12.0] {
-            let (stepped_a, stepped_b) = step_beta_shapes([slope_in_a, 500.0], weight, a, b);
-            assert_eq!(
-                stepped_b, BETA_SHAPE_BOUNDS.1,
-                "the second shape held at its bound"
-            );
-            assert!(
-                (stepped_a - (a + slope_in_a / h11)).abs() < 1e-12,
-                "slope {slope_in_a} in the first shape: stepped to {stepped_a}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_read_scored_the_two_routes_ways_agrees_on_the_non_reference_chance() {
-        // The chance a read shows anything but the reference base, summed out of this
-        // module's three categories, must equal the histogram route's own `p_j(ε)`.
-        let ploidy = Ploidy::try_new(2).expect("two");
-        for rate in [0.001, 0.01, 0.1] {
-            for j in 0..=2_u8 {
-                let carried = f64::from(j) / 2.0;
-                let theirs = carried * (1.0 - rate / 3.0) + (1.0 - carried) * rate;
-                let on_candidate = carried * (1.0 - rate) + (1.0 - carried) * rate / 3.0;
-                let ours = on_candidate + 2.0 * rate / 3.0;
-                assert!(
-                    (ours - theirs).abs() < 1e-12,
-                    "at {j} copies and rate {rate}: {ours} against {theirs}"
-                );
-                let _ = ploidy;
-            }
-        }
-    }
-
-    #[test]
-    fn genotype_frequencies_sum_to_one_and_the_excess_moves_the_heterozygote() {
-        for f in [0.01, 0.3, 0.5, 0.9] {
-            for excess in [0.0, 0.3, 1.0] {
-                let g = genotype_frequencies(f, excess);
-                let total: f64 = g.iter().sum();
-                assert!((total - 1.0).abs() < 1e-12, "{g:?} sums to {total}");
-            }
-            let none = genotype_frequencies(f, 0.0);
-            let whole = genotype_frequencies(f, 1.0);
-            assert!(whole[1] < none[1] || none[1] == 0.0);
-            assert!(
-                (whole[1] - 0.0).abs() < 1e-12,
-                "a fully inbred plant has no heterozygotes"
-            );
-        }
-    }
-
-    #[test]
     fn the_expected_heterozygosity_is_the_densitys_own() {
         let density = FrequencyDensity {
             p_invariant: 0.9,
@@ -6295,6 +4413,7 @@ mod tests {
 /// Nothing here is production code: a release build without the feature compiles none of it.
 #[cfg(any(test, feature = "bench-fixtures"))]
 pub mod bench_fixtures {
+    use super::expectation::genotype_frequencies;
     use super::*;
 
     use crate::parameter_estimation::joint::census::{
@@ -6835,6 +4954,8 @@ mod whole_fit_tests {
         CarrierFrequency, DrawnLibrary, as_cohort, draw_cohort, draw_cohort_of_libraries,
         draw_cohort_with_carriers, draw_cohort_with_duplications, draw_cohort_with_library_rates,
     };
+    use super::beta_quadrature::trigamma;
+    use super::expectation::{MIN_POSITIONS_PER_CHUNK, expectation};
     use super::*;
     use crate::parameter_estimation::joint::census::DepthCap;
 
