@@ -542,49 +542,23 @@ pub enum NotReadable {
 /// and the compressor — and they fail for different reasons, which a caller reading only a
 /// sentence could not tell apart.
 ///
-/// **They also come from two different halves of the header**, which is why neither this type nor
-/// the error above says *manifest* any more: the cut rule comes from the manifest, and the
-/// compression level from the writer's own recorded parameters. *This type was `ManifestRefusal`
-/// and the error `UnsupportedManifest` until 2026-08-30, when the second of those was found being
-/// reported as a fault in the first.*
+/// *This type was `ManifestRefusal` and the error `UnsupportedManifest` until 2026-08-30*, when the
+/// append writer of the time (deleted 2026-11-28; psp spec §6.4) also read a compression level from
+/// the writer's recorded parameters, outside the manifest. Two variants for a level recorded in a
+/// shape or at a value it could not use went with it.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum HeaderRefusal {
     /// The genomic block size or the byte ceiling is one no cut rule can be built from.
     #[error(transparent)]
     CutRule(#[from] BlockCutRuleError),
-    /// The header records a compression level in a shape this writer cannot read — a string, a
-    /// float, a boolean.
-    ///
-    /// **A refusal rather than a fallback**, and the distinction is the point: *absent* is what a
-    /// file written before the parameter existed looks like and legitimately falls back to this
-    /// build's level, where *present and unreadable* is **a setting recorded and then ignored**,
-    /// which is worse than one not recorded (spec goal 4). Until a review caught it they were the
-    /// same arm, and a file recording `"1"` was appended to at level 9 with nothing said.
-    #[error("the header records a compression level of {recorded}, which is not an integer")]
-    UnreadableLevel { recorded: String },
 
-    /// The header records a compression level no `i32` can hold.
+    /// The look-back window is one no compressor can be built from.
     ///
-    /// **Its own variant so that the refusal names the level the file records.** It used to
-    /// saturate to `i32::MAX` before the range check saw it, so a file recording −5,000,000,000
-    /// was refused for recording 2,147,483,647 — a number that is not in the file, which is the
-    /// clamp `BlockCompressor::with_level` exists to prevent, moved one function upstream.
-    #[error(
-        "the header records a compression level of {recorded}, which is past what a level can be"
-    )]
-    LevelPastAnyLevel { recorded: i64 },
-
-    /// The look-back window or the compression level is one no compressor can be built from.
-    ///
-    /// **Reached by `append` on a file whose recorded compression level zstd will not take** —
-    /// 99, say. It is *not* reachable through `create`, whose header is encoded first and whose
-    /// window log `header.rs`'s own validation refuses as
-    /// [`PspWriteError::InvalidHeaderField`] before the compressor sees it.
-    ///
-    /// ⚠ **It was once unreachable and this doc said so; a later change made it reachable and the
-    /// doc was not updated until a review caught that.** A variant documented as
-    /// unreachable, quietly reachable, is a path nothing protects.
+    /// **Not reachable through `create` today**, whose header is encoded first and whose window log
+    /// `header.rs`'s own validation refuses as [`PspWriteError::InvalidHeaderField`] before the
+    /// compressor sees it. It is kept, typed, because the compressor is built from the manifest
+    /// and its refusal must not be reported as the cut rule's.
     #[error(transparent)]
     Compressor(#[from] BlockCompressError),
 }
@@ -642,14 +616,8 @@ pub enum PspWriteError {
     #[error("header field {field} is not writable: {reason}")]
     InvalidHeaderField { field: String, reason: String },
 
-    /// An append was asked to extend a file whose header declares something this writer cannot
-    /// honour. **Appending does not rewrite the header**, so the added records must use the
-    /// encodings the file already declares (spec §6.4).
-    ///
-    /// **The sentence says *header* rather than *manifest*, and the difference is where an
-    /// operator looks.** The cut rule is built from the manifest, but the compression level is
-    /// read from the writer's recorded parameters — the header's provenance half — so a level
-    /// this build cannot read was arriving under a sentence pointing at the wrong section.
+    /// `create` was handed a header declaring a cut rule or a compressor this writer cannot
+    /// build. **Nothing touches the filesystem first**, so the refusal leaves no file behind.
     #[error("{} declares something in its header this writer cannot honour", path.display())]
     UnsupportedHeader {
         path: PathBuf,
@@ -657,16 +625,6 @@ pub enum PspWriteError {
         /// sentence — and so `Display` and the chain do not print the same words twice.
         #[source]
         source: HeaderRefusal,
-    },
-
-    /// Reopening a finished file failed. **Append and trailer replacement read before they
-    /// write** — the footer for the offsets, the header for the manifest — so both surface
-    /// the read-side classes (spec §6.7) rather than restating them here.
-    #[error("{}: the file could not be reopened", path.display())]
-    Reopen {
-        path: PathBuf,
-        #[source]
-        source: PspReadError,
     },
 
     /// A record the block builder or the record codec refused: an empty region, a region at
@@ -860,30 +818,6 @@ mod tests {
             refused.to_string(),
             "SRR7279481.psp: record at contig 0:900-900 starts before the previous record at \
              contig 0:1000-1000"
-        );
-    }
-
-    /// Reopening for an append or a trailer rewrite reads the footer first, so a file with no
-    /// footer surfaces as the read-side class. **The wrapper says a write was in progress and
-    /// the chain still reaches the read error** — a transparent wrapper would have said
-    /// neither.
-    #[test]
-    fn a_reopen_says_a_write_was_in_progress_and_still_carries_its_cause() {
-        let refused = PspWriteError::Reopen {
-            path: PathBuf::from("half-written.psp"),
-            source: PspReadError::Incomplete {
-                path: PathBuf::from("half-written.psp"),
-            },
-        };
-        assert_eq!(
-            refused.to_string(),
-            "half-written.psp: the file could not be reopened"
-        );
-
-        let cause = std::error::Error::source(&refused).expect("the read error is the cause");
-        assert_eq!(
-            cause.to_string(),
-            "half-written.psp has no valid footer — the writer did not finish"
         );
     }
 

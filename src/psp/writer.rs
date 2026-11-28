@@ -13,8 +13,6 @@
 //! ```
 
 use std::fs::File;
-#[cfg(test)]
-use std::io::Seek;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -25,15 +23,12 @@ use super::index::BlockIndexEntry;
 use super::{PspWriteError, footer, index};
 use crate::locus_generation::SampleLocusObservations;
 use crate::types::GenomePosition;
-#[cfg(test)]
-use crate::types::GenomeRegion;
 
 /// The header-parameter key under which a writer records the zstd level it compressed at.
 ///
-/// **Named because three sites must spell it identically**: `create` writes it, `append`
-/// reads it back to match bytes already in the file, and anything comparing a header it
-/// built against a header read back has to add it. A rename that reached only some of them
-/// would look like a store defect rather than a typo.
+/// **Named because more than one site must spell it identically**: `create` writes it, and
+/// anything comparing a header it built against a header read back has to add it. A rename that
+/// reached only some of them would look like a store defect rather than a typo.
 pub const ZSTD_COMPRESSION_LEVEL_KEY: &str = "zstd-compression-level";
 
 /// What one finished file cost, handed back by [`PspWriter::finish`].
@@ -353,9 +348,9 @@ impl PspWriter {
     /// creating over a finished psp destroys it, and there is no footer left to say a sample was
     /// ever there. That is the conventional meaning of *create* and it is what the pipeline
     /// wants when it re-runs a sample, but it is not stated anywhere in the spec, and the spec
-    /// *does* warn about the milder destruction `append` causes (§6.4: "write to a new path and
-    /// rename if that matters"). A caller that must not destroy an existing psp checks for one
-    /// first.
+    /// *does* warn about the milder destruction an append would cause (§6.4, not implemented:
+    /// "write to a new path and rename if that matters"). A caller that must not destroy an
+    /// existing psp checks for one first.
     ///
     /// **Nothing touches the filesystem until the header and the manifest have been accepted.**
     /// The header is encoded, and the cut rule and compressor built from its manifest, before
@@ -364,9 +359,9 @@ impl PspWriter {
     pub fn create(path: &Path, mut header: Header) -> Result<Self, PspWriteError> {
         // **The compression level is recorded because it is a setting, and goal 4 is that
         // settings are recorded.** A reader needs nothing from it — zstd decodes any level — but
-        // `append` must match bytes already in a file, and without this it would have no way to
-        // learn what those bytes were written at. `block.rs`'s own doc assigns this to the writer
-        // by name.
+        // byte-identity checks and the size figures the specs quote rest on it, and an append
+        // (spec §6.4, not implemented) would need it to match bytes already in a file.
+        // `block.rs`'s own doc assigns this to the writer by name.
         header.writer.parameters.insert(
             ZSTD_COMPRESSION_LEVEL_KEY.to_string(),
             crate::psp::header::ParameterValue::Integer(i64::from(
@@ -404,166 +399,6 @@ impl PspWriter {
         };
         writer.put(&header_bytes, "writing the header")?;
         Ok(writer)
-    }
-
-    #[cfg(test)]
-    /// Reopen a finished psp and add records to it.
-    ///
-    /// **The footer says where the blocks end, so appending is truncating at the index offset and
-    /// carrying on** (spec §6.4): the old index, trailer and footer are discarded, the blocks and
-    /// the header are not touched, and `finish` writes a whole new index made of the entries that
-    /// were already there and the ones this writer adds.
-    ///
-    /// **The header is not rewritten, so the manifest is the file's.** A field's encoding, the
-    /// grid the blocks cut on and the look-back window are all already declared, and appended
-    /// records must use them — so a manifest this build cannot honour is
-    /// [`UnsupportedHeader`](PspWriteError::UnsupportedHeader) here rather than a file whose
-    /// added records no reader can interpret under the header it keeps.
-    ///
-    /// **Coordinate order runs across the seam.** The last record already in the file is found by
-    /// walking the last block's heads — the bodies are never built — and the first appended record
-    /// is checked against it.
-    ///
-    /// **⚠ A file being appended to has no footer while this writer holds it open**, exactly like
-    /// a new one, so an append interrupted half-way leaves a file every reader refuses. That is
-    /// right — but note it has *lost the trailer the file had*, which is not recoverable. Spec
-    /// §6.4: **write to a new path and rename if that matters to the caller.**
-    pub fn append(path: &Path) -> Result<Self, PspWriteError> {
-        let reopen = |source: super::PspReadError| PspWriteError::Reopen {
-            path: path.to_path_buf(),
-            source,
-        };
-        // **Opened as a reader first, and every check `open` makes is made.** An append writes a
-        // fresh index and footer onto whatever it finds, so a file the reader would refuse must
-        // not be extended — the same lesson `replace_trailer` learned from its own review, and
-        // here the index is needed anyway.
-        let mut psp = super::PspReader::open(path).map_err(reopen)?;
-        let header = psp.header().clone();
-        let blocks_end = psp.footer().index_offset;
-        let index = psp.block_index().to_vec();
-        // **The manifest is checked before the file is walked, and the order is the finding.**
-        // `BlockBuilder::from_manifest` is what refuses a layout this build cannot write, and the
-        // walk below needs the same layout to read — so walking first made a manifest this writer
-        // cannot honour arrive as a *reader's* refusal wrapped in `Reopen`, which is the wrong
-        // class for what spec §6.4 calls out by name.
-        let mut builder = BlockBuilder::from_manifest(&header.manifest).map_err(|source| {
-            PspWriteError::UnsupportedHeader {
-                path: path.to_path_buf(),
-                source: source.into(),
-            }
-        })?;
-        let last_record = Self::find_the_last_record_in(&mut psp).map_err(reopen)?;
-        drop(psp);
-        if let Some(region) = last_record {
-            builder = builder.continuing_after(region);
-        }
-        // **At the level the file records, not this build's** (spec goal 4). `create` writes it
-        // into the header's parameters for exactly this: an append that used another level would
-        // put blocks in one file compressed two ways, with nothing saying so.
-        let compressor =
-            Self::build_the_compressor_the_header_records(&header).map_err(|source| {
-                PspWriteError::UnsupportedHeader {
-                    path: path.to_path_buf(),
-                    source,
-                }
-            })?;
-
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|source| PspWriteError::Io {
-                path: path.to_path_buf(),
-                while_doing: "reopening the file to append to it",
-                source,
-            })?;
-        // **The truncation is what removes the footer**, and from here until `finish` writes a new
-        // one every reader refuses the file — which is the same state a new writer leaves and is
-        // goal 3.
-        file.set_len(blocks_end)
-            .map_err(|source| PspWriteError::Io {
-                path: path.to_path_buf(),
-                while_doing: "truncating the file at its block index",
-                source,
-            })?;
-        file.seek(std::io::SeekFrom::Start(blocks_end))
-            .map_err(|source| PspWriteError::Io {
-                path: path.to_path_buf(),
-                while_doing: "seeking to the end of the blocks",
-                source,
-            })?;
-
-        Ok(Self {
-            path: path.to_path_buf(),
-            out: BufWriter::new(file),
-            // **Where the next byte lands, which is where the blocks ended.** Every offset the
-            // new index and footer carry is measured from this, so a zero here would put every
-            // appended block at an address inside the file that was already there.
-            written: blocks_end,
-            builder: Some(builder),
-            line: BlockCompressionLine::start(compressor),
-            index,
-            // **Not the records already in the file**, which nothing counts: `WriteStats` says
-            // what this writer wrote, and the blocks it inherited are in the index it inherited.
-            records: 0,
-            spent: None,
-        })
-    }
-
-    #[cfg(test)]
-    /// The region of the last record already in a file, or `None` if it holds none.
-    ///
-    /// **Heads only.** The walk declines every body, so this costs the last block's framing and
-    /// no record building — and the last block is the only one read.
-    fn find_the_last_record_in(
-        psp: &mut super::PspReader,
-    ) -> Result<Option<GenomeRegion>, super::PspReadError> {
-        let Some(last_block) = psp.block_index().len().checked_sub(1) else {
-            return Ok(None);
-        };
-        let mut last = None;
-        for found in psp
-            .records_from_block(last_block)?
-            .building_only_where(|_| false)
-        {
-            last = Some(found?.head.region);
-        }
-        Ok(last)
-    }
-
-    #[cfg(test)]
-    /// Build a compressor at the window the manifest declares and the level the header records.
-    ///
-    /// **A header that records no level gives this build's**, which is what a file written before
-    /// the parameter existed looks like. **Every other shape is refused**, including one recorded
-    /// as a string or a float — ⚠ until a review caught it those fell into the same arm as
-    /// *absent*, so a file recording `"1"` was appended to at level 9 with nothing said, which is
-    /// exactly the file §2.4 says must not exist.
-    fn build_the_compressor_the_header_records(
-        header: &Header,
-    ) -> Result<BlockCompressor, super::HeaderRefusal> {
-        use crate::psp::header::ParameterValue;
-
-        let level = match header.writer.parameters.get(ZSTD_COMPRESSION_LEVEL_KEY) {
-            Some(ParameterValue::Integer(recorded)) => {
-                i32::try_from(*recorded).map_err(|_| super::HeaderRefusal::LevelPastAnyLevel {
-                    recorded: *recorded,
-                })?
-            }
-            // **Absent is the one shape that falls back**, and only because it is what a file
-            // written before this parameter existed looks like. Any other shape is a level
-            // recorded and then ignored, which is the file §2.4 says must not exist.
-            Some(other) => {
-                return Err(super::HeaderRefusal::UnreadableLevel {
-                    recorded: format!("{other:?}"),
-                });
-            }
-            None => super::block::ZSTD_COMPRESSION_LEVEL,
-        };
-        Ok(BlockCompressor::with_level(
-            header.manifest.look_back_window_log,
-            level,
-        )?)
     }
 
     /// Lay one record down.
@@ -1069,8 +904,7 @@ pub(crate) mod tests_support {
 #[cfg(test)]
 mod tests {
     use super::tests_support::{
-        a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, footer_of, rewrite,
-        wreck_the_block,
+        a_file, a_finished_psp, a_header, a_record, a_sample, bytes_of, rewrite,
     };
     use super::*;
     use crate::psp::NotReadable;
@@ -2147,8 +1981,7 @@ mod tests {
     }
 
     /// The compression level the writer used reaches the file, because it is a setting and
-    /// goal 4 is that settings are recorded — and because `append` must match bytes already
-    /// written and has no other way to learn what level produced them.
+    /// goal 4 is that settings are recorded.
     #[test]
     fn the_compression_level_reaches_the_header() {
         let (_dir, path) = a_file();
@@ -2212,145 +2045,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Appending to a finished file
+    // Abandoned writers, and a footer a reader must refuse
     // -----------------------------------------------------------------
-
-    /// **A file appended to reads back as one file**: every record that was there and every
-    /// record added, in order, from one walk.
-    ///
-    /// The comparison is against the two record lists concatenated, field for field — an append
-    /// that lost the old records, or wrote the new ones somewhere a walk does not reach, fails
-    /// here rather than in a count.
-    #[test]
-    fn an_appended_file_reads_back_as_one_file() {
-        let (_dir, path) = a_finished_psp();
-        let already_there = a_sample();
-        let added: Vec<_> = (0..6u64)
-            .map(|step| a_record(1, 60_000 + step * 100, 1))
-            .collect();
-
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        for record in &added {
-            writer
-                .push(record)
-                .expect("past the last record already there");
-        }
-        let stats = writer
-            .finish(b"a summary of both halves")
-            .expect("it finishes");
-        // **The three fields are measured on two different populations**, and each is pinned:
-        // records is this writer's, blocks and bytes are the file's.
-        assert_eq!(
-            stats.records, 6,
-            "what this writer wrote, not what the file holds"
-        );
-        assert_eq!(
-            stats.blocks, 9,
-            "eight already there and one block appended"
-        );
-        assert_eq!(stats.bytes, bytes_of(&path).len() as u64, "the whole file");
-
-        let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        let read: Vec<_> = psp
-            .records()
-            .expect("the walk starts")
-            .map(|found| found.expect("a finished psp walks").record.expect("a body"))
-            .collect();
-        let expected: Vec<_> = already_there.iter().chain(&added).cloned().collect();
-        assert_eq!(read, expected);
-        assert_eq!(
-            psp.trailer().expect("it reads"),
-            b"a summary of both halves"
-        );
-    }
-
-    /// **The blocks and the header that were already there are byte-identical afterwards**, and
-    /// the appended blocks start exactly where the old index did.
-    #[test]
-    fn appending_leaves_the_header_and_the_old_blocks_untouched() {
-        let (_dir, path) = a_finished_psp();
-        let before = bytes_of(&path);
-        let footer = footer_of(&before);
-        let blocks_end = footer.index_offset as usize;
-        let old_blocks = before[..blocks_end].to_vec();
-        let old_entries = {
-            let psp = PspReader::open(&path).expect("it opens");
-            psp.block_index().to_vec()
-        };
-
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        writer.push(&a_record(1, 60_000, 1)).expect("in order");
-        let _ = writer.finish(b"").expect("it finishes");
-
-        let after = bytes_of(&path);
-        assert_eq!(
-            after[..blocks_end],
-            old_blocks[..],
-            "the header and every old block"
-        );
-        let psp = PspReader::open(&path).expect("it opens");
-        assert_eq!(
-            &psp.block_index()[..old_entries.len()],
-            &old_entries[..],
-            "the old index entries come back unchanged"
-        );
-        assert_eq!(
-            psp.block_index()[old_entries.len()].block_offset,
-            blocks_end as u64,
-            "and the first appended block starts where the old index did"
-        );
-    }
-
-    /// **Coordinate order runs across the seam** (spec §6.4): a first appended record that
-    /// precedes the last one already in the file is refused, on the position and on the contig.
-    ///
-    /// ⚠ **A builder that started blank would accept both** — it is the seed taken from the last
-    /// block's heads that makes this fail, and nothing else in the file could.
-    #[test]
-    fn a_record_that_precedes_the_seam_is_refused() {
-        for (contig, at, what) in [
-            (1u32, 1u64, "an earlier position on the same contig"),
-            (0, 9_000, "an earlier contig"),
-        ] {
-            let (_dir, path) = a_finished_psp();
-            let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-            let refused = writer
-                .push(&a_record(contig, at, 1))
-                .expect_err("that is behind the seam");
-            assert!(
-                matches!(
-                    refused,
-                    PspWriteError::OutOfOrder { .. } | PspWriteError::RecordRefused { .. }
-                ),
-                "{what}: got {refused}"
-            );
-        }
-    }
-
-    /// **A record at exactly the last record's position is accepted**, because the rule is *must
-    /// not precede* and two records may begin on one base.
-    #[test]
-    fn a_record_at_the_seams_own_position_is_accepted() {
-        let (_dir, path) = a_finished_psp();
-        let last = {
-            let mut psp = PspReader::open(&path).expect("it opens");
-            psp.records()
-                .expect("the walk starts")
-                .last()
-                .expect("the fixture has records")
-                .expect("a finished psp walks")
-                .head
-                .region
-        };
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        writer
-            .push(&a_record(last.contig.0, last.start.get(), 1))
-            .expect("the same base is not before it");
-        let _ = writer.finish(b"").expect("it finishes");
-
-        let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        assert_eq!(psp.records().expect("the walk starts").count(), 41);
-    }
 
     /// **A writer abandoned with blocks still being compressed must not hang, and must leave no
     /// thread behind.**
@@ -2383,184 +2079,20 @@ mod tests {
             drop(writer);
         }
 
-        // The last file is what a killed run leaves — headed, unsealed, and refused for append.
-        let refused = PspWriter::append(&path).expect_err("nothing sealed the last one");
-        assert!(
-            matches!(refused, PspWriteError::Reopen { .. }),
-            "an unsealed file is refused for append, not opened: {refused:?}",
-        );
-    }
-
-    /// **A file with no footer cannot be appended to**, because nothing says where its blocks
-    /// end — it is what a killed run leaves, and the answer is to re-run it.
-    #[test]
-    fn a_file_with_no_footer_cannot_be_appended_to() {
-        let (_dir, path) = a_file();
-        let mut writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
-        writer.push(&a_record(0, 1, 1)).expect("one record");
-        drop(writer);
-
-        let refused = PspWriter::append(&path).expect_err("there is no footer");
-        // ⚠ **`Reopen { .. }` alone cannot tell what this test names from three other things** —
-        // it is satisfied by `NotAnNgPsp`, by `Damaged` and by `Io` too. A review found that
-        // gap, and this test was written after it was fixed.
-        assert!(
-            matches!(
-                refused,
-                PspWriteError::Reopen {
-                    source: crate::psp::PspReadError::Incomplete { .. },
-                    ..
-                }
-            ),
-            "got {refused}"
-        );
-    }
-
-    /// **An append is refused on a manifest this writer cannot honour** (spec §6.4), because the
-    /// header is not rewritten: the added records would have to use encodings the file declares
-    /// and this build does not write, and left unchecked they would be added anyway — unreadable
-    /// under the header the file keeps.
-    #[test]
-    fn an_append_is_refused_on_a_manifest_this_writer_cannot_honour() {
-        let (_dir, path) = a_finished_psp();
-        let mut whole = bytes_of(&path);
-        let declared = b"position-offset";
-        let at = whole
-            .windows(declared.len())
-            .position(|window| window == declared)
-            .expect("the manifest names the record's first field");
-        whole[at..at + declared.len()].copy_from_slice(b"position-offsex");
-        rewrite(&path, &whole);
-
-        let refused = PspWriter::append(&path).expect_err("this build cannot write that layout");
-        match refused {
-            PspWriteError::UnsupportedHeader { source, .. } => {
-                assert!(
-                    matches!(source, crate::psp::HeaderRefusal::CutRule(_)),
-                    "got {source}"
-                )
-            }
-            other => panic!("got {other}"),
-        }
-        assert_eq!(bytes_of(&path), whole, "and the file is exactly as it was");
-    }
-
-    /// **An append dropped before it finishes leaves a file every reader refuses** — and the
-    /// trailer the file had is gone with the index it followed (spec §6.4).
-    #[test]
-    fn an_append_dropped_before_finishing_leaves_a_file_no_reader_accepts() {
-        let (_dir, path) = a_finished_psp();
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        writer.push(&a_record(1, 60_000, 1)).expect("in order");
-        drop(writer);
-
-        let refused = PspReader::open(&path).expect_err("there is no footer any more");
+        // The last file is what a killed run leaves — headed, unsealed, and refused by a reader.
+        let refused = PspReader::open(&path).expect_err("nothing sealed the last one");
         assert!(
             matches!(refused, crate::psp::PspReadError::Incomplete { .. }),
-            "got {refused}"
+            "an unsealed file is refused, not opened: {refused:?}",
         );
     }
 
-    /// **An append writes at the level the file records**, not at this build's — so a file's
-    /// blocks are all compressed the same way, which is goal 4.
+    /// **A footer that puts the block index inside the header is refused at open.**
     ///
-    /// ⚠ **The fixture has to make the two levels give different bytes, and the first one did
-    /// not.** It compared an appended block against a fresh block at the level the file records,
-    /// which *is* this build's — so an append that ignored the record entirely passed. Here the
-    /// file's recorded level is patched to 1 in its own header text, which is one character wide
-    /// and moves no offset, and the payload is varied enough that 1 and 9 differ. **Both halves
-    /// are asserted**: that the levels separate, and that the appended block is the recorded
-    /// level's.
-    #[test]
-    fn an_append_compresses_at_the_level_the_file_records() {
-        use crate::psp::header::ParameterValue;
-        use crate::psp::{BlockCompressor, COMPRESSED_BLOCK_LENGTH_BYTES, ZSTD_COMPRESSION_LEVEL};
-
-        // A record whose bases do not repeat trivially, so the levels have something to disagree
-        // about.
-        let varied = || {
-            let mut record = a_record(1, 60_000, 1);
-            let bases: Vec<u8> = (0..8_000u64)
-                .map(|i| b"ACGT"[((i * 7 + i / 3 + i * i / 5) % 4) as usize])
-                .collect();
-            record.reference_bases = bases.clone().into_boxed_slice();
-            record.observations[0].bases = bases.into_boxed_slice();
-            record
-        };
-
-        let (_dir, path) = a_finished_psp();
-        let mut whole = bytes_of(&path);
-        assert_eq!(
-            ZSTD_COMPRESSION_LEVEL, 9,
-            "or the fixture patches the wrong text"
-        );
-        let recorded = b"zstd-compression-level = 9";
-        let patched_to = b"zstd-compression-level = 1";
-        let at = whole
-            .windows(recorded.len())
-            .position(|window| window == recorded)
-            .expect("the header records the level it was written at");
-        // **The same width, so no offset in the file moves** — the whole reason for a one-digit
-        // level here.
-        whole[at..at + patched_to.len()].copy_from_slice(patched_to);
-        rewrite(&path, &whole);
-        {
-            let psp = PspReader::open(&path).expect("the patched file still opens");
-            assert_eq!(
-                psp.header().writer.parameters.get("zstd-compression-level"),
-                Some(&ParameterValue::Integer(1)),
-                "the fixture must record a level this build does not use"
-            );
-        }
-
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        writer.push(&varied()).expect("in order");
-        let _ = writer.finish(b"").expect("it finishes");
-        let appended = {
-            let whole = bytes_of(&path);
-            let psp = PspReader::open(&path).expect("it opens");
-            let at = psp.block_index().last().expect("blocks").block_offset as usize;
-            whole[at..psp.footer().index_offset as usize].to_vec()
-        };
-
-        // The same record, alone, in a fresh file — which this build writes at its own level.
-        let (_dir2, fresh) = a_file();
-        let mut writer = PspWriter::create(&fresh, a_header(1_000)).expect("a header");
-        writer.push(&varied()).expect("one record");
-        let _ = writer.finish(b"").expect("it finishes");
-        let (payload, at_this_builds_level) = {
-            let whole = bytes_of(&fresh);
-            let psp = PspReader::open(&fresh).expect("it opens");
-            let at = psp.block_index()[0].block_offset as usize;
-            let block = whole[at..psp.footer().index_offset as usize].to_vec();
-            let payload = zstd::decode_all(&block[COMPRESSED_BLOCK_LENGTH_BYTES..])
-                .expect("the block inflates");
-            (payload, block)
-        };
-
-        let mut at_one =
-            BlockCompressor::with_level(a_header(1_000).manifest.look_back_window_log, 1)
-                .expect("a level zstd takes");
-        let at_one = at_one.compress(&payload).expect("it compresses").to_vec();
-        assert_ne!(
-            at_one, at_this_builds_level,
-            "the fixture must separate the levels, or it proves nothing"
-        );
-        assert_eq!(
-            appended, at_one,
-            "the appended block is compressed at the level the file records"
-        );
-    }
-
-    /// **A footer that puts the block index inside the header is refused, and the file is left
-    /// whole.**
-    ///
-    /// ⚠ **A review found this missing, as a blocking defect.** `append` truncates at
-    /// `index_offset`, so this rule is all that stands between a footer of nonsense
-    /// and a psp reduced to a stump — and **the per-entry rule cannot carry it: on an empty index
-    /// there are no entries to check.** A footer saying the index is at byte 4 and holds nothing
-    /// passed `PspReader::open`, and `append` then cut a 3,742-byte psp down to 109 bytes and
-    /// returned `Ok`.
+    /// **The per-entry rule cannot carry it: on an empty index there are no entries to check.** A
+    /// footer saying the index is at byte 4 and holds nothing once passed `PspReader::open`, and
+    /// the append writer this tree had then (deleted 2026-11-28, psp spec §6.4) cut a 3,742-byte
+    /// psp down to 109 bytes and returned `Ok`.
     #[test]
     fn a_footer_that_puts_the_block_index_inside_the_header_is_refused() {
         use crate::psp::footer::Footer;
@@ -2579,336 +2111,12 @@ mod tests {
         crafted.extend_from_slice(&crate::psp::encode_footer(&footer));
         rewrite(&path, &crafted);
 
-        let refused = PspWriter::append(&path).expect_err("the index is inside the header");
+        let refused = PspReader::open(&path).expect_err("the index is inside the header");
         match refused {
-            PspWriteError::Reopen {
-                source: crate::psp::PspReadError::Damaged { reason, .. },
-                ..
-            } => assert!(reason.contains("inside the"), "got {reason}"),
+            crate::psp::PspReadError::Damaged { reason, .. } => {
+                assert!(reason.contains("inside the"), "got {reason}")
+            }
             other => panic!("got {other}"),
         }
-        assert_eq!(bytes_of(&path), crafted, "and every byte is still there");
-    }
-
-    /// **The seam is the last record in the file, not the last block's first.**
-    ///
-    /// ⚠ **The first version of the seam test could not tell those apart.** Both records it
-    /// offered preceded every record in the last block, so it separated *seeded* from *not
-    /// seeded* and nothing finer — and an implementation keeping the **first** record of the last
-    /// block passed all 381 tests. A record falling between the two is what closes it.
-    #[test]
-    fn a_record_inside_the_last_blocks_span_is_refused() {
-        let (_dir, path) = a_finished_psp();
-        let (first_of_last, last_of_last) = {
-            let mut psp = PspReader::open(&path).expect("it opens");
-            let n = psp.block_index().len();
-            let regions: Vec<_> = psp
-                .records_from_block(n - 1)
-                .expect("the walk starts")
-                .building_only_where(|_| false)
-                .map(|found| found.expect("a finished psp walks").head.region)
-                .collect();
-            (regions[0], *regions.last().expect("the block has records"))
-        };
-        assert!(
-            first_of_last.start < last_of_last.start,
-            "the fixture's last block must hold more than one position, or this proves nothing"
-        );
-
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        let refused = writer
-            .push(&a_record(
-                last_of_last.contig.0,
-                first_of_last.start.get() + 1,
-                1,
-            ))
-            .expect_err("that is behind the last record, though inside the last block");
-        assert!(
-            matches!(refused, PspWriteError::OutOfOrder { .. }),
-            "got {refused}"
-        );
-    }
-
-    /// **A psp that holds no records is appendable**, and the first appended record is checked
-    /// against nothing: `finish` writes such a file, `open` accepts it, and there is no block to
-    /// walk for a seam.
-    #[test]
-    fn a_psp_that_holds_no_records_is_appendable() {
-        let (_dir, path) = a_file();
-        let writer = PspWriter::create(&path, a_header(1_000)).expect("a header");
-        let empty = writer.finish(b"no coverage").expect("it finishes");
-        assert_eq!(empty.blocks, 0, "the fixture must hold no blocks");
-
-        let mut writer = PspWriter::append(&path).expect("a psp with no blocks is appendable");
-        // The seam is nothing, so even the file's lowest coordinate is legal.
-        writer
-            .push(&a_record(0, 1, 1))
-            .expect("nothing precedes it");
-        let stats = writer.finish(b"one record now").expect("it finishes");
-        assert_eq!((stats.records, stats.blocks), (1, 1));
-
-        let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        assert_eq!(psp.records().expect("the walk starts").count(), 1);
-        assert_eq!(psp.trailer().expect("it reads"), b"one record now");
-    }
-
-    /// **A recorded compression level this build cannot use is refused, not written at another
-    /// one** — and the refusal names the level the file records, not a substitute for it.
-    ///
-    /// ⚠ **It used to name a substitute.** Every level outside an `i32` became `i32::MAX` before
-    /// the check saw it, so a file recording −5,000,000,000 was refused for recording
-    /// 2,147,483,647 — a number that is not in the file. And nothing reached the path at all.
-    #[test]
-    fn an_append_is_refused_on_a_recorded_level_zstd_will_not_take() {
-        use crate::psp::header::ParameterValue;
-
-        for recorded in [99i64, -5_000_000_000, 5_000_000_000] {
-            let mut header = a_header(1_000);
-            header.writer.parameters.insert(
-                "zstd-compression-level".to_string(),
-                ParameterValue::Integer(recorded),
-            );
-            let refused = PspWriter::build_the_compressor_the_header_records(&header)
-                .expect_err("zstd does not take that level");
-            assert!(
-                matches!(
-                    refused,
-                    crate::psp::HeaderRefusal::Compressor(_)
-                        | crate::psp::HeaderRefusal::LevelPastAnyLevel { .. }
-                ),
-                "got {refused}"
-            );
-            // **The refusal names the level the file records**, not a substitute for it — which
-            // is the half that used to be wrong: every level outside an `i32` became `i32::MAX`
-            // before the range check saw it.
-            assert!(
-                refused.to_string().contains(&recorded.to_string()),
-                "the refusal must name the level the file records; got {refused}"
-            );
-        }
-    }
-
-    /// **The sentence a refused append prints sends an operator to the header, not the
-    /// manifest.**
-    ///
-    /// The two things built before a byte is written come from different halves of the header:
-    /// the block cut rule from the manifest, and the compression level from the writer's own
-    /// recorded parameters. One sentence covers both, so it names the header — a review
-    /// found it naming the manifest for a failure that is not in one, which sends whoever reads
-    /// it to the wrong section of a file they are already unsure about.
-    ///
-    /// **The error is constructed rather than provoked, and that is a limit worth stating.** The
-    /// only way to a wrongly-typed level in a real file is editing the header's bytes, and no
-    /// length-preserving edit of `zstd-compression-level = 3` is valid TOML — while re-encoding
-    /// the header moves every offset in the file after it, which is refused first and for
-    /// another reason. What this pins is the sentence; that `append` raises this variant with
-    /// this cause is held by
-    /// [`an_append_is_refused_on_a_manifest_this_writer_cannot_honour`] and by
-    /// [`a_level_recorded_in_a_shape_this_writer_cannot_read_is_refused`].
-    #[test]
-    fn a_header_this_writer_cannot_honour_is_reported_against_the_header() {
-        let refused = PspWriteError::UnsupportedHeader {
-            path: PathBuf::from("/somewhere/sample.ngpsp"),
-            source: crate::psp::HeaderRefusal::UnreadableLevel {
-                recorded: "String(\"1\")".to_string(),
-            },
-        };
-        let sentence = refused.to_string();
-        assert!(
-            sentence.contains("header"),
-            "the refusal has to name the part of the file to look at; got {sentence}"
-        );
-        assert!(
-            !sentence.contains("manifest"),
-            "a compression level is not in the manifest, and this sentence covers both halves; \
-             got {sentence}"
-        );
-        assert!(
-            sentence.contains("/somewhere/sample.ngpsp"),
-            "and the file, because a cohort raises these from thousands of writers at once; got \
-             {sentence}"
-        );
-
-        // The cause underneath is what says *which* setting, and it is a separate sentence so
-        // the two do not print the same words twice.
-        let cause = std::error::Error::source(&refused).expect("the refusal carries its cause");
-        assert!(
-            cause.to_string().contains("compression level"),
-            "got {cause}"
-        );
-    }
-
-    /// **A level recorded in a shape this writer cannot read is refused, not ignored.**
-    ///
-    /// A setting recorded and then silently replaced is what §2.4 argues is worse than one not
-    /// recorded — and *absent* is the one case that legitimately falls back, because it is what a
-    /// file written before the parameter existed looks like.
-    #[test]
-    fn a_level_recorded_in_a_shape_this_writer_cannot_read_is_refused() {
-        use crate::psp::header::ParameterValue;
-
-        for shape in [
-            ParameterValue::String("1".to_string()),
-            ParameterValue::Float(1.0),
-            ParameterValue::Boolean(true),
-        ] {
-            let mut header = a_header(1_000);
-            header
-                .writer
-                .parameters
-                .insert("zstd-compression-level".to_string(), shape.clone());
-            let refused = PspWriter::build_the_compressor_the_header_records(&header)
-                .expect_err("a level recorded and unreadable is not a level to guess at");
-            assert!(
-                matches!(refused, crate::psp::HeaderRefusal::UnreadableLevel { .. }),
-                "for {shape:?}, got {refused}"
-            );
-        }
-
-        // And absent is the compatibility case, which still falls back.
-        let mut header = a_header(1_000);
-        header.writer.parameters.remove("zstd-compression-level");
-        PspWriter::build_the_compressor_the_header_records(&header)
-            .expect("a file that records none");
-    }
-
-    /// **The seam is found from the last block alone.** `records_from_block` walks to the end of
-    /// the file, so starting anywhere earlier gives the same answer at the cost of every block
-    /// before it — a change nothing else would notice.
-    #[test]
-    fn the_seam_is_found_by_reading_only_the_last_block() {
-        let (_dir, path) = a_finished_psp();
-        let mut psp = PspReader::open(&path).expect("it opens");
-        let blocks = psp.block_index().len();
-        let seen = psp
-            .records_from_block(blocks - 1)
-            .expect("the walk starts")
-            .building_only_where(|_| false)
-            .count();
-        assert_eq!(seen, 5, "the last block's records, not the file's");
-        assert!(
-            seen < 40,
-            "or the walk is reading blocks the seam does not need"
-        );
-    }
-
-    /// **An append stopped part way leaves a file no reader accepts**, at every stopping point
-    /// from the truncation onwards — the shape `replace_trailer` was given earlier, on the more
-    /// destructive of the two operations.
-    #[test]
-    fn an_append_stopped_part_way_leaves_a_file_no_reader_accepts() {
-        let (_dir, path) = a_finished_psp();
-        let blocks_end = footer_of(&bytes_of(&path)).index_offset as usize;
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        for step in 0..6u64 {
-            writer
-                .push(&a_record(1, 60_000 + step * 100, 1))
-                .expect("in order");
-        }
-        let _ = writer.finish(b"whole").expect("it finishes");
-        let whole = bytes_of(&path);
-
-        for stopped_at in blocks_end..whole.len() {
-            rewrite(&path, &whole[..stopped_at]);
-            assert!(
-                PspReader::open(&path).is_err(),
-                "a file stopped at byte {stopped_at} of {} opened",
-                whole.len()
-            );
-        }
-        rewrite(&path, &whole);
-        assert!(PspReader::open(&path).is_ok(), "and the complete one opens");
-    }
-
-    /// **A second append inherits the first's index, not the original's** — and the file grows a
-    /// block a time, which §6's trade-off note is about.
-    #[test]
-    fn a_second_append_inherits_the_first_ones_index() {
-        let (_dir, path) = a_finished_psp();
-        for round in 0..2u64 {
-            let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-            writer
-                .push(&a_record(1, 60_000 + round * 1_000, 1))
-                .expect("in order");
-            let stats = writer.finish(b"round").expect("it finishes");
-            assert_eq!(stats.records, 1, "what this writer wrote");
-            assert_eq!(stats.blocks, 9 + round, "and every block in the file");
-        }
-        let mut psp = PspReader::open(&path).expect("a finished psp opens");
-        assert_eq!(psp.records().expect("the walk starts").count(), 42);
-    }
-
-    /// **A psp whose last block cannot inflate is not extended**, and the file is left whole.
-    ///
-    /// This is the one check `append` makes that `open` does not: the seam walk reads the last
-    /// block, so a damaged one is met before a byte is truncated. §2.1's "every check `open`
-    /// makes comes free" is therefore only half of it.
-    #[test]
-    fn a_psp_whose_last_block_cannot_inflate_is_not_extended() {
-        let (_dir, path) = a_finished_psp();
-        let blocks = {
-            let psp = PspReader::open(&path).expect("it opens");
-            psp.block_index().len()
-        };
-        wreck_the_block(&path, blocks - 1);
-        let wrecked = bytes_of(&path);
-
-        let refused = PspWriter::append(&path).expect_err("the last block does not inflate");
-        assert!(
-            matches!(refused, PspWriteError::Reopen { .. }),
-            "got {refused}"
-        );
-        assert_eq!(
-            bytes_of(&path),
-            wrecked,
-            "and the file is exactly as it was"
-        );
-    }
-
-    /// **A record appended into the grid cell the old last block covered opens a second block
-    /// for that cell**, rather than reopening the first — which is legal, and is one of the two
-    /// ways two blocks come to share a first position (`index.rs`).
-    ///
-    /// ⚠ **`continuing_after`'s doc claims both halves and nothing asserted either.** It is the
-    /// shape a blocking defect found in review was about, so it is worth pinning from the writer's
-    /// side too.
-    #[test]
-    fn a_record_appended_into_the_old_last_cell_opens_a_second_block_for_it() {
-        let (_dir, path) = a_finished_psp();
-        let (blocks_before, last_entry) = {
-            let psp = PspReader::open(&path).expect("it opens");
-            (
-                psp.block_index().len(),
-                *psp.block_index().last().expect("blocks"),
-            )
-        };
-        // The fixture's grid is 1 kb and its last block starts at 3,001; 3,500 is the same cell.
-        let same_cell = last_entry.first_position.position.get() + 499;
-        assert_eq!(
-            same_cell / 1_000,
-            last_entry.first_position.position.get() / 1_000
-        );
-
-        let mut writer = PspWriter::append(&path).expect("a finished psp is appendable");
-        writer
-            .push(&a_record(last_entry.first_position.contig.0, same_cell, 1))
-            .expect("past the seam");
-        let _ = writer.finish(b"").expect("it finishes");
-
-        let psp = PspReader::open(&path).expect("a finished psp opens");
-        assert_eq!(
-            psp.block_index().len(),
-            blocks_before + 1,
-            "the appended record opened a block of its own"
-        );
-        assert_eq!(
-            psp.block_index()
-                .last()
-                .expect("blocks")
-                .first_position
-                .position
-                .get(),
-            same_cell
-        );
     }
 }

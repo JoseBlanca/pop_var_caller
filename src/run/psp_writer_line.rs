@@ -320,8 +320,8 @@ fn write_loci(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::psp::PspWriteError;
     use crate::psp::writer::tests_support::{a_file, a_header, a_record};
+    use crate::psp::{PspReadError, PspReader};
 
     /// **A line dropped without being asked to seal leaves a file every reader refuses** — the
     /// invariant this module broke on its first draft, where the thread sealed whenever its
@@ -342,10 +342,10 @@ mod tests {
             // Dropped here, deliberately, without `finish` — which is what a walk that failed
             // part-way leaves behind.
         }
-        let refused = PspWriter::append(&path).expect_err("nothing sealed it");
+        let refused = PspReader::open(&path).expect_err("nothing sealed it");
         assert!(
-            matches!(refused, PspWriteError::Reopen { .. }),
-            "an unsealed file is refused for append, not opened: {refused:?}",
+            matches!(refused, PspReadError::Incomplete { .. }),
+            "an unsealed file is refused, not opened: {refused:?}",
         );
     }
 
@@ -373,10 +373,10 @@ mod tests {
             }
             drop(line);
         }
-        let refused = PspWriter::append(&path).expect_err("nothing sealed the last one");
+        let refused = PspReader::open(&path).expect_err("nothing sealed the last one");
         assert!(
-            matches!(refused, PspWriteError::Reopen { .. }),
-            "an unsealed file is refused for append, not opened: {refused:?}",
+            matches!(refused, PspReadError::Incomplete { .. }),
+            "an unsealed file is refused, not opened: {refused:?}",
         );
     }
 
@@ -427,11 +427,12 @@ mod tests {
             stats.records, loci,
             "every locus handed over is in the file"
         );
-        // The claim is that the call succeeds — a sealed file can be reopened for appending —
-        // so the writer itself is not wanted. Bound and dropped rather than discarded with
-        // `let _ =`, which would also swallow a writer this test had meant to use.
-        let reopened = PspWriter::append(&path).expect("a sealed file reopens");
-        drop(reopened);
+        let mut sealed = PspReader::open(&path).expect("a sealed file opens");
+        assert_eq!(
+            sealed.records().expect("the walk starts").count() as u64,
+            loci,
+            "and a reader finds every locus in it"
+        );
     }
 
     /// **The bytes handed to `finish` are the bytes the sealed file carries.**

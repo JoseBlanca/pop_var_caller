@@ -29,8 +29,7 @@ use crate::types::{Bp, ReadGroupId};
 /// A file's own account of how it was written: everything a reader needs before it touches
 /// a block, and the only part of the file that is plain text.
 ///
-/// **Fixed at `create` and never rewritten.** An append reuses the header it finds, so the
-/// appended records must use the encodings already declared (spec §6.3, §6.4).
+/// **Fixed at `create` and never rewritten** (spec §6.3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
     /// `MAJOR.MINOR`. **Parsed before anything else and never behind a binary encoding** —
@@ -3196,9 +3195,9 @@ mod tests {
         }
     }
 
-    /// A header that came off disk re-encodes to the bytes it came from. This is what lets an
-    /// append reuse the header it finds rather than rewriting it, and it is the property a
-    /// silently-dropped field would break.
+    /// A header that came off disk re-encodes to the bytes it came from — the property a
+    /// silently-dropped field would break, and what an append (spec §6.4, not implemented) would
+    /// rest on to reuse the header it finds.
     #[test]
     fn a_decoded_header_re_encodes_to_the_bytes_it_came_from() {
         let bytes = a_written_header().encode().expect("a valid header encodes");
