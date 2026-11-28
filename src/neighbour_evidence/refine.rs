@@ -40,7 +40,7 @@ use super::phase::{
     EXTRA_PATHS_PER_ROUND, LastBlock, MAX_PATHS, PairLayout, PassReadCounts, PathAgreement,
     SamplePhase, SiteReads, WrittenPhase, join_and_name_core_blocks, phase_bytes,
 };
-use super::random::{StreamPurpose, Uniforms};
+use super::random::{StreamPurpose, Uniforms, pick};
 use super::records::{SampleRow, SiteRecord};
 use super::templates::{
     ChosenTemplate, choose_haplotypes, choose_templates_where, compared_records_where,
@@ -63,6 +63,22 @@ pub const MISMATCH: f64 = 0.01;
 /// with the other templates landed on alike, before landing followed stretches won; the share was
 /// not re-tuned after (`local_sources_2026-11-05.md`).
 pub const BACKGROUND_LANDING_SHARE: f64 = 1e-5;
+
+/// **A sample's walk reads alleles drawn from its templates only where the sample is shallow**:
+/// in a window where it has reads at fewer than this share of the walked sites (phasing spec §2.3).
+/// 1× leaves about 37 sites in 100 without a read, 2× about 14, 3× about 5, so the line falls
+/// below about 2×.
+///
+/// A drawn allele makes an unsure template plainly right or wrong at a site. For a sample with few
+/// reads that is what lets its walk tell its templates apart: on a simulated F2 at 1× it took
+/// heterozygous offspring right from 88 to 91 in 100, and in a 40-sample outbred cohort its 1×
+/// samples' homozygous-reference genotypes from 64 to 73.5. For a sample whose own reads settle
+/// most sites it is noise that overrides them: drawn for every sample, 10 inbred samples at 3× had
+/// 320 genotypes wrong where they had reads against calling's 117, nearly all homozygous reference
+/// called non-reference; under this rule, 123. Drawing only from templates that are themselves
+/// sure (90% or 99% at the site) kept neither gain, because the gain comes from the unsure ones
+/// (`doc/devel/reports/implementations/refine_drawn_alleles_2026-11-27.md`).
+pub const DRAW_BELOW_READ_SHARE: f64 = 0.9;
 
 /// **The least `GQ` a sample whose reads said nothing is written with a genotype at** (§4.2, owner
 /// 2026-11-02 at 10; 9 since 2026-11-08): below it the sample stays `./.` with the pass's
@@ -1469,6 +1485,28 @@ fn solve_round(
     let share_total = (template_count + 1) * allele_total;
     let mut likelihoods: Vec<f64> = Vec::with_capacity(genotype_total);
     let mut shares: Vec<f64> = Vec::with_capacity(share_total);
+    // From round 2 the states are weighed by definite alleles, one drawn from each template's
+    // shares at each site, the background's included (phasing spec §2.3): a template that is
+    // unsure is then sometimes plainly wrong, as a soft share never is. The shares themselves stay
+    // what the prediction and the drawn haplotypes read.
+    // Only for a sample shallow in this window ([`DRAW_BELOW_READ_SHARE`]).
+    let with_reads = layout
+        .record_of_site
+        .iter()
+        .filter(|&&index| records[index].row(sample) == SampleRow::Informative)
+        .count();
+    let shallow = is_shallow(with_reads, layout.record_of_site.len());
+    let mut definite = (round > 1 && shallow).then(|| {
+        (
+            Vec::<u8>::with_capacity(share_total),
+            Uniforms::new(
+                StreamPurpose::DefiniteAlleles,
+                phasing.window_key,
+                sample,
+                round,
+            ),
+        )
+    });
     let mut spans = Vec::with_capacity(layout.sites());
     for &index in &layout.record_of_site {
         let record = &records[index];
@@ -1493,11 +1531,18 @@ fn solve_round(
             }
         }
         shares.extend(record.background_shares());
+        if let Some((drawn, uniforms)) = definite.as_mut() {
+            for template_shares in shares[share_start..].chunks_exact(record.allele_count) {
+                let allele = pick(template_shares, uniforms.next_uniform());
+                drawn.extend((0..record.allele_count).map(|a| u8::from(a == allele)));
+            }
+        }
         spans.push((
             likelihood_start..likelihoods.len(),
             share_start..shares.len(),
         ));
     }
+    let drawn = definite.map(|(drawn, _)| drawn);
     let sites: Vec<WalkSite<'_>> = layout
         .record_of_site
         .iter()
@@ -1507,6 +1552,7 @@ fn solve_round(
             allele_count: records[index].allele_count,
             likelihoods: &likelihoods[likelihood_span.clone()],
             template_shares: &shares[share_span.clone()],
+            emission_shares: drawn.as_ref().map(|drawn| &drawn[share_span.clone()]),
         })
         .collect();
     let walk_templates = template_count + 1;
@@ -1980,3 +2026,9 @@ pub fn has_evidence_nearby(
 
 #[cfg(test)]
 mod tests;
+
+/// **Whether a sample with reads at `with_reads` of a window's `sites` walked sites is shallow
+/// there**, so that its walk reads drawn alleles ([`DRAW_BELOW_READ_SHARE`]).
+fn is_shallow(with_reads: usize, sites: usize) -> bool {
+    (with_reads as f64) < DRAW_BELOW_READ_SHARE * sites as f64
+}
