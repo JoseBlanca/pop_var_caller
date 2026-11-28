@@ -34,8 +34,8 @@ use crate::bam::index_preflight::{
 use crate::fasta::{ContigEntry, ContigList};
 use crate::read::filtering::ReadFilterConfig;
 use crate::read::input::aligned_reads_reader::{
-    AlignedReadsReader, BamAlignedReadsReader, ContainerPrefetcher, CramAlignedReadsReader,
-    SharedBgzfBlocks, SharedContainers, SharedDecode,
+    AlignedReadsReader, BamAlignedReadsReader, ContainerPrefetcher, ContigCraiEntries,
+    CramAlignedReadsReader, SharedBgzfBlocks, SharedContainers, SharedDecode,
 };
 use crate::read::input::cursor::AlignmentCursor;
 use crate::read::input::read_groups::ReadGroupResolution;
@@ -132,7 +132,7 @@ pub struct AlignmentFile {
     filter_config: ReadFilterConfig,
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
-    crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
+    crai_by_contig: Vec<Arc<ContigCraiEntries>>,
     /// The decoded CRAM containers **every cursor on this file shares**. Never
     /// read on the BAM arm.
     ///
@@ -576,7 +576,7 @@ impl AlignmentFile {
                     .crai_by_contig
                     .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
                     .cloned()
-                    .unwrap_or_else(|| Vec::new().into());
+                    .unwrap_or_default();
                 // **Started here, once, and shared by every cursor after this one.** It needs a
                 // third descriptor and a *third* checked reference reader — both are positions
                 // rather than values, so neither can be shared with a reader that is seeking
@@ -725,7 +725,7 @@ impl std::fmt::Debug for AlignmentFile {
 pub(crate) fn group_crai_by_contig(
     index: &cram::crai::Index,
     contig_count: usize,
-) -> Vec<Arc<[cram::crai::Record]>> {
+) -> Vec<Arc<ContigCraiEntries>> {
     let mut by_contig: Vec<Vec<cram::crai::Record>> = vec![Vec::new(); contig_count];
 
     for record in index.iter() {
@@ -736,7 +736,10 @@ pub(crate) fn group_crai_by_contig(
         }
     }
 
-    by_contig.into_iter().map(Arc::from).collect()
+    by_contig
+        .into_iter()
+        .map(|entries| Arc::new(ContigCraiEntries::new(entries)))
+        .collect()
 }
 
 /// Read just the SAM header, dispatching on the file's extension.
@@ -1445,6 +1448,79 @@ mod tests {
                  had already served every region before it",
             );
         }
+    }
+
+    /// **A long read in an earlier container is served for a region it reaches**, even when a
+    /// later container that starts closer to the region ends before it.
+    ///
+    /// The fixture's first `.crai` entry starts at 1,000 and reaches 50,059 because of one
+    /// spliced read; the second starts at 1,100 and ends near 1,430. A cursor's first region
+    /// is a jump, so it is positioned from the index alone. Positioning that walked back from
+    /// the first entry starting past 20,000 stopped at the second entry, which does not reach
+    /// 20,000, and never decoded the first: the long read was missing, while a BAM of the same
+    /// reads served it.
+    #[test]
+    fn a_long_read_in_an_earlier_container_is_served_after_a_jump() {
+        use crate::read::input::test_fixtures::{
+            LONG_READ_SKIP, LONG_READ_START, cram_with_one_long_read,
+        };
+
+        let (_cram_dir, path, _fasta_dir, fasta) = cram_with_one_long_read();
+        let crai = cram::crai::fs::read(format!("{}.crai", path.display()))
+            .expect("the fixture writes a .crai");
+        let reach = |entry: &cram::crai::Record| {
+            entry.alignment_start().map_or(0, usize::from) + entry.alignment_span()
+        };
+        assert!(
+            crai.len() >= 2
+                && reach(&crai[0]) > 20_000
+                && crai[1..].iter().all(|entry| reach(entry) <= 20_000),
+            "the fixture must put the long read alone in reaching 20,000, in the first \
+             container: {crai:?}",
+        );
+
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+        let mut cursor = file
+            .cursor(ContigId(0), || cram_cursor_reference_bases(&fasta))
+            .expect("a cursor for contig 0");
+
+        let asked = GenomeRegion {
+            contig: ContigId(0),
+            start: Position(20_000),
+            end: Position(20_100),
+        };
+        cursor.move_to_region(asked).expect("on this chromosome");
+        let mut actual = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("the fixture reads decode and filter");
+            actual.push(String::from_utf8_lossy(&read.qname).into_owned());
+        }
+
+        assert_eq!(
+            cram_names_by_linear_scan(&path, &fasta, asked),
+            vec!["long".to_string()],
+            "the linear scan finds the long read ({LONG_READ_START} to {}) and nothing else",
+            LONG_READ_START + LONG_READ_SKIP + 59,
+        );
+        assert_eq!(
+            actual,
+            vec!["long".to_string()],
+            "the CRAM cursor lost the long read that reaches the region from the first container",
+        );
     }
 
     /// **No reference reader a CRAM cursor holds grows with the walk**
@@ -3449,7 +3525,11 @@ mod tests {
             (1, vec![300, 400]),
             (2, vec![500]),
         ] {
-            let offsets: Vec<u64> = grouped[contig].iter().map(|e| e.offset()).collect();
+            let offsets: Vec<u64> = grouped[contig]
+                .entries()
+                .iter()
+                .map(|e| e.offset())
+                .collect();
             assert_eq!(offsets, expected_offsets, "contig {contig}");
         }
     }
@@ -3470,7 +3550,7 @@ mod tests {
         ];
         let grouped = group_crai_by_contig(&index, 3);
 
-        let offsets: Vec<u64> = grouped[1].iter().map(|e| e.offset()).collect();
+        let offsets: Vec<u64> = grouped[1].entries().iter().map(|e| e.offset()).collect();
         assert_eq!(
             offsets,
             vec![300],
@@ -3481,7 +3561,10 @@ mod tests {
         // And the unplaced entry belongs to no contig at all.
         for (contig, entries) in grouped.iter().enumerate() {
             assert!(
-                entries.iter().all(|e| e.reference_sequence_id().is_some()),
+                entries
+                    .entries()
+                    .iter()
+                    .all(|e| e.reference_sequence_id().is_some()),
                 "an unplaced entry leaked into contig {contig}"
             );
         }
