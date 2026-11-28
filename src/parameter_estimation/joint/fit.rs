@@ -59,7 +59,6 @@ use crate::types::{
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
 };
-use super::census_moments::CensusMomentSums;
 use super::contamination::{
     ContaminationConfig, NotIdentifiedReason, SampleContaminationEstimates, fit_contamination_over,
     not_identified_anywhere,
@@ -343,28 +342,6 @@ pub struct JointFit {
     pub contamination: BTreeMap<String, SampleContaminationEstimates>,
     /// The population's expected heterozygosity, read off the density.
     pub expected_heterozygosity: f64,
-    /// **The same two numbers the SNP/indel genotype prior wants, averaged over the census
-    /// positions instead of integrated off the curve** — as running sums, which is all the fit can
-    /// carry without choosing an inbreeding coefficient.
-    ///
-    /// [`Self::expected_heterozygosity`] above and
-    /// `FrequencyDensity::expected_alternative_frequency` are the *other* route to the same pair:
-    /// two integrals of the fitted curve, with no census pass and no coefficient. **A run should
-    /// emit both and they should agree** — two routes to one quantity, and a large gap between
-    /// them is the fit telling you something (`doc/devel/ng/spec/ordinary_site_prior_moments.md`
-    /// §7). Measured at 63 samples across three populations and four depths, the curve's number
-    /// sits between 1.1% below and 10.7% above the census average's, and **which population is the
-    /// wide one is not predicted by whether the curve can hold its shape**.
-    ///
-    /// **These are sums and not the finished moments, and that is deliberate**: the heterozygosity
-    /// needs the panel's inbreeding coefficient, which is not this fit's to choose. **Nothing
-    /// finishes them yet**: no code reads this field (see [`CensusMomentSums`]).
-    ///
-    /// **The coefficient there is to finish them with is [`Self::hom_excess`]**, each sample's
-    /// departure from Hardy–Weinberg. Spec §4.1 prefers a runs-of-homozygosity estimator, but that
-    /// one walked genome windows in the per-sample histogram route, which has been deleted (see
-    /// the [`parameter_estimation`](crate::parameter_estimation) module doc).
-    pub census_moments: CensusMomentSums,
     /// **For every kept position, in position order, the probability that it is mismapped** —
     /// that two stretches of genome the reference holds once are both piling reads up here.
     ///
@@ -1486,19 +1463,6 @@ struct Statistics {
     /// class**, in the same position order. Collected with `genotype_posterior`.
     duplicated_posterior: Vec<f32>,
     collect_genotype_posterior: bool,
-    /// **The two population moments as running sums over the census positions this chunk saw** —
-    /// [`CensusMomentSums`], four numbers whatever the census and whatever the cohort.
-    ///
-    /// It is here rather than reduced afterwards from `genotype_posterior` because that array is
-    /// twelve bytes a position a sample — **1.2 GB for fifty samples over the shipped
-    /// two-million-position census, 1.5 GB at the tomato cohort's sixty-three, and about twice
-    /// either while the chunks are merged** — held only to be summed once
-    /// (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
-    ///
-    /// **It is collected on every pass and only the last pass's value is read**, because a sum
-    /// costs less than the branch that would skip it, and a pass that skipped it would leave the
-    /// field describing whichever earlier pass last filled it.
-    census_moments: CensusMomentSums,
     /// **The information the standard errors are computed from**, summed over the positions this
     /// chunk saw — `None` unless the pass was asked for it ([`PassKeeps::information`]).
     information: Option<InformationSums>,
@@ -1588,11 +1552,6 @@ impl Statistics {
             genotype_posterior: Vec::new(),
             duplicated_posterior: Vec::new(),
             collect_genotype_posterior: false,
-            // A fit over no samples cannot happen — `fit_jointly` refuses one — but `Statistics`
-            // is constructed before that check runs in some test paths, and the accumulator
-            // refuses a panel of none. One is as harmless a stand-in as there is: no position is
-            // ever added to it.
-            census_moments: CensusMomentSums::over(samples.max(1)),
             information: None,
         }
     }
@@ -1671,7 +1630,6 @@ impl Statistics {
             .extend_from_slice(&other.genotype_posterior);
         self.duplicated_posterior
             .extend_from_slice(&other.duplicated_posterior);
-        self.census_moments.merge(&other.census_moments);
         match (self.information.as_mut(), other.information.as_ref()) {
             (Some(into), Some(from)) => into.absorb(from),
             (None, None) => {}
@@ -2375,7 +2333,6 @@ impl JointFit {
             rates,
             contamination,
             expected_heterozygosity: parameters.density.expected_heterozygosity(),
-            census_moments: statistics.census_moments.clone(),
             duplicated: parameters.duplicated.map(|value| Estimate {
                 value,
                 provenance: Provenance::FittedHere,
@@ -4278,7 +4235,6 @@ mod tests {
     /// over a value no density produces and see what the wrap does with it.
     fn a_fit_carrying(density: FrequencyDensity, expected_heterozygosity: f64) -> JointFit {
         JointFit {
-            census_moments: CensusMomentSums::over(1),
             noise: BTreeMap::new(),
             clean_rate_standard_error: BTreeMap::new(),
             noisy_share: 0.0,

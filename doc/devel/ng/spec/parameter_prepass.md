@@ -712,8 +712,10 @@ in [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §7.
 > the census fit's per-sample homozygote excess, which two million positions already support
 > because it is an average over positions. The budget stayed at two million and the estimator went.
 >
-> **So the circularity `parameter_prepass_generic.md` §6.3 warns about is now permanent**, and
-> `joint::census_moments` states it in the run's output instead of correcting it.
+> **So the circularity `parameter_prepass_generic.md` §6.3 warns about is now permanent.** No
+> run's output states it yet: the census-average moments meant to carry that warning
+> ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md)) were never given a report,
+> and their unread accumulator was deleted on 2026-11-28.
 
 *The statement of the question, kept because it is what the decision above was taken against:*
 

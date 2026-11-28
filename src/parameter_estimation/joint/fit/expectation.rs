@@ -943,24 +943,11 @@ pub(super) fn one_position(
                 .extend(std::iter::repeat_n(0.0_f32, samples * 3));
             statistics.duplicated_posterior.push(0.0);
         }
-        // **And it counts as a position for the two population moments, carrying nothing.** Both
-        // routes to those moments have to see the same census: the stored array records this
-        // position as all-zero posteriors, so the running sums must record a position of no
-        // alternative copies rather than skip it, or the two would divide by different counts.
-        //
         // **⚠ No test enters this branch, and none of the fixtures can.** Every logarithm on the
         // way here is taken through `float::ln(p.max(f64::MIN_POSITIVE))`, which floors a read's
         // term at about −708, and `ln_sum_exp` returns `−∞` only when every input already is one —
         // so reaching `!position_ln.is_finite()` from well-formed evidence would take on the order
-        // of 1e305 reads at a position. What the two lines below maintain is tested where it can be:
-        // an all-zero position counts and contributes nothing, in `census_moments`'s
-        // all-reference fixtures, which build the identical buffer. Replacing this block with a
-        // `panic!` leaves the suite green, and that is a statement about the branch's
-        // reachability, not about the bookkeeping.
-        scratch.position_genotype.fill(0.0);
-        statistics
-            .census_moments
-            .add_position(&scratch.position_genotype);
+        // of 1e305 reads at a position.
         return;
     }
     scratch.position_genotype.fill(0.0);
@@ -973,12 +960,6 @@ pub(super) fn one_position(
 
     let duplicated_here = attribute(scratch, model, coverage_odds, statistics, position_ln);
 
-    // **The two population moments, summed here rather than stored and reduced afterwards.**
-    // `scratch.position_genotype` is the buffer this position just filled; nothing is copied and
-    // nothing is kept (`doc/devel/ng/spec/ordinary_site_prior_moments.md` §5).
-    statistics
-        .census_moments
-        .add_position(&scratch.position_genotype);
     if statistics.collect_genotype_posterior {
         statistics
             .genotype_posterior

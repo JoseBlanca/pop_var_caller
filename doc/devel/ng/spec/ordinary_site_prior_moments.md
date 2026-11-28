@@ -4,7 +4,11 @@
 [`../../reports/ng_ordinary_site_prior_moments_2026-08-27.md`](../../reports/ng_ordinary_site_prior_moments_2026-08-27.md),
 which answers the six questions in
 [`../research/ordinary_site_prior_moments.md`](../research/ordinary_site_prior_moments.md). **No
-code yet.**
+code.** The §5 running sums were built on 2026-08-27 (`joint/census_moments.rs`) but no report ever
+read them, and they were deleted on 2026-11-28 (code-quality decision B18). They come back with
+the §7 report that reads them;
+[`../../reports/implementations/ng_ordinary_site_prior_moments_2026-08-27.md`](../../reports/implementations/ng_ordinary_site_prior_moments_2026-08-27.md)
+holds their design.
 
 **What it changes:** where the SNP/indel genotype prior's two numbers come from.
 **What it does not change:** the prior itself, the joint fit's model, the repeat-tract path, and

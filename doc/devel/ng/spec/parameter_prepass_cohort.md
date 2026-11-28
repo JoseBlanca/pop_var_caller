@@ -17,8 +17,10 @@ is a record, not a change.*
 > diversity now comes from the allele-frequency curve the census fit produces, read off in closed
 > form with no panel and no `F` in it
 > ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md)), and the coefficient a
-> caller reads is the census fit's own homozygote excess — which **is** circular, and which
-> `joint::census_moments` says so about in its output rather than hiding.
+> caller reads is the census fit's own homozygote excess — which **is** circular. No run's output
+> says so yet: the census-average moments meant to carry that warning
+> ([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md)) were never given a report,
+> and their unread accumulator was deleted on 2026-11-28.
 
 ---
 
