@@ -69,8 +69,7 @@ use pop_var_caller::parameter_estimation::Provenance;
 use pop_var_caller::parameter_estimation::joint::census::Stratum as FitStratum;
 use pop_var_caller::parameter_estimation::joint::contamination::ContaminationSource;
 use pop_var_caller::parameter_estimation::joint::sequencing_batches::SequencingBatches;
-use pop_var_caller::parameter_estimation::joint::share_curve::ShareSource;
-use pop_var_caller::parameter_estimation::joint::slippage_curve::LevelSource;
+use pop_var_caller::parameter_estimation::joint::slippage_curve::{LevelSource, ShareSource};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
 };
@@ -870,13 +869,11 @@ fn tract_strata_describing(
 ) -> StratumFits {
     let level = LevelProvenance {
         source: LevelSource::Cell,
-        curve: None,
         reach: None,
         slipped_reads: Some(400.0),
     };
     let share = ShareProvenance {
         source: ShareSource::Stratum,
-        curve: None,
         reach: None,
     };
     let fitted_stratum = |repeats: u64,

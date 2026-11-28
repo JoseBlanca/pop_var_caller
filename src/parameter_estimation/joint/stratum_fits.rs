@@ -8,26 +8,13 @@
 //!
 //! # What it deliberately does not do
 //!
-//! **It does not blend, and re-blending here would be a defect rather than a duplication.** The
+//! **It does not smooth, and smoothing here would be a defect rather than a duplication.** The
 //! level on a [`StratumOutcome`] is already the emitted one, and its [`LevelProvenance`] says how
-//! it was made. The penalised fit (`ssr_fit::penalised_fit::fit_repeat_tracts`) emits a point on
-//! its motif length's penalised curve. The climb it replaced (deleted 2026-10-16), whose
-//! parameters files are still read, emitted one of three:
-//!
-//! - a stratum fitted on its own tracts had its level weighed against its period's curve — the
-//!   curves were drawn after every stratum had its own answer, then `blend_level` (deleted with
-//!   the rest of the curve fitting on 2026-10-16) applied in place;
-//! - a stratum too thin to be fitted took its period's curve whole, never through `blend_level`;
-//! - a run with curves switched off kept every cell's own answer.
-//!
-//! Feeding any of those back through `blend_level` would weigh the curve against a number the
-//! curve is already inside. `spec/str_slippage_level_curve.md` §5.1 does not name this act — what
-//! it forbids in so many words is a *curve* fitted from blended values, "otherwise each round of
-//! smoothing fits a curve to the previous round's curve, and the cells stop being evidence". This
-//! is the same circularity one step downstream, and the measurement is in the report: re-blending
-//! the five blended strata of a small real fit moves their levels by 0.6% to 4.1%, while leaving
-//! the `curve_weight` in their provenance unchanged — so a consumer inspecting the provenance
-//! would see nothing wrong and only the number would have moved.
+//! it was made: the penalised fit (`ssr_fit::penalised_fit::fit_repeat_tracts`) emits a point on
+//! its motif length's penalised curve, which already pulls each repeat count toward its
+//! neighbours. Pulling it again here would weigh the neighbours twice. (The fit before it, the
+//! climb, deleted 2026-10-16, blended a stratum's own level with a parametric curve; re-blending
+//! five of its strata moved their levels by 0.6% to 4.1% and left their provenance unchanged.)
 //!
 //! **It does not decide anything about a stratum with no answer.** Four different absences reach
 //! a lookup and [`NoSlippage`] keeps them apart, because a caller that cannot tell *this run
@@ -50,8 +37,6 @@ use crate::parameter_estimation::Provenance;
 use crate::types::ReadGroupId;
 
 use super::census::Stratum;
-use super::share_curve::ShareSource;
-use super::slippage_curve::LevelSource;
 use super::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR;
 use super::ssr_fit::{
     LevelProvenance, SharesProvenance, Slippage, StratumOutcome, read_group_level,
@@ -77,22 +62,18 @@ pub struct StutterMultiplier {
 }
 
 /// **The three numbers and where they came from, together.** A level fitted from 8,000 slipped
-/// reads and one read off a curve through four cells are the same `f64`, and a consumer that
-/// weighs them alike is treating an interpolation as a measurement
-/// (`str_slippage_level_curve.md` §8).
+/// reads and one held up by its neighbours' reads are the same `f64`, and the provenance beside it
+/// is what tells them apart (`str_slippage_level_curve.md` §8).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FittedSlippage {
     /// How often a read reports a tract length other than its allele's, which way the slips go,
-    /// and how fast multi-repeat slips fall off — **the emitted numbers**. The level is the one
-    /// the fit settled on, which the field beside it says was the cell's, the curve's, or a blend
-    /// of the two; it is not always a blend, and this type never makes one.
+    /// and how fast multi-repeat slips fall off — **the emitted numbers**, the ones the fit
+    /// settled on; this type never recomputes them.
     pub slippage: Slippage,
-    /// Where the level came from: the stratum's own fit, its period's curve, or a blend of the
-    /// two with the share the curve carried.
+    /// Where the level came from: the stratum's own fit, or a point on its penalised curve.
     pub level: LevelProvenance,
     /// Where the direction split and the fall-off came from. Separate from the level's, because
-    /// the three numbers are smoothed on their own curves and a stratum can take its level from
-    /// a curve while keeping its own shares.
+    /// the three numbers are smoothed on curves of their own.
     pub shares: Option<SharesProvenance>,
     /// **The standard error of each of the three numbers, where that number is the stratum's own
     /// fit** (`doc/devel/ng/spec/fit_precision.md` §5.2). Calling never reads them; the parameters
@@ -105,17 +86,11 @@ pub struct FittedSlippage {
     pub samples_fitted_on: Option<u64>,
 }
 
-/// **The standard errors of one slippage group's three numbers in one stratum, each only where the
-/// number emitted was fitted with the stratum's own reads**: its own fit, or a point on a
-/// penalised curve (`doc/devel/ng/spec/str_fit_to_calling.md` §2.3).
-///
-/// A number taken whole from its period's parametric curve has none: the own fit's error would
-/// describe a number the stratum does not emit. A number blended with the curve has none either,
-/// even at a curve weight of 0, where the number is the stratum's own fit: no error is computed for
-/// a blend (spec `fit_precision.md` §5.2), the writer and the validator have always refused one
-/// beside it, and the climb never emitted a blend at weight 0. Also `None` where the fit gives the
-/// number none — not told apart from the stratum's other numbers, not placed by its tracts, or
-/// withheld for too few loci.
+/// **The standard errors of one slippage group's three numbers in one stratum.** Every number
+/// emitted was fitted with the stratum's own reads — its own fit, or a point on a penalised curve
+/// (`doc/devel/ng/spec/str_fit_to_calling.md` §2.3) — so the fit's error describes it. `None`
+/// where the fit gives the number none — not told apart from the stratum's other numbers, not
+/// placed by its tracts, or withheld for too few loci.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct OwnFitStandardErrors {
     /// The slippage level's — how often a read reports a tract length other than its allele's.
@@ -127,10 +102,10 @@ pub struct OwnFitStandardErrors {
 }
 
 impl OwnFitStandardErrors {
-    /// **The fit's errors, kept only for the numbers the stratum emits as fitted with its own
-    /// reads** — the level where it came from the cell or a penalised curve, each share where it
-    /// came from the stratum or a penalised curve. `errors` is the fit's for this group, `None`
-    /// where none was computed.
+    /// **The fit's errors, kept for every number the stratum emits.** Each source left — the
+    /// stratum's own fit, or a point on its penalised curve — was fitted with the stratum's own
+    /// reads, so the fit's error describes it. `errors` is the fit's for this group, `None` where
+    /// none was computed; a number with no provenance keeps no error.
     fn of_the_numbers_emitted(
         errors: Option<&super::ssr_fit::SlippageErrors>,
         level: Option<&LevelProvenance>,
@@ -140,35 +115,10 @@ impl OwnFitStandardErrors {
             return Self::default();
         };
         Self {
-            level: level
-                .filter(|level| a_level_fitted_with_its_strata_reads(level.source))
-                .and_then(|_| errors.level.value()),
-            shorter_share: shares
-                .filter(|shares| a_share_fitted_with_its_strata_reads(shares.shorter_share.source))
-                .and_then(|_| errors.shorter_share.value()),
-            fall_off: shares
-                .filter(|shares| a_share_fitted_with_its_strata_reads(shares.fall_off.source))
-                .and_then(|_| errors.fall_off.value()),
+            level: level.and_then(|_| errors.level.value()),
+            shorter_share: shares.and_then(|_| errors.shorter_share.value()),
+            fall_off: shares.and_then(|_| errors.fall_off.value()),
         }
-    }
-}
-
-/// Whether a level from this source was fitted with its stratum's own reads, so that the fit's
-/// error describes it. **Every variant is named**, so a new source has to say which side it is
-/// on. A blend is not, even at a curve weight of 0: no error is computed for a blend, and the
-/// climb, the only fit that emitted blends (deleted 2026-10-16), never emitted one at weight 0.
-fn a_level_fitted_with_its_strata_reads(source: LevelSource) -> bool {
-    match source {
-        LevelSource::Cell | LevelSource::PenalisedCurve(_) => true,
-        LevelSource::Curve | LevelSource::Blend { .. } => false,
-    }
-}
-
-/// The same, for a share.
-fn a_share_fitted_with_its_strata_reads(source: ShareSource) -> bool {
-    match source {
-        ShareSource::Stratum | ShareSource::PenalisedCurve(_) => true,
-        ShareSource::Curve | ShareSource::Blend { .. } => false,
     }
 }
 
@@ -1485,10 +1435,7 @@ fn median_concentration(fitted: &[(f64, usize)]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter_estimation::joint::share_curve::ShareSource;
-    use crate::parameter_estimation::joint::slippage_curve::{
-        LevelSource, RiseShape, SlippageCurve,
-    };
+    use crate::parameter_estimation::joint::slippage_curve::{LevelSource, ShareSource};
     use crate::parameter_estimation::joint::ssr_fit::{
         ShareProvenance, StratumFit, StratumRefusal,
     };
@@ -1508,20 +1455,6 @@ mod tests {
         }
     }
 
-    /// A curve whose value at 10 repeats is 0.11 — the shape a level provenance carries, so a
-    /// test can ask the curve itself what it would have said.
-    fn a_curve() -> SlippageCurve {
-        SlippageCurve {
-            rise_shape: RiseShape::new(1.0).expect("a rise shape of one is on the grid"),
-            intercept: 0.01,
-            slope: 0.01,
-            fitted_from: 8,
-            fitted_to: 12,
-            held_out_error: 0.077,
-            cells: 5,
-        }
-    }
-
     /// A level provenance carrying a distinguishable `slipped_reads`, so that a test can tell
     /// one slippage group's provenance from another's.
     ///
@@ -1531,26 +1464,23 @@ mod tests {
     fn from_the_cell(slipped_reads: f64) -> LevelProvenance {
         LevelProvenance {
             source: LevelSource::Cell,
-            curve: None,
             reach: None,
             slipped_reads: Some(slipped_reads),
         }
     }
 
-    /// A shares provenance with real content — **the shape the fit actually emits**, where the
-    /// helper below used to hand out `None`. The climb's thin strata and its pooled fit (both
-    /// deleted 2026-10-16) set a shares provenance wherever they set a slippage number, so a
-    /// fixture without one is a shape no file holds.
-    fn shares_from_a_curve(slipped_reads: f64) -> SharesProvenance {
-        let from_a_curve = ShareProvenance {
-            source: ShareSource::Curve,
-            curve: None,
+    /// A shares provenance with real content — **the shape every fit emits**: a fit sets a shares
+    /// provenance wherever it sets a slippage number, so a fixture without one is a shape no file
+    /// holds.
+    fn shares_of_the_stratum(slipped_reads: f64) -> SharesProvenance {
+        let own = ShareProvenance {
+            source: ShareSource::Stratum,
             reach: None,
         };
         SharesProvenance {
             slipped_reads: Some(slipped_reads),
-            shorter_share: from_a_curve,
-            fall_off: from_a_curve,
+            shorter_share: own,
+            fall_off: own,
         }
     }
 
@@ -1568,8 +1498,9 @@ mod tests {
             .iter()
             .zip(&level)
             .map(|(numbers, level)| {
-                numbers
-                    .and(level.map(|level| shares_from_a_curve(level.slipped_reads.unwrap_or(1.0))))
+                numbers.and(
+                    level.map(|level| shares_of_the_stratum(level.slipped_reads.unwrap_or(1.0))),
+                )
             })
             .collect();
         StratumRowsOfAFile {
@@ -1588,15 +1519,12 @@ mod tests {
         StratumFits::over(&[], slippage_group_of).with_rows_of_a_file(rows, BTreeMap::new())
     }
 
-    /// **A stratum's own-fit errors are kept only for the numbers it emits as its own, and the
-    /// samples it was fitted on travel with every group's numbers.** Group 0's level is the
-    /// cell's and its fall-off the stratum's own, its shorter share a curve's: it keeps the
-    /// level's and the fall-off's errors and not the shorter share's, though the own fit computed
-    /// all three. Group 1's level is a blend and its shares a curve's: no error at all. A stratum
-    /// derived from its period's curves, fitted on nothing, has neither errors nor a sample count.
+    /// **A stratum's own-fit errors travel with each group's numbers, and so do the samples it was
+    /// fitted on.** Both groups keep the three errors the fit gave them, each its own group's. A
+    /// stratum read from a file's rows, with no fit behind it here, has neither errors nor a
+    /// sample count.
     #[test]
-    fn own_fit_errors_are_kept_only_for_the_numbers_the_stratum_emits_as_its_own() {
-        use crate::parameter_estimation::joint::slippage_curve::CurveReach;
+    fn own_fit_errors_and_the_samples_fitted_on_travel_with_each_groups_numbers() {
         use crate::parameter_estimation::joint::ssr_fit::{
             SlippageErrors, StratumError, StratumErrors,
         };
@@ -1606,18 +1534,6 @@ mod tests {
                 shorter_share: StratumError::Estimated(shorter_share),
                 fall_off: StratumError::Estimated(fall_off),
             })
-        };
-        let mut shares_partly_own = shares_from_a_curve(400.0);
-        shares_partly_own.fall_off = ShareProvenance {
-            source: ShareSource::Stratum,
-            curve: None,
-            reach: None,
-        };
-        let blended = LevelProvenance {
-            source: LevelSource::Blend { curve_weight: 0.4 },
-            curve: Some(a_curve()),
-            reach: Some(CurveReach::Inside),
-            slipped_reads: Some(90.0),
         };
         let fitted_on_a_subset = StratumOutcome::Fitted(Box::new(StratumFit {
             standard_errors: Some(StratumErrors {
@@ -1632,8 +1548,11 @@ mod tests {
             samples_fitted_on: Some(300),
             tracts_of_its_own: 40,
             reads_crossing: 400,
-            level_provenance: vec![Some(from_the_cell(400.0)), Some(blended)],
-            shares_provenance: vec![Some(shares_partly_own), Some(shares_from_a_curve(90.0))],
+            level_provenance: vec![Some(from_the_cell(400.0)), Some(from_the_cell(90.0))],
+            shares_provenance: vec![
+                Some(shares_of_the_stratum(400.0)),
+                Some(shares_of_the_stratum(90.0)),
+            ],
         }));
         let fits = StratumFits::over(
             &[fitted_on_a_subset],
@@ -1653,13 +1572,17 @@ mod tests {
             cells[0].2.own_fit_standard_errors,
             OwnFitStandardErrors {
                 level: Some(0.001),
-                shorter_share: None,
+                shorter_share: Some(0.02),
                 fall_off: Some(0.03),
             }
         );
         assert_eq!(
             cells[1].2.own_fit_standard_errors,
-            OwnFitStandardErrors::default()
+            OwnFitStandardErrors {
+                level: Some(0.004),
+                shorter_share: Some(0.05),
+                fall_off: Some(0.06),
+            }
         );
         assert_eq!(
             (cells[0].2.samples_fitted_on, cells[1].2.samples_fitted_on),
@@ -1690,7 +1613,6 @@ mod tests {
         };
         let on_the_curve = ShareProvenance {
             source: ShareSource::PenalisedCurve(point),
-            curve: None,
             reach: Some(CurveReach::Inside),
         };
         let fitted = StratumOutcome::Fitted(Box::new(StratumFit {
@@ -1712,7 +1634,6 @@ mod tests {
             reads_crossing: 400,
             level_provenance: vec![Some(LevelProvenance {
                 source: LevelSource::PenalisedCurve(point),
-                curve: None,
                 reach: Some(CurveReach::Inside),
                 slipped_reads: Some(400.0),
             })],
@@ -1980,67 +1901,6 @@ mod tests {
         );
     }
 
-    /// **The lookup returns the level the fit emitted, not one it recomputed from the curve.**
-    ///
-    /// This is the property the module exists to hold, and the fixture is built so that it can
-    /// fail. The stratum's emitted level is a blend of its own fit with its period's curve, as a
-    /// file the climb wrote carries it, so it sits **between** the two and equals neither — a
-    /// fixture whose level happened to equal the curve's value would make every recomputation
-    /// look correct and this test would prove nothing.
-    ///
-    /// Measured on a small real fit when the climb still ran: putting the emitted level back
-    /// through the blend moved the five blended strata by 0.6 % to 4.1 %, and left the
-    /// `curve_weight` in their provenance unchanged — so the number moved and the provenance did
-    /// not say so.
-    #[test]
-    fn the_level_is_the_one_the_fit_emitted_and_not_the_curves_own() {
-        let curve = a_curve();
-        let repeats = 10;
-        // `a_curve` is a straight line in the level (rise shape 1): 0.01 + 0.01 × 10 = 0.11 at
-        // 10 repeats, inside its fitted 8 to 12. A cell at 0.08 weighed against that 0.11 sits
-        // between the two and equals neither.
-        let the_curves_level = 0.11;
-        let emitted = 0.084_711_129_860_078_91;
-        assert!(
-            0.08 < emitted && emitted < the_curves_level,
-            "the fixture must not be a level the curve would also produce, or nothing it \
-             asserts can fail",
-        );
-        let fits = of_rows(
-            [derived(
-                stratum(2, repeats),
-                vec![Some(slippage(emitted))],
-                vec![Some(LevelProvenance {
-                    source: LevelSource::Blend {
-                        curve_weight: 0.179_7,
-                    },
-                    curve: Some(curve),
-                    reach: None,
-                    slipped_reads: Some(400.0),
-                })],
-            )],
-            one_group(),
-        );
-
-        let answer = fits
-            .at(ReadGroupId(0), 2, repeats)
-            .expect("the stratum has numbers");
-        assert_eq!(
-            answer.slippage.level, emitted,
-            "the emitted level, not the curve's own value and not a second blend of the two",
-        );
-        assert_eq!(
-            answer.level.curve,
-            Some(curve),
-            "and the curve travels beside it, so a consumer can see what it would have said",
-        );
-        assert_eq!(
-            answer.slippage.shorter_share, 0.83,
-            "the two shape numbers are the ones the row carried",
-        );
-        assert_eq!(answer.slippage.fall_off, 0.25);
-    }
-
     /// **Two outcomes naming one stratum is refused rather than silently halved.** A map insert
     /// keeps the last and says nothing, and the two levels can differ by a factor of five.
     #[test]
@@ -2081,7 +1941,7 @@ mod tests {
             tracts_of_its_own: 40,
             reads_crossing: 400,
             level_provenance: vec![Some(from_the_cell(400.0))],
-            shares_provenance: vec![Some(shares_from_a_curve(400.0))],
+            shares_provenance: vec![Some(shares_of_the_stratum(400.0))],
         }))
     }
 

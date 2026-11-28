@@ -633,24 +633,9 @@ own_fit_standard_error = 0.0021
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 12040.25
+shorter_share_smoothing = "this_stratum"
 fall_off_smoothing = "this_stratum"
 fall_off_own_fit_standard_error = 0.018
-
-[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.blend]
-curve_weight = 0.61
-reach = "inside_the_fitted_range"
-
-[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.blend.curve]
-shape = "turning"
-intercept = 1.4
-slope = -0.09
-bend = 0.006
-centre_repeats = 22.5
-fitted_from_repeats = 5
-fitted_to_repeats = 40
-held_out_error = 0.167
-strata = 36
-curve_fitted_on = "this_period"
 
 [[repeat_tracts.slippage_by_stratum_and_group]]
 period = 2
@@ -661,40 +646,14 @@ shorter_share = 0.83
 fall_off = 0.31
 
 [repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
+smoothing = "this_stratum"
 expected_slipped_reads = 8000.5
-
-[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.blend]
-curve_weight = 0.37
-reach = "inside_the_fitted_range"
-
-[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.blend.curve]
-rise_shape = 0.55
-intercept = 0.011
-slope = 0.004
-fitted_from_repeats = 5
-fitted_to_repeats = 19
-held_out_error = 0.3333333333333333
-cells = 15
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 8000.5
 shorter_share_smoothing = "this_stratum"
+fall_off_smoothing = "this_stratum"
 shorter_share_own_fit_standard_error = 0.011
-
-[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.this_periods_curve]
-reach = "above_the_fitted_range"
-
-[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.this_periods_curve.curve]
-shape = "turning"
-intercept = 1.4
-slope = -0.09
-bend = 0.006
-centre_repeats = 3.0
-fitted_from_repeats = 2
-fitted_to_repeats = 4
-held_out_error = 0.167
-strata = 3
-curve_fitted_on = "this_period"
 
 [[repeat_tracts.slippage_by_stratum_and_group]]
 period = 2
@@ -704,17 +663,8 @@ share_of_reads_that_slip = 0.0913
 shorter_share = 0.79
 fall_off = 0.28
 
-[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.this_periods_curve]
-reach = "below_the_fitted_range"
-
-[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.this_periods_curve.curve]
-rise_shape = 0.55
-intercept = 0.011
-slope = 0.004
-fitted_from_repeats = 12
-fitted_to_repeats = 19
-held_out_error = 0.3333333333333333
-cells = 8
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
+smoothing = "this_stratum"
 
 [[repeat_tracts.slippage_by_stratum_and_group]]
 period = 2
@@ -744,7 +694,7 @@ eased_here = false
 reach = "inside_the_fitted_range"
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.penalised_curve]
-strength = 9.75
+strength = 0.3333333333333333
 eased_here = false
 reach = "inside_the_fitted_range"
 

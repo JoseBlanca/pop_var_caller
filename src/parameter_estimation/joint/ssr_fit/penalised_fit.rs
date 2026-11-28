@@ -1361,7 +1361,6 @@ fn outcome_of_a_class(
     };
     let share_on = |curve: &ParameterCurve| ShareProvenance {
         source: ShareSource::PenalisedCurve(point_on(curve)),
-        curve: None,
         reach: Some(CurveReach::Inside),
     };
     let concentration = fitted
@@ -1390,7 +1389,6 @@ fn outcome_of_a_class(
         reads_crossing,
         level_provenance: vec![Some(LevelProvenance {
             source: LevelSource::PenalisedCurve(point_on(&curves.level)),
-            curve: None,
             reach: Some(CurveReach::Inside),
             slipped_reads,
         })],
@@ -1865,6 +1863,15 @@ impl Period {
                     .map(|(a, b)| (a - b).abs())
                     .fold(0.0, larger_change);
                 self.set_state(&jumped);
+                // **Every class counts again in the next round**: the jump moved every number, so
+                // a change measured before it no longer says a class has settled, and a class that
+                // passed the reuse test would hand that round counts taken before the jump.
+                self.class_change
+                    .iter_mut()
+                    .for_each(|c| *c = f64::INFINITY);
+                if self.multipliers.is_some() {
+                    self.multiplier_change = f64::INFINITY;
+                }
                 self.squarem = SquaremCycle::Jumped {
                     fallback: reached,
                     to_beat: log_likelihood,
@@ -2299,7 +2306,15 @@ impl Period {
             }
         }
         self.rounds_per_counting.push(rounds_here);
-        self.squarem = SquaremCycle::Idle;
+        // **A run of rounds that ran out on a jump returns what the jump started from.** The
+        // jumped numbers are judged only by the round after them, which will not run, and the
+        // curves and the last counts — what the standard errors are built from — describe the
+        // numbers the round reached before it jumped.
+        if let SquaremCycle::Jumped { fallback, .. } = std::mem::take(&mut self.squarem)
+            && self.last_change >= fit.tolerance
+        {
+            self.set_state(&fallback);
+        }
         if share_held {
             self.share_from_pairs = true;
         }
@@ -3113,6 +3128,82 @@ mod tests {
         assert_eq!(larger_change(0.5, 0.25), 0.5);
     }
 
+    /// **A jump makes every class count again in the round after it.** The round that jumps moves
+    /// every number, by up to `2·50·|r| + 50²·|v|`, yet its change measures still say how far the
+    /// round *before* the jump moved each class. A class that had nearly settled would then pass
+    /// the reuse test and hand the next round counts taken at the numbers from before the jump —
+    /// counts that feed both the curves and the log-likelihood the jump is judged on.
+    #[test]
+    fn a_jump_marks_every_class_unsettled() {
+        let class = a_drawn_class(2, 8, 40, 12, 8, 31);
+        let mut period =
+            Period::new(&[&class], &a_narrow_production_fit()).expect("a class with reads");
+        let start = period.state();
+        // Two rounds that each moved every number a little: a jump extrapolates from them.
+        let first: Vec<f64> = start.iter().map(|value| value + 0.01).collect();
+        period.set_state(&first);
+        let first = period.state();
+        let reached: Vec<f64> = first.iter().map(|value| value + 0.005).collect();
+        period.set_state(&reached);
+        period.squarem = SquaremCycle::OneRound { start, first };
+        // The round before the jump settled every class.
+        period
+            .class_change
+            .iter_mut()
+            .for_each(|change| *change = 0.0);
+        period.multiplier_change = 0.0;
+
+        let jump = period.squarem_step(Vec::new(), -10.0);
+        assert!(jump > 0.0, "the step jumped");
+        assert!(matches!(period.squarem, SquaremCycle::Jumped { .. }));
+        assert!(
+            period
+                .class_change
+                .iter()
+                .all(|change| *change == f64::INFINITY),
+            "every class counts again after a jump: {:?}",
+            period.class_change
+        );
+    }
+
+    /// **A fit whose last allowed round jumps returns the numbers that round reached, not the
+    /// jumped ones.** A jump is only judged by the round after it, so the numbers it sets have
+    /// been checked by no round; and the curves and the last counts, which the standard errors are
+    /// built from, describe the numbers the round reached before it jumped. With the jumps
+    /// starting after five rounds, the cycle is: round 6 takes one round, round 7 jumps — so a
+    /// limit of 7 rounds ends on a jump. Every class's slip rate must then be the one its slip
+    /// rate curve holds.
+    #[test]
+    fn a_fit_that_runs_out_of_rounds_on_a_jump_returns_what_its_curves_describe() {
+        let classes = [
+            a_drawn_class(1, 8, 40, 12, 8, 31),
+            a_drawn_class(1, 9, 40, 12, 8, 32),
+            a_drawn_class(1, 10, 40, 12, 8, 33),
+        ];
+        let classes: Vec<&StratumEvidence> = classes.iter().collect();
+        let mut fit = a_narrow_production_fit();
+        // Never settled, so only the limit stops it.
+        fit.tolerance = 0.0;
+        for max_rounds in [6, 7] {
+            fit.max_rounds = max_rounds;
+            let mut period = Period::new(&classes, &fit).expect("the classes have reads");
+            period.count(&classes, &[0.3; 12], &fit, false, &|_, _| {});
+            assert_eq!(period.rounds, max_rounds);
+            for (point, class) in period.class_at_point.iter().enumerate() {
+                if class.is_none() {
+                    continue;
+                }
+                let on_the_curve = logistic(period.level_curve.values[point]);
+                let reported = period.slippage[point].level;
+                assert!(
+                    (reported - on_the_curve).abs() < 1e-12,
+                    "a limit of {max_rounds} rounds: the fit reports a slip rate of {reported} \
+                     where its curve holds {on_the_curve}"
+                );
+            }
+        }
+    }
+
     /// Binomial successes out of `trials` at each probability, with sampling noise from a fixed
     /// stream (the normal approximation, which is close at these counts).
     fn noisy_successes(probabilities: &[f64], trials: &[f64], seed: u64) -> Vec<f64> {
@@ -3379,7 +3470,6 @@ mod tests {
                     assert_eq!(fit.reads_crossing, evidence.spanning_reads());
                     let level = fit.level_provenance[0].expect("group 0 has numbers");
                     assert!(matches!(level.source, LevelSource::PenalisedCurve(_)));
-                    assert_eq!(level.curve, None);
                     assert_eq!(level.reach, Some(CurveReach::Inside));
                     let slipped = level
                         .slipped_reads
@@ -3392,7 +3482,6 @@ mod tests {
                     assert_eq!(shares.slipped_reads, Some(slipped));
                     for share in [shares.shorter_share, shares.fall_off] {
                         assert!(matches!(share.source, ShareSource::PenalisedCurve(_)));
-                        assert_eq!(share.curve, None);
                         assert_eq!(share.reach, Some(CurveReach::Inside));
                     }
                     let errors = fit

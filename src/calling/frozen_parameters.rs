@@ -592,8 +592,7 @@ mod tests {
     /// rather than the same one.
     fn strata_with_allele_length_variations() -> StratumFits {
         use crate::parameter_estimation::joint::census::Stratum;
-        use crate::parameter_estimation::joint::share_curve::ShareSource;
-        use crate::parameter_estimation::joint::slippage_curve::LevelSource;
+        use crate::parameter_estimation::joint::slippage_curve::{LevelSource, ShareSource};
         use crate::parameter_estimation::joint::ssr_fit::{
             LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
             StratumOutcome,
@@ -601,13 +600,11 @@ mod tests {
 
         let level = LevelProvenance {
             source: LevelSource::Cell,
-            curve: None,
             reach: None,
             slipped_reads: Some(400.0),
         };
         let share = ShareProvenance {
             source: ShareSource::Stratum,
-            curve: None,
             reach: None,
         };
         let one =

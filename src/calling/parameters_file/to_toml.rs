@@ -68,10 +68,9 @@ use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, GroupOfNumbers, InbreedingRow, InformationalNumber, LevelOrigin, LevelSmoothing,
     MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow,
-    ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung,
-    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
-    SnpIndelFitStart, StartOutcome, StratumAlleleLengthVariationRow, StutterMultiplierRow,
-    SubstitutionRateRow, Warrant, WarrantedValue,
+    ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareSmoothing, SharesOrigin,
+    SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome, StratumAlleleLengthVariationRow,
+    StutterMultiplierRow, SubstitutionRateRow, Warrant, WarrantedValue,
 };
 
 impl ParametersFile {
@@ -1673,31 +1672,11 @@ fn a_shares_origin(origin: &SharesOrigin) -> String {
     an_inline_table(&fields)
 }
 
-/// **A smoothing that used no curve is a bare word; one that used a curve is a one-key table** —
-/// serde's own spelling of an enum, and the device that stops a reach being written without the
-/// curve it is a reach into.
+/// **A smoothing that used no curve is a bare word; a point on a penalised curve is a one-key
+/// table** — serde's own spelling of an enum.
 fn a_level_smoothing(smoothing: &LevelSmoothing) -> String {
     match smoothing {
         LevelSmoothing::ThisStratum => a_toml_string("this_stratum"),
-        LevelSmoothing::ThisPeriodsCurve { curve, reach } => an_inline_table(&[(
-            "this_periods_curve",
-            an_inline_table(&[
-                ("curve", a_slippage_curve(curve)),
-                ("reach", a_toml_string(the_word_for_reach(*reach))),
-            ]),
-        )]),
-        LevelSmoothing::Blend {
-            curve_weight,
-            curve,
-            reach,
-        } => an_inline_table(&[(
-            "blend",
-            an_inline_table(&[
-                ("curve_weight", a_toml_float(*curve_weight)),
-                ("curve", a_slippage_curve(curve)),
-                ("reach", a_toml_string(the_word_for_reach(*reach))),
-            ]),
-        )]),
         LevelSmoothing::PenalisedCurve {
             strength,
             eased_here,
@@ -1721,70 +1700,12 @@ fn a_penalised_point(strength: f64, eased_here: bool, reach: CurveReach) -> Stri
 fn a_share_smoothing(smoothing: &ShareSmoothing) -> String {
     match smoothing {
         ShareSmoothing::ThisStratum => a_toml_string("this_stratum"),
-        ShareSmoothing::ThisPeriodsCurve { curve, reach } => an_inline_table(&[(
-            "this_periods_curve",
-            an_inline_table(&[
-                ("curve", a_share_curve(curve)),
-                ("reach", a_toml_string(the_word_for_reach(*reach))),
-            ]),
-        )]),
-        ShareSmoothing::Blend {
-            curve_weight,
-            curve,
-            reach,
-        } => an_inline_table(&[(
-            "blend",
-            an_inline_table(&[
-                ("curve_weight", a_toml_float(*curve_weight)),
-                ("curve", a_share_curve(curve)),
-                ("reach", a_toml_string(the_word_for_reach(*reach))),
-            ]),
-        )]),
         ShareSmoothing::PenalisedCurve {
             strength,
             eased_here,
             reach,
         } => a_penalised_point(*strength, *eased_here, *reach),
     }
-}
-
-fn a_slippage_curve(curve: &SlippageCurve) -> String {
-    an_inline_table(&[
-        ("rise_shape", a_toml_float(curve.rise_shape)),
-        ("intercept", a_toml_float(curve.intercept)),
-        ("slope", a_toml_float(curve.slope)),
-        (
-            "fitted_from_repeats",
-            a_toml_integer(curve.fitted_from_repeats),
-        ),
-        ("fitted_to_repeats", a_toml_integer(curve.fitted_to_repeats)),
-        ("held_out_error", a_toml_float(curve.held_out_error)),
-        ("cells", a_toml_integer(curve.cells)),
-    ])
-}
-
-fn a_share_curve(curve: &ShareCurve) -> String {
-    an_inline_table(&[
-        (
-            "shape",
-            a_toml_string(the_word_for_share_shape(curve.shape)),
-        ),
-        ("intercept", a_toml_float(curve.intercept)),
-        ("slope", a_toml_float(curve.slope)),
-        ("bend", a_toml_float(curve.bend)),
-        ("centre_repeats", a_toml_float(curve.centre_repeats)),
-        (
-            "fitted_from_repeats",
-            a_toml_integer(curve.fitted_from_repeats),
-        ),
-        ("fitted_to_repeats", a_toml_integer(curve.fitted_to_repeats)),
-        ("held_out_error", a_toml_float(curve.held_out_error)),
-        ("strata", a_toml_integer(curve.strata)),
-        (
-            "curve_fitted_on",
-            a_toml_string(the_word_for_share_curve_rung(curve.curve_fitted_on)),
-        ),
-    ])
 }
 
 /// A stratum's row. **An absent F and an absent error are absent keys**, never a number standing
@@ -1948,23 +1869,6 @@ fn the_word_for_reach(reach: CurveReach) -> &'static str {
         CurveReach::InsideTheFittedRange => "inside_the_fitted_range",
         CurveReach::BelowTheFittedRange => "below_the_fitted_range",
         CurveReach::AboveTheFittedRange => "above_the_fitted_range",
-    }
-}
-
-fn the_word_for_share_curve_rung(rung: ShareCurveRung) -> &'static str {
-    match rung {
-        ShareCurveRung::ThisPeriod => "this_period",
-        ShareCurveRung::ThisPeriodUnscored => "this_period_unscored",
-        ShareCurveRung::OtherPeriods => "other_periods",
-        ShareCurveRung::BuiltInDefault => "built_in_default",
-    }
-}
-
-fn the_word_for_share_shape(shape: ShareShape) -> &'static str {
-    match shape {
-        ShareShape::Flat => "flat",
-        ShareShape::Sloping => "sloping",
-        ShareShape::Turning => "turning",
     }
 }
 
@@ -2330,25 +2234,6 @@ mod tests {
             CurveReach::AboveTheFittedRange,
         ] {
             assert_eq!(the_word_for_reach(reach), serdes_word(reach), "{reach:?}");
-        }
-        for rung in [
-            ShareCurveRung::ThisPeriod,
-            ShareCurveRung::ThisPeriodUnscored,
-            ShareCurveRung::OtherPeriods,
-            ShareCurveRung::BuiltInDefault,
-        ] {
-            assert_eq!(
-                the_word_for_share_curve_rung(rung),
-                serdes_word(rung),
-                "{rung:?}"
-            );
-        }
-        for shape in [ShareShape::Flat, ShareShape::Sloping, ShareShape::Turning] {
-            assert_eq!(
-                the_word_for_share_shape(shape),
-                serdes_word(shape),
-                "{shape:?}"
-            );
         }
         for source in [
             super::super::ContaminationFittedFrom::ThisReadGroupsOwnReads,

@@ -20,10 +20,8 @@
 //! [`contamination`] the share of a sample's reads that came from another individual, which no
 //! per-sample route can produce at all. Each module's own docs say what it does and does not do.
 //!
-//! [`slippage_curve`] holds how the repeat-tract slippage *level* rises with repeat count, which
-//! is what lets a thin cell read a line drawn through all its neighbours instead of copying one.
-//! [`share_curve`] does the same for the other two slippage numbers — which way a read slipped
-//! and how far — whose shapes differ from the level's and from each other.
+//! [`slippage_curve`] says where each emitted repeat-tract slippage number came from: the
+//! stratum's own fit, or a point on its motif length's penalised curve.
 //!
 //! [`sequencing_batches`] holds who was sequenced beside whom, as the run was told — the
 //! grouping the contaminating population is drawn from, and the one thing in this module that is
@@ -41,7 +39,6 @@ pub mod fit_trace;
 mod linear_algebra;
 pub mod loci;
 pub mod sequencing_batches;
-pub mod share_curve;
 pub mod slippage_curve;
 pub mod ssr_fit;
 pub mod stratum_fits;

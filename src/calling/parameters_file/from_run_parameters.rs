@@ -20,11 +20,10 @@ use super::{
     InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing, MisreadAfterRunRow,
     MisreadAfterRuns, MisreadBase, OrdinarySitePrior, ParametersFile,
     PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting, RepeatTracts,
-    RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
-    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
-    SnpIndelFitAsReturned, SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow,
-    StutterMultiplierRow, SubstitutionRateRow, Warrant, WarrantedValue,
-    between_locus_share_error_of, between_locus_share_of, concentration_error_of,
+    RepeatTractsLeftOut, SampleBatchRow, SeedRung, SequencingBatches, ShareSmoothing, SharesOrigin,
+    SlippageGroupRow, SlippageRow, SnpIndelFitAsReturned, SnpIndelFitStart, StatedConstants,
+    StratumAlleleLengthVariationRow, StutterMultiplierRow, SubstitutionRateRow, Warrant,
+    WarrantedValue, between_locus_share_error_of, between_locus_share_of, concentration_error_of,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -33,11 +32,8 @@ use crate::parameter_estimation::joint::census::Stratum;
 use crate::parameter_estimation::joint::contamination::ContaminationSource;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches as DeclaredBatches;
-use crate::parameter_estimation::joint::share_curve::{
-    ShareCurve as FittedShareCurve, ShareCurveSource, ShareShape as FittedShape, ShareSource,
-};
 use crate::parameter_estimation::joint::slippage_curve::{
-    CurveReach as FittedCurveReach, LevelSource, SlippageCurve as FittedSlippageCurve,
+    CurveReach as FittedCurveReach, LevelSource, ShareSource,
 };
 use crate::parameter_estimation::joint::ssr_fit::{LevelProvenance, ShareProvenance};
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
@@ -1017,19 +1013,7 @@ fn level_origin_of(
             // `blend_level` (deleted 2026-10-16) returned for a fitted cell with no curve beside
             // it — so there is nothing to record.
             LevelSource::Cell => LevelSmoothing::ThisStratum,
-            LevelSource::Curve => LevelSmoothing::ThisPeriodsCurve {
-                curve: the_recorded_curve(provenance.curve, stratum, slippage_group, "the level")
-                    .into(),
-                reach: the_recorded_reach(provenance.reach, stratum, slippage_group, "the level"),
-            },
-            LevelSource::Blend { curve_weight } => LevelSmoothing::Blend {
-                curve_weight,
-                curve: the_recorded_curve(provenance.curve, stratum, slippage_group, "the level")
-                    .into(),
-                reach: the_recorded_reach(provenance.reach, stratum, slippage_group, "the level"),
-            },
-            // **The curve is not read on this arm either**: a penalised point is on no parametric
-            // curve, and its provenance records none. Its reach is required as a curve's is.
+            // A penalised point's reach is required: the file records it beside the point.
             LevelSource::PenalisedCurve(point) => LevelSmoothing::PenalisedCurve {
                 strength: point.strength,
                 eased_here: point.eased_here,
@@ -1051,42 +1035,12 @@ fn share_smoothing_of(
 ) -> ShareSmoothing {
     match provenance.source {
         ShareSource::Stratum => ShareSmoothing::ThisStratum,
-        ShareSource::Curve => ShareSmoothing::ThisPeriodsCurve {
-            curve: the_recorded_curve(provenance.curve, stratum, slippage_group, which_number)
-                .into(),
-            reach: the_recorded_reach(provenance.reach, stratum, slippage_group, which_number),
-        },
-        ShareSource::Blend { curve_weight } => ShareSmoothing::Blend {
-            curve_weight,
-            curve: the_recorded_curve(provenance.curve, stratum, slippage_group, which_number)
-                .into(),
-            reach: the_recorded_reach(provenance.reach, stratum, slippage_group, which_number),
-        },
         ShareSource::PenalisedCurve(point) => ShareSmoothing::PenalisedCurve {
             strength: point.strength,
             eased_here: point.eased_here,
             reach: the_recorded_reach(provenance.reach, stratum, slippage_group, which_number),
         },
     }
-}
-
-/// The curve a number came off, refusing a provenance that says a curve supplied it and does not
-/// say which.
-fn the_recorded_curve<T>(
-    curve: Option<T>,
-    stratum: Stratum,
-    slippage_group: u32,
-    which_number: &str,
-) -> T {
-    curve.unwrap_or_else(|| {
-        panic!(
-            "at period {}, {} repeats, slippage group {slippage_group}, {which_number} came off \
-             its period's curve and no curve was recorded beside it — the file says which curve \
-             supplied a number or does not say a curve did, because a reader cannot weigh an \
-             interpolation it cannot see",
-            stratum.period, stratum.reference_repeats
-        )
-    })
 }
 
 /// Whether the stratum sat inside the curve's fitted range, refusing a curve that does not say.
@@ -1120,8 +1074,8 @@ fn the_recorded_reach(
 // `SeedRung` was built with three, so a run whose cohort turned out to have no variation at all
 // had no rung to be written under.
 //
-// **Exhaustiveness cannot catch a variant crossed with another** — `Flat => Sloping` compiles and
-// spells correctly — which is the other half, and
+// **Exhaustiveness cannot catch a variant crossed with another** — `Inside => AboveFitted`
+// compiles and spells correctly — which is the other half, and
 // `every_pre_pass_word_maps_to_its_own_word_in_the_file` names every pair.
 
 impl From<Provenance> for Warrant {
@@ -1161,58 +1115,6 @@ impl From<FittedCurveReach> for CurveReach {
             FittedCurveReach::Inside => Self::InsideTheFittedRange,
             FittedCurveReach::BelowFitted => Self::BelowTheFittedRange,
             FittedCurveReach::AboveFitted => Self::AboveTheFittedRange,
-        }
-    }
-}
-
-impl From<FittedSlippageCurve> for SlippageCurve {
-    fn from(curve: FittedSlippageCurve) -> Self {
-        Self {
-            rise_shape: curve.rise_shape.get(),
-            intercept: curve.intercept,
-            slope: curve.slope,
-            fitted_from_repeats: curve.fitted_from,
-            fitted_to_repeats: curve.fitted_to,
-            held_out_error: curve.held_out_error,
-            cells: curve.cells as u64,
-        }
-    }
-}
-
-impl From<FittedShareCurve> for ShareCurve {
-    fn from(curve: FittedShareCurve) -> Self {
-        Self {
-            shape: curve.shape.into(),
-            intercept: curve.intercept,
-            slope: curve.slope,
-            bend: curve.bend,
-            centre_repeats: curve.centre,
-            fitted_from_repeats: curve.fitted_from,
-            fitted_to_repeats: curve.fitted_to,
-            held_out_error: curve.held_out_error,
-            strata: curve.strata as u64,
-            curve_fitted_on: curve.source.into(),
-        }
-    }
-}
-
-impl From<ShareCurveSource> for ShareCurveRung {
-    fn from(source: ShareCurveSource) -> Self {
-        match source {
-            ShareCurveSource::ThisPeriod => Self::ThisPeriod,
-            ShareCurveSource::ThisPeriodUnscored => Self::ThisPeriodUnscored,
-            ShareCurveSource::OtherPeriods => Self::OtherPeriods,
-            ShareCurveSource::BuiltInDefault => Self::BuiltInDefault,
-        }
-    }
-}
-
-impl From<FittedShape> for ShareShape {
-    fn from(shape: FittedShape) -> Self {
-        match shape {
-            FittedShape::Flat => Self::Flat,
-            FittedShape::Sloping => Self::Sloping,
-            FittedShape::Turning => Self::Turning,
         }
     }
 }
@@ -1269,7 +1171,7 @@ mod tests {
     use crate::parameter_estimation::joint::contamination::{
         ContaminationEstimate, NotIdentifiedReason,
     };
-    use crate::parameter_estimation::joint::slippage_curve::RiseShape;
+    use crate::parameter_estimation::joint::slippage_curve::PenalisedPoint;
     use crate::parameter_estimation::joint::ssr_fit::{
         SharesProvenance, Slippage, StratumFit, StratumOutcome, StratumRefusal,
     };
@@ -1431,35 +1333,6 @@ mod tests {
         ]
     }
 
-    fn a_slippage_curve() -> FittedSlippageCurve {
-        FittedSlippageCurve {
-            rise_shape: RiseShape::new(0.55).expect("a rise shape in [0, 1]"),
-            intercept: 0.011,
-            slope: 0.004,
-            fitted_from: 5,
-            fitted_to: 19,
-            held_out_error: 0.077,
-            cells: 23,
-        }
-    }
-
-    /// **Its fitted range is 4 to 17 where the slippage curve's is 5 to 19**, so a field taken
-    /// from the wrong curve is visible and not merely equal.
-    fn a_share_curve() -> FittedShareCurve {
-        FittedShareCurve {
-            shape: FittedShape::Turning,
-            intercept: 1.4,
-            slope: -0.09,
-            bend: 0.006,
-            centre: 11.5,
-            fitted_from: 4,
-            fitted_to: 17,
-            held_out_error: 0.167,
-            strata: 12,
-            source: ShareCurveSource::ThisPeriod,
-        }
-    }
-
     fn ssr_stratum(period: u8, repeats: u32) -> SsrStratum {
         SsrStratum::new(
             SsrPeriod::try_new(usize::from(period)).expect("a motif period"),
@@ -1472,18 +1345,19 @@ mod tests {
     /// - period 2 at 6 repeats — **fitted**, so it carries an allele length variation of its own. Only
     ///   slippage group 0 put reads in it; group 1 has no numbers there, which is the
     ///   `(stratum × slippage group)` the file must leave out rather than write a zero for. Its
-    ///   level is a **blend**, its shorter share is its own, and its fall-off came off the
-    ///   period's curve — three different origins in one row.
-    /// - period 2 at 11 repeats — **derived** from the period's curves, so it has no length
-    ///   spectrum at all, and only group 1 has numbers. Its shares provenance is absent, which
-    ///   is the `shorter_share_and_fall_off_origin` key the file must leave out.
-    /// - period 3 at 9 repeats — **derived**, group 1 only, and its shares came off a **blend**.
-    ///   Its group-0 shares are absent where its group-1 shares are not, so a reader that took
-    ///   group 0's shares for every group would write this row's `shorter_share_and_fall_off_origin` as missing.
+    ///   level is a point on a **penalised curve**, its shorter share is its own, and its
+    ///   fall-off is a point on another penalised curve — the two origins mixed in one row.
+    /// - period 2 at 11 repeats — read from a file's rows, so it has no allele length variation
+    ///   at all, and only group 1 has numbers. Its shares provenance is absent, which is the
+    ///   `shorter_share_and_fall_off_origin` key the file must leave out.
+    /// - period 3 at 9 repeats — read from a file's rows, group 1 only, its shorter share on a
+    ///   penalised curve. Its group-0 shares are absent where its group-1 shares are not, so a
+    ///   reader that took group 0's shares for every group would write this row's
+    ///   `shorter_share_and_fall_off_origin` as missing.
     /// - period 1 at 30 repeats — **refused**, which contributes nothing at all.
     ///
-    /// The two derived strata and the period-2 pool are shapes only the climb wrote (deleted
-    /// 2026-10-16), so they come in through the rows of a file, as an older file's do.
+    /// The two strata read from rows and the period-2 pool come in through the rows of a file,
+    /// as an older file's do: the pool is a shape only the fit deleted on 2026-10-16 wrote.
     fn the_runs_slippage() -> StratumFits {
         let fitted = StratumOutcome::Fitted(Box::new(StratumFit {
             standard_errors: None,
@@ -1506,8 +1380,10 @@ mod tests {
             reads_crossing: 19_000,
             level_provenance: vec![
                 Some(LevelProvenance {
-                    source: LevelSource::Blend { curve_weight: 0.37 },
-                    curve: Some(a_slippage_curve()),
+                    source: LevelSource::PenalisedCurve(PenalisedPoint {
+                        strength: 12.5,
+                        eased_here: false,
+                    }),
                     reach: Some(FittedCurveReach::Inside),
                     slipped_reads: Some(8_000.5),
                 }),
@@ -1518,13 +1394,14 @@ mod tests {
                     slipped_reads: Some(8_000.5),
                     shorter_share: ShareProvenance {
                         source: ShareSource::Stratum,
-                        curve: None,
                         reach: None,
                     },
                     fall_off: ShareProvenance {
-                        source: ShareSource::Curve,
-                        curve: Some(a_share_curve()),
-                        reach: Some(FittedCurveReach::AboveFitted),
+                        source: ShareSource::PenalisedCurve(PenalisedPoint {
+                            strength: 4.25,
+                            eased_here: true,
+                        }),
+                        reach: Some(FittedCurveReach::Inside),
                     },
                 }),
                 None,
@@ -1546,15 +1423,14 @@ mod tests {
             level_provenance: vec![
                 None,
                 Some(LevelProvenance {
-                    source: LevelSource::Curve,
-                    curve: Some(a_slippage_curve()),
-                    reach: Some(FittedCurveReach::BelowFitted),
+                    source: LevelSource::Cell,
+                    reach: None,
                     slipped_reads: None,
                 }),
             ],
             shares_provenance: vec![None, None],
         };
-        let blended_shares = StratumRowsOfAFile {
+        let mixed_shares = StratumRowsOfAFile {
             stratum: Stratum {
                 period: 3,
                 reference_repeats: 9,
@@ -1570,9 +1446,8 @@ mod tests {
             level_provenance: vec![
                 None,
                 Some(LevelProvenance {
-                    source: LevelSource::Curve,
-                    curve: Some(a_slippage_curve()),
-                    reach: Some(FittedCurveReach::Inside),
+                    source: LevelSource::Cell,
+                    reach: None,
                     slipped_reads: None,
                 }),
             ],
@@ -1581,13 +1456,14 @@ mod tests {
                 Some(SharesProvenance {
                     slipped_reads: Some(31.0),
                     shorter_share: ShareProvenance {
-                        source: ShareSource::Blend { curve_weight: 0.6 },
-                        curve: Some(a_share_curve()),
+                        source: ShareSource::PenalisedCurve(PenalisedPoint {
+                            strength: 6.0,
+                            eased_here: false,
+                        }),
                         reach: Some(FittedCurveReach::Inside),
                     },
                     fall_off: ShareProvenance {
                         source: ShareSource::Stratum,
-                        curve: None,
                         reach: None,
                     },
                 }),
@@ -1610,7 +1486,7 @@ mod tests {
             ]),
         )
         .with_rows_of_a_file(
-            [derived, blended_shares],
+            [derived, mixed_shares],
             BTreeMap::from([(
                 2,
                 FittedAlleleLengthVariation {
@@ -2165,36 +2041,32 @@ mod tests {
         );
     }
 
-    /// **A slippage number that came off a curve carries the curve and the reach; one that is
-    /// the stratum's own carries neither** — and the three numbers of one row can have three
-    /// different origins.
+    /// **A point on a penalised curve carries its strength, its eased flag and its reach; a
+    /// stratum's own number carries none of them** — and the numbers of one row can mix the two.
     #[test]
-    fn a_number_off_a_curve_carries_the_curve_and_a_stratums_own_carries_neither() {
+    fn a_penalised_point_carries_its_strength_and_a_stratums_own_number_carries_nothing() {
         let file = the_projected_file();
-        let blended = &file.repeat_tracts.slippage_by_stratum_and_group[0];
+        let fitted = &file.repeat_tracts.slippage_by_stratum_and_group[0];
 
-        assert_eq!(blended.share_of_reads_that_slip, 0.0421);
-        assert_eq!(blended.shorter_share, 0.83);
-        assert_eq!(blended.fall_off, 0.31);
+        assert_eq!(fitted.share_of_reads_that_slip, 0.0421);
+        assert_eq!(fitted.shorter_share, 0.83);
+        assert_eq!(fitted.fall_off, 0.31);
         assert_eq!(
-            blended
+            fitted
                 .share_of_reads_that_slip_origin
                 .expected_slipped_reads,
             Some(8_000.5)
         );
-        match &blended.share_of_reads_that_slip_origin.smoothing {
-            LevelSmoothing::Blend {
-                curve_weight,
-                reach,
-                ..
-            } => {
-                assert_eq!(*curve_weight, 0.37);
-                assert_eq!(*reach, CurveReach::InsideTheFittedRange);
+        assert_eq!(
+            fitted.share_of_reads_that_slip_origin.smoothing,
+            LevelSmoothing::PenalisedCurve {
+                strength: 12.5,
+                eased_here: false,
+                reach: CurveReach::InsideTheFittedRange,
             }
-            other => panic!("this stratum's level was blended, not {other:?}"),
-        }
+        );
 
-        let shares = blended
+        let shares = fitted
             .shorter_share_and_fall_off_origin
             .as_ref()
             .expect("this stratum has a shares provenance");
@@ -2202,120 +2074,61 @@ mod tests {
         assert_eq!(
             shares.shorter_share_smoothing,
             ShareSmoothing::ThisStratum,
-            "a stratum can keep its own direction split while its level takes a curve"
+            "a stratum can keep its own direction split while its level is on a curve"
         );
-        match &shares.fall_off_smoothing {
-            ShareSmoothing::ThisPeriodsCurve { reach, .. } => {
-                assert_eq!(*reach, CurveReach::AboveTheFittedRange);
-            }
-            other => panic!("this stratum's fall-off came off its period's curve, not {other:?}"),
-        }
-
-        let derived = &file.repeat_tracts.slippage_by_stratum_and_group[1];
-        match &derived.share_of_reads_that_slip_origin.smoothing {
-            LevelSmoothing::ThisPeriodsCurve { reach, .. } => {
-                assert_eq!(*reach, CurveReach::BelowTheFittedRange)
-            }
-            other => panic!("a derived stratum's level is its period's curve, not {other:?}"),
-        }
         assert_eq!(
-            derived
+            shares.fall_off_smoothing,
+            ShareSmoothing::PenalisedCurve {
+                strength: 4.25,
+                eased_here: true,
+                reach: CurveReach::InsideTheFittedRange,
+            },
+            "the fall-off's own curve, with its own strength, not the level's"
+        );
+
+        let from_rows = &file.repeat_tracts.slippage_by_stratum_and_group[1];
+        assert_eq!(
+            from_rows.share_of_reads_that_slip_origin.smoothing,
+            LevelSmoothing::ThisStratum
+        );
+        assert_eq!(
+            from_rows
                 .share_of_reads_that_slip_origin
                 .expected_slipped_reads,
             None,
-            "a stratum that borrowed has reads of its own but no level of its own to say how \
-             many of them slipped — and absent is not zero"
+            "absent is not zero"
         );
         assert_eq!(
-            derived.shorter_share_and_fall_off_origin, None,
+            from_rows.shorter_share_and_fall_off_origin, None,
             "no shares provenance was recorded for this pair, so the file writes no key"
         );
 
         // The third row's shares are its group's own, where the row above it has none at all —
         // so a reader that took slippage group 0's shares for every group would write this one
         // as missing.
-        let blended_shares = &file.repeat_tracts.slippage_by_stratum_and_group[2];
-        let shares = blended_shares
+        let mixed_shares = &file.repeat_tracts.slippage_by_stratum_and_group[2];
+        let shares = mixed_shares
             .shorter_share_and_fall_off_origin
             .as_ref()
             .expect("slippage group 1 has a shares provenance at this stratum");
         assert_eq!(shares.expected_slipped_reads, Some(31.0));
-        match &shares.shorter_share_smoothing {
-            ShareSmoothing::Blend {
-                curve_weight,
-                reach,
-                ..
-            } => {
-                assert_eq!(
-                    *curve_weight, 0.6,
-                    "the weight is the share the curve carried, not the stratum's"
-                );
-                assert_eq!(*reach, CurveReach::InsideTheFittedRange);
+        assert_eq!(
+            shares.shorter_share_smoothing,
+            ShareSmoothing::PenalisedCurve {
+                strength: 6.0,
+                eased_here: false,
+                reach: CurveReach::InsideTheFittedRange,
             }
-            other => panic!("this share was blended, not {other:?}"),
-        }
+        );
         assert_eq!(shares.fall_off_smoothing, ShareSmoothing::ThisStratum);
     }
 
-    /// **Every field of both curves reaches the file under its own name.**
-    ///
-    /// The two `From` impls rename field by field — `fitted_from` becomes
-    /// `fitted_from_repeats`, `centre` becomes `centre_repeats` — which is where a transposition
-    /// happens and where nothing but an assertion can see it. An intercept written under `slope`
-    /// evaluates to a different number at every repeat count, silently.
-    #[test]
-    fn every_field_of_both_curves_reaches_the_file_under_its_own_name() {
-        let file = the_projected_file();
-        let blended = &file.repeat_tracts.slippage_by_stratum_and_group[0];
-
-        let LevelSmoothing::Blend { curve, .. } =
-            &blended.share_of_reads_that_slip_origin.smoothing
-        else {
-            panic!("this stratum's level was blended")
-        };
-        assert_eq!(
-            curve.rise_shape, 0.55,
-            "the rise shape is a checked newtype upstream and a bare number in the file"
-        );
-        assert_eq!(curve.intercept, 0.011);
-        assert_eq!(curve.slope, 0.004);
-        assert_eq!(curve.fitted_from_repeats, 5);
-        assert_eq!(curve.fitted_to_repeats, 19);
-        assert_eq!(curve.held_out_error, 0.077);
-        assert_eq!(curve.cells, 23);
-
-        let shares = blended
-            .shorter_share_and_fall_off_origin
-            .as_ref()
-            .expect("a shares provenance");
-        let ShareSmoothing::ThisPeriodsCurve { curve, .. } = &shares.fall_off_smoothing else {
-            panic!("this stratum's fall-off came off its period's curve")
-        };
-        assert_eq!(curve.shape, ShareShape::Turning);
-        assert_eq!(curve.intercept, 1.4);
-        assert_eq!(curve.slope, -0.09);
-        assert_eq!(curve.bend, 0.006);
-        assert_eq!(curve.centre_repeats, 11.5);
-        assert_eq!(
-            (curve.fitted_from_repeats, curve.fitted_to_repeats),
-            (4, 17),
-            "the share curve's fitted range is not the slippage curve's, so a field taken from \
-             the wrong curve shows here"
-        );
-        assert_eq!(curve.held_out_error, 0.167);
-        assert_eq!(curve.strata, 12);
-        assert_eq!(curve.curve_fitted_on, ShareCurveRung::ThisPeriod);
-    }
-
-    /// **A level that is the stratum's own carries no curve** — the arm reached at a motif period
-    /// the run drew no curve for, which is the low-coverage corner where a period has too few
-    /// strata to fit one.
+    /// **A level that is the stratum's own carries no curve.**
     #[test]
     fn a_level_that_is_the_stratums_own_carries_no_curve() {
         let origin = level_origin_of(
             LevelProvenance {
                 source: LevelSource::Cell,
-                curve: None,
                 reach: None,
                 slipped_reads: Some(412.0),
             },
@@ -2459,9 +2272,9 @@ mod tests {
     /// **Every word the pre-pass uses maps to its own word in the file, and not to a neighbour's.**
     ///
     /// The exhaustive matches catch a variant *added* upstream at compile time and cannot catch
-    /// one *crossed* with another: `Flat => Sloping` compiles, spells as `"sloping"`, and passes
-    /// every other test in this crate. Half of these pairs are reached by no fixture — among them
-    /// `ShareShape::Flat`, which the project's own measurement makes the commonest real answer.
+    /// one *crossed* with another: `Inside => AboveFitted` compiles, spells as
+    /// `"above_the_fitted_range"`, and passes every other test in this crate. Some of these pairs
+    /// are reached by no fixture.
     #[test]
     fn every_pre_pass_word_maps_to_its_own_word_in_the_file() {
         for (upstream, in_the_file) in [
@@ -2500,27 +2313,6 @@ mod tests {
             ),
         ] {
             assert_eq!(CurveReach::from(upstream), in_the_file, "{upstream:?}");
-        }
-        for (upstream, in_the_file) in [
-            (ShareCurveSource::ThisPeriod, ShareCurveRung::ThisPeriod),
-            (
-                ShareCurveSource::ThisPeriodUnscored,
-                ShareCurveRung::ThisPeriodUnscored,
-            ),
-            (ShareCurveSource::OtherPeriods, ShareCurveRung::OtherPeriods),
-            (
-                ShareCurveSource::BuiltInDefault,
-                ShareCurveRung::BuiltInDefault,
-            ),
-        ] {
-            assert_eq!(ShareCurveRung::from(upstream), in_the_file, "{upstream:?}");
-        }
-        for (upstream, in_the_file) in [
-            (FittedShape::Flat, ShareShape::Flat),
-            (FittedShape::Sloping, ShareShape::Sloping),
-            (FittedShape::Turning, ShareShape::Turning),
-        ] {
-            assert_eq!(ShareShape::from(upstream), in_the_file, "{upstream:?}");
         }
     }
 
@@ -2969,62 +2761,6 @@ mod tests {
         let _ = projected(&run, &read_groups);
     }
 
-    #[test]
-    #[should_panic(expected = "no curve was recorded beside it")]
-    fn a_level_that_came_off_a_curve_with_no_curve_recorded_is_refused() {
-        level_origin_of(
-            LevelProvenance {
-                source: LevelSource::Curve,
-                curve: None,
-                reach: Some(FittedCurveReach::Inside),
-                slipped_reads: None,
-            },
-            None,
-            Stratum {
-                period: 2,
-                reference_repeats: 6,
-            },
-            0,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "nothing says whether this stratum sat inside")]
-    fn a_level_off_a_curve_that_does_not_say_how_far_it_reached_is_refused() {
-        level_origin_of(
-            LevelProvenance {
-                source: LevelSource::Curve,
-                curve: Some(a_slippage_curve()),
-                reach: None,
-                slipped_reads: None,
-            },
-            None,
-            Stratum {
-                period: 2,
-                reference_repeats: 6,
-            },
-            0,
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "the fall-off came off its period's curve")]
-    fn a_share_that_came_off_a_curve_with_no_curve_recorded_is_refused() {
-        share_smoothing_of(
-            ShareProvenance {
-                source: ShareSource::Curve,
-                curve: None,
-                reach: None,
-            },
-            Stratum {
-                period: 2,
-                reference_repeats: 6,
-            },
-            1,
-            "the fall-off",
-        );
-    }
-
     /// The point every penalised source in these tests carries: a strength that is not a round
     /// number, and an eased bend, so neither field can pass by being a default.
     fn a_penalised_point() -> crate::parameter_estimation::joint::slippage_curve::PenalisedPoint {
@@ -3043,7 +2779,6 @@ mod tests {
         };
         let on_the_curve = ShareProvenance {
             source: ShareSource::PenalisedCurve(a_penalised_point()),
-            curve: None,
             reach: Some(FittedCurveReach::Inside),
         };
         StratumOutcome::Fitted(Box::new(StratumFit {
@@ -3079,7 +2814,6 @@ mod tests {
             level_provenance: vec![
                 Some(LevelProvenance {
                     source: LevelSource::PenalisedCurve(a_penalised_point()),
-                    curve: None,
                     reach: Some(FittedCurveReach::Inside),
                     slipped_reads: Some(8_000.5),
                 }),
@@ -3168,7 +2902,6 @@ mod tests {
             cell.level,
             LevelProvenance {
                 source: LevelSource::PenalisedCurve(a_penalised_point()),
-                curve: None,
                 reach: Some(FittedCurveReach::Inside),
                 slipped_reads: Some(8_000.5),
             }
@@ -3179,7 +2912,6 @@ mod tests {
                 share,
                 ShareProvenance {
                     source: ShareSource::PenalisedCurve(a_penalised_point()),
-                    curve: None,
                     reach: Some(FittedCurveReach::Inside),
                 }
             );
@@ -3203,7 +2935,6 @@ mod tests {
         level_origin_of(
             LevelProvenance {
                 source: LevelSource::PenalisedCurve(a_penalised_point()),
-                curve: None,
                 reach: None,
                 slipped_reads: Some(400.0),
             },
@@ -3225,7 +2956,6 @@ mod tests {
         share_smoothing_of(
             ShareProvenance {
                 source: ShareSource::PenalisedCurve(a_penalised_point()),
-                curve: None,
                 reach: None,
             },
             Stratum {
@@ -3703,7 +3433,6 @@ mod tests {
     fn a_stratum_with_no_concentration_writes_and_reads_back_with_no_f() {
         let own = |source| ShareProvenance {
             source,
-            curve: None,
             reach: None,
         };
         let no_concentration = StratumOutcome::Fitted(Box::new(StratumFit {
@@ -3728,7 +3457,6 @@ mod tests {
             level_provenance: vec![
                 Some(LevelProvenance {
                     source: LevelSource::Cell,
-                    curve: None,
                     reach: None,
                     slipped_reads: Some(8_000.5),
                 }),
