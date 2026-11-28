@@ -61,6 +61,11 @@ pub struct SampleLocusObservations {
     pub reads_without_observation: u32,
     /// Reads a depth cap discarded. **Non-zero means the support counts are a
     /// subsample, not the depth** (spec §3).
+    ///
+    /// At an STR segment or bundle the cap is offered only the reads that reach the tract:
+    /// a read whose alignment lies wholly in a flank is set aside before it and counted in
+    /// [`reads_without_observation`](Self::reads_without_observation), where it lands too
+    /// when the cap keeps it.
     pub reads_discarded_by_cap: u32,
     /// What kind of locus this is, and the extras that kind carries — read off the
     /// type, never inferred from which fields are populated.

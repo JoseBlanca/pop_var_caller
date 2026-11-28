@@ -292,9 +292,19 @@ pub enum SsrGeneratorConfigError {
 /// tract and mean nothing to a pileup (spec §4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SsrGeneratorCounts {
-    /// Reads fetched over the tract-plus-margin query span.
+    /// Reads fetched over the tract-plus-margin query span. Each is counted once more, in
+    /// exactly one of [`outside_tract_before_cap`](Self::outside_tract_before_cap),
+    /// [`reads_discarded_by_cap`](Self::reads_discarded_by_cap) or the per-read outcomes that
+    /// follow them.
     pub reads_fetched: u64,
-    /// Reads the reservoir cap dropped.
+    /// Reads whose own alignment never reaches the tract, set aside **before** the read cap so
+    /// that they do not take a place in it (`classify::lies_outside_the_tract`). Before this
+    /// counter existed these reads were offered to the cap and, when kept, counted under
+    /// [`outside_tract`](Self::outside_tract).
+    pub outside_tract_before_cap: u64,
+    /// Reads the reservoir cap dropped, **out of the reads that reach the tract**: the reads
+    /// counted in [`outside_tract_before_cap`](Self::outside_tract_before_cap) are never
+    /// offered to it.
     pub reads_discarded_by_cap: u64,
     /// Observations pinning the tract length (both borders seen).
     pub observations_complete: u64,
@@ -306,11 +316,14 @@ pub struct SsrGeneratorCounts {
     pub low_quality: u64,
     /// Reads whose allele stayed flank-truncated even after widening.
     pub window_truncated: u64,
-    /// Reads that anchored a flank but crossed **no** tract position — they overlap the
-    /// locus *window* and lie outside the repeat the locus is. Logged rather than merely
-    /// dropped, because it is a large population and the number is the evidence that the
-    /// fetch window is wider than the locus: **6,704 reads against 7,085 real partials** on
-    /// tomato chr01 of `SRR7279503` when this counter was added.
+    /// Reads that reached the aligner, anchored a flank and crossed **no** tract position —
+    /// they overlap the locus *window* and lie outside the repeat the locus is. Logged rather
+    /// than merely dropped, because it is a large population and the number is the evidence
+    /// that the fetch window is wider than the locus: **6,704 reads against 7,085 real
+    /// partials** on tomato chr01 of `SRR7279503` when this counter was added. That figure
+    /// included the reads whose CIGAR alone shows them outside, which are now set aside before
+    /// the cap and counted in [`outside_tract_before_cap`](Self::outside_tract_before_cap)
+    /// instead; this counter keeps the ones only the delimiter can find.
     pub outside_tract: u64,
 }
 
@@ -825,16 +838,22 @@ where
         // Read out before the cursor is borrowed: `cursor_for` takes `&mut self`, and a config
         // field read in the same call would hold a shared borrow across it.
         let max_reads_per_locus = self.config.max_reads_per_locus;
+        // **Reads that never reach the tract are set aside before the cap**, from their CIGAR
+        // alone, so that the cap's places go to reads that can measure the tract. They are
+        // still reads that covered the locus and produced no observation, so they are added to
+        // `reads_without_observation` below, as they were when the cap kept them.
         let capped = fetch_capped_reads(
             self.cursor_for(contig, reads, region)?,
             query_span,
             seed,
             max_reads_per_locus,
+            |read| classify::lies_outside_the_tract(read, locus),
         )?;
         // Per-locus discards cannot approach 2^32 (the cap and any real depth are far below), so
-        // the `as u32` on the locus field below is exact; the run-level counter keeps the u64.
-        let reads_discarded_by_cap = capped.fetched - capped.kept.len() as u64;
+        // the `as u32` on the locus fields below is exact; the run-level counters keep the u64.
+        let reads_discarded_by_cap = capped.fetched - capped.set_aside - capped.kept.len() as u64;
         self.counts.reads_fetched += capped.fetched;
+        self.counts.outside_tract_before_cap += capped.set_aside;
         self.counts.reads_discarded_by_cap += reads_discarded_by_cap;
 
         let reach = self.slide_reach(locus, contig, region)?;
@@ -861,7 +880,7 @@ where
         );
         Ok(MeasuredReads {
             observations: tallied.observations,
-            reads_without_observation: tallied.reads_without_observation,
+            reads_without_observation: tallied.reads_without_observation + capped.set_aside as u32,
             reads_discarded_by_cap: reads_discarded_by_cap as u32,
         })
     }
@@ -1073,14 +1092,14 @@ mod tests {
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
 
         let mut cursor = a_cursor(&reads);
-        let capped =
-            fetch_capped_reads(&mut cursor, span(1, 100), 42, Some(3)).expect("fetch succeeds");
+        let capped = fetch_capped_reads(&mut cursor, span(1, 100), 42, Some(3), |_| false)
+            .expect("fetch succeeds");
         assert_eq!(capped.fetched, 5);
         assert_eq!(capped.kept.len(), 3, "capped to 3 of the 5 fetched");
 
         let mut cursor = a_cursor(&reads);
-        let uncapped =
-            fetch_capped_reads(&mut cursor, span(1, 100), 42, None).expect("fetch succeeds");
+        let uncapped = fetch_capped_reads(&mut cursor, span(1, 100), 42, None, |_| false)
+            .expect("fetch succeeds");
         assert_eq!(uncapped.fetched, 5);
         assert_eq!(uncapped.kept.len(), 5, "no cap keeps every read");
     }
@@ -1096,12 +1115,14 @@ mod tests {
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
         let kept_positions = |seed| {
             let mut positions: Vec<u64> =
-                fetch_capped_reads(&mut a_cursor(&reads), span(1, 100), seed, Some(5))
-                    .expect("fetch succeeds")
-                    .kept
-                    .iter()
-                    .map(|read| read.pos)
-                    .collect();
+                fetch_capped_reads(&mut a_cursor(&reads), span(1, 100), seed, Some(5), |_| {
+                    false
+                })
+                .expect("fetch succeeds")
+                .kept
+                .iter()
+                .map(|read| read.pos)
+                .collect();
             positions.sort_unstable();
             positions
         };
@@ -1877,6 +1898,81 @@ mod tests {
         assert_eq!(generator.counts().reads_fetched, 4);
         assert_eq!(locus.reads_discarded_by_cap, 2, "4 fetched, 2 kept");
         assert_eq!(generator.counts().reads_discarded_by_cap, 2);
+    }
+
+    /// **Reads that never reach the tract do not take places in the read cap.** 1,500 reads
+    /// are fetched at one tract, 300 of them lying wholly in the left flank, under a cap of
+    /// 1,000: the cap keeps 1,000 reads that cross the tract. When the flank-only reads were
+    /// offered to the cap too, about a fifth of the 1,000 places went to them (they are a fifth
+    /// of the fetch) and were then discarded as outside the tract.
+    ///
+    /// The flank-only reads still count as reads that covered the locus and showed nothing,
+    /// so the locus's reads add up to the 1,500 fetched as before.
+    #[test]
+    fn reads_outside_the_tract_are_set_aside_before_the_cap() {
+        use crate::read::input::test_fixtures::read_named_with_length;
+        // Tract [40, 49], flank 10: the fetch spans [30, 59]. A 30-base read at 30 crosses the
+        // tract; one at 1 ends on base 30, in the left flank. In position order, as a sorted
+        // file holds them.
+        let records: Vec<_> = (0..1_500)
+            .map(|i| {
+                let start = if i < 300 { 1 } else { 30 };
+                read_named_with_length(&format!("r{i}"), 0, start, 30)
+            })
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = SsrGenerator::new(
+            fixture_ref_bases(),
+            fixture_ref_bases as fn() -> InMemoryRefSeq,
+            SsrUnitRobustAligner::new(PerQualityEmission::new()),
+            SsrGeneratorConfig {
+                flank_bp: Bp(10),
+                max_reads_per_locus: Some(1_000),
+            },
+            Bp(10),
+        )
+        .expect("flank within the bundle threshold");
+        let segment = tract(40, 49);
+
+        generator.begin_segment(span(40, 49));
+        let locus = generator
+            .next_locus(&segment, &reads)
+            .expect("no error")
+            .expect("one locus");
+
+        let counts = generator.counts().clone();
+        let outside = counts.outside_tract + counts.outside_tract_before_cap;
+        let observed: u64 = locus
+            .observations
+            .iter()
+            .map(|o| u64::from(o.num_obs))
+            .sum();
+        let kept_crossing = observed + u64::from(locus.reads_without_observation) - outside;
+        assert_eq!(counts.reads_fetched, 1_500);
+        assert_eq!(
+            kept_crossing, 1_000,
+            "the cap's 1,000 places all go to reads crossing the tract: {counts:?}"
+        );
+        assert_eq!(
+            outside, 300,
+            "every flank-only read is found outside: {counts:?}"
+        );
+        assert_eq!(
+            counts.outside_tract_before_cap, 300,
+            "set aside before the cap"
+        );
+        assert_eq!(
+            locus.reads_discarded_by_cap, 200,
+            "1,200 crossing, 1,000 kept"
+        );
+        assert_eq!(counts.reads_discarded_by_cap, 200);
+        assert_eq!(
+            observed
+                + u64::from(locus.reads_without_observation)
+                + u64::from(locus.reads_discarded_by_cap),
+            1_500,
+            "the locus still accounts for every read fetched"
+        );
     }
 
     /// A tract near the contig **end** splits a short right flank end-to-end: the fetched margin

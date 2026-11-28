@@ -136,11 +136,14 @@ impl<T> Reservoir<T> {
     }
 }
 
-/// The reads kept for one locus after depth-capping, and how many were fetched — the caller
-/// records `reads_discarded_by_cap = fetched - kept.len()`.
+/// The reads kept for one locus after depth-capping, how many were fetched, and how many were
+/// set aside before the cap — the caller records
+/// `reads_discarded_by_cap = fetched - set_aside - kept.len()`.
 pub(super) struct CappedReads {
     pub kept: Vec<AlignedRead>,
     pub fetched: u64,
+    /// Reads `set_aside` claimed: never offered to the cap, never kept.
+    pub set_aside: u64,
 }
 
 /// Fetch the reads over a locus's query span (tract + margin) and depth-cap them with the
@@ -151,6 +154,11 @@ pub(super) struct CappedReads {
 /// read that runs off mid-tract is exactly what a partial observation is made of (spec §2). The
 /// cap sits between fetch and align; `None` keeps every read.
 ///
+/// **`set_aside` is asked of every read before the cap**, and a read it claims is counted and
+/// dropped, not offered. The generator passes the test for a read whose alignment never
+/// reaches the tract, which it would discard after the cap anyway; offered to the cap, such a
+/// read takes the place of one that can measure the tract.
+///
 /// **Pointed at a cursor, not handed a query.** The cursor covers `query_span`'s
 /// chromosome and stays open across every locus on it, so consecutive loci that share reads
 /// decode them once (`spec/alignment_cursor.md` §1). Making the cursor and moving it to the
@@ -160,6 +168,7 @@ pub(super) fn fetch_capped_reads<R: RawRefSeq>(
     query_span: GenomeRegion,
     seed: u64,
     max_reads_per_locus: Option<u32>,
+    mut set_aside: impl FnMut(&AlignedRead) -> bool,
 ) -> Result<CappedReads, LocusGenerationError> {
     // **The region these failures are attributed to is the span queried**, this
     // function knowing no other: it is handed a tract-plus-margin span, not the
@@ -176,25 +185,40 @@ pub(super) fn fetch_capped_reads<R: RawRefSeq>(
         source: source.into(),
     };
     let mut fetched = 0u64;
+    let mut set_aside_count = 0u64;
     let kept = match max_reads_per_locus {
         Some(cap) => {
             let mut reservoir = Reservoir::new(cap as usize, seed);
             while let Some(read) = reads.next_read() {
-                reservoir.offer(read.map_err(read_failed)?);
+                let read = read.map_err(read_failed)?;
                 fetched += 1;
+                if set_aside(&read) {
+                    set_aside_count += 1;
+                } else {
+                    reservoir.offer(read);
+                }
             }
             reservoir.into_held()
         }
         None => {
             let mut all = Vec::new();
             while let Some(read) = reads.next_read() {
-                all.push(read.map_err(read_failed)?);
+                let read = read.map_err(read_failed)?;
                 fetched += 1;
+                if set_aside(&read) {
+                    set_aside_count += 1;
+                } else {
+                    all.push(read);
+                }
             }
             all
         }
     };
-    Ok(CappedReads { kept, fetched })
+    Ok(CappedReads {
+        kept,
+        fetched,
+        set_aside: set_aside_count,
+    })
 }
 
 #[cfg(test)]

@@ -121,24 +121,11 @@ pub(super) fn classify_read<A: RepeatDelimiter>(
     let window_start = (locus.margin_start.get() - 1) as u32; // 0-based
     let window_len = reference.len() as u32;
 
-    // **A read whose own alignment never reaches the tract measures nothing about it**
-    // (owner, 2026-10-10). The fetch takes the tract plus its margin, so reads lying wholly
-    // in a flank arrive here, and the delimiter cannot always tell them from a read that
-    // crossed: where a flank's last bases repeat the other flank's first — `CCACCA` on both
-    // sides of a 6-base repeat on the stuttering benchmark — a read stopping exactly at the
-    // tract matched its last six bases to the far flank and was measured as a complete
-    // observation of an **empty** tract. At 50 samples and 15× that was 122 reads at 34
-    // segments, and an empty candidate stopped the locus. The read's CIGAR settles it before
-    // any alignment: ending at or before the tract's first base, or starting at or after its
-    // last, with no unaligned bases on the side facing it — a soft clip or an insertion
-    // there could be tract the mapper did not place, and goes to the delimiter as before.
-    let tract_start = window_start + left as u32;
-    let tract_end = tract_start + locus.repeat.tract_len() as u32;
-    let tract_on_reference = tract_start..tract_end;
-    let (unaligned_before, unaligned_after) = unaligned_bases_at_the_ends(&read.cigar);
-    let ends_before_the_tract = fp.ref_end <= tract_start && unaligned_after == 0;
-    let starts_after_the_tract = fp.ref_start >= tract_end && unaligned_before == 0;
-    if ends_before_the_tract || starts_after_the_tract {
+    // A read whose own alignment never reaches the tract measures nothing about it
+    // ([`lies_outside_the_tract`]). The generator sets these reads aside before its read cap,
+    // so on that path none arrives here; the test stays so that this function answers alone.
+    let tract_on_reference = tract_on_reference(locus);
+    if outside_the_tract(&read.cigar, fp, &tract_on_reference) {
         return Classified::NoObservation(NoObservationReason::OutsideTract);
     }
 
@@ -263,7 +250,7 @@ pub(super) fn classify_read<A: RepeatDelimiter>(
             &region,
             fp,
             window_start..window_start + window_len,
-            tract_start..tract_end,
+            tract_on_reference.clone(),
             reference,
             (left, right),
         )
@@ -817,6 +804,46 @@ fn aligned_bases_beyond_the_tract(
         }
     }
     (before, after)
+}
+
+/// **Whether a read's own alignment never reaches the tract**, so that it measures nothing
+/// about it (owner, 2026-10-10): its CIGAR ends at or before the tract's first base, or starts
+/// at or after its last, with no unaligned bases on the side facing the tract. A soft clip or
+/// an insertion on that side could be tract the mapper did not place, so such a read is not
+/// outside and goes to the delimiter.
+///
+/// The fetch takes the tract plus its margin, so reads lying wholly in a flank arrive, and the
+/// delimiter cannot always tell them from a read that crossed: where a flank's last bases
+/// repeat the other flank's first — `CCACCA` on both sides of a 6-base repeat on the stuttering
+/// benchmark — a read stopping exactly at the tract matched its last six bases to the far
+/// flank and was measured as a complete observation of an **empty** tract. At 50 samples and
+/// 15× that was 122 reads at 34 segments, and an empty candidate stopped the locus.
+///
+/// **Asked before the read cap** (`SsrGenerator::measure_reads`), because it needs the CIGAR
+/// only. A read that fails it would be discarded after the cap anyway, so letting it into the
+/// cap's sample would take the place of a read that can measure the tract. With 150-base reads
+/// and a 30-base tract about one fetched read in seven lies outside, so the cap of 1,000 reads
+/// started to bind at about 700 reads a position instead of 1,000 / (6/7) ≈ 1,170.
+pub(super) fn lies_outside_the_tract(read: &AlignedRead, locus: &SsrLocus) -> bool {
+    outside_the_tract(
+        &read.cigar,
+        read_footprint(&read.cigar, read.pos),
+        &tract_on_reference(locus),
+    )
+}
+
+/// The tract's 0-based, half-open span on the reference.
+fn tract_on_reference(locus: &SsrLocus) -> Range<u32> {
+    let tract_start = (locus.margin_start.get() - 1) as u32 + locus.left_flank_len() as u32;
+    tract_start..tract_start + locus.repeat.tract_len() as u32
+}
+
+/// [`lies_outside_the_tract`] over a footprint already computed.
+fn outside_the_tract(cigar: &[CigarOp], fp: Footprint, tract: &Range<u32>) -> bool {
+    let (unaligned_before, unaligned_after) = unaligned_bases_at_the_ends(cigar);
+    let ends_before_the_tract = fp.ref_end <= tract.start && unaligned_after == 0;
+    let starts_after_the_tract = fp.ref_start >= tract.end && unaligned_before == 0;
+    ends_before_the_tract || starts_after_the_tract
 }
 
 /// **How many read bases sit unaligned at each end of a read** — a soft clip, or an
