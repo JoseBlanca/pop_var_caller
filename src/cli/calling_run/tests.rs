@@ -431,10 +431,10 @@ fn refinement_memory_is_judged_before_calling_and_only_warns() {
 
     let (warned, warning) =
         refinement_memory_checked(at(100_000_000_000), unit, Some(scratch), 48, 90_000_000);
-    let warning = warning.expect("131.8 GB of 118 is over 85%");
+    let warning = warning.expect("131.8 GB (122.8 GiB) of 118 GB is over 85%");
     assert!(warning.contains("This is an upper bound"), "{warning}");
     assert!(
-        warning.contains("--refine-window-bytes 76000000000 (76.0 GB) or less"),
+        warning.contains("--refine-window-bytes 75161927680 (70.0 GiB) or less"),
         "{warning}"
     );
     assert_eq!(

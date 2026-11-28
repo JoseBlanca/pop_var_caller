@@ -157,7 +157,7 @@ For a record with `A` written alleles and, at diploidy, `G = A(A+1)/2` genotypes
 What a record contributes depends on what it carries:
 
 - **A record whose `FILTER` is not `PASS`** — tagged by the hidden-duplication filter, or `EMNoConv`,
-  `tooManyAlleles`, `lowDepth` — **is passed through unchanged and is no site of any walk.** A
+  `tooManyAlleles` — **is passed through unchanged and is no site of any walk.** A
   collapsed paralog's false heterozygotes would otherwise break the autozygous runs around them.
 - **A record with no rows at all** — one merged from an STR record and its flank's generic records
   (`vcf_output.md` §7.2) — is passed through unchanged and is no site.

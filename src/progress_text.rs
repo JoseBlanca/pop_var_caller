@@ -65,9 +65,14 @@ fn above_a_second(took: Duration) -> Option<String> {
     }
 }
 
-/// A size in bytes as a person reads it: whole mebibytes below one gibibyte (`850 MiB`), where one
-/// decimal of a gibibyte would read `0.0` for a cohort of a few hundred samples, and gibibytes to
-/// one decimal above (`3.2 GiB`).
+/// A size in bytes as a person reads it, in **binary units** — the way memory is sold, so a
+/// gibibyte is 2³⁰ bytes: gibibytes to one decimal from one gibibyte up (`3.2 GiB`), whole
+/// mebibytes below that (`850 MiB`), where one decimal of a gibibyte would read `0.0` for a cohort
+/// of a few hundred samples, whole kibibytes below a mebibyte (`40 KiB`), and bytes below a
+/// kibibyte (`512 bytes`).
+///
+/// **Every message that prints a size uses this**, so a figure in one log line can be compared
+/// with a figure in another without asking which unit each meant.
 #[must_use]
 pub fn size_in_bytes(bytes: u64) -> String {
     // Precision loss is irrelevant: a size to read, to one decimal.
@@ -75,8 +80,12 @@ pub fn size_in_bytes(bytes: u64) -> String {
     let as_float = bytes as f64;
     if bytes >= 1 << 30 {
         format!("{:.1} GiB", as_float / f64::from(1u32 << 30))
-    } else {
+    } else if bytes >= 1 << 20 {
         format!("{:.0} MiB", as_float / f64::from(1u32 << 20))
+    } else if bytes >= 1 << 10 {
+        format!("{:.0} KiB", as_float / f64::from(1u32 << 10))
+    } else {
+        format!("{bytes} bytes")
     }
 }
 
@@ -124,13 +133,20 @@ mod tests {
         );
     }
 
-    /// Whole mebibytes below a gibibyte, gibibytes to one decimal above.
+    /// Binary units throughout: gibibytes to one decimal, whole mebibytes and kibibytes below,
+    /// and bytes below a kibibyte.
     #[test]
-    fn sizes_are_read_in_mib_and_gib() {
+    fn sizes_are_read_in_binary_units() {
         assert_eq!(size_in_bytes(850 << 20), "850 MiB");
         assert_eq!(size_in_bytes(3 << 30), "3.0 GiB");
         assert_eq!(size_in_bytes(364_000_000), "347 MiB");
         assert_eq!(size_in_bytes(7_895_160_000), "7.4 GiB");
+        assert_eq!(size_in_bytes(40_000), "39 KiB");
+        assert_eq!(size_in_bytes(1_050), "1 KiB");
+        assert_eq!(size_in_bytes(512), "512 bytes");
+        assert_eq!(size_in_bytes(0), "0 bytes");
+        // **A decimal gigabyte is not a gibibyte**: 32,000,000,000 bytes is 29.8 GiB.
+        assert_eq!(size_in_bytes(32_000_000_000), "29.8 GiB");
     }
 
     #[test]

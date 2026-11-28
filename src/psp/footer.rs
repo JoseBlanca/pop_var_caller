@@ -31,8 +31,9 @@ pub const FOOTER_MAGIC: [u8; 4] = *b"NGPE";
 /// before it believes any of the offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Footer {
-    /// Where the block index starts. **Also where the blocks end**, which is what makes an
-    /// append cheap: a writer reopening a file truncates here and carries on (spec §3).
+    /// Where the block index starts. **Also where the blocks end**, which is what would make an
+    /// append cheap: a writer reopening a file would truncate here and carry on (spec §3; §6.4
+    /// records that no writer does yet).
     pub index_offset: u64,
     /// How many bytes the block index occupies.
     pub index_bytes: u64,

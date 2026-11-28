@@ -442,14 +442,15 @@ overwritten sample by sample (`calling_quality.md` §3.1 rejected keeping them t
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=EMNoConv,Description="The calling loop did not converge within its pass cap">
 ##FILTER=<ID=tooManyAlleles,Description="More candidate alleles segregate than the caller admits">
-##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">
 ```
 
-Four ids: three of production's four (one generic, two tract) in one namespace, plus `PASS`. A
+Three ids: two of production's four (one generic, one tract) in one namespace, plus `PASS`. A
 record carries exactly one value; there is no `.` FILTER. *(Production's third tract value,
 `notPeriodic`, was declared here until 2026-10-22, when the periodicity check that minted it was
 removed (owner; [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7). Its header line went
-with it.)*
+with it. Its fourth, `lowDepth`, was declared until 2026-11-28 and never written: production
+refused a tract whose cohort-summed depth was under ten, and this caller has no such gate. The
+owner removed the line, because a header describes the file it heads.)*
 
 **The format's rule: a locus-level refusal that is written at all is written on its FILTER, with
 every sample no-called, `ALT .` where no alternative was established, and `QUAL 0`.** That is the

@@ -116,14 +116,24 @@ pub struct TypedRegionsArgs {
 
     /// Satellite cap and scan margin (bp), one field: a tract longer than this
     /// is a `Satellite`, not an STR. Must be `>= --flank-bp` (the walk enforces
-    /// it, spec T3).
-    #[arg(long, default_value_t = DEFAULT_MAX_STR_LEN, help_heading = "Advanced")]
+    /// it, spec T3). At most 65,535.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STR_LEN,
+        value_parser = crate::cli::parsers::parse_max_str_len,
+        help_heading = "Advanced"
+    )]
     pub max_str_len: u64,
 
     /// Bundle cap (bp): an STR bundle whose hull — its first repeat's start to the furthest
     /// end of any of its repeats — is longer than this is a satellite. 0 makes every bundle
-    /// a satellite.
-    #[arg(long, default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN, help_heading = "Advanced")]
+    /// a satellite. At most 65,535.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
+        value_parser = crate::cli::parsers::parse_max_str_len,
+        help_heading = "Advanced"
+    )]
     pub max_str_bundle_len: u64,
 
     /// Flank (bp) a locus needs each side, and the bundle radius (spec §2.4).

@@ -525,7 +525,7 @@ mod encoded_lines {
                     vec![allele(b"A")],
                     vec![no_call(vec![0]), no_call(vec![0])],
                     None,
-                    FilterVerdict::LowDepth,
+                    FilterVerdict::TooManyAlleles,
                     None,
                     None,
                 ),

@@ -82,8 +82,7 @@ pub enum CensusVerdict {
 
     /// The psp carries no census at all: its trailer is empty.
     ///
-    /// A psp written before the census moved into the trailer, or one whose trailer an
-    /// `append` discarded (spec §3.4).
+    /// A psp written before the census moved into the trailer (spec §3.4).
     NoCensus,
 
     /// The version word at the front of the psp's census is not the one this build reads.
@@ -643,8 +642,8 @@ mod tests {
 
     /// **An empty trailer is answered out of the footer, which opening already read.**
     ///
-    /// Every psp this tree wrote before the census moved into the trailer is this shape, and so
-    /// is one whose trailer an append discarded (spec §3.4).
+    /// Every psp this tree wrote before the census moved into the trailer is this shape (spec
+    /// §3.4).
     #[test]
     fn a_psp_whose_trailer_is_empty_carries_no_census() {
         let dir = tempfile::tempdir().expect("a temporary directory");

@@ -1216,7 +1216,7 @@ impl NeighbourEvidenceStage {
             // back from.
             tracing::debug!(
                 "refinement window: contig {} core {}..{}, {} records ({} in the core{}), {} \
-                 samples, {:.2} GB of a {:.2} GB budget, {:.1} s",
+                 samples, {} of a {} budget, {:.1} s",
                 self.contig.map_or(0, |contig| contig.0),
                 self.positions[plan.core_start],
                 self.positions[plan.core_end - 1],
@@ -1224,8 +1224,8 @@ impl NeighbourEvidenceStage {
                 plan.core_end - plan.core_start,
                 walked_records.map_or(String::new(), |walked| format!(", {walked} walked")),
                 self.samples,
-                plan.bytes as f64 / 1e9,
-                self.sizes.budget_bytes as f64 / 1e9,
+                crate::progress_text::size_in_bytes(plan.bytes),
+                crate::progress_text::size_in_bytes(self.sizes.budget_bytes),
                 began.elapsed().as_secs_f64()
             );
             self.core_start = plan.core_end;

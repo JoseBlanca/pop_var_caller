@@ -484,15 +484,13 @@ impl BlockBuilder {
         })
     }
 
-    /// A builder driven by a file's declared cut rule, which is the only rule a writer
-    /// extending that file may use — the manifest is fixed when the file is created and an
-    /// append does not rewrite it (spec §6.4).
+    /// A builder driven by a header's declared cut rule — the manifest is fixed when the file
+    /// is created and never rewritten (spec §6.3).
     ///
-    /// **The declared field layout is checked here too, and it has to be**: an append writes
-    /// records with whatever layout this build encodes, into a file that already declares one.
-    /// A manifest naming different fields, or the same fields differently encoded, is a file
-    /// this writer cannot extend — and left unchecked it would be extended anyway, with the
-    /// added records unreadable under the header the file keeps.
+    /// **The declared field layout is checked here too, and it has to be**: the writer encodes
+    /// records with whatever layout this build knows, so a manifest naming different fields, or
+    /// the same fields differently encoded, would put records in the file that are unreadable
+    /// under the header it carries.
     pub fn from_manifest(manifest: &Manifest) -> Result<Self, BlockCutRuleError> {
         // Destructured with no `..`, and every field named: a field added to the manifest is
         // then a compile error here rather than a setting a writer silently fails to honour.
@@ -508,23 +506,6 @@ impl BlockBuilder {
         RecordLayout::check_this_build_writes(manifest)
             .map_err(|source| BlockCutRuleError::UnsupportedRecordLayout { source })?;
         Self::new(*genomic_block_size_bp, *block_byte_ceiling)
-    }
-
-    #[cfg(test)]
-    /// The same builder, told which record the file it is extending ends with.
-    ///
-    /// **Coordinate order runs across the seam** (spec §6.4): the first appended record must not
-    /// precede the last one already in the file, and a builder that started blank would accept
-    /// one that did — producing a file whose index no longer seeks. The region seeded here is
-    /// what [`check_order`](Self::check_order) compares the first appended record against.
-    ///
-    /// **It seeds the order and nothing else.** No block is open, so the appended records start a
-    /// new block at the seam even when they fall in the grid cell the old last block covered —
-    /// which is legal, and is one of the two ways two blocks come to share a first position
-    /// (`index.rs`).
-    pub fn continuing_after(mut self, last_accepted_region: GenomeRegion) -> Self {
-        self.last_accepted_region = Some(last_accepted_region);
-        self
     }
 
     /// Lay `record` down, and hand back the block it closed if it closed one.
@@ -783,8 +764,8 @@ pub enum BlockWriteError {
 /// everything a decoder needs, so no reader is ever driven by the level — which is the
 /// difference between it and the genomic block size or the look-back window (spec §4.5). But
 /// *nobody is driven by it* is not the same as *nobody needs to know it*: goal 5's
-/// byte-identity check, an append that must match the bytes already in a file, and every byte
-/// figure the specs quote all rest on the level a file was written at. So a compressor keeps
+/// byte-identity check, an append (spec §6.4, not implemented) that would have to match the
+/// bytes already in a file, and every byte figure the specs quote all rest on the level a file was written at. So a compressor keeps
 /// its own ([`BlockCompressor::compression_level`]), and **the writer records it in the header's
 /// writer-provenance parameters** (`zstd-compression-level`), which is where a writer's exposed
 /// knobs go.

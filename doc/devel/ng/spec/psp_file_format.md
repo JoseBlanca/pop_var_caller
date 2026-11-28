@@ -944,7 +944,7 @@ overrule. What is not negotiable is the set of operations and the guarantees att
 |---|---|---|
 | **read** | open a finished file and get its header, its trailer, its block list or its records | a path |
 | **write** | create a file from nothing and fill it | a path and the header content |
-| **append** | reopen a finished file and add more records to it | a path |
+| **append** — *not implemented* (§6.4) | reopen a finished file and add more records to it | a path |
 | **re-trailer** | reopen a finished file and replace only its trailer | a path and a payload |
 | **inspect** | read the header of a file without opening it as a reader | a path |
 
@@ -1009,7 +1009,16 @@ and a truncated footer on a billions-of-records file looks exactly like an inter
 Production's writer carries this warning in its own doc comment
 (`d9e7b076:src/psp/writer.rs`) because it has bitten before.
 
-### 6.4 Appending to a finished file
+### 6.4 Appending to a finished file — not implemented
+
+**No writer in this tree appends.** A test-only `PspWriter::append` was built and then deleted on
+2026-11-28: no run reopened a finished psp to add records, so the method, its tests and the three
+error variants only it raised (`PspWriteError::Reopen`, `HeaderRefusal::UnreadableLevel` and
+`HeaderRefusal::LevelPastAnyLevel`) were code only the tests kept alive. Every run writes each psp whole, with `create`, `push` and `finish`
+(§6.3).
+
+**What follows is what an append would have to do**, kept so that a later one — a resumable run,
+say — starts from the design rather than from nothing:
 
 ```rust
 let mut out = PspWriter::append(path)?;   // truncates at the index; header and manifest kept
@@ -1020,7 +1029,8 @@ out.finish(trailer_payload)?;
 **The footer says where the blocks end**, so appending means truncating at the index offset —
 discarding the old index, trailer and footer — and carrying on. **The header is not rewritten**, so
 the appended records must use the encodings already declared, and `append` fails on a file whose
-manifest the writer cannot honour.
+manifest the writer cannot honour. It must also compress at the level the header records
+(`zstd-compression-level`), which `create` still writes for that reason and for goal 4.
 
 **It also inherits the coordinate-order rule across the seam**: the first appended record must not
 precede the last one already in the file.
@@ -1073,6 +1083,8 @@ machine causes.
 | **a record-buffer ceiling at or under the buffer it caps** | setting that ceiling |
 | **a block asked for by an ordinal the file does not have** | `records_from_block` |
 | **the read itself failed** | any operation that touches the file |
+
+*`append` in this table is the design of §6.4, which is not implemented.*
 
 **None of these may reach a caller as a half-built record**, and none is a panic: a corrupt file is
 an input, not a bug.

@@ -537,7 +537,11 @@ mod tests {
     /// **Re-recorded 2026-11-28** with the homozygote-excess fix (code-quality B2): only the
     /// `##pvcParameters` line moves, which names the parameters file's checksum. It was
     /// `f1ace6b25648ec2e1cb5aef52ebb1e8d`. Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "d7f57fe83f8789748a4b5cffb09c9279";
+    ///
+    /// **Re-recorded 2026-11-28**, when the header lost its `lowDepth` FILTER line, which no
+    /// record could carry: putting that one line back gives the old checksum exactly. It was
+    /// `d7f57fe83f8789748a4b5cffb09c9279`. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "0d8013c6f3f6e7395e48abd39fbb909b";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -892,7 +896,11 @@ mod tests {
     /// **Re-recorded 2026-11-28** with the homozygote-excess fix (code-quality B2): only the
     /// `##pvcParameters` line moves. It was `240d77a0915e50c8ead10cae152e4da1`. Recorded on the
     /// macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "bb6808092b9297bdc23ffed00cc0c5c6";
+    ///
+    /// **Re-recorded 2026-11-28**, when the header lost its `lowDepth` FILTER line, which no
+    /// record could carry: putting that one line back gives the old checksum exactly. It was
+    /// `bb6808092b9297bdc23ffed00cc0c5c6`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "b9a0bd90732626e1d66a36333db4d785";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -1280,7 +1288,11 @@ mod tests {
     /// genotypes; QUAL moves by at most 4.5 and a GQ by at most 1, from the fit's slightly
     /// different stopping point. It was `8e6bfdaa782ce9bf6c8facafec4d8aa2`. Recorded on the macOS
     /// host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "26160913e14bfc87da2b784e972484ed";
+    ///
+    /// **Re-recorded 2026-11-28**, when the header lost its `lowDepth` FILTER line, which no
+    /// record could carry: putting that one line back gives the old checksum exactly. It was
+    /// `26160913e14bfc87da2b784e972484ed`. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "eb0beb4d49bb19039caa9efa2f2d1c8c";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

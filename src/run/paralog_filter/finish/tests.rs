@@ -856,11 +856,11 @@ fn the_report_says_how_much_disk_the_parked_records_took() {
         .split_once(" on disk")
         .expect("the size line ends as it began")
         .0;
-    // Rendered as kibibytes, and the digits are the real ones: a divisor of 1000 rather than 1024
-    // moves the first decimal place at this size, and calling it MB would move the unit.
+    // Rendered as whole kibibytes, and the digits are the real ones: a divisor of 1000 rather than
+    // 1024 moves the figure by two or three at this size, and calling it MB would move the unit.
     assert_eq!(
         printed,
-        format!("{:.1} kiB", bytes as f64 / 1024.0),
+        format!("{:.0} KiB", bytes as f64 / 1024.0),
         "the size must be the file's own, in the unit it names: {lines}"
     );
     assert!(
