@@ -80,6 +80,17 @@ pub(super) fn maximisation(
         }
     }
 
+    // **The rule the pass counted each sample's genotypes at**, built before the shapes below
+    // move. A count at node `k` was gathered at this rule's `k`th frequency, so the homozygote
+    // excess has to be maximised against these frequencies and not against the moved rule's.
+    // Paired with the moved rule, counts drawn at an excess of 0.3 came back at 0.313 (this
+    // module's test `the_excess_is_fitted_at_the_frequencies_its_counts_were_gathered_at`).
+    let counted_at = BetaQuadrature::new(
+        parameters.density.a,
+        parameters.density.b,
+        config.quadrature_nodes,
+    );
+
     // The Beta's two shapes, one step along the log-likelihood's own slope in them.
     if statistics.segregating > 0.0 {
         let (a, b) = step_beta_shapes(
@@ -119,19 +130,15 @@ pub(super) fn maximisation(
     // log-likelihood by tens of units a pass. The cap of 0.5 on the mismapped share is what makes
     // that class the minority one.
 
-    // Each sample's homozygote excess, over its expected genotype counts at each node.
-    let quadrature = BetaQuadrature::new(
-        parameters.density.a,
-        parameters.density.b,
-        config.quadrature_nodes,
-    );
+    // Each sample's homozygote excess, over its expected genotype counts at each node of the rule
+    // they were counted at.
     // **At one sample the homozygote excess is not identified and is not moved.** Nothing
     // separates "this individual is inbred" from "the population's frequencies are what they
     // are" when there is one individual, so a fit that searched it anyway would wander without
     // converging and hand back a plausible number. `fit_jointly` marks it as not fitted.
     if fits_homozygote_excess(samples_with_reads(statistics)) {
         for (s, counts) in statistics.genotypes.iter().enumerate() {
-            let fitted = maximise_hom_excess(counts, &quadrature, parameters.hom_excess[s]);
+            let fitted = maximise_hom_excess(counts, &counted_at, parameters.hom_excess[s]);
             note(parameters.hom_excess[s], fitted);
             parameters.hom_excess[s] = fitted;
         }
@@ -379,6 +386,61 @@ mod tests {
             assert!(
                 (stepped_a - (a + slope_in_a / h11)).abs() < 1e-12,
                 "slope {slope_in_a} in the first shape: stepped to {stepped_a}"
+            );
+        }
+    }
+
+    /// **The homozygote excess is maximised against the frequencies its counts were gathered at.**
+    /// A pass counts each sample's expected genotypes at the nodes of the rule built from the
+    /// shapes it entered with; the same maximisation then moves the shapes. Two samples' counts are
+    /// laid down at the nodes of the rule at `(0.7, 2.5)`, drawn with an excess of 0.3, and the
+    /// shapes' slope is set so that they move: the excess that comes back must be the one the rule
+    /// at `(0.7, 2.5)` gives, to the bit. Until 2026-11-28 it was maximised against the rule at the
+    /// moved shapes, pairing each count with the frequency of the same-numbered node of a
+    /// different rule.
+    #[test]
+    fn the_excess_is_fitted_at_the_frequencies_its_counts_were_gathered_at() {
+        let (a, b, nodes, samples) = (0.7, 2.5, 12, 2);
+        let config = JointFitConfig {
+            quadrature_nodes: nodes,
+            ..JointFitConfig::default()
+        };
+        let gathered_at = BetaQuadrature::new(a, b, nodes);
+        let mut statistics = Statistics::new(1, samples, nodes);
+        statistics.segregating = 1_000.0;
+        statistics.density_shape_slopes = [400.0, -300.0];
+        statistics.with_reads = vec![10; samples];
+        for counts in &mut statistics.genotypes {
+            for (node, row) in counts.iter_mut().enumerate() {
+                let prior = genotype_frequencies(gathered_at.nodes[node], 0.3);
+                *row = prior.map(|p| 500.0 * gathered_at.weights[node] * p);
+            }
+        }
+        let mut parameters = Parameters {
+            clean: vec![0.002],
+            noisy: vec![0.06],
+            noisy_share: 0.02,
+            density: super::super::FrequencyDensity {
+                p_invariant: 0.9,
+                p_fixed_alt: 0.01,
+                a,
+                b,
+            },
+            hom_excess: vec![0.0; samples],
+            duplicated: None,
+        };
+        maximisation(&mut parameters, &statistics, &config);
+        assert!(
+            (parameters.density.a - a).abs() > 1e-3 && (parameters.density.b - b).abs() > 1e-3,
+            "the shapes have to move, or this test cannot tell the two rules apart: ({}, {})",
+            parameters.density.a,
+            parameters.density.b
+        );
+        for s in 0..samples {
+            assert_eq!(
+                parameters.hom_excess[s],
+                maximise_hom_excess(&statistics.genotypes[s], &gathered_at, 0.0),
+                "sample {s}"
             );
         }
     }
