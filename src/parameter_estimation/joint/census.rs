@@ -3872,6 +3872,27 @@ mod tests {
         assert!(ssr.differences().is_empty());
     }
 
+    /// **Reads that reached a tract and crossed none of it count even at the walk's first
+    /// tract.** The count goes to the lowest-numbered declared group; it used to go to the
+    /// lowest-numbered group *that had put an observation on a kept tract so far*, so a walk
+    /// whose first tracts held only such reads dropped them from the stratum's reaching total.
+    #[test]
+    fn reads_crossing_no_tract_count_before_any_observation_has_arrived() {
+        let mut writer = ssr_writer();
+        let mut locus = ssr_locus(Vec::new());
+        locus.reads_without_observation = 3;
+        writer.add_locus(&locus);
+        let records = writer.finish();
+
+        let ssr = ssr_of(&records, 0, AT_SIX_REPEATS);
+        assert_eq!(ssr.covering_not_crossing(), 3);
+        assert_eq!(
+            ssr.state(0),
+            SsrLocusState::NoLengthReported,
+            "reads reached the tract and none crossed it"
+        );
+    }
+
     #[test]
     fn a_read_group_that_saw_nothing_here_still_gets_its_zero() {
         // Group 1 puts no read at this position. Its record must say zero, not never walked
