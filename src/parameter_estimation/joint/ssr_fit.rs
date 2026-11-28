@@ -46,9 +46,9 @@
 //! **The fit before it, the climb, was deleted on 2026-10-16** (`arch/str_penalised_fit.md`
 //! §4.1): a coordinate climb per stratum over a 256-point average of each tract's likelihood,
 //! with curves drawn across repeat count afterwards; the code that drew and blended those curves
-//! went later the same day. What older parameters files carry from it —
-//! curve-sourced and blended numbers ([`SlippageCurve`], [`ShareCurve`]), strata whose numbers
-//! all came from those curves, and period-pooled allele length variations — is still read, by
+//! went later the same day. A parameters file that records a number read off one of those curves,
+//! or blended with one, is refused when it is read. What older files carry beside them —
+//! period-pooled allele length variations — is still read, by
 //! [`StratumFits::of_gathered_rows`](super::stratum_fits::StratumFits::of_gathered_rows), which
 //! takes the file's rows and never a [`StratumOutcome`].
 //!
@@ -144,8 +144,7 @@ impl Slippage {
 /// locus — and re-exported here, where the fit reads it, so a consumer of either module names
 /// one type.
 pub use super::census::Stratum;
-pub use super::share_curve::{ShareCurve, ShareCurveSource, ShareShape, ShareSource};
-pub use super::slippage_curve::{CurveReach, LevelSource, SlippageCurve};
+pub use super::slippage_curve::{CurveReach, LevelSource, ShareSource};
 
 /// **The highest slippage level a read group's multiplier may lift a read to**
 /// (`str_library_stutter.md` §2.1). A level of one would say no read reports its allele.
@@ -652,24 +651,16 @@ pub const NOT_PLACED: f64 = 3.0;
 
 /// Where one slippage group's level at one stratum came from, and what stood behind it.
 ///
-/// **This replaces what `Provenance::Borrowed` used to mark.** After the level becomes a curve, a
-/// value fitted from 8,000 slipped reads and one interpolated across a gap look identical in the
-/// number alone, and the mechanism that used to distinguish them no longer sets the level
-/// (`str_slippage_level_curve.md` §8).
+/// **This replaces what `Provenance::Borrowed` used to mark.** A level on a curve looks the same
+/// in the number alone whether 8,000 slipped reads stood behind it or 40, so the reads travel with
+/// it (`str_slippage_level_curve.md` §8).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LevelProvenance {
-    /// The cell's own fit, the curve, a blend — and for a blend, the share the curve carried —
-    /// or a point on a penalised curve.
+    /// The cell's own fit, or a point on a penalised curve.
     pub source: LevelSource,
-    /// The curve that supplied it, absent when this stratum's period had none, and absent for a
-    /// point on a penalised curve, which is not a parametric curve. It carries the curve's own
-    /// held-out error and how many cells stood behind it, so a consumer can tell a curve through
-    /// twenty-three cells from one through four.
-    pub curve: Option<SlippageCurve>,
-    /// Whether this stratum's repeat count sat inside the curve's fitted range. `None` where
-    /// there is no curve; always inside for a point on a penalised curve, whose range is the
-    /// classes with reads. **A level held at a fitted end is under-stated in a known direction**
-    /// (`str_slippage_level_curve.md` §6).
+    /// Whether this stratum's repeat count sat inside the curve's fitted range. `None` for the
+    /// cell's own fit, which has no curve; always inside for a point on a penalised curve, whose
+    /// range is the classes with reads.
     pub reach: Option<CurveReach>,
     /// How many of this stratum's own reads slipped: from the penalised fit, the class's expected
     /// slipped reads at the fit's last E-step
@@ -678,32 +669,20 @@ pub struct LevelProvenance {
     /// **The stratum's own reads, not the emitted level times them**, because this is the evidence
     /// that stood behind the cell — it is what set how precisely the stratum could determine its
     /// own answer. The emitted level is a point on a curve, so for a thin class it is mostly its
-    /// neighbours'.
-    ///
-    /// **Absent is not zero.** In a file the climb wrote, `None` where the stratum borrowed its
-    /// level: it has reads of its own — they are in [`StratumFit::reads_crossing`] — but no level
-    /// of its own to say how many of them slipped.
+    /// neighbours'. **Absent is not zero**: a file may leave it out.
     pub slipped_reads: Option<f64>,
 }
 
 /// Where a stratum's direction split and fall-off came from, and what stood behind them.
 ///
 /// **From the penalised fit, each share is a point on its own penalised curve** across the
-/// motif length's repeat counts, as the level is, each curve with its own stiffness. A file the
-/// climb wrote may instead carry the stratum's own share, its period's parametric curve, or a
-/// blend of the two (`str_slippage_level_curve.md` §5.1).
-///
-/// **The climb's curves replaced a gate with a cliff.** A stratum used to keep its own two shares
-/// above 4,000 slipped reads and take one named neighbour's whole below it. Across both cohorts
-/// one motif period of twelve ever cleared that floor, so 69 of HG002's strata and every one of
-/// tomato's got nothing at all.
+/// motif length's repeat counts, as the level is, each curve with its own stiffness.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SharesProvenance {
     /// How many of this stratum's own reads slipped: from the penalised fit, the class's expected
     /// slipped reads at the fit's last E-step
     /// ([`PenalisedClass::expected_slipped_reads`](penalised_fit::PenalisedClass::expected_slipped_reads)),
-    /// the same count as [`LevelProvenance::slipped_reads`]. In a file the climb wrote, `None`
-    /// where nothing was fitted here.
+    /// the same count as [`LevelProvenance::slipped_reads`].
     ///
     /// **Both shares are proportions over the reads that slipped**, so this one count sets how
     /// precisely the stratum holds either of them. It is the stratum's own reads rather than the
@@ -715,20 +694,13 @@ pub struct SharesProvenance {
     pub fall_off: ShareProvenance,
 }
 
-/// Where one of the two shares came from: the stratum's own fit, its period's curve, or a blend.
+/// Where one of the two shares came from: the stratum's own fit, or a point on a penalised curve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShareProvenance {
-    /// The stratum's own fit, the curve, a blend — and for a blend the share the curve carried —
-    /// or a point on a penalised curve.
+    /// The stratum's own fit, or a point on a penalised curve.
     pub source: ShareSource,
-    /// The curve that supplied it, absent where this stratum's period had none or the share is a
-    /// point on a penalised curve. It carries its
-    /// own held-out error, how many strata stood behind it, and which rung of the fallback
-    /// ladder produced it.
-    pub curve: Option<ShareCurve>,
-    /// Whether this stratum's repeat count sat inside the curve's fitted range; `None` where
-    /// there is no curve. **A share held at a fitted end is the end stratum's answer**, not this
-    /// stratum's.
+    /// Whether this stratum's repeat count sat inside the curve's fitted range; `None` for the
+    /// stratum's own fit, which has no curve.
     pub reach: Option<CurveReach>,
 }
 

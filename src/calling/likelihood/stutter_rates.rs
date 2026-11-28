@@ -237,22 +237,23 @@ mod tests {
         }
     }
 
-    /// **The fit's own top level, which nothing covered.**
+    /// **A level near one, which nothing covered.**
     ///
-    /// A parameters file the climb wrote may carry a level read off its curve as high as
-    /// `LEVEL_CEILING` (0.999). Because the part-repeat mass is added on top rather than carved
+    /// The fit before the penalised one (the climb, deleted 2026-10-16) could report a level as
+    /// high as 0.999, and the penalised fit's ordinary rounds do not hold the level below 0.95, so
+    /// a parameters file can carry one. Because the part-repeat mass is added on top rather than carved
     /// out, the four direction shares then total `1.05 × level` — **past one**, at any level above 0.9524. Every individual
     /// share is still under one, so `StutterModel::new`'s debug assertion does not fire; the
     /// same-length share floors at `GEOM_MIN` instead, and `unreachable_mass` reports
     /// **exactly no loss** for a row that has over-allocated six parts in a hundred.
     ///
-    /// **This is a row an older parameters file is entitled to carry**, not a hostile hand-built one,
+    /// **This is a row a parameters file is entitled to carry**, not a hostile hand-built one,
     /// which is why it is pinned here rather than left to the floored-model test in the
     /// stutter module. Whether reporting nothing there is the wanted answer is a decision for
     /// whoever owns the fit's ceiling; this test makes it visible either way.
     #[test]
     fn the_fits_top_level_floors_the_same_length_share_and_reports_no_loss() {
-        use crate::parameter_estimation::joint::slippage_curve::LEVEL_CEILING;
+        const LEVEL_CEILING: f64 = 0.999;
 
         let rates = stutter_rates_for(&Slippage {
             level: LEVEL_CEILING,

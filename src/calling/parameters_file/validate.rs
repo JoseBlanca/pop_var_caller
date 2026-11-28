@@ -66,8 +66,8 @@ use super::to_toml::the_word_for_warrant;
 use super::{
     BetweenLocusShare, ContaminationMeasurement, EvidenceCount, InformationalNumber,
     LevelSmoothing, MisreadAfterRunRow, MisreadBase, PairedNumber, ParametersFile,
-    ParametersFileError, RepeatTracts, ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome,
-    Warrant, WarrantedValue, between_locus_share_of, concentration_error_of,
+    ParametersFileError, RepeatTracts, ShareSmoothing, StartOutcome, Warrant, WarrantedValue,
+    between_locus_share_of, concentration_error_of,
 };
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::misread_context::RunEntry;
@@ -546,16 +546,21 @@ impl ParametersFile {
     }
 
     fn the_version_is_one_this_build_reads(&self) -> Result<(), ParametersFileError> {
-        // **Both a zero and a future version are refused**, which is the shape the project's other
+        /// Formats 1 and 2 were written only by the repeat-tract fit deleted on 2026-10-16.
+        const OLDEST_FORMAT_THIS_BUILD_READS: u32 = 3;
+        // **Both a past and a future version are refused**, which is the shape the project's other
         // TOML artefact already uses (`SampleSummaryError::UnsupportedVersion`). A version this
-        // build knows passes. Versions 1 and 2 spell the repeat-tract keys differently from
-        // version 3, and the reader rewrites such a file into version 3 as it reads it, so a file
-        // read from text never reaches this check saying 1 or 2 (`FORMAT_VERSION`).
-        if self.format_version == 0 || self.format_version > super::FORMAT_VERSION {
+        // build knows passes. Versions 1 and 2 were written only by the repeat-tract fit deleted
+        // on 2026-10-16, and the reader refuses a file saying either before it parses the shape
+        // (`ParametersFile::from_toml`), so a file read from text reaches this check saying 1 or 2
+        // only if it was built in memory.
+        if self.format_version < OLDEST_FORMAT_THIS_BUILD_READS
+            || self.format_version > super::FORMAT_VERSION
+        {
             return Err(refuse(
                 "format_version",
                 format!(
-                    "is {}, and this build reads versions 1 to {}; a higher number means the file was written by a newer build of this caller, so run that build or refit",
+                    "is {}, and this build reads versions {OLDEST_FORMAT_THIS_BUILD_READS} to {}; a higher number means the file was written by a newer build of this caller, so run that build or refit",
                     self.format_version,
                     super::FORMAT_VERSION
                 ),
@@ -1284,9 +1289,6 @@ impl ParametersFile {
             an_own_fit_error(
                 &format!("{at}.share_of_reads_that_slip_origin.own_fit_standard_error"),
                 row.share_of_reads_that_slip_origin.own_fit_standard_error,
-                a_level_fitted_with_its_strata_reads(
-                    &row.share_of_reads_that_slip_origin.smoothing,
-                ),
             )?;
             if let Some(samples) = row.samples_fitted_on
                 && samples > self.fitted_from.samples.len() as u64
@@ -1327,14 +1329,12 @@ impl ParametersFile {
                         "{at}.shorter_share_and_fall_off_origin.shorter_share_own_fit_standard_error"
                     ),
                     shares.shorter_share_own_fit_standard_error,
-                    a_share_fitted_with_its_strata_reads(&shares.shorter_share_smoothing),
                 )?;
                 an_own_fit_error(
                     &format!(
                         "{at}.shorter_share_and_fall_off_origin.fall_off_own_fit_standard_error"
                     ),
                     shares.fall_off_own_fit_standard_error,
-                    a_share_fitted_with_its_strata_reads(&shares.fall_off_smoothing),
                 )?;
             }
         }
@@ -1788,44 +1788,13 @@ fn no_error_is_computed_for(at: &str, value: &WarrantedValue) -> Result<(), Para
     Ok(())
 }
 
-/// **A stratum's own-fit error, written only beside a number fitted with the stratum's own
-/// reads** — its own fit, or a point on a penalised curve. One beside a number taken from a
-/// parametric curve or blended with one would describe a number the stratum does not emit
-/// (`fit_precision.md` §5.2).
-fn an_own_fit_error(
-    at: &str,
-    error: Option<f64>,
-    fitted_with_the_stratums_reads: bool,
-) -> Result<(), ParametersFileError> {
-    let Some(error) = error else {
-        return Ok(());
-    };
-    if !fitted_with_the_stratums_reads {
-        return Err(refuse(
-            at,
-            "is written beside a number taken from its period's curve or blended with it, and \
-             only a number fitted with this stratum's own reads — its own fit, or a point on a \
-             penalised curve — has an own-fit error; delete it",
-        ));
-    }
-    a_standard_error(at, error)
-}
-
-/// Whether a level with this smoothing was fitted with its stratum's own reads, and so may carry
-/// an own-fit error. **Every variant is named**, so a new smoothing has to say which side it is
-/// on.
-fn a_level_fitted_with_its_strata_reads(smoothing: &LevelSmoothing) -> bool {
-    match smoothing {
-        LevelSmoothing::ThisStratum | LevelSmoothing::PenalisedCurve { .. } => true,
-        LevelSmoothing::ThisPeriodsCurve { .. } | LevelSmoothing::Blend { .. } => false,
-    }
-}
-
-/// The same, for a share.
-fn a_share_fitted_with_its_strata_reads(smoothing: &ShareSmoothing) -> bool {
-    match smoothing {
-        ShareSmoothing::ThisStratum | ShareSmoothing::PenalisedCurve { .. } => true,
-        ShareSmoothing::ThisPeriodsCurve { .. } | ShareSmoothing::Blend { .. } => false,
+/// **A stratum's own-fit error**, where one is written: a standard error. Every smoothing this
+/// build reads — the stratum's own fit, or a point on a penalised curve — was fitted with the
+/// stratum's own reads, so any of them may carry one (`fit_precision.md` §5.2).
+fn an_own_fit_error(at: &str, error: Option<f64>) -> Result<(), ParametersFileError> {
+    match error {
+        Some(error) => a_standard_error(at, error),
+        None => Ok(()),
     }
 }
 
@@ -2103,28 +2072,11 @@ fn an_allele_length_variation(at: &str, shares: &[f64]) -> Result<(), Parameters
     Ok(())
 }
 
-/// A level's smoothing: the weight a curve carried is a share, the curve's own numbers are
-/// numbers, and a penalised curve's strength is above zero.
-///
-/// **The curve is provenance rather than a term in a score** — it is recorded so an interpolation
-/// can be told from a measurement — so a `NaN` in it changes no genotype. It is still refused,
-/// because a run that reports where a number came from should not report `nan` as the slope of the
-/// line it came off, and because a reader who hand-edits a curve gets told rather than ignored.
+/// A level's smoothing: a penalised curve's strength is above zero.
 fn a_level_smoothing(at: &str, smoothing: &LevelSmoothing) -> Result<(), ParametersFileError> {
     let at = format!("{at}.share_of_reads_that_slip_origin.smoothing");
     match smoothing {
         LevelSmoothing::ThisStratum => Ok(()),
-        LevelSmoothing::ThisPeriodsCurve { curve, .. } => {
-            a_slippage_curve(&format!("{at}.this_periods_curve.curve"), curve)
-        }
-        LevelSmoothing::Blend {
-            curve_weight,
-            curve,
-            ..
-        } => {
-            a_share(&format!("{at}.blend.curve_weight"), *curve_weight)?;
-            a_slippage_curve(&format!("{at}.blend.curve"), curve)
-        }
         LevelSmoothing::PenalisedCurve { strength, .. } => {
             a_penalised_strength(&format!("{at}.penalised_curve.strength"), *strength)
         }
@@ -2135,17 +2087,6 @@ fn a_level_smoothing(at: &str, smoothing: &LevelSmoothing) -> Result<(), Paramet
 fn a_share_smoothing(at: &str, smoothing: &ShareSmoothing) -> Result<(), ParametersFileError> {
     match smoothing {
         ShareSmoothing::ThisStratum => Ok(()),
-        ShareSmoothing::ThisPeriodsCurve { curve, .. } => {
-            a_share_curve(&format!("{at}.this_periods_curve.curve"), curve)
-        }
-        ShareSmoothing::Blend {
-            curve_weight,
-            curve,
-            ..
-        } => {
-            a_share(&format!("{at}.blend.curve_weight"), *curve_weight)?;
-            a_share_curve(&format!("{at}.blend.curve"), curve)
-        }
         ShareSmoothing::PenalisedCurve { strength, .. } => {
             a_penalised_strength(&format!("{at}.penalised_curve.strength"), *strength)
         }
@@ -2168,38 +2109,10 @@ fn a_penalised_strength(at: &str, strength: f64) -> Result<(), ParametersFileErr
     ))
 }
 
-/// Every number a level curve records is a number.
-fn a_slippage_curve(at: &str, curve: &SlippageCurve) -> Result<(), ParametersFileError> {
-    for (key, value) in [
-        ("rise_shape", curve.rise_shape),
-        ("intercept", curve.intercept),
-        ("slope", curve.slope),
-        ("held_out_error", curve.held_out_error),
-    ] {
-        finite(format!("{at}.{key}"), value)?;
-    }
-    Ok(())
-}
-
-/// Every number a share curve records is a number.
-fn a_share_curve(at: &str, curve: &ShareCurve) -> Result<(), ParametersFileError> {
-    for (key, value) in [
-        ("intercept", curve.intercept),
-        ("slope", curve.slope),
-        ("bend", curve.bend),
-        ("centre_repeats", curve.centre_repeats),
-        ("held_out_error", curve.held_out_error),
-    ] {
-        finite(format!("{at}.{key}"), value)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        THE_ROW_ON_PENALISED_CURVES, THE_ROW_WHOSE_SHARES_BLEND, THE_ROW_WHOSE_SLIP_SHARE_BLENDS,
-        a_file_using_every_shape,
+        THE_ROW_ON_PENALISED_CURVES, THE_ROW_WITH_ONE_OWN_FIT_ERROR, a_file_using_every_shape,
     };
     use super::super::{
         ContaminationFittedFrom, ContaminationMeasurement, EvidenceCount, LevelSmoothing, SeedRung,
@@ -2882,29 +2795,6 @@ mod tests {
         );
         assert!(problem.contains("`defaulted`"), "{problem}");
 
-        // The fixture's second row blends its level with its period's curve.
-        let (field, problem) = refused(|file| {
-            file.repeat_tracts.slippage_by_stratum_and_group[1]
-                .share_of_reads_that_slip_origin
-                .own_fit_standard_error = Some(0.002);
-        });
-        assert!(
-            field.ends_with("share_of_reads_that_slip_origin.own_fit_standard_error"),
-            "{field}"
-        );
-        assert!(problem.contains("curve"), "{problem}");
-        // Its fall-off is its period's curve's.
-        let (field, _) = refused(|file| {
-            file.repeat_tracts.slippage_by_stratum_and_group[1]
-                .shorter_share_and_fall_off_origin
-                .as_mut()
-                .expect("the fixture's second row has a shares origin")
-                .fall_off_own_fit_standard_error = Some(0.02);
-        });
-        assert!(
-            field.ends_with("fall_off_own_fit_standard_error"),
-            "{field}"
-        );
         let (field, _) = refused(|file| {
             file.repeat_tracts.slippage_by_stratum_and_group[0]
                 .share_of_reads_that_slip_origin
@@ -3010,13 +2900,21 @@ mod tests {
         );
     }
 
-    /// **A version-1 file still reads**: every key version 2 added is optional, so a file written
-    /// before them is the same file with those keys absent (`fit_precision.md` §5.2), and without
-    /// format 4's two tables.
+    /// **The oldest version this build reads, 3, is accepted** without the keys and tables
+    /// versions 4 to 10 added — and versions 1 and 2, which the fit deleted on 2026-10-16 wrote,
+    /// are refused.
     #[test]
-    fn a_version_one_file_is_accepted() {
+    fn a_version_three_file_is_accepted_and_versions_one_and_two_are_refused() {
+        for version in [1, 2] {
+            let (field, problem) = refused(|file| file.format_version = version);
+            assert_eq!(field, "format_version");
+            assert!(
+                problem.contains("this build reads versions 3 to"),
+                "{problem}"
+            );
+        }
         let mut file = a_file_using_every_shape();
-        file.format_version = 1;
+        file.format_version = 3;
         file.repeat_tracts_left_out = None;
         file.repeat_tracts.stutter_multiplier_by_read_group.clear();
         file.misread_after_runs = None;
@@ -3028,7 +2926,7 @@ mod tests {
         file.duplicated_positions = None;
         file.stated_constants.repeat_tract_outlier_weight.value =
             OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
-        file.validate().expect("a version-1 file is accepted");
+        file.validate().expect("a version-3 file is accepted");
     }
 
     #[test]
@@ -3459,47 +3357,12 @@ mod tests {
         );
     }
 
-    /// **A number that is not a number is refused wherever the walk reaches one**, including in
-    /// the curves, which are provenance rather than terms in a score.
-    ///
-    /// A `NaN` in a curve changes no genotype — the curve records where a slippage number came
-    /// from, not what it is — but the writer can emit `nan` and the reader takes it back, so
-    /// without this a run would report `nan` as the slope of the line one of its numbers came off.
-    /// **These were unchecked until review**, which is how a claim of "every float" gets made about
-    /// a walk that reached the row's three numbers and stopped.
+    /// **A slipped-read count that is not a number is refused**, though no score reads it: a run
+    /// that reports what stood behind a number should not report `nan` reads.
     #[test]
-    fn a_curve_carrying_something_that_is_not_a_number_is_refused() {
+    fn a_slipped_read_count_that_is_not_a_number_is_refused() {
         let (field, problem) = refused(|file| {
-            if let LevelSmoothing::Blend { curve, .. } = &mut file
-                .repeat_tracts
-                .slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
-                .share_of_reads_that_slip_origin
-                .smoothing
-            {
-                curve.slope = f64::NAN;
-            } else {
-                panic!("that row blends its slip share");
-            }
-        });
-        assert!(field.ends_with("blend.curve.slope"), "{field}");
-        assert!(problem.contains("not a number"), "{problem}");
-
-        let (field, _) = refused(|file| {
-            let shares = file.repeat_tracts.slippage_by_stratum_and_group
-                [THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
-                .shorter_share_and_fall_off_origin
-                .as_mut()
-                .expect("that row records its shares' origin");
-            if let ShareSmoothing::ThisPeriodsCurve { curve, .. } = &mut shares.fall_off_smoothing {
-                curve.centre_repeats = f64::INFINITY;
-            } else {
-                panic!("that row takes its fall-off from a period curve");
-            }
-        });
-        assert!(field.ends_with("curve.centre_repeats"), "{field}");
-
-        let (field, _) = refused(|file| {
-            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
+            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_WITH_ONE_OWN_FIT_ERROR]
                 .share_of_reads_that_slip_origin
                 .expected_slipped_reads = Some(f64::NAN);
         });
@@ -3507,6 +3370,7 @@ mod tests {
             field.ends_with("share_of_reads_that_slip_origin.expected_slipped_reads"),
             "{field}"
         );
+        assert!(problem.contains("not a number"), "{problem}");
     }
 
     /// **`fall_off` is not bounded above, and that is a decision rather than an oversight.**
@@ -3518,38 +3382,6 @@ mod tests {
     #[test]
     fn a_fall_off_above_one_is_accepted_because_nothing_documents_a_bound() {
         accepted(|file| file.repeat_tracts.slippage_by_stratum_and_group[0].fall_off = 1.5);
-    }
-
-    #[test]
-    fn a_curve_weight_outside_zero_to_one_is_refused() {
-        let (field, _) = refused(|file| {
-            if let LevelSmoothing::Blend { curve_weight, .. } = &mut file
-                .repeat_tracts
-                .slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
-                .share_of_reads_that_slip_origin
-                .smoothing
-            {
-                *curve_weight = 1.9;
-            } else {
-                panic!("that row blends its slip share");
-            }
-        });
-        assert!(field.ends_with("blend.curve_weight"), "{field}");
-
-        let (field, _) = refused(|file| {
-            let shares = file.repeat_tracts.slippage_by_stratum_and_group
-                [THE_ROW_WHOSE_SHARES_BLEND]
-                .shorter_share_and_fall_off_origin
-                .as_mut()
-                .expect("that row records its shares' origin");
-            if let ShareSmoothing::Blend { curve_weight, .. } = &mut shares.shorter_share_smoothing
-            {
-                *curve_weight = -0.5;
-            } else {
-                panic!("the fixture's third row blends its shorter share");
-            }
-        });
-        assert!(field.ends_with("blend.curve_weight"), "{field}");
     }
 
     /// **An allele length variation that is not a distribution over an odd span is refused.**
@@ -3948,33 +3780,33 @@ mod tests {
             // **The nested paths, which are what an earlier version of this test could not
             // see.** It compared only the last segment, so a refusal that named the row's
             // `shorter_share` where the key is `shorter_share_smoothing` passed on the strength
-            // of its final `curve_weight` — and `shorter_share` is a real sibling key of that
-            // same row, holding a perfectly good number. A path that names a healthy key is
-            // worse than one that names nothing, because the reader stops there.
+            // of its final segment — and `shorter_share` is a real sibling key of that same row,
+            // holding a perfectly good number. A path that names a healthy key is worse than one
+            // that names nothing, because the reader stops there.
             refused(|file| {
                 let shares = file.repeat_tracts.slippage_by_stratum_and_group
-                    [THE_ROW_WHOSE_SHARES_BLEND]
+                    [THE_ROW_ON_PENALISED_CURVES]
                     .shorter_share_and_fall_off_origin
                     .as_mut()
                     .expect("that row records its shares' origin");
-                if let ShareSmoothing::Blend { curve_weight, .. } =
+                if let ShareSmoothing::PenalisedCurve { strength, .. } =
                     &mut shares.shorter_share_smoothing
                 {
-                    *curve_weight = -0.5;
+                    *strength = -0.5;
                 } else {
-                    panic!("that row blends its shorter share");
+                    panic!("that row's shorter share is on a penalised curve");
                 }
             }),
             refused(|file| {
-                if let LevelSmoothing::Blend { curve_weight, .. } = &mut file
+                if let LevelSmoothing::PenalisedCurve { strength, .. } = &mut file
                     .repeat_tracts
-                    .slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
+                    .slippage_by_stratum_and_group[THE_ROW_ON_PENALISED_CURVES]
                     .share_of_reads_that_slip_origin
                     .smoothing
                 {
-                    *curve_weight = 1.9;
+                    *strength = 0.0;
                 } else {
-                    panic!("that row blends its slip share");
+                    panic!("that row's level is on a penalised curve");
                 }
             }),
         ] {

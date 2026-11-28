@@ -1361,7 +1361,6 @@ fn outcome_of_a_class(
     };
     let share_on = |curve: &ParameterCurve| ShareProvenance {
         source: ShareSource::PenalisedCurve(point_on(curve)),
-        curve: None,
         reach: Some(CurveReach::Inside),
     };
     let concentration = fitted
@@ -1390,7 +1389,6 @@ fn outcome_of_a_class(
         reads_crossing,
         level_provenance: vec![Some(LevelProvenance {
             source: LevelSource::PenalisedCurve(point_on(&curves.level)),
-            curve: None,
             reach: Some(CurveReach::Inside),
             slipped_reads,
         })],
@@ -3379,7 +3377,6 @@ mod tests {
                     assert_eq!(fit.reads_crossing, evidence.spanning_reads());
                     let level = fit.level_provenance[0].expect("group 0 has numbers");
                     assert!(matches!(level.source, LevelSource::PenalisedCurve(_)));
-                    assert_eq!(level.curve, None);
                     assert_eq!(level.reach, Some(CurveReach::Inside));
                     let slipped = level
                         .slipped_reads
@@ -3392,7 +3389,6 @@ mod tests {
                     assert_eq!(shares.slipped_reads, Some(slipped));
                     for share in [shares.shorter_share, shares.fall_off] {
                         assert!(matches!(share.source, ShareSource::PenalisedCurve(_)));
-                        assert_eq!(share.curve, None);
                         assert_eq!(share.reach, Some(CurveReach::Inside));
                     }
                     let errors = fit

@@ -200,21 +200,18 @@ fn tract_strata_describing(
     slippage_group_of_each_library: std::collections::BTreeMap<ReadGroupId, u32>,
 ) -> StratumFits {
     use crate::parameter_estimation::joint::census::Stratum;
-    use crate::parameter_estimation::joint::share_curve::ShareSource;
-    use crate::parameter_estimation::joint::slippage_curve::LevelSource;
+    use crate::parameter_estimation::joint::slippage_curve::{LevelSource, ShareSource};
     use crate::parameter_estimation::joint::ssr_fit::{
         LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
     };
 
     let level = LevelProvenance {
         source: LevelSource::Cell,
-        curve: None,
         reach: None,
         slipped_reads: Some(400.0),
     };
     let share = ShareProvenance {
         source: ShareSource::Stratum,
-        curve: None,
         reach: None,
     };
     // One entry per slippage group: group 0 is library 0's, group 1 is libraries 1 and 2's.
