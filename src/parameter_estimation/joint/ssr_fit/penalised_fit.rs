@@ -1863,6 +1863,15 @@ impl Period {
                     .map(|(a, b)| (a - b).abs())
                     .fold(0.0, larger_change);
                 self.set_state(&jumped);
+                // **Every class counts again in the next round**: the jump moved every number, so
+                // a change measured before it no longer says a class has settled, and a class that
+                // passed the reuse test would hand that round counts taken before the jump.
+                self.class_change
+                    .iter_mut()
+                    .for_each(|c| *c = f64::INFINITY);
+                if self.multipliers.is_some() {
+                    self.multiplier_change = f64::INFINITY;
+                }
                 self.squarem = SquaremCycle::Jumped {
                     fallback: reached,
                     to_beat: log_likelihood,
@@ -3109,6 +3118,41 @@ mod tests {
         assert_eq!(larger_change(0.5, f64::NAN), f64::INFINITY);
         assert_eq!(larger_change(f64::NAN, 0.5), f64::INFINITY);
         assert_eq!(larger_change(0.5, 0.25), 0.5);
+    }
+
+    /// **A jump makes every class count again in the round after it.** The round that jumps moves
+    /// every number, by up to `2·50·|r| + 50²·|v|`, yet its change measures still say how far the
+    /// round *before* the jump moved each class. A class that had nearly settled would then pass
+    /// the reuse test and hand the next round counts taken at the numbers from before the jump —
+    /// counts that feed both the curves and the log-likelihood the jump is judged on.
+    #[test]
+    fn a_jump_marks_every_class_unsettled() {
+        let class = a_drawn_class(2, 8, 40, 12, 8, 31);
+        let mut period =
+            Period::new(&[&class], &a_narrow_production_fit()).expect("a class with reads");
+        let start = period.state();
+        // Two rounds that each moved every number a little: a jump extrapolates from them.
+        let first: Vec<f64> = start.iter().map(|value| value + 0.01).collect();
+        period.set_state(&first);
+        let first = period.state();
+        let reached: Vec<f64> = first.iter().map(|value| value + 0.005).collect();
+        period.set_state(&reached);
+        period.squarem = SquaremCycle::OneRound { start, first };
+        // The round before the jump settled every class.
+        period.class_change.iter_mut().for_each(|change| *change = 0.0);
+        period.multiplier_change = 0.0;
+
+        let jump = period.squarem_step(Vec::new(), -10.0);
+        assert!(jump > 0.0, "the step jumped");
+        assert!(matches!(period.squarem, SquaremCycle::Jumped { .. }));
+        assert!(
+            period
+                .class_change
+                .iter()
+                .all(|change| *change == f64::INFINITY),
+            "every class counts again after a jump: {:?}",
+            period.class_change
+        );
     }
 
     /// Binomial successes out of `trials` at each probability, with sampling noise from a fixed
