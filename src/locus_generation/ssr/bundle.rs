@@ -377,7 +377,11 @@ mod tests {
 
         let counts = bundles.counts();
         assert_eq!(counts.reads_fetched, 5);
-        assert_eq!(counts.outside_tract, 1, "{counts:?}");
+        assert_eq!(counts.outside_tract_before_cap, 1, "{counts:?}");
+        assert_eq!(
+            counts.outside_tract, 0,
+            "set aside before the cap: {counts:?}"
+        );
         assert_eq!(counts.observations_partial, 2, "{counts:?}");
         assert_eq!(locus.reads_without_observation, 1);
         assert_eq!(locus.observations.len(), 3, "{:?}", locus.observations);
