@@ -168,8 +168,20 @@ impl RepeatCatalogWriter {
                 Some(encode_header(header)),
             ));
         self.writer
-            .close()
+            .finish()
             .map_err(|e| unreadable(&self.temp_path, e))?;
+        // **Synced before the rename, so the name never points at a catalog still in the page
+        // cache.** Without it a machine that crashes just after the rename can leave a short
+        // file under the final name; the reader refuses it (no footer), but the build has to be
+        // run again. `finish` has flushed the writer's own buffer, so the file holds every byte.
+        self.writer
+            .inner()
+            .sync_all()
+            .map_err(|source| RepeatCatalogError::Write {
+                path: self.temp_path.clone(),
+                source,
+            })?;
+        drop(self.writer);
 
         std::fs::rename(&self.temp_path, &self.final_path).map_err(|source| {
             RepeatCatalogError::Write {
