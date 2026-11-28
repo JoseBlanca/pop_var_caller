@@ -1,6 +1,6 @@
 # Baseline for scripts/code_quality_oracle.sh. Re-record with --record only when an output is meant
 # to change (say in the commit which lines moved and why) or the timing moved for a reason outside
-# the code. Recorded 2026-11-28T06:56Z from 459091d2, 5 passes.
+# the code. Recorded 2026-11-28T12:16Z from b7a7be8f, 5 passes.
 #
 # perf lines: step, then min median max of wall seconds, of peak resident MB, and of instructions
 # retired. They are compared only on the host and thread count below.
@@ -12,53 +12,53 @@ digest in/tomato/regions80.bed e14108bcc245d4a45ce469765f15d7c3
 digest in/hg002/regions50.bed b158882f0f9cd95b6b9a8d291aaef6a7
 digest catalog/S_lycopersicum_chromosomes.4.00.repeats.parquet a60f92fab5d112938ca34b200a14b086
 digest catalog/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna.repeats.parquet eae84ae2e20c2438f377db243f77e414
-digest tomato16/psps/SRS3394594.psp fdccff11438485219c965dea1e97176f
-digest tomato16/psps/SRS3394606.psp 3fb10a860f54ec7b18027a7366ea9cb1
-digest tomato16/psps/SRS3394638.psp 8019a13246378635561a71a6aceca7df
-digest tomato16/psps/SRS3394674.psp da5aa78ea94a006ff8a67e105deba488
-digest tomato16/psps/SRS3394687.psp 016aa41637e62e8072bfcb9bfb0044de
-digest tomato16/psps/SRS3394705.psp b71544c9fc0a61378292bbd28394ad53
-digest tomato16/psps/SRS3394706.psp 64e24f769a01f555e381a5d4249dff32
-digest tomato16/psps/SRS3394707.psp 5024c1f70b520fb7cc34db8b710d3f1f
-digest tomato16/psps/SRS3394708.psp b9bb69fa9263d950a626729f10ea7dc5
-digest tomato16/psps/SRS3394709.psp d98876dc3dc85f7288ab64a42a755f1d
-digest tomato16/psps/SRS3394710.psp 7519039cb3c8e16ab3ee8e55bad0b13f
-digest tomato16/psps/SRS3394711.psp b1ebc9862cefa91bf329f9ed3654ab69
-digest tomato16/psps/SRS3394712.psp b884cbe145c6b56855f35a38e663406d
-digest tomato16/psps/SRS3394712_SRR7279484.psp fb3681d0aaa6ded7ffda7989a173d0d9
-digest tomato16/psps/SRS3394713.psp 170f570f121aa804138f3702d7f54cf8
-digest tomato16/psps/SRS3394714.psp ef59e7b0691248c43a419f72367d16c4
-digest tomato16/parameters.toml ac71505a463615677625cda98103d4aa
-digest tomato16/from_psps.vcf 8166bdd289d955195d65d035fc2187bd
+digest tomato16/psps/SRS3394594.psp 1df7e0958c4b1c47db1ac0812d1eff4b
+digest tomato16/psps/SRS3394606.psp 0fe3b0a0de1748c3537bcc4559d857a4
+digest tomato16/psps/SRS3394638.psp 20dd0158fdaae813ca5999daa2e43f80
+digest tomato16/psps/SRS3394674.psp afe506b573420b727061db033e189997
+digest tomato16/psps/SRS3394687.psp ddf068ff662076feb9a5c802b5f8238f
+digest tomato16/psps/SRS3394705.psp 7560e37f5827cc36db69d7f49cedca6f
+digest tomato16/psps/SRS3394706.psp 146c8793f860357c9fb4405dff189b13
+digest tomato16/psps/SRS3394707.psp 6496a850e1a58d3eea595b53c0a278a4
+digest tomato16/psps/SRS3394708.psp 3fa294573f104a011e73bab806cae27a
+digest tomato16/psps/SRS3394709.psp 0ca0fd6968163e01803f9eae89f08d58
+digest tomato16/psps/SRS3394710.psp f0d2f346a0bd8803e45a4e84b18cfe3b
+digest tomato16/psps/SRS3394711.psp c97c5d8395cc98deb94c46d85e12cd43
+digest tomato16/psps/SRS3394712.psp dc82bbd30e7cdaa54e0d5903e074ccb6
+digest tomato16/psps/SRS3394712_SRR7279484.psp 2b0b3007a1abcc7793fa9610e4649e20
+digest tomato16/psps/SRS3394713.psp 94c51476f017197544d6ede9d25c7c5b
+digest tomato16/psps/SRS3394714.psp 4bb0115d8ec47abb14b7efacb15ffa44
+digest tomato16/parameters.toml 08ea2ca83071ca8000c2a757ac77957c
+digest tomato16/from_psps.vcf 3e01fd263d6a32e7aed1e19f44f12e16
 digest tomato16/from_psps.windows eba4326d4fe597a25b319777630d03c7
 digest tomato16/from_psps.windows.histograms 667a517fa33442357763ac24d56ac9eb
-digest tomato16/from_alignments.vcf 8166bdd289d955195d65d035fc2187bd
+digest tomato16/from_alignments.vcf 3e01fd263d6a32e7aed1e19f44f12e16
 digest tomato16/from_alignments.windows eba4326d4fe597a25b319777630d03c7
 digest tomato16/from_alignments.windows.histograms 667a517fa33442357763ac24d56ac9eb
-digest tomato63/from_alignments.vcf 95098c698be126d603fdb257de357ea7
+digest tomato63/from_alignments.vcf e11cbd811b0375dd24b7d5d4119ba54c
 digest tomato63/from_alignments.windows 7eabb403a7d64bbbf999f200c194d23d
 digest tomato63/from_alignments.windows.histograms 543b04e1fcb88161bfb5a6d295923831
-digest hg002/from_psps.vcf ccbffb37dbf4e28e93b426d6c5c4d7ec
+digest hg002/from_psps.vcf 3302e105530b8adaf0a8dbbbe3a3df0f
 digest hg002/from_psps.windows 3fa637797090a9fa73b1019b2a976fed
 digest hg002/from_psps.windows.histograms 650a5263360fd580f2cae7742109ee53
-digest hg002/from_alignments.vcf ccbffb37dbf4e28e93b426d6c5c4d7ec
+digest hg002/from_alignments.vcf 3302e105530b8adaf0a8dbbbe3a3df0f
 digest hg002/from_alignments.windows 3fa637797090a9fa73b1019b2a976fed
 digest hg002/from_alignments.windows.histograms 650a5263360fd580f2cae7742109ee53
-digest tomato16/refined.vcf bbfc05fed6b422abd98d481b882387af
-digest tomato1/from_alignments.vcf a3f0c30448ecf7cc0501484e541ca2a1
-digest hg002/psps/HG002.psp de08aba83ff1847f2027e0ea1362c70f
-digest hg002/parameters.toml 35634d6785f229c5a1af063f0d3bd4bb
-perf catalog-tomato 3.620 3.670 4.080 1233.5 1303.1 1337.2 154709688672 154723723103 154760550903
-perf catalog-grch38 13.800 13.950 14.450 3429.7 3481.1 3532.3 588989346055 589036291571 589232200582
-perf tomato16-generate-psps 3.280 3.280 3.340 231.6 267.9 307.8 69457290354 69474602271 69484050560
-perf tomato16-estimate-parameters 32.280 32.380 34.690 35.7 35.8 36.2 3722601451048 3722646709709 3723576837243
-perf tomato16-call-from-psps 1.220 1.220 1.240 75.7 77.9 81.8 19787104806 19788824671 19813287041
-perf tomato16-call-from-alignments 1.620 1.630 1.630 846.0 873.7 876.8 43805433007 43858736935 43901425890
-perf tomato16-call-refined 1.290 1.290 1.320 80.4 83.1 87.2 27300631687 27306098841 27321542314
-perf tomato63-call-from-alignments 4.430 4.480 4.660 3938.0 3956.7 4092.2 217115969114 217431121145 217522958705
-perf tomato1-call-from-alignments 4.570 4.580 4.660 376.8 380.8 388.4 111815629585 111868360651 111882026973
-perf hg002-generate-psps 12.190 12.230 12.290 283.8 286.5 291.0 291848647708 291859360844 291900940686
-perf hg002-estimate-parameters 10.900 10.920 11.040 68.1 68.2 68.3 739008918969 739014576089 739063480758
-perf hg002-call-from-psps 4.220 4.230 4.300 97.9 102.3 103.6 54368895717 54379652690 54382827370
-perf hg002-call-from-alignments 10.490 10.510 10.650 273.2 296.6 302.9 211612346039 211627963935 211635566843
-perf TOTAL 104.03 104.38 108.35 0 0 0 0 0 0
+digest tomato16/refined.vcf 9a9ce2c4f1a582635317d3c53be173fb
+digest tomato1/from_alignments.vcf 0ae170b17942df2704de54f17f892be3
+digest hg002/psps/HG002.psp 575641da54a6f2569d872ca90abd88ab
+digest hg002/parameters.toml 6c464fc7bbc35fa2c01af44d4eacb208
+perf catalog-tomato 3.790 3.820 4.070 1283.2 1326.3 1366.1 154734798310 154792046337 154900142855
+perf catalog-grch38 13.950 14.440 14.810 3406.5 3426.5 3531.4 589058975275 589535507024 589581718426
+perf tomato16-generate-psps 3.170 3.310 3.340 240.2 242.6 249.0 69390743609 69402978298 69407294202
+perf tomato16-estimate-parameters 34.720 38.990 43.020 35.3 35.8 36.2 4267469179842 4267541976876 4267651952388
+perf tomato16-call-from-psps 1.220 1.220 1.230 80.0 81.2 85.3 19783681121 19786585292 19789193675
+perf tomato16-call-from-alignments 1.590 1.620 1.630 865.4 883.6 897.6 43574875177 43604478106 43666364455
+perf tomato16-call-refined 1.290 1.300 1.300 85.8 87.1 88.5 27291747988 27304234298 27309058354
+perf tomato63-call-from-alignments 4.520 4.680 4.810 3935.0 3960.7 3982.2 216857013560 217094531325 217202780565
+perf tomato1-call-from-alignments 4.580 4.640 4.670 356.9 378.4 385.6 111628270549 111637942391 111657433131
+perf hg002-generate-psps 12.180 12.310 12.410 286.4 290.1 292.3 291089408283 291114144521 291180341237
+perf hg002-estimate-parameters 11.040 11.430 11.560 66.4 67.7 69.0 737762070709 737768724261 737894268721
+perf hg002-call-from-psps 4.340 4.350 4.360 97.2 99.4 103.3 54370194172 54375356552 54377012991
+perf hg002-call-from-alignments 10.660 10.670 10.670 245.6 261.2 298.7 210902343162 210912464222 210932325765
+perf TOTAL 107.7 112.79 116.84 0 0 0 0 0 0
