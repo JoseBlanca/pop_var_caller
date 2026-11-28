@@ -6,14 +6,14 @@
 //! [`CallingLoopConfig`] is every switch of the design, held as a **value** rather than as a
 //! code path.
 //!
-//! ## Two loops, one inside the other, and the outer one ships switched off
+//! ## One loop
 //!
-//! The inner loop is the one that runs: guess the allele frequencies, work out each
-//! sample's genotype probabilities under that guess, add them up to get better frequencies,
-//! repeat until they stop moving. Around it sits **the slippage round**, which re-fits how
-//! often a read gains or loses a whole repeat from the locus's own reads and runs the
-//! frequency loop again on the new numbers ([`SlippageRefitConfig`], `max_rounds` 0, so a
-//! single pass through its body).
+//! Guess the allele frequencies, work out each sample's genotype probabilities under that
+//! guess, add them up to get better frequencies, repeat until they stop moving. A repeat
+//! tract's slippage numbers stay at what the parameter fit measured for its stratum: the
+//! per-locus re-fit the spec describes (`doc/devel/ng/spec/calling_em_loop.md` §5.1) was built,
+//! measured and deleted — [`SummariseConditionLoop`](summarise_condition::SummariseConditionLoop)
+//! records the measurement.
 //!
 //! **Allele discovery is not a loop here.** It admits the tract lengths that recur too often
 //! in one sample to be slippage ([`DiscoveryConfig`]), and it runs as a **pre-pass inside
@@ -25,11 +25,7 @@
 //! the spec described were therefore examined and removed
 //! (`doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5).
 //!
-//! The slippage round's three settings — *frozen*, *pulled back part way* and *free* — are
-//! three values of one code path rather than three implementations to keep in step
-//! (`doc/devel/ng/spec/calling_em_loop.md` §5.1). Its body is built: the arithmetic in
-//! [`slippage_refit`], the round itself in the loop's driver. [`LocusGenotyper::call_locus`]
-//! takes a [`RunnableCallingLoopConfig`], which has one constructor and it is
+//! [`LocusGenotyper::call_locus`] takes a [`RunnableCallingLoopConfig`], which has one constructor and it is
 //! [`CallingLoopConfig::validate`], so a value out of range cannot reach the loop at all.
 //!
 //! ## What is deliberately not configured here
@@ -51,7 +47,6 @@
 //! with it the impossibility of a negative share or a floor of zero reads.
 
 pub mod repeat_tract_parameters;
-pub(crate) mod slippage_refit;
 pub mod summarise_condition;
 
 use std::num::NonZeroU32;
@@ -103,53 +98,6 @@ pub const CONVERGENCE_THRESHOLD_RANGE_MAX: f64 = 0.1;
 /// ten times what was seen.
 pub const DEFAULT_MAX_PASSES: u32 = 50;
 
-/// Ship with the locus's slippage numbers **frozen** at what the parameter fit measured for
-/// its stratum: no re-fit rounds, and so no rebuild of the likelihood table.
-///
-/// **Frozen is this code path at zero rounds**, not a second implementation. Whether a locus
-/// should be allowed to pull its own numbers away from its stratum's is unmeasured — the
-/// reads a tract's numbers would be re-fitted from are the very reads being genotyped, so
-/// they can end up describing this locus's noise rather than its chemistry (spec §5.1, and
-/// §12's question 2 is the measurement).
-pub const DEFAULT_SLIPPAGE_REFIT_ROUNDS: u32 = 0;
-
-/// How hard a re-fit is pulled back toward what the parameter fit measured for the locus's
-/// stratum, for the **two numbers that say what a slip looks like when one happens**: which
-/// way it goes, and how fast longer slips get rarer. In pseudo-counts.
-///
-/// The crate's names for the pair are `Slippage::shorter_share` — the share of slips that
-/// shorten the tract rather than lengthen it — and `Slippage::fall_off`, how quickly a slip
-/// of two repeats becomes rarer than a slip of one.
-///
-/// Production's value. A tract with few slipped reads cannot overcome it and collapses back
-/// to its stratum's numbers, which is the behaviour the pull-back exists for; zero is
-/// HipSTR's setting, where the locus's own reads set the numbers outright. **Inherited and
-/// never measured here.**
-pub const DEFAULT_DIRECTION_AND_FALL_OFF_PULL_BACK_PSEUDOCOUNTS: f64 = 50.0;
-
-/// The same pull-back for **how often a read slips at all** — the crate's `Slippage::level` —
-/// counted in slipped reads rather than in pseudo-counts. Production's value, inherited and
-/// never measured here.
-///
-/// **What it is pulled back *toward* moved after the spec was written.** The slippage level
-/// is no longer a per-cell number but a curve in repeat count, fitted once per motif period
-/// and read off at the cell (`doc/devel/ng/spec/str_slippage_level_curve.md`), so the target
-/// is a point on a fitted line rather than a cell's own estimate.
-pub const DEFAULT_LEVEL_PULL_BACK_SLIPPED_READS: f64 = 20.0;
-
-/// Stop the slippage rounds when every re-fitted number moves less than this between rounds.
-///
-/// **The outer rounds need their own stopping rule and this is not the frequency loop's.**
-/// They stop on their own numbers' movement or at the round cap — production's rule rather
-/// than HipSTR's likelihood test, because a likelihood test would need the table rebuilt in
-/// order to be read (spec §6).
-///
-/// **The value is production's, which uses it twice**: one threshold on the shape
-/// coefficients and one on the level multiplier (`EmCfg::dev_default`,
-/// `d9e7b076:src/ssr/cohort/em.rs`). ng holds the two at one number until something measures them
-/// apart.
-pub const DEFAULT_ROUND_CONVERGENCE_THRESHOLD: f64 = 1e-3;
-
 /// How many of one sample's reads must show a tract length before discovery may admit it
 /// as an allele.
 ///
@@ -195,90 +143,6 @@ const fn non_zero_default(default_value: u32) -> NonZeroU32 {
     match NonZeroU32::new(default_value) {
         Some(value) => value,
         None => panic!("a calling-loop default that fills a non-zero field must be non-zero"),
-    }
-}
-
-/// Which of the slippage re-fit's two pull-backs a refusal is about.
-///
-/// **A type rather than a string**, so that a caller can act on the answer and the compiler
-/// checks the match. The two are pulled back in different units and toward different things,
-/// which is why they are two settings rather than one.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum PullBack {
-    /// What a slip looks like when one happens — which way it goes, and how fast longer
-    /// slips get rarer. Weighed in pseudo-counts.
-    DirectionAndFallOff,
-    /// How often a read slips at all. Weighed in slipped reads.
-    Level,
-}
-
-impl std::fmt::Display for PullBack {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::DirectionAndFallOff => "direction-and-fall-off",
-            Self::Level => "level",
-        })
-    }
-}
-
-/// Re-fitting the locus's own slippage numbers: **how many rounds, and how hard the locus is
-/// allowed to pull them away from its stratum's.**
-///
-/// How often a read gains or loses a whole repeat is measured before calling starts, pooled
-/// over every tract that shares a motif length and a repeat count. The case for letting one
-/// tract depart from its class is that a tract can behave unlike it — an interruption, a
-/// nearby indel, somatic instability. The case against is that the reads it would be
-/// re-fitted from are the reads being genotyped. **Nobody has measured which effect is
-/// larger**, so ng ships frozen, builds the machinery for the other two settings, and hands
-/// the choice to a measurement (spec §5.1, §12's question 2).
-///
-/// The three settings are three values of this one type: **frozen** at zero rounds,
-/// **pulled back part way** at production's pseudo-counts, and **free** at zero pull-back.
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct SlippageRefitConfig {
-    /// Zero is frozen — the default, and the whole of the frozen setting: no rounds, and so
-    /// no rebuild of the likelihood table. Production caps at three.
-    ///
-    /// Defaults to [`DEFAULT_SLIPPAGE_REFIT_ROUNDS`] (0). **The one count here that is not a
-    /// [`NonZeroU32`]**, because zero is this field's shipped setting rather than a mistake.
-    pub max_rounds: u32,
-    /// Pseudo-counts pulling the re-fitted direction split and fall-off back toward the
-    /// stratum's values. Zero is the free setting.
-    ///
-    /// Defaults to [`DEFAULT_DIRECTION_AND_FALL_OFF_PULL_BACK_PSEUDOCOUNTS`] (50).
-    pub direction_and_fall_off_pull_back_pseudocounts: f64,
-    /// Slipped reads pulling the re-fitted level back toward the fitted curve's value at the
-    /// locus's cell. Zero is the free setting.
-    ///
-    /// Defaults to [`DEFAULT_LEVEL_PULL_BACK_SLIPPED_READS`] (20).
-    pub level_pull_back_slipped_reads: f64,
-    /// Stop when every re-fitted number moves less than this between rounds.
-    ///
-    /// Defaults to [`DEFAULT_ROUND_CONVERGENCE_THRESHOLD`] (`1e-3`).
-    pub round_convergence_threshold: f64,
-}
-
-impl SlippageRefitConfig {
-    /// Frozen: the numbers the parameter fit measured for the stratum, unchanged.
-    pub const DEFAULT: Self = Self {
-        max_rounds: DEFAULT_SLIPPAGE_REFIT_ROUNDS,
-        direction_and_fall_off_pull_back_pseudocounts:
-            DEFAULT_DIRECTION_AND_FALL_OFF_PULL_BACK_PSEUDOCOUNTS,
-        level_pull_back_slipped_reads: DEFAULT_LEVEL_PULL_BACK_SLIPPED_READS,
-        round_convergence_threshold: DEFAULT_ROUND_CONVERGENCE_THRESHOLD,
-    };
-
-    /// Whether any round would run. False is the shipped setting.
-    #[inline]
-    #[must_use]
-    pub fn is_frozen(&self) -> bool {
-        self.max_rounds == 0
-    }
-}
-
-impl Default for SlippageRefitConfig {
-    fn default() -> Self {
-        Self::DEFAULT
     }
 }
 
@@ -375,9 +239,8 @@ impl Default for DiscoveryConfig {
 
 /// Every switch the calling loop has, as **values**.
 ///
-/// **Nothing here is a code path**, and that is the point: the slippage re-fit's three
-/// settings are configurations of one implementation, so the shipped behaviour and the
-/// measured alternatives cannot drift apart (spec §5.1).
+/// **Nothing here is a code path**: each switch is a value one implementation reads, so the
+/// shipped behaviour and a measured alternative cannot drift apart.
 ///
 /// **This type is what a run builds; it is not what the loop takes.** The loop takes a
 /// [`RunnableCallingLoopConfig`], which [`Self::validate`] is the only way to make — so a
@@ -400,20 +263,16 @@ pub struct CallingLoopConfig {
     /// Defaults to [`DEFAULT_MAX_PASSES`] (50). A [`NonZeroU32`], because a cap of zero
     /// passes would call no genotype anywhere.
     pub max_passes: NonZeroU32,
-    /// Whether the locus may re-fit its own slippage numbers. Frozen by default.
-    pub slippage_refit: SlippageRefitConfig,
     /// Whether candidate selection runs the STR discovery pre-pass. On by default
     /// ([`DiscoveryConfig::DEFAULT`]).
     pub discovery: DiscoveryConfig,
 }
 
 impl CallingLoopConfig {
-    /// What ships: the frequency loop with the slippage round inert, after candidate
-    /// selection's discovery pre-pass.
+    /// What ships: the frequency loop, after candidate selection's discovery pre-pass.
     pub const DEFAULT: Self = Self {
         convergence_threshold: DEFAULT_CONVERGENCE_THRESHOLD,
         max_passes: non_zero_default(DEFAULT_MAX_PASSES),
-        slippage_refit: SlippageRefitConfig::DEFAULT,
         discovery: DiscoveryConfig::DEFAULT,
     };
 
@@ -425,7 +284,7 @@ impl CallingLoopConfig {
     /// at all — rather than depending on a caller remembering to ask.
     ///
     /// **What it refuses is a value outside its range** — a convergence threshold that is not
-    /// a fraction on the frequency scale, a negative pull-back. Fewer of these than there
+    /// a fraction on the frequency scale. Fewer of these than there
     /// were: a floor of zero reads, a share outside `[0, 1]` and a pass cap of zero are no
     /// longer refused here because they are no longer *expressible*, held instead by
     /// [`MinAltReads`] and by [`NonZeroU32`].
@@ -441,27 +300,6 @@ impl CallingLoopConfig {
             return Err(CallingLoopConfigError::ConvergenceThresholdOutOfRange {
                 threshold: self.convergence_threshold,
             });
-        }
-        let refit = &self.slippage_refit;
-        for (pull_back, which) in [
-            (
-                refit.direction_and_fall_off_pull_back_pseudocounts,
-                PullBack::DirectionAndFallOff,
-            ),
-            (refit.level_pull_back_slipped_reads, PullBack::Level),
-        ] {
-            if !(pull_back.is_finite() && pull_back >= 0.0) {
-                return Err(CallingLoopConfigError::PullBackOutOfRange { which, pull_back });
-            }
-        }
-        if !(refit.round_convergence_threshold.is_finite()
-            && refit.round_convergence_threshold > 0.0)
-        {
-            return Err(
-                CallingLoopConfigError::RoundConvergenceThresholdOutOfRange {
-                    threshold: refit.round_convergence_threshold,
-                },
-            );
         }
         Ok(RunnableCallingLoopConfig(self))
     }
@@ -531,19 +369,6 @@ pub enum CallingLoopConfigError {
          stops every locus after one pass and flags it as settled"
     )]
     ConvergenceThresholdOutOfRange { threshold: f64 },
-    /// One of the two pull-backs in `slippage_refit` is not a weight.
-    #[error(
-        "the {which} pull-back is a weight — pseudo-counts, or slipped reads — so it must be \
-         finite and at or above zero, not {pull_back}; zero is the free setting, where the \
-         locus's own reads set the numbers outright"
-    )]
-    PullBackOutOfRange { which: PullBack, pull_back: f64 },
-    /// `slippage_refit.round_convergence_threshold` is not a positive finite number.
-    #[error(
-        "`slippage_refit.round_convergence_threshold` must be finite and above zero, not \
-         {threshold}"
-    )]
-    RoundConvergenceThresholdOutOfRange { threshold: f64 },
 }
 
 /// **One locus, the whole cohort, in and calls out** — the one boundary every way of handling
@@ -625,22 +450,12 @@ mod tests {
         // **Compared against the numbers, not against the constants they came from.**
         // `assert_eq!(field, DEFAULT_X)` is an identity — `Default` read `DEFAULT_X` a
         // moment earlier — so it holds for whatever value the constant is edited to.
-        // Measured: written that way, changing the round threshold to 0.5 or the discovery
-        // share to 0.9 each left the whole suite green.
+        // Measured: written that way, changing the discovery share to 0.9 left the whole
+        // suite green.
         // These are the numbers the design's open questions will move deliberately, and a
         // deliberate move should have to edit a test that states the old value.
         assert_eq!(config.convergence_threshold, 1e-3);
         assert_eq!(config.max_passes.get(), 50);
-        assert!(config.slippage_refit.is_frozen());
-        assert_eq!(config.slippage_refit.max_rounds, 0);
-        assert_eq!(
-            config
-                .slippage_refit
-                .direction_and_fall_off_pull_back_pseudocounts,
-            50.0
-        );
-        assert_eq!(config.slippage_refit.level_pull_back_slipped_reads, 20.0);
-        assert_eq!(config.slippage_refit.round_convergence_threshold, 1e-3);
         assert!(!config.discovery.is_off());
         assert_eq!(config.discovery.mode, DiscoveryMode::BeforeTheLoop);
 
@@ -668,14 +483,9 @@ mod tests {
         );
     }
 
-    /// The built outer settings validate, alone and together: re-fit rounds, discovery's
-    /// pre-pass, and the pair a measurement arm would set at once.
+    /// Both discovery modes validate.
     #[test]
-    fn the_built_outer_settings_validate() {
-        let mut refitting = CallingLoopConfig::default();
-        refitting.slippage_refit.max_rounds = 3;
-        assert!(refitting.validate().is_ok());
-
+    fn both_discovery_modes_validate() {
         let mut discovering_before_the_loop = CallingLoopConfig::default();
         discovering_before_the_loop.discovery.mode = DiscoveryMode::BeforeTheLoop;
         assert!(discovering_before_the_loop.validate().is_ok());
@@ -683,10 +493,6 @@ mod tests {
         let mut not_discovering = CallingLoopConfig::default();
         not_discovering.discovery.mode = DiscoveryMode::Off;
         assert!(not_discovering.validate().is_ok());
-
-        let mut both = refitting;
-        both.discovery.mode = DiscoveryMode::BeforeTheLoop;
-        assert!(both.validate().is_ok());
     }
 
     /// **What the driver reads off a validated configuration**: the pre-pass mode hands
@@ -705,7 +511,7 @@ mod tests {
         assert_eq!(config.pre_pass_bar(), None, "off runs no pre-pass");
     }
 
-    /// Every range check refuses the value it is for, and each names a different variant.
+    /// The convergence threshold's range check refuses every value outside its range.
     ///
     /// **The not-a-number cases are the ones a comparison-only check misses.** `NaN` fails
     /// every ordinary comparison, so a check written as `threshold <= 0.0` lets it through
@@ -737,50 +543,6 @@ mod tests {
             ..CallingLoopConfig::default()
         };
         assert!(at_the_ceiling.validate().is_ok());
-
-        let mut negative_shape = CallingLoopConfig::default();
-        negative_shape
-            .slippage_refit
-            .direction_and_fall_off_pull_back_pseudocounts = -1.0;
-        assert!(matches!(
-            negative_shape.validate(),
-            Err(CallingLoopConfigError::PullBackOutOfRange {
-                which: PullBack::DirectionAndFallOff,
-                ..
-            })
-        ));
-
-        // **Both halves of every finiteness check, and infinity is the half a fixture
-        // reaches last.** `is_finite()` weakened to `!is_nan()` still refuses a
-        // not-a-number and admits an infinity, so a not-a-number case alone leaves that
-        // weakening alive — measured: it survived on both pull-backs and on the round
-        // threshold until these cases were added.
-        for level in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-            let mut bad_level = CallingLoopConfig::default();
-            bad_level.slippage_refit.level_pull_back_slipped_reads = level;
-            assert!(
-                matches!(
-                    bad_level.validate(),
-                    Err(CallingLoopConfigError::PullBackOutOfRange {
-                        which: PullBack::Level,
-                        ..
-                    })
-                ),
-                "a level pull-back of {level} was accepted"
-            );
-        }
-
-        for threshold in [0.0, -1e-3, f64::NAN, f64::INFINITY] {
-            let mut bad_round = CallingLoopConfig::default();
-            bad_round.slippage_refit.round_convergence_threshold = threshold;
-            assert!(
-                matches!(
-                    bad_round.validate(),
-                    Err(CallingLoopConfigError::RoundConvergenceThresholdOutOfRange { .. })
-                ),
-                "a round threshold of {threshold} was accepted"
-            );
-        }
     }
 
     /// The number a refusal carries is the number that was refused, and it reaches the
@@ -804,20 +566,6 @@ mod tests {
             CallingLoopConfigError::ConvergenceThresholdOutOfRange { threshold: 0.25 }
         );
         assert!(refusal.to_string().contains("0.25"), "{refusal}");
-
-        let mut negative = CallingLoopConfig::default();
-        negative
-            .slippage_refit
-            .direction_and_fall_off_pull_back_pseudocounts = -7.5;
-        let refusal = negative.validate().expect_err("a negative weight");
-        assert_eq!(
-            refusal,
-            CallingLoopConfigError::PullBackOutOfRange {
-                which: PullBack::DirectionAndFallOff,
-                pull_back: -7.5
-            }
-        );
-        assert!(refusal.to_string().contains("-7.5"), "{refusal}");
     }
 
     /// **Three things `validate` used to refuse are now values nobody can write**, and that is
@@ -839,40 +587,6 @@ mod tests {
         // 2 reads, or 15% of that sample's tract-spanning reads, whichever is more.
         assert_eq!(DEFAULT_DISCOVERY_BAR.required_of(3), 2);
         assert_eq!(DEFAULT_DISCOVERY_BAR.required_of(100), 15);
-    }
-
-    /// **Zero pull-back is a setting, not an error** — it is the free arm, where the locus's
-    /// own reads set its slippage numbers outright, and a range check that refused it would
-    /// make one of the three settings the design compares unreachable.
-    ///
-    /// The shape it is checked in is the one a measurement uses: free **with rounds on**,
-    /// which is HipSTR's setting and now a configuration this caller runs.
-    #[test]
-    fn zero_pull_back_is_the_free_setting_and_passes_the_range_check() {
-        let mut free = CallingLoopConfig::default();
-        free.slippage_refit
-            .direction_and_fall_off_pull_back_pseudocounts = 0.0;
-        free.slippage_refit.level_pull_back_slipped_reads = 0.0;
-        assert!(free.validate().is_ok());
-
-        // And with rounds on — the shape a measurement arm actually sets — it still runs.
-        free.slippage_refit.max_rounds = 1;
-        assert!(free.validate().is_ok());
-    }
-
-    /// The pull-back an operator reads about in a log line is named in words, not as a Rust
-    /// identifier.
-    #[test]
-    fn a_refusal_reads_as_a_sentence_rather_than_as_an_identifier() {
-        let mut negative = CallingLoopConfig::default();
-        negative
-            .slippage_refit
-            .direction_and_fall_off_pull_back_pseudocounts = -1.0;
-        let sentence = negative.validate().expect_err("out of range").to_string();
-        assert!(
-            sentence.contains("direction-and-fall-off pull-back"),
-            "{sentence}"
-        );
     }
 
     /// A site quality standing in for one the worker computed — this stand-in looks at no

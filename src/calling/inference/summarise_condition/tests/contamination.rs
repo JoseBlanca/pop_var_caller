@@ -404,6 +404,7 @@ fn the_initialisation_assembly_scores_the_reads_alone() {
             &alleles,
             &genotypes,
             &mut scratch,
+            str_prior_of(&evidence, parameters).as_ref(),
         );
         assemble_genotype_likelihood_table(
             &evidence,
@@ -496,6 +497,7 @@ fn a_samples_own_copies_come_out_of_its_own_batch_and_no_other() {
         &alleles,
         &genotypes,
         &mut scratch,
+        str_prior_of(&evidence, &parameters).as_ref(),
     );
     assemble_genotype_likelihood_table(
         &evidence,
@@ -588,6 +590,7 @@ fn the_copies_are_scattered_onto_the_sample_a_row_names_and_not_onto_the_row() {
         &alleles,
         &genotypes,
         &mut scratch,
+        str_prior_of(&evidence, &parameters).as_ref(),
     );
     assemble_genotype_likelihood_table(
         &evidence,
@@ -669,6 +672,7 @@ fn a_sample_with_two_libraries_reads_its_own_samples_batch() {
         &alleles,
         &genotypes,
         &mut scratch,
+        str_prior_of(&evidence, &parameters).as_ref(),
     );
     assemble_genotype_likelihood_table(
         &evidence,
@@ -724,6 +728,7 @@ fn a_contaminated_run_scored_on_the_plain_formula_is_refused() {
         &alleles,
         &genotypes,
         &mut scratch,
+        str_prior_of(&evidence, &parameters).as_ref(),
     );
     assemble_genotype_likelihood_table(
         &evidence,
@@ -836,6 +841,7 @@ fn a_sample_alone_in_its_batch_is_scored_against_the_reference() {
         &alleles,
         &genotypes,
         &mut scratch,
+        str_prior_of(&evidence, &parameters).as_ref(),
     );
     assemble_genotype_likelihood_table(
         &evidence,

@@ -23,8 +23,8 @@
 use super::expected_counts::ReadGroupSlips;
 use super::*;
 
-/// **The pull toward a multiplier of one, in pseudo-reads** (spec §3.5): the per-locus slip refit's
-/// own pull (`DEFAULT_LEVEL_PULL_BACK_SLIPPED_READS`). Soft; to be set from the stuttering
+/// **The pull toward a multiplier of one, in pseudo-reads** (spec §3.5): the value the per-locus
+/// slip re-fit used for its own pull before it was deleted (2026-11-28). Soft; to be set from the stuttering
 /// simulation at 3 reads a sample.
 pub const PULL_TOWARD_ONE_SLIPPED_READS: f64 = 20.0;
 

@@ -754,6 +754,12 @@ quadratic in the cohort is the wrong trade for a caller meant for thousands of s
 
 ### 5.1 Re-fitting the slippage numbers at the locus — three settings, one to be measured
 
+**Status (2026-11-28): built, measured, deleted.** On GIAB HG002 at 30× the pulled-back setting
+changed the genotype of 7 tracts in 6,993, net +1 correct, and the owner had it removed
+(`../research/tract_accuracy_program_report.md`, lever L3). The caller ships the frozen setting
+and has no other; what follows is the design as it was built, kept for anyone who rebuilds it
+(the last commit holding the code is `a9690a90`).
+
 **What is at stake.** How often a read gains or loses a whole repeat is measured before calling
 starts, pooled over every tract sharing a motif length and a repeat count
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4). The case for letting one tract depart
