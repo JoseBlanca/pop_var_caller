@@ -277,10 +277,19 @@ pub(crate) use crate::read::prepared_read::{MateRole, PreparedRead, ReadLengthEr
 
 /// How wide a single record may get before the walk refuses it, in reference bases.
 ///
-/// Bounds what one open record costs. Reads wider than this are dropped by the read filters
-/// upstream, so in an ordinary run the walk's own check never fires; it is here because a
-/// record that grew past it would otherwise grow without limit.
+/// Bounds what one open record costs. A read with a deletion that would open a record wider
+/// than this is dropped by the read filter upstream
+/// ([`DEFAULT_MAX_DELETION_LEN`](crate::read::filtering::DEFAULT_MAX_DELETION_LEN), held one
+/// below this by the assertion after it). The walk's own check can still fire when a deletion
+/// widens a record another event opened earlier; it is here because a record that grew past
+/// the cap would otherwise grow without limit.
 pub(crate) const DEFAULT_MAX_RECORD_SPAN: u32 = 5_000;
+
+const _: () = assert!(
+    crate::read::filtering::DEFAULT_MAX_DELETION_LEN + 1 == DEFAULT_MAX_RECORD_SPAN,
+    "the read filter must drop every deletion whose record (the deleted bases and the base \
+     before them) is wider than the walk's cap, and no shorter one",
+);
 
 /// How far past a first mate's start the walk keeps looking for its partner, in reference
 /// bases, before giving up and treating the read as unpaired.

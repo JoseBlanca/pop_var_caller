@@ -2081,6 +2081,7 @@ mod tests {
             "read-filter-drop-duplicates = ",
             "read-filter-max-read-mismatch-fraction = ",
             "read-filter-mismatch-bq-floor = ",
+            "read-filter-max-deletion-len-bp = ",
             // The segmentation section: an analysed span, a routing criterion spelled
             // as the short decimal a person would write, and the catalog's identity.
             "[[segmentation.analysed-region]]",

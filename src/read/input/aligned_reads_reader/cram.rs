@@ -89,7 +89,7 @@ pub(crate) struct CramAlignedReadsReader {
     /// `+ Send` keeps the cursor `Send` (`a_sample_cursor_is_send_in_both_arms`).
     reference_reader: Box<dyn SliceReference + Send>,
     /// **This contig's** `.crai` entries, in file order, grouped once at open.
-    entries: Arc<[cram::crai::Record]>,
+    entries: Arc<ContigCraiEntries>,
     /// A copy of the file's, settled at open. Owned, so this reader carries no lifetime.
     resolution: ReadGroupResolution,
     path: Arc<Path>,
@@ -141,7 +141,7 @@ impl CramAlignedReadsReader {
         reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
         reference_reader: Box<dyn SliceReference + Send>,
-        entries: Arc<[cram::crai::Record]>,
+        entries: Arc<ContigCraiEntries>,
         resolution: ReadGroupResolution,
         path: Arc<Path>,
         shared: SharedDecode,
@@ -186,7 +186,7 @@ impl CramAlignedReadsReader {
     /// costs a decode and nothing else. Starting after it drops reads silently. Every choice
     /// below leans the safe way.
     pub(crate) fn begin_region(&mut self, region: GenomeRegion) -> io::Result<()> {
-        self.next_entry = first_entry_reaching(&self.entries, region.start.get());
+        self.next_entry = self.entries.first_reaching(region.start.get());
         // **What is held is what is being served, and it belongs to where the reader was.**
         // Dropping it here is what makes a reposition a reposition: a reader that kept it
         // would serve the rest of the old container before reaching the new position, which
@@ -241,7 +241,7 @@ impl CramAlignedReadsReader {
     /// question, asked above; this walks the contig's entries in order until they are spent.
     fn decode_next_container(&mut self) -> io::Result<bool> {
         loop {
-            let Some(entry) = self.entries.get(self.next_entry) else {
+            let Some(entry) = self.entries.entries().get(self.next_entry) else {
                 return Ok(false);
             };
             self.next_entry += 1;
@@ -313,7 +313,7 @@ impl CramAlignedReadsReader {
         let Some(prefetcher) = &self.shared.prefetcher else {
             return;
         };
-        let Some(next) = self.entries[self.next_entry.min(self.entries.len())..]
+        let Some(next) = self.entries.entries()[self.next_entry.min(self.entries.len())..]
             .iter()
             .map(cram::crai::Record::offset)
             .find(|offset| Some(*offset) != self.last_decoded_offset)
@@ -329,42 +329,99 @@ impl CramAlignedReadsReader {
     }
 }
 
-/// The first `.crai` entry whose container can hold a record reaching `start`.
+/// **One contig's `.crai` entries, with how far the containers up to each one reach.**
 ///
-/// **A binary search and then a walk back**, and both halves are needed. The entries are
-/// sorted by the position a container *starts* at, so a binary search finds the first one
-/// starting at or after `start` — but a container beginning *before* `start` can still hold
-/// records reaching into it, and those records are ours to serve. So the search is followed
-/// by stepping back over every earlier container whose span reaches `start`.
+/// The entries are in file order, which on a coordinate-sorted file is ascending by the
+/// position a container *starts* at. Where a container *ends* has no such order: one long
+/// or spliced read makes its container reach far past containers that start after it. So
+/// positioning cannot be read off the starts alone, and [`reach_end`](Self::reach_end)
+/// holds, for each entry, the furthest any container up to and including it reaches. That
+/// running maximum never decreases, which is what lets one binary search answer
+/// [`first_reaching`](Self::first_reaching).
 ///
-/// Walking from entry 0 instead would be correct and is what the per-region source did. It
-/// cannot be done here: that source was built once per region, while this one is repositioned
-/// on every jump of a walk that may make millions of them, and a prefix scan of a
-/// many-container contig would be paid at each.
-///
-/// A free function over the entries rather than a method, so the rule can be stated against a
-/// hand-built index — a `CramAlignedReadsReader` needs a real file behind it, and the property this
-/// has to get right is about the index alone.
-fn first_entry_reaching(entries: &[cram::crai::Record], start: u64) -> usize {
-    let container_start = |entry: &cram::crai::Record| {
-        entry
-            .alignment_start()
-            .map_or(0, |at| usize::from(at) as u64)
-    };
-    let mut at = entries.partition_point(|entry| container_start(entry) < start);
-    // Back over containers that begin earlier but reach `start`. A container with no
-    // recorded start cannot be reasoned about, so it is kept rather than skipped.
-    while at > 0 {
-        let previous = &entries[at - 1];
-        let begins = container_start(previous);
-        let span = previous.alignment_span() as u64;
-        let reaches = span == 0 || begins + span > start;
-        if !reaches {
-            break;
+/// **8 bytes an entry**, on top of the 56 a `crai::Record` costs: 0.9 MB for a whole-genome
+/// tomato CRAM's 112,140 slices. Built once when the file is opened, from the `.crai` on
+/// disk; nothing of it is written anywhere.
+#[derive(Debug, Default)]
+pub(crate) struct ContigCraiEntries {
+    entries: Box<[cram::crai::Record]>,
+    /// `reach_end[i]`: one past the last base any of `entries[..=i]` reaches.
+    ///
+    /// An entry with no recorded span counts as reaching only its own first base here. The
+    /// span it does not record is handled by [`first_reaching`](Self::first_reaching) instead,
+    /// because counting it as reaching everything would make every later jump on the contig
+    /// decode from that entry onward.
+    reach_end: Box<[u64]>,
+}
+
+impl ContigCraiEntries {
+    /// Group one contig's entries, which must be in file order.
+    pub(crate) fn new(entries: Vec<cram::crai::Record>) -> Self {
+        let mut furthest = 0u64;
+        let reach_end = entries
+            .iter()
+            .map(|entry| {
+                let span = (entry.alignment_span() as u64).max(1);
+                furthest = furthest.max(container_start(entry) + span);
+                furthest
+            })
+            .collect();
+        Self {
+            entries: entries.into_boxed_slice(),
+            reach_end,
         }
-        at -= 1;
     }
-    at
+
+    /// The entries, in file order.
+    pub(crate) fn entries(&self) -> &[cram::crai::Record] {
+        &self.entries
+    }
+
+    /// The first entry whose container can hold a record reaching `start`.
+    ///
+    /// **One binary search on the running reach, then a step back over entries with no
+    /// recorded span.** Every entry before the answer reaches no further than `start - 1`,
+    /// by the running maximum; an entry the index gives no span for cannot be reasoned
+    /// about, so one immediately before the answer is kept rather than skipped.
+    ///
+    /// Until 2026-11-28 this was a binary search on the starts and a walk back that stopped
+    /// at the first container not reaching `start`. A container before that one could still
+    /// reach it, and its long read was then never served after a jump (code-quality review
+    /// 2026-11-26, io B2).
+    ///
+    /// Walking from entry 0 instead would be correct and is what the per-region source did.
+    /// It cannot be done here: this reader is repositioned on every jump of a walk that may
+    /// make millions of them, and a prefix scan of a many-container contig would be paid at
+    /// each.
+    pub(crate) fn first_reaching(&self, start: u64) -> usize {
+        let mut at = self.reach_end.partition_point(|&end| end <= start);
+        while at > 0 && self.entries[at - 1].alignment_span() == 0 {
+            at -= 1;
+        }
+        at
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The position a `.crai` entry's container starts at, 0 where it records none.
+fn container_start(entry: &cram::crai::Record) -> u64 {
+    entry
+        .alignment_start()
+        .map_or(0, |at| usize::from(at) as u64)
+}
+
+/// [`ContigCraiEntries::first_reaching`] over hand-built entries, for the tests.
+#[cfg(test)]
+fn first_entry_reaching(entries: &[cram::crai::Record], start: u64) -> usize {
+    ContigCraiEntries::new(entries.to_vec()).first_reaching(start)
 }
 
 #[cfg(test)]
@@ -423,6 +480,23 @@ mod tests {
             first_entry_reaching(&entries, 401),
             2,
             "and one that ends at 400 does not reach 401",
+        );
+    }
+
+    /// **A container that reaches the region from behind a nearer one that does not.** The
+    /// first entry starts at 1,000 and reaches 50,999 (one long or spliced read); the second
+    /// covers 1,100 to 1,399. Walking back from the first entry starting past 20,000 stops at
+    /// the second, which does not reach 20,000, so the first was never decoded and its long
+    /// read was lost.
+    #[test]
+    fn a_container_reaching_the_region_behind_one_that_does_not_is_stepped_back_to() {
+        let entries = vec![entry(1_000, 50_000), entry(1_100, 300)];
+
+        assert_eq!(first_entry_reaching(&entries, 20_000), 0);
+        assert_eq!(
+            first_entry_reaching(&entries, 51_000),
+            entries.len(),
+            "and past every container's reach, nothing is decoded",
         );
     }
 

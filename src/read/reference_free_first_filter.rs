@@ -71,7 +71,7 @@ use crate::read::input::region_raw_aligned_reads::RegionRawAlignedReads;
 use crate::read::input::test_fixtures::{
     bam_header, fixture_read_group, matching_contigs, read_named_with_length,
 };
-use crate::types::{BaseQual, ContigId, GenomeRegion, MapQual, Position};
+use crate::types::{BaseQual, Bp, ContigId, GenomeRegion, MapQual, Position};
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::Flags;
 
@@ -107,6 +107,9 @@ fn config_of_a_caller_with_no_reference() -> ReadFilterConfig {
         // because the config is one struct for both filters.
         max_read_mismatch_fraction: None,
         mismatch_bq_floor: BaseQual(13),
+        // A CIGAR scan on the decoded read, which this caller never makes; named because the
+        // config is one struct for both filters.
+        max_deletion_len: Bp(4_999),
     }
 }
 

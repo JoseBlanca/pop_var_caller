@@ -908,10 +908,12 @@ fn what_the_filters_did(counts: &ReadFilterCounts) -> WhatTheFiltersDid {
         too_short,
         high_mismatch_fraction,
         bad_cigar,
+        no_base_qualities,
+        deletion_too_long,
         other_sample,
     } = counts;
 
-    // One entry a `DropReason`, and there are nine of them.
+    // One entry a `DropReason`, and there are eleven of them.
     let by_reason = [
         ("duplicate", *duplicate),
         ("mapping quality too low", *low_mapq),
@@ -922,12 +924,14 @@ fn what_the_filters_did(counts: &ReadFilterCounts) -> WhatTheFiltersDid {
         ("too short", *too_short),
         ("too many mismatches", *high_mismatch_fraction),
         ("unusable CIGAR", *bad_cigar),
+        ("with no base qualities", *no_base_qualities),
+        ("with a deletion too long to walk", *deletion_too_long),
     ];
     WhatTheFiltersDid {
         kept: *kept,
         dropped: by_reason.iter().map(|(_, n)| n).sum(),
-        // **Only the reasons that fired.** Nine reasons and a run trips two or three; the other
-        // six as zeros are six numbers a reader scans past to find the one that matters.
+        // **Only the reasons that fired.** Eleven reasons and a run trips two or three; the other
+        // eight as zeros are six numbers a reader scans past to find the one that matters.
         why: by_reason
             .iter()
             .filter(|(_, n)| *n > 0)
@@ -942,7 +946,7 @@ fn what_the_filters_did(counts: &ReadFilterCounts) -> WhatTheFiltersDid {
 struct WhatTheFiltersDid {
     /// Reads that came through.
     kept: u64,
-    /// Reads a filter turned down, over the nine reasons there are.
+    /// Reads a filter turned down, over the eleven reasons there are.
     dropped: u64,
     /// Those reasons that fired, in the reader's words — empty where none did.
     why: String,

@@ -32,7 +32,7 @@
 //! conversion between them — lives in [`crate::read::aligned_read`].
 
 use crate::bam::alignment_input::{
-    DEFAULT_MAX_READ_MISMATCH_FRACTION, DEFAULT_MIN_MAPQ, DEFAULT_MIN_READ_LENGTH,
+    CigarOp, DEFAULT_MAX_READ_MISMATCH_FRACTION, DEFAULT_MIN_MAPQ, DEFAULT_MIN_READ_LENGTH,
     DEFAULT_MISMATCH_BQ_FLOOR, FLAG_DUPLICATE, FLAG_QC_FAIL, FLAG_SECONDARY, FLAG_SUPPLEMENTARY,
     FLAG_UNMAPPED, cigar_is_bad, cigar_ref_span, read_exceeds_mismatch_fraction,
 };
@@ -75,7 +75,23 @@ pub struct ReadFilterConfig {
     /// BQ floor below which a mismatch does not count toward filter #8. Only
     /// meaningful when `max_read_mismatch_fraction` is `Some`.
     pub mismatch_bq_floor: BaseQual,
+    /// The longest deletion a kept read may carry, in reference bases (filter #11). See
+    /// [`DEFAULT_MAX_DELETION_LEN`] for why it is not a free choice.
+    pub max_deletion_len: Bp,
 }
+
+/// **The longest deletion the generic-path walk can hold: 4,999 bases.**
+///
+/// The walk opens one record for a deletion, covering the deleted bases and the base before
+/// them, and refuses a record wider than its `max_record_span` of 5,000 bases
+/// (`locus_generation::pileup::DEFAULT_MAX_RECORD_SPAN`) with an error that stops the run. So
+/// a deletion of 5,000 bases or more in a single read stopped the whole run. Dropping such a
+/// read here, and counting it, lets the run carry on; `pileup/mod.rs` asserts at compile time
+/// that this stays one below the walk's cap.
+///
+/// What is lost is the read, from both paths. A deletion that long is beyond what the generic
+/// path can call in any case, and before this filter the read was lost together with the run.
+pub(crate) const DEFAULT_MAX_DELETION_LEN: u32 = 4_999;
 
 impl Default for ReadFilterConfig {
     fn default() -> Self {
@@ -96,6 +112,7 @@ impl Default for ReadFilterConfig {
                     .expect("DEFAULT_MAX_READ_MISMATCH_FRACTION is in [0, 1]"),
             ),
             mismatch_bq_floor: BaseQual(DEFAULT_MISMATCH_BQ_FLOOR),
+            max_deletion_len: Bp(u64::from(DEFAULT_MAX_DELETION_LEN)),
         }
     }
 }
@@ -121,6 +138,10 @@ pub enum DropReason {
     TooShort,
     HighMismatchFraction,
     BadCigar,
+    /// The read carries no base quality for its bases: SAM's `QUAL *`.
+    NoBaseQualities,
+    /// The read carries a deletion longer than [`ReadFilterConfig::max_deletion_len`].
+    DeletionTooLong,
 }
 
 /// A per-sample tally of the filtering pass — one counter per drop reason, plus
@@ -140,6 +161,11 @@ pub struct ReadFilterCounts {
     pub too_short: u64,
     pub high_mismatch_fraction: u64,
     pub bad_cigar: u64,
+    /// Reads with bases but no base qualities (SAM `QUAL *`), which the walk cannot use.
+    pub no_base_qualities: u64,
+    /// Reads with a deletion longer than the walk can hold
+    /// ([`ReadFilterConfig::max_deletion_len`]).
+    pub deletion_too_long: u64,
     /// Records skipped because they belong to **another sample** — a file's read
     /// groups need not all be this open's.
     ///
@@ -171,6 +197,8 @@ impl ReadFilterCounts {
             too_short,
             high_mismatch_fraction,
             bad_cigar,
+            no_base_qualities,
+            deletion_too_long,
             other_sample,
         } = other;
 
@@ -184,6 +212,8 @@ impl ReadFilterCounts {
         self.too_short += too_short;
         self.high_mismatch_fraction += high_mismatch_fraction;
         self.bad_cigar += bad_cigar;
+        self.no_base_qualities += no_base_qualities;
+        self.deletion_too_long += deletion_too_long;
         self.other_sample += other_sample;
     }
 
@@ -202,6 +232,8 @@ impl ReadFilterCounts {
             DropReason::TooShort => self.too_short += 1,
             DropReason::HighMismatchFraction => self.high_mismatch_fraction += 1,
             DropReason::BadCigar => self.bad_cigar += 1,
+            DropReason::NoBaseQualities => self.no_base_qualities += 1,
+            DropReason::DeletionTooLong => self.deletion_too_long += 1,
         }
     }
 }
@@ -254,9 +286,22 @@ pub(in crate::read) fn verdict_on_raw_read(
 /// [`AlignedRead`] only after it clears phase one. Evaluated **cheapest-first**:
 ///
 /// 1. **#7 too-short** — one length compare, no reference.
-/// 2. **#9 bad-CIGAR** — a pure CIGAR scan, no reference.
-/// 3. **#8 high-mismatch** — a reference fetch plus a per-base walk, and only
+/// 2. **#10 no base qualities** — one length compare, no reference.
+/// 3. **#9 bad-CIGAR** — a pure CIGAR scan, no reference.
+/// 4. **#11 deletion too long** — a second CIGAR scan, no reference.
+/// 5. **#8 high-mismatch** — a reference fetch plus a per-base walk, and only
 ///    when `max_read_mismatch_fraction` is `Some`.
+///
+/// **#10 and #11 drop reads the generic-path walk would otherwise stop the run on**
+/// (owner decision B5, 2026-11-28). SAM allows `QUAL *` beside real bases — a BAM made from
+/// FASTA input, some assembly and long-read BAMs — and the walk refuses a read whose base
+/// qualities do not match its bases; and it refuses a deletion wider than its record cap
+/// ([`DEFAULT_MAX_DELETION_LEN`]). Each refusal was an error that ended the run on one read.
+/// Both checks are exact: #10 drops exactly the reads whose qualities are missing or do not
+/// match the bases in number, and #11 exactly the reads one of whose deletions would open a
+/// record wider than the cap. A deletion that only widens a record opened by an earlier
+/// event in another read can still pass #11 and stop the walk; that case is not a property
+/// of one read.
 ///
 /// This is a deliberate reordering relative to the spec's #7/#8/#9 *table*: it
 /// puts the one reference-touching filter (#8) last, so a read dropped for
@@ -295,8 +340,22 @@ pub(in crate::read) fn verdict_on_aligned_read(
     // #9 — bad CIGAR (adjacent I/D, or a boundary deletion). Cheap: a pure scan
     // of the aligner's CIGAR, no reference. Run before #8 so a malformed read
     // never pays the reference fetch below.
+    // #10 — no base qualities. `QUAL *` decodes to an empty list beside a non-empty
+    // sequence; a list of another length is refused the same way, because the walk
+    // refuses both.
+    if read.qual.len() != read.seq.len() {
+        return Ok(FilterVerdict::Drop(DropReason::NoBaseQualities));
+    }
+
     if cigar_is_bad(&read.cigar) {
         return Ok(FilterVerdict::Drop(DropReason::BadCigar));
+    }
+
+    // #11 — a deletion longer than the walk can hold.
+    if read.cigar.iter().any(
+        |op| matches!(op, CigarOp::Deletion(len) if u64::from(*len) > config.max_deletion_len.get()),
+    ) {
+        return Ok(FilterVerdict::Drop(DropReason::DeletionTooLong));
     }
 
     // #8 — high mismatch fraction. The only reference-dependent filter, and the
@@ -367,7 +426,6 @@ pub(in crate::read) fn verdict_on_aligned_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bam::alignment_input::CigarOp;
     use crate::bam::alignment_input::FLAG_PAIRED;
     use crate::ref_seq::InMemoryRefSeq;
     use crate::types::ReadGroupId;
@@ -390,6 +448,7 @@ mod tests {
             config.mismatch_bq_floor,
             BaseQual(DEFAULT_MISMATCH_BQ_FLOOR)
         );
+        assert_eq!(config.max_deletion_len, Bp(4_999));
     }
 
     #[test]
@@ -409,6 +468,8 @@ mod tests {
                 too_short: 0,
                 high_mismatch_fraction: 0,
                 bad_cigar: 0,
+                no_base_qualities: 0,
+                deletion_too_long: 0,
                 other_sample: 0,
             }
         );
@@ -580,6 +641,7 @@ mod tests {
             drop_duplicate: false,
             max_read_mismatch_fraction: max.map(|x| MismatchFraction::try_new(x).unwrap()),
             mismatch_bq_floor: BaseQual(0),
+            max_deletion_len: Bp(u64::from(DEFAULT_MAX_DELETION_LEN)),
         }
     }
 
@@ -749,6 +811,69 @@ mod tests {
             post(&read, &reference, &cfg),
             FilterVerdict::Drop(DropReason::TooShort)
         );
+    }
+
+    /// **A read with bases and `QUAL *` is dropped and charged to its own reason**, and one
+    /// with both `SEQ *` and `QUAL *` is not — its lengths agree, and with #7 on it is
+    /// dropped as too short.
+    #[test]
+    fn a_read_with_no_base_qualities_is_dropped() {
+        let reference = poly_a_ref(40);
+        let cfg = post_config(None);
+        let no_qualities = mapped(&[b'A'; 30], &[], vec![CigarOp::Match(30)]);
+        let wrong_count = mapped(&[b'A'; 30], &[40; 29], vec![CigarOp::Match(30)]);
+        assert_eq!(
+            post(&no_qualities, &reference, &cfg),
+            FilterVerdict::Drop(DropReason::NoBaseQualities)
+        );
+        assert_eq!(
+            post(&wrong_count, &reference, &cfg),
+            FilterVerdict::Drop(DropReason::NoBaseQualities)
+        );
+        let with_qualities = mapped(&[b'A'; 30], &[40; 30], vec![CigarOp::Match(30)]);
+        assert_eq!(post(&with_qualities, &reference, &cfg), FilterVerdict::Keep);
+    }
+
+    /// **The deletion cap's boundary: 4,999 bases is kept, 5,000 is dropped.** A 4,999-base
+    /// deletion opens a record of 5,000 bases with its anchor, the widest the walk holds.
+    #[test]
+    fn a_deletion_longer_than_the_walk_holds_is_dropped() {
+        let reference = poly_a_ref(6_000);
+        let cfg = post_config(None);
+        let with_deletion = |len: u32| {
+            mapped(
+                &[b'A'; 200],
+                &[40; 200],
+                vec![
+                    CigarOp::Match(100),
+                    CigarOp::Deletion(len),
+                    CigarOp::Match(100),
+                ],
+            )
+        };
+        assert_eq!(
+            post(&with_deletion(DEFAULT_MAX_DELETION_LEN), &reference, &cfg),
+            FilterVerdict::Keep
+        );
+        assert_eq!(
+            post(
+                &with_deletion(DEFAULT_MAX_DELETION_LEN + 1),
+                &reference,
+                &cfg
+            ),
+            FilterVerdict::Drop(DropReason::DeletionTooLong)
+        );
+        // A spliced gap of the same length is not a deletion: it opens no record.
+        let spliced = mapped(
+            &[b'A'; 200],
+            &[40; 200],
+            vec![
+                CigarOp::Match(100),
+                CigarOp::Skip(5_000),
+                CigarOp::Match(100),
+            ],
+        );
+        assert_eq!(post(&spliced, &reference, &cfg), FilterVerdict::Keep);
     }
 
     #[test]

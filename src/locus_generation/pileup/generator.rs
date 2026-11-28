@@ -2293,6 +2293,112 @@ mod tests {
         );
     }
 
+    /// Walk 1 to 8,000 of the big fixture contig over one clean read with a mismatch at 60,
+    /// `odd`, and one with a mismatch at 7,010, at the default settings and through the real
+    /// read filter. Returns the loci's anchors and the summed read-filter tally.
+    ///
+    /// For the reads the walk cannot hold (owner decision B5, 2026-11-28): before the read
+    /// filter dropped them, each stopped the walk with an error, so the locus at 7,010 after
+    /// them was never reached.
+    fn walk_past(odd: RecordBuf) -> (Vec<u64>, ReadFilterCounts) {
+        use crate::read::filtering::ReadFilterConfig;
+        use crate::read::input::test_fixtures::{
+            BIG_FIXTURE_CONTIG, big_contig_specs, big_fixture_reference,
+        };
+
+        let records = [
+            read_with_one_mismatch("before", 0, 50, 10),
+            odd,
+            read_with_one_mismatch("after", 0, 7_000, 10),
+        ];
+        let (_reference_dir, reference) = big_fixture_reference();
+        let (_bam_dir, bam) = indexed_bam(
+            &header(
+                Some("coordinate"),
+                &big_contig_specs(),
+                &[("rg1", Some("NA12878"))],
+            ),
+            &records,
+        );
+        let reads =
+            SampleReads::open_only_sample(&[bam], &reference, ReadFilterConfig::default(), false)
+                .expect("the fixture sample opens");
+        let bases = || {
+            InMemoryRefSeq::from_named_contigs(vec![(
+                BIG_FIXTURE_CONTIG.0.to_string(),
+                vec![b'A'; BIG_FIXTURE_CONTIG.1],
+            )])
+        };
+        let mut generator = PileupGenerator::new(
+            Arc::new(bases()),
+            bases,
+            PassthroughPreparer,
+            PileupGeneratorConfig::default(),
+        )
+        .expect("the default config");
+
+        let loci = loci_of(&mut generator, region(0, 1, 8_000), &reads);
+        let tally = generator.read_filter_counts().into_iter().fold(
+            ReadFilterCounts::default(),
+            |mut sum, (_, counts)| {
+                sum.add(&counts);
+                sum
+            },
+        );
+        (anchors(&loci), tally)
+    }
+
+    /// **A read with a 6,000-base deletion is dropped and counted, and the walk carries on.**
+    /// `100M6000D100M` opens a record of 6,001 bases, past the walk's 5,000-base cap; before
+    /// the filter dropped it, the walk stopped with `RecordTooWide`.
+    #[test]
+    fn a_read_with_a_deletion_too_long_to_walk_is_dropped_and_the_walk_carries_on() {
+        use noodles_sam::alignment::record::cigar::op::Kind;
+
+        let (anchors, tally) = walk_past(read_with_cigar(
+            "long_deletion",
+            0,
+            200,
+            &[
+                (Kind::Match, 100),
+                (Kind::Deletion, 6_000),
+                (Kind::Match, 100),
+            ],
+        ));
+
+        assert!(
+            anchors.contains(&7_010),
+            "the walk reaches the mismatch after the read: {anchors:?}",
+        );
+        assert_eq!(
+            (tally.deletion_too_long, tally.kept),
+            (1, 2),
+            "the read is charged to its own reason: {tally:?}",
+        );
+    }
+
+    /// **A read with bases and `QUAL *` is dropped and counted, and the walk carries on.**
+    /// Before the filter dropped it, the walk stopped with a malformed-read error: 40 bases
+    /// against no base qualities.
+    #[test]
+    fn a_read_with_no_base_qualities_is_dropped_and_the_walk_carries_on() {
+        use noodles_sam::alignment::record_buf::QualityScores;
+
+        let mut no_qualities = read_named_with_length("no_qualities", 0, 300, 40);
+        *no_qualities.quality_scores_mut() = QualityScores::default();
+        let (anchors, tally) = walk_past(no_qualities);
+
+        assert!(
+            anchors.contains(&7_010),
+            "the walk reaches the mismatch after the read: {anchors:?}",
+        );
+        assert_eq!(
+            (tally.no_base_qualities, tally.kept),
+            (1, 2),
+            "the read is charged to its own reason: {tally:?}",
+        );
+    }
+
     /// Asking for a locus before any segment has begun is a normal `None`, not a
     /// panic and not an error: the pairing of `begin_segment` and `next_locus` is
     /// a contract nothing in the types enforces.

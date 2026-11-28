@@ -111,7 +111,7 @@ use crate::types::GenomeRegion;
 pub(crate) use bam::BamAlignedReadsReader;
 pub(crate) use bgzf_blocks::SharedBgzfBlocks;
 pub(crate) use container::SharedContainers;
-pub(crate) use cram::CramAlignedReadsReader;
+pub(crate) use cram::{ContigCraiEntries, CramAlignedReadsReader};
 pub(crate) use in_memory::InMemoryAlignedReadsReader;
 pub(crate) use prefetch::{ContainerPrefetcher, SharedDecode};
 

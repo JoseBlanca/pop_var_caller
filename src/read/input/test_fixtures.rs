@@ -712,6 +712,78 @@ pub(crate) fn multi_container_cram_two_read_groups(
     (cram_dir, cram_path, fasta_dir, fasta)
 }
 
+/// Where [`cram_with_one_long_read`]'s long read starts, and how far it reaches.
+pub(crate) const LONG_READ_START: usize = 1_000;
+/// The long read's spliced gap, in reference bases: `30M 49000N 30M`, so it covers
+/// 1,000 to 50,059 while holding only 60 bases.
+pub(crate) const LONG_READ_SKIP: usize = 49_000;
+
+/// A single-contig CRAM whose **first container holds one long read** and whose second
+/// container holds only short reads that end long before the long read does.
+///
+/// The shape the `.crai` positioning has to get right: entry 0 starts at 1,000 and reaches
+/// 50,059; entry 1 starts at 1,100 and ends near 1,430. A region at 20,000 begins after
+/// both entries start, and only entry 0 reaches it. Positioning that steps back from the
+/// first entry starting at or after 20,000 and stops at the first entry that does not reach
+/// it stops at entry 1 and never decodes the long read.
+///
+/// noodles writes 10,240 records a container, so the long read and 10,239 short reads at
+/// 1,000 to 1,099 fill the first; 10,240 short reads at 1,100 to 1,400 fill the second. The
+/// spliced gap (`N`) rather than a deletion keeps the read past the read filter, which
+/// drops a deletion the walk cannot hold. A test using this fixture should check the
+/// `.crai` really has this shape, since it depends on the writer's container size.
+pub(crate) fn cram_with_one_long_read() -> (TempDir, PathBuf, TempDir, PathBuf) {
+    use crate::bam::cram_files::{HeaderOverrides, build_cram};
+
+    let specs = vec![ContigSpec {
+        name: "chr1".to_string(),
+        length: 60_000,
+    }];
+    let (fasta_dir, fasta) = build_fasta(&specs).expect("build fasta");
+
+    let mut long = read_named_with_length("long", 0, LONG_READ_START, 60);
+    *long.cigar_mut() = [
+        Op::new(Kind::Match, 30),
+        Op::new(Kind::Skip, LONG_READ_SKIP),
+        Op::new(Kind::Match, 30),
+    ]
+    .into_iter()
+    .collect();
+
+    const PER_CONTAINER: usize = 10_240;
+    let mut records = vec![long];
+    records.extend((1..PER_CONTAINER).map(|i| {
+        read_named_with_length(
+            &format!("a{i}"),
+            0,
+            LONG_READ_START + i * 100 / PER_CONTAINER,
+            30,
+        )
+    }));
+    records.extend(
+        (0..PER_CONTAINER).map(|i| {
+            read_named_with_length(&format!("b{i}"), 0, 1_100 + i * 300 / PER_CONTAINER, 30)
+        }),
+    );
+
+    let (cram_dir, cram_path) = build_cram(
+        &fasta,
+        &specs,
+        &HeaderOverrides {
+            read_groups: vec![("rg1".to_string(), Some("NA12878".to_string()))],
+            ..HeaderOverrides::default()
+        },
+        &records,
+    )
+    .expect("build cram");
+
+    let index = noodles_cram::fs::index(&cram_path).expect("index a single-reference CRAM");
+    let crai_path = PathBuf::from(format!("{}.crai", cram_path.display()));
+    noodles_cram::crai::fs::write(&crai_path, &index).expect("write crai");
+
+    (cram_dir, cram_path, fasta_dir, fasta)
+}
+
 /// One 10 bp read at the start of the first contig — enough to make a file
 /// non-empty for tests that never read it.
 pub(crate) fn one_read() -> Vec<RecordBuf> {
