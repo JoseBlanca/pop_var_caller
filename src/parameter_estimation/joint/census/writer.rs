@@ -45,7 +45,13 @@ pub struct CensusWriter {
     edges: DepthBinEdges,
     generic: BTreeMap<ReadGroupId, GenericEvidence>,
     /// Per read group, then per stratum. **Two levels rather than one key**, because the
-    /// walk asks twice for "every read group seen so far" and the outer map answers it.
+    /// walk asks twice for "every declared read group" and the outer map answers it.
+    ///
+    /// **Seeded with every declared group at construction**, as [`Self::read_groups`] is for the
+    /// generic half. Grown from the observations instead, the map was empty until some group's
+    /// read landed on a kept tract, and the reads at a tract that produced no observation were
+    /// dropped until then — so a stratum's reaching total depended on which tract the walk met
+    /// first.
     ssr: BTreeMap<ReadGroupId, BTreeMap<Stratum, SsrEvidence>>,
     /// Non-reference observations before they are sorted — the walk arrives in position
     /// order, so this is already sorted in practice and the sort at `finish` is a guard.
@@ -179,7 +185,10 @@ impl CensusWriter {
         let ssr_loci = ssr_loci.into_iter().map(|(region, _)| region).collect();
         Self {
             generic_loci: loci.generic().to_vec(),
-            ssr: BTreeMap::new(),
+            ssr: declared
+                .keys()
+                .map(|group| (*group, BTreeMap::new()))
+                .collect(),
             ssr_loci,
             ssr_stratum_of,
             ssr_index_in_stratum,
@@ -524,9 +533,9 @@ impl CensusWriter {
                 }
             }
         }
-        // Reads that reached the locus and produced no observation at all. **Every read group
-        // seen so far learns the walk reached this tract**, and the count itself is charged
-        // once — to the lowest-numbered group, since the reads cannot be attributed to one and
+        // Reads that reached the locus and produced no observation at all. **Every declared read
+        // group learns the walk reached this tract**, and the count itself is charged once — to
+        // the lowest-numbered declared group, since the reads cannot be attributed to one and
         // the fit adds every group's total into the stratum's anyway.
         if locus.reads_without_observation > 0 {
             for strata in self.ssr.values_mut() {
