@@ -88,7 +88,7 @@ fn two_heterozygotes_linked_by_two_fragments_share_a_phase_set() {
 /// same as above, and nothing is phased.
 #[test]
 fn a_record_below_gq_30_or_not_pass_is_never_linked() {
-    for (filter, quality) in [("PASS", "29"), ("lowDepth", "40")] {
+    for (filter, quality) in [("PASS", "29"), ("tooManyAlleles", "40")] {
         let (written, tally) = phased(vec![
             (
                 100,

@@ -111,7 +111,7 @@ fn run_stage_reading(threads: usize, lines_read_together: usize) -> StageRunAndP
             let line = line.replace("chr1", &format!("chr{}", contig + 1));
             let position = 1 + index as u64 * 500;
             let line = if index == 700 {
-                line.replace("PASS", "lowDepth")
+                line.replace("PASS", "tooManyAlleles")
             } else {
                 line
             };

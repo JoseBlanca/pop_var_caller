@@ -720,8 +720,6 @@ pub enum FilterVerdict {
     EmDidNotConverge,
     /// More candidate alleles segregate at the tract than the caller admits.
     TooManyAlleles,
-    /// Too little cohort depth to call the tract.
-    LowDepth,
 }
 
 impl FilterVerdict {
@@ -733,7 +731,6 @@ impl FilterVerdict {
             Self::Pass => "PASS",
             Self::EmDidNotConverge => "EMNoConv",
             Self::TooManyAlleles => "tooManyAlleles",
-            Self::LowDepth => "lowDepth",
         }
     }
 }

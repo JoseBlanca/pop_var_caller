@@ -603,7 +603,6 @@ const FILTER_DECLARATIONS: &[&str] = &[
     r#"##FILTER=<ID=PASS,Description="All filters passed">"#,
     r#"##FILTER=<ID=EMNoConv,Description="The calling loop did not converge within its pass cap">"#,
     r#"##FILTER=<ID=tooManyAlleles,Description="More candidate alleles segregate than the caller admits">"#,
-    r#"##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">"#,
 ];
 
 /// `GT`'s declaration as calling writes it: never phased.
@@ -1133,9 +1132,20 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
         for id in ["GT", "GQ", "DP", "AD", "REPCN"] {
             assert!(text.contains(&format!("##FORMAT=<ID={id},")), "FORMAT {id}");
         }
-        for id in ["PASS", "EMNoConv", "tooManyAlleles", "lowDepth"] {
+        for id in ["PASS", "EMNoConv", "tooManyAlleles"] {
             assert!(text.contains(&format!("##FILTER=<ID={id},")), "FILTER {id}");
         }
+        // **Only values this caller can write.** `lowDepth` was declared until 2026-11-28 and
+        // never written: a header describes the file it heads.
+        assert!(
+            !text.contains("lowDepth"),
+            "a FILTER no record can carry is declared"
+        );
+        assert_eq!(
+            text.matches("##FILTER=").count(),
+            3,
+            "one line per FilterVerdict"
+        );
     }
 
     #[test]
@@ -1152,7 +1162,6 @@ samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut
             FilterVerdict::Pass,
             FilterVerdict::EmDidNotConverge,
             FilterVerdict::TooManyAlleles,
-            FilterVerdict::LowDepth,
         ] {
             assert!(
                 text.contains(&format!("##FILTER=<ID={},", verdict.as_str())),

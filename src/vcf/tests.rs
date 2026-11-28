@@ -167,12 +167,12 @@ fn a_refused_tract_locus_is_expressible() {
         None,
         quality(0.0),
         None,
-        FilterVerdict::LowDepth,
+        FilterVerdict::TooManyAlleles,
         Some(TractAnnotation::new(motif(b"AT"))),
     );
 
     assert!(record.alternatives().is_empty());
-    assert_eq!(record.filter().as_str(), "lowDepth");
+    assert_eq!(record.filter().as_str(), "tooManyAlleles");
     assert_eq!(record.site_quality.get(), 0.0);
     // Two reads were seen and no allele explains them — the counts still say so.
     assert_eq!(
@@ -183,11 +183,10 @@ fn a_refused_tract_locus_is_expressible() {
 
 #[test]
 fn every_filter_value_has_its_written_spelling() {
-    // Four values in one namespace, spelled as the two production writers spell them.
+    // Three values in one namespace, spelled as the two production writers spell them.
     assert_eq!(FilterVerdict::Pass.as_str(), "PASS");
     assert_eq!(FilterVerdict::EmDidNotConverge.as_str(), "EMNoConv");
     assert_eq!(FilterVerdict::TooManyAlleles.as_str(), "tooManyAlleles");
-    assert_eq!(FilterVerdict::LowDepth.as_str(), "lowDepth");
 }
 
 /// A full-tract deletion away from the contig's start: padded from the left.

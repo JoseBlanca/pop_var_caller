@@ -798,11 +798,10 @@ pub fn evidence_for_output(
 /// # The tract verdict is a tract's, and one more ng never mints
 ///
 /// `tooManyAlleles` comes from repeat-tract selection
-/// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §6). **`lowDepth` is declared and never
-/// written**: production refuses a tract whose *cohort-summed* depth is under ten, and ng does
+/// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §6). **Production's `lowDepth` is not
+/// ported**: production refuses a tract whose *cohort-summed* depth is under ten, and ng does
 /// not port that gate — depth is asked once, upstream, per sample, by the merge's keep rule,
-/// and there is no depth verdict on this path (§6). The vocabulary stays in the header because
-/// a file written by an older caller can carry it.
+/// and there is no depth verdict on this path (§6). Its header line was removed on 2026-11-28.
 ///
 /// # A truncated SNP/indel locus is not filtered, and that is unchanged
 ///

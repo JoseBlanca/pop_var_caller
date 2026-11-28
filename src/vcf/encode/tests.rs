@@ -154,7 +154,7 @@ fn a_record_with_no_alternative_writes_a_missing_alt() {
         None,
         quality(0.0),
         None,
-        FilterVerdict::LowDepth,
+        FilterVerdict::TooManyAlleles,
         Some(TractAnnotation::new(
             Motif::new(b"AT").expect("a two-base motif"),
         )),
@@ -162,7 +162,7 @@ fn a_record_with_no_alternative_writes_a_missing_alt() {
 
     assert_eq!(
         fixed_columns(&record, &contigs()),
-        "chr1\t500\t.\tATATATATATAT\t.\t0.0\tlowDepth"
+        "chr1\t500\t.\tATATATATATAT\t.\t0.0\ttooManyAlleles"
     );
 }
 
@@ -631,7 +631,7 @@ fn a_record_with_no_alternative_omits_every_per_alternative_key() {
         None,
         quality(0.0),
         None,
-        FilterVerdict::LowDepth,
+        FilterVerdict::TooManyAlleles,
         Some(TractAnnotation::new(
             Motif::new(b"AT").expect("a two-base motif"),
         )),
@@ -1002,7 +1002,7 @@ fn a_no_call_at_a_tract_leaves_its_repeat_counts_missing_too() {
         None,
         quality(0.0),
         None,
-        FilterVerdict::LowDepth,
+        FilterVerdict::TooManyAlleles,
         Some(TractAnnotation::new(
             Motif::new(b"AT").expect("a two-base motif"),
         )),
@@ -1028,7 +1028,7 @@ fn the_no_call_spelling_follows_the_run_s_ploidy() {
         None,
         quality(0.0),
         None,
-        FilterVerdict::LowDepth,
+        FilterVerdict::TooManyAlleles,
         None,
     );
 
@@ -1402,7 +1402,7 @@ fn a_refused_tract_locus_line() {
         None,
         quality(0.0),
         None,
-        FilterVerdict::LowDepth,
+        FilterVerdict::TooManyAlleles,
         Some(TractAnnotation::new(
             Motif::new(b"AT").expect("a two-base motif"),
         )),
@@ -1410,7 +1410,7 @@ fn a_refused_tract_locus_line() {
 
     assert_eq!(
         record_line(&record, &contigs(), diploid()),
-        "chr1\t500\t.\tATATATATATAT\t.\t0.0\tlowDepth\t\
+        "chr1\t500\t.\tATATATATATAT\t.\t0.0\ttooManyAlleles\t\
          AN=0;DP=2;STR;RU=AT;PERIOD=2\t\
          GT:GQ:DP:AD:PL:GP:REPCN\t./.:.:2:0:.:.:.\t./.:.:0:0:.:.:."
     );
