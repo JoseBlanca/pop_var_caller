@@ -22,3 +22,4 @@
 - Broken rustdoc links in paralog/locus_score.rs:683, paralog/prior.rs:97; walker.rs import order fails rustfmt --check.
 - examples/dhat_ng_joint_fit.rs: 9 dead-code/unused-import warnings under --features bench-fixtures (found by X3).
 - ~40 reconciliation-table rows in doc/devel/ng spec/arch name functions/types no longer in the linked file (collect_windowed, RegionScanner, verdict_pre_decode, agreed_sample_name, Freshness, …); links fixed, symbols left as design history (found by the src/ng/ pass). **src/ng/ pass DONE** (cq-ngpaths).
+- B5 gap: a deletion shorter than 4,999 bases can still stop the run when it widens a record another read opened past the 5,000-base cap; a per-read filter cannot catch it, and the RecordTooWide message still claims an upstream filter should have removed the read (found by cq-b-reads).
