@@ -313,7 +313,14 @@ mod tests {
     /// SNP/indel fit's own numbers in `[snp_indel_fit]`: the file moves by `format_version` and the
     /// new table only — taking both out reproduces the old checksum, `b15b5e62860021c3d8e8471d1a225115`, exactly — and the
     /// VCF by its `##pvcParameters` line. Recorded on the macOS host (arm64).
-    const FITTED_PARAMETERS_MD5: &str = "973817a050c13e7071087a05e0ad117d";
+    /// **Re-recorded 2026-11-28** when the SNP/indel fit began maximising each homozygote excess
+    /// against the frequencies its genotype counts were gathered at, rather than the rule at the
+    /// shapes the same step had just moved (code-quality B2): the fit stops at another point within
+    /// its tolerance, and the second shape of the frequency density moves from 39.568 to 39.387,
+    /// the first from 1.3326 to 1.3258, the invariant share from 0.97094 to 0.97121. Both
+    /// shapes are marked not separately determined. It was
+    /// `973817a050c13e7071087a05e0ad117d`. Recorded on the macOS host (arm64).
+    const FITTED_PARAMETERS_MD5: &str = "bc971190b6a04d1fbb8aca218364c032";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -526,7 +533,11 @@ mod tests {
     /// **Re-recorded 2026-11-07** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was
     /// `8a037a8542205d42116a3ff52b92c5bc`. Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "f1ace6b25648ec2e1cb5aef52ebb1e8d";
+    ///
+    /// **Re-recorded 2026-11-28** with the homozygote-excess fix (code-quality B2): only the
+    /// `##pvcParameters` line moves, which names the parameters file's checksum. It was
+    /// `f1ace6b25648ec2e1cb5aef52ebb1e8d`. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "d7f57fe83f8789748a4b5cffb09c9279";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -684,7 +695,11 @@ mod tests {
     /// SNP/indel fit's own numbers in `[snp_indel_fit]`: the file moves by `format_version` and the
     /// new table only — taking both out reproduces the old checksum, `33367da030ee1715da78e807590990a0`, exactly — and the
     /// VCF by its `##pvcParameters` line. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "f84b1cc515d7734befab55cc9a13a192";
+    /// **Re-recorded 2026-11-28** with the homozygote-excess fix (code-quality B2), as
+    /// [`FITTED_PARAMETERS_MD5`] says: the density's second shape moves from 44.315 to 44.324, the
+    /// libraries' error multipliers in their sixth digit. It was
+    /// `f84b1cc515d7734befab55cc9a13a192`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "81f82740851e52c2ba37165184d0b76a";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -873,7 +888,11 @@ mod tests {
     /// **Re-recorded 2026-11-07** with the interrupted-tract count: only the `##pvcParameters`
     /// line moves, which names the parameters file's checksum. It was
     /// `55175fcd3d222db39b21ffeb9994ae1e`. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "240d77a0915e50c8ead10cae152e4da1";
+    ///
+    /// **Re-recorded 2026-11-28** with the homozygote-excess fix (code-quality B2): only the
+    /// `##pvcParameters` line moves. It was `240d77a0915e50c8ead10cae152e4da1`. Recorded on the
+    /// macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "bb6808092b9297bdc23ffed00cc0c5c6";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A

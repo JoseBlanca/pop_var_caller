@@ -15,9 +15,8 @@ use crate::types::InbreedingF;
 /// ladder.
 ///
 /// The quantity is each sample's **homozygote excess**: how much less heterozygous it is than the
-/// allele frequencies this same fit produced predict. **That is circular and the output says so**
-/// — `joint::census_moments` carries the warning — and it is the only fitted source there is since
-/// the runs-of-homozygosity estimator was removed
+/// allele frequencies this same fit produced predict. **That is circular**, and it is the only
+/// fitted source there is since the runs-of-homozygosity estimator was removed
 /// (`impl_plan/remove_histogram_route.md`).
 ///
 /// **Keyed by name, never by position**, because the run's sample order is the run's and a list
