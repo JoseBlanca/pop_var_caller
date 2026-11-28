@@ -2306,7 +2306,15 @@ impl Period {
             }
         }
         self.rounds_per_counting.push(rounds_here);
-        self.squarem = SquaremCycle::Idle;
+        // **A run of rounds that ran out on a jump returns what the jump started from.** The
+        // jumped numbers are judged only by the round after them, which will not run, and the
+        // curves and the last counts — what the standard errors are built from — describe the
+        // numbers the round reached before it jumped.
+        if let SquaremCycle::Jumped { fallback, .. } = std::mem::take(&mut self.squarem)
+            && self.last_change >= fit.tolerance
+        {
+            self.set_state(&fallback);
+        }
         if share_held {
             self.share_from_pairs = true;
         }
@@ -3139,7 +3147,10 @@ mod tests {
         period.set_state(&reached);
         period.squarem = SquaremCycle::OneRound { start, first };
         // The round before the jump settled every class.
-        period.class_change.iter_mut().for_each(|change| *change = 0.0);
+        period
+            .class_change
+            .iter_mut()
+            .for_each(|change| *change = 0.0);
         period.multiplier_change = 0.0;
 
         let jump = period.squarem_step(Vec::new(), -10.0);
@@ -3153,6 +3164,44 @@ mod tests {
             "every class counts again after a jump: {:?}",
             period.class_change
         );
+    }
+
+    /// **A fit whose last allowed round jumps returns the numbers that round reached, not the
+    /// jumped ones.** A jump is only judged by the round after it, so the numbers it sets have
+    /// been checked by no round; and the curves and the last counts, which the standard errors are
+    /// built from, describe the numbers the round reached before it jumped. With the jumps
+    /// starting after five rounds, the cycle is: round 6 takes one round, round 7 jumps — so a
+    /// limit of 7 rounds ends on a jump. Every class's slip rate must then be the one its slip
+    /// rate curve holds.
+    #[test]
+    fn a_fit_that_runs_out_of_rounds_on_a_jump_returns_what_its_curves_describe() {
+        let classes = [
+            a_drawn_class(1, 8, 40, 12, 8, 31),
+            a_drawn_class(1, 9, 40, 12, 8, 32),
+            a_drawn_class(1, 10, 40, 12, 8, 33),
+        ];
+        let classes: Vec<&StratumEvidence> = classes.iter().collect();
+        let mut fit = a_narrow_production_fit();
+        // Never settled, so only the limit stops it.
+        fit.tolerance = 0.0;
+        for max_rounds in [6, 7] {
+            fit.max_rounds = max_rounds;
+            let mut period = Period::new(&classes, &fit).expect("the classes have reads");
+            period.count(&classes, &[0.3; 12], &fit, false, &|_, _| {});
+            assert_eq!(period.rounds, max_rounds);
+            for (point, class) in period.class_at_point.iter().enumerate() {
+                if class.is_none() {
+                    continue;
+                }
+                let on_the_curve = logistic(period.level_curve.values[point]);
+                let reported = period.slippage[point].level;
+                assert!(
+                    (reported - on_the_curve).abs() < 1e-12,
+                    "a limit of {max_rounds} rounds: the fit reports a slip rate of {reported} \
+                     where its curve holds {on_the_curve}"
+                );
+            }
+        }
     }
 
     /// Binomial successes out of `trials` at each probability, with sampling noise from a fixed
