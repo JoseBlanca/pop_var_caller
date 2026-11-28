@@ -439,8 +439,8 @@ impl RepeatCatalogHeader {
     }
 
     /// How far outside a requested stretch a row can sit and still change the answer inside
-    /// it: the longer of the contig's longest tract and the reader's bundle cap, plus the
-    /// bundle radius the reader is asking with.
+    /// it: the longest of the contig's longest tract, the reader's satellite cap and its
+    /// bundle cap, plus the bundle radius the reader is asking with.
     ///
     /// **The longest tract** bounds a single row: a longer one does not exist in that
     /// contig. **The bundle cap** bounds a chain of short rows, which a single tract's length
@@ -454,13 +454,24 @@ impl RepeatCatalogHeader {
     /// 55-base bundle from a read over its first repeat and as a 181-base satellite from the
     /// whole contig.
     ///
-    /// **What it does not bound** is the extent of such a satellite: a chain reaching further
-    /// than this past the requested stretch comes back cut at the padded window. That was so
-    /// before the cap, for bundles and for coverage runs of abutting tracts alike.
+    /// **The satellite cap** does the same for a coverage run of abutting tracts, which is a
+    /// satellite once it is longer than the cap and can be longer than any tract in it. With
+    /// the cap in the reach, a run that is a satellite is seen longer than the cap, so it is a
+    /// satellite by the satellite cap itself; and a run up to the cap's length past the
+    /// requested stretch is seen whole. Measured before the cap was in the reach, at a
+    /// satellite cap of 400 and the bundle cap's 100: four abutting tracts of 120, 120, 120
+    /// and 60 bases came back from a read over the last one as a satellite starting 241 bases
+    /// later than the whole contig's. The kind was right only because the 181 bases the read
+    /// saw were a bundle over the bundle cap.
+    ///
+    /// **What it does not bound** is the extent of a satellite reaching further than this past
+    /// the requested stretch: it comes back cut at the padded window, for bundles and for
+    /// coverage runs alike.
     pub fn reach_into_window(
         &self,
         contig: ContigId,
         bundle_threshold: u64,
+        max_str_len: u64,
         max_str_bundle_len: u64,
     ) -> u64 {
         let longest = self
@@ -468,6 +479,7 @@ impl RepeatCatalogHeader {
             .get(contig.get() as usize)
             .copied()
             .unwrap_or(0)
+            .max(max_str_len)
             .max(max_str_bundle_len);
         // **Saturating, because both terms come from outside.** `longest_tract_bp` is read
         // from a file this build did not necessarily write, and `bundle_threshold` is an

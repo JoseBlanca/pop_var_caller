@@ -864,6 +864,74 @@ fn a_window_over_one_end_of_a_bundle_types_the_whole_chain() {
     );
 }
 
+/// **A read over one end of a run of abutting tracts sees the whole run, when the satellite
+/// cap is above the bundle cap** (`--max-str-len` above `--max-str-bundle-len`).
+///
+/// Abutting tracts merge into one run, and a run longer than the satellite cap is a satellite.
+/// The run is longer than any one of its tracts, so a read padded only by the longest tract and
+/// the bundle cap saw part of it. Here the run is four abutting tracts of 120, 120, 120 and 60
+/// bases, 420 from first to last, under a satellite cap of 400; the window sits inside the last
+/// tract. Before the satellite cap was in the read's reach, the padding was 120 + 15 bases and
+/// the read saw the last 181 bases of the run: still a satellite, because 181 bases of
+/// abutting tracts are a bundle over the bundle cap, but a satellite starting at base 441
+/// where the whole contig's starts at base 200.
+///
+/// The calling defaults set both caps to 100, so only a raised `--max-str-len` reaches this.
+#[test]
+fn a_window_over_one_end_of_an_abutting_run_sees_the_whole_run() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let run = format!(
+        "{}{}{}{}{}{}",
+        filler(200),
+        "GATA".repeat(30),
+        "TC".repeat(60),
+        "CAG".repeat(40),
+        "AAT".repeat(20),
+        filler(200),
+    );
+    let contigs = vec![("chr_abutting_run", run)];
+    let sides = both_sides(dir.path(), &contigs);
+    let criteria = StrRepeatCriteria {
+        max_str_len_bp: Bp(400),
+        ..StrRepeatCriteria::default()
+    };
+    assert!(criteria.max_str_len_bp > criteria.max_str_bundle_len_bp);
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)
+            .expect("opens");
+
+    let (name, seq) = &contigs[0];
+    let contig = ContigId(0);
+    let whole_contig = partition_resident(name, contig, seq.as_bytes(), &scan_config(&criteria));
+    let satellite = whole_contig
+        .iter()
+        .find(|r| matches!(r.kind, RegionKind::Satellite))
+        .unwrap_or_else(|| panic!("the 420-base run is a satellite: {whole_contig:#?}"));
+    assert!(
+        satellite.region.len() > 400,
+        "the fixture's run is over the satellite cap: {satellite:?}"
+    );
+
+    // Inside the last tract, which runs from base 561 to 620.
+    let window = [GenomeRegion {
+        contig,
+        start: Position(605),
+        end: Position(615),
+    }];
+    let from_file: Vec<TypedRegion> = catalog
+        .genome_segments(&criteria, ReadScope::Regions(&window))
+        .expect("servable")
+        .map(|r| r.expect("a region"))
+        .collect();
+    let [from_file_one] = from_file.as_slice() else {
+        panic!("the window lies inside one region: {from_file:#?}");
+    };
+    assert_eq!(
+        from_file_one, satellite,
+        "the window sees the whole satellite, as the whole contig does"
+    );
+}
+
 /// Sequence with no structure of its own, from a fixed seed — the same bases every run. Each
 /// base is drawn uniformly from `alphabet`, so a letter listed three times is drawn three times
 /// as often as one listed once.
