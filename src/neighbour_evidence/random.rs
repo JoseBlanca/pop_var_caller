@@ -27,6 +27,9 @@ pub enum StreamPurpose {
     /// The records of a sample whose reads are held out of the draw for the read check
     /// (`neighbour_evidence_reads_in_draw.md` §2.6).
     ReadCheck,
+    /// The definite alleles a sample's walk weighs its states by in a round, one a template a site
+    /// (`neighbour_evidence_phasing.md` §2.3).
+    DefiniteAlleles,
 }
 
 /// **A SplitMix64 stream** of uniforms in `[0, 1)`.
@@ -46,6 +49,7 @@ impl Uniforms {
             StreamPurpose::ExtraPaths => 3,
             StreamPurpose::Orientation => 4,
             StreamPurpose::ReadCheck => 5,
+            StreamPurpose::DefiniteAlleles => 6,
         };
         let mut state = SEED;
         for value in [purpose, window, sample as u64, round as u64] {

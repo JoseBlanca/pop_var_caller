@@ -68,6 +68,7 @@ fn walk_sites(owned: &[OwnedSite]) -> Vec<WalkSite<'_>> {
             allele_count: 2,
             likelihoods,
             template_shares: shares,
+            emission_shares: None,
         })
         .collect()
 }

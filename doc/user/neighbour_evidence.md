@@ -42,15 +42,15 @@ differ with the cohort:
 |---|---|---|
 | 400 samples from a coalescent simulation (msprime), 100 each at 30×, 10×, 5× and 2× | 2026-11-08 | SNP genotypes missed at 2×: 12,220 → 1,546; fewer at every depth below 30× ([Accuracy](accuracy.md#imputation-genotype-refinement-and-filling)) |
 | 40 samples from the same simulation, all at 2× | 2026-11-07 | genotypes right 29,381 → 31,378, but heterozygotes right 7,521 → 7,042 |
-| 50 samples at 3×, mosaics of 16 founder haplotypes | 2026-11-27 | wrong genotypes where samples had reads: 4,959 → 1,780 (64% fewer) |
-| 50 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-27 | the same: 5,031 → 4,149 (18% fewer) |
-| 10 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-27 | the same: 973 → 935 (4% fewer) |
+| 50 samples at 3×, mosaics of 16 founder haplotypes | 2026-11-28 | wrong genotypes where samples had reads: 4,959 → 1,814 (63% fewer) |
+| 50 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-28 | the same: 5,031 → 4,149 (18% fewer) |
+| 10 samples at 3×, mosaics of 64 founder haplotypes | 2026-11-28 | the same: 973 → 935 (4% fewer) |
 
 The cohorts differ in more than their size. The 400-sample cohort holds 100 samples at 30×,
 whose haplotypes are good templates; in the others every sample is shallow. And with 64
 founders and 10 samples, a sample's haplotype at a given place is often carried by no other
 sample, so there is little to copy. The code differs too: the first two rows were measured
-before a change on 2026-11-27 that stopped the refinement from making small cohorts at 3× worse
+before a change on 2026-11-28 that stopped the refinement from making small cohorts at 3× worse
 (with 10 samples from 64 founders, it had raised the wrong genotypes from 973 to 1,088), and
 they have not been run again. Cohorts of real outbred species, such as human, cattle or outbred
 crops, have not been measured at all. For those, an imputation tool built for outbred
