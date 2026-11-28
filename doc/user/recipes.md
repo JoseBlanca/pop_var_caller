@@ -88,7 +88,7 @@ pvc call-from-psps --reference genome.fa --psp psps/ \
 - **Estimate the parameters here too.** In the simulated population of the inbred recipe, the
   outbred group's estimate at 3× was 0.007, against a true 0.005: the fit does not invent
   inbreeding.
-- **Leave imputation off**, the default. On simulated outbred cohorts at 3× it removed 18% to 64%
+- **Leave imputation off**, the default. On simulated outbred cohorts at 3× it removed 18% to 63%
   of the wrong genotypes at 50 samples, but only 4% at 10 samples. Outbred species have not been
   measured. To impute, run a tool that
   phases, such as Beagle or GLIMPSE, on pvc's VCF.
