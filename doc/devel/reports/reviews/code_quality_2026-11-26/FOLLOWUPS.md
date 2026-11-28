@@ -23,3 +23,6 @@
 - examples/dhat_ng_joint_fit.rs: 9 dead-code/unused-import warnings under --features bench-fixtures (found by X3).
 - ~40 reconciliation-table rows in doc/devel/ng spec/arch name functions/types no longer in the linked file (collect_windowed, RegionScanner, verdict_pre_decode, agreed_sample_name, Freshness, …); links fixed, symbols left as design history (found by the src/ng/ pass). **src/ng/ pass DONE** (cq-ngpaths).
 - B5 gap: a deletion shorter than 4,999 bases can still stop the run when it widens a record another read opened past the 5,000-base cap; a per-read filter cannot catch it, and the RecordTooWide message still claims an upstream filter should have removed the read (found by cq-b-reads).
+- After B2 the ten-sample cohort in JUMP_SLACK's comment takes 37 passes with or without the slack, same end point: JUMP_SLACK can go (owner to confirm). The fit's basic alternation, from the deliberately wrong start, loses 16.7 log-likelihood units on its first pass (before and after B2), contradicting squarem_jump's assumption that a basic pass never lowers it (found by cq-b-fit).
+- B2 raised tomato16's SNP/indel fit passes from 121 to 137 over three starts (+13%); time estimate-parameters.
+- cli/cross_platform_digests.rs fixtures were re-recorded on macOS only after B2; check them on Linux.
