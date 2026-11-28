@@ -398,29 +398,6 @@ fn how_long(span: Duration) -> String {
     }
 }
 
-/// **A size in the largest binary unit that leaves it legible**, and named for the unit it really
-/// is.
-///
-/// **Why not megabytes throughout.** One decimal place of a mebibyte reads `0.0 MB` for everything
-/// under about 51 kB, so a spill holding forty thousand bytes and one holding nothing printed the
-/// same words — and the figure exists so an operator can size a filesystem. `MB` was also the
-/// wrong name for a count divided by 1024².
-fn how_big(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let size = bytes as f64;
-    if size >= GIB {
-        format!("{:.2} GiB", size / GIB)
-    } else if size >= MIB {
-        format!("{:.1} MiB", size / MIB)
-    } else if size >= KIB {
-        format!("{:.1} kiB", size / KIB)
-    } else {
-        format!("{bytes} bytes")
-    }
-}
-
 /// The lowest, median and highest of a run of values — how a cohort's fits are summarised when
 /// there are too many to name.
 struct Spread {
@@ -653,7 +630,7 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
     match *spill_bytes_on_disk {
         Some(bytes) => lines.push(format!(
             "  the parked records took {} on disk, and are gone",
-            how_big(bytes)
+            crate::progress_text::size_in_bytes(bytes)
         )),
         // **Said rather than left out.** The size is here so an operator can size a filesystem;
         // printing nothing would leave them to conclude the spill was empty.

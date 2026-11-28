@@ -107,8 +107,8 @@ fn memory_in_status(status: &str) -> String {
     match (field("VmRSS:"), field("VmHWM:")) {
         (Some(now), Some(most)) => format!(
             "; memory {}, at most {} so far",
-            gibibytes(now),
-            gibibytes(most)
+            size(now.saturating_mul(1024)),
+            size(most.saturating_mul(1024))
         ),
         _ => String::new(),
     }
@@ -124,11 +124,6 @@ pub(crate) fn note(line: impl std::fmt::Display) {
 /// already carries both, such as one repeat class's row counts after its motif length's line.
 pub(crate) fn detail(line: impl std::fmt::Display) {
     tracing::debug!("estimating: {line}");
-}
-
-/// Kibibytes as gibibytes to one decimal.
-pub(crate) fn gibibytes(kibibytes: u64) -> String {
-    format!("{:.1} GiB", kibibytes as f64 / (1024.0 * 1024.0))
 }
 
 #[cfg(test)]
@@ -162,7 +157,7 @@ mod tests {
     fn linux_lines_carry_the_memory() {
         let memory = memory();
         assert!(memory.starts_with("; memory "), "{memory}");
-        assert!(memory.contains(" GiB so far"), "{memory}");
+        assert!(memory.contains("iB so far"), "{memory}");
     }
 
     /// A stage that has only just begun prints no "where it is" line: the minute runs from its

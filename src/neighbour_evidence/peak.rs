@@ -174,13 +174,13 @@ impl PeakEstimate {
         peak
     }
 
-    /// **The parts, for a person**: `70.0 GB for a window, 9.5 GB for 48 threads' working arrays
+    /// **The parts, for a person**: `65.2 GiB for a window, 8.9 GiB for 48 threads' working arrays
     /// (189,230 walked records), 16% for the allocator`.
     #[must_use]
     pub fn parts_in_words(&self) -> String {
         format!(
             "{} for a window as --refine-window-bytes counts it ({} allowed), {} for {} \
-             thread{}' working arrays ({} walked records at {:.2} kB each a thread), and {:.0}% on \
+             thread{}' working arrays ({} walked records at {} bytes each a thread), and {:.0}% on \
              top for the memory allocator",
             gb(self.counted_bytes),
             gb(self.budget_bytes),
@@ -188,7 +188,7 @@ impl PeakEstimate {
             self.walking_threads,
             if self.walking_threads == 1 { "" } else { "s" },
             with_thousands(self.walked_records),
-            WALK_BYTES_A_RECORD_A_THREAD as f64 / 1_000.0,
+            with_thousands(WALK_BYTES_A_RECORD_A_THREAD),
             ALLOCATOR_SLACK * 100.0
         )
     }
@@ -357,8 +357,8 @@ fn share(part: u64, whole: u64) -> f64 {
     part as f64 / whole.max(1) as f64
 }
 
-/// **The largest budget whose estimate is within the warning share**, rounded down to a whole GB
-/// (to a tenth of one below 1 GB), found by halving: the estimate does not fall as the budget
+/// **The largest budget whose estimate is within the warning share**, rounded down to a whole
+/// gibibyte (to 100 MiB below one gibibyte), found by halving: the estimate does not fall as the budget
 /// grows. `None` where even a budget of nothing is over it.
 fn largest_budget_that_fits(
     budget: u64,
@@ -378,11 +378,7 @@ fn largest_budget_that_fits(
             high = middle;
         }
     }
-    let step = if low >= 1_000_000_000 {
-        1_000_000_000
-    } else {
-        100_000_000
-    };
+    let step = if low >= 1 << 30 { 1 << 30 } else { 100 << 20 };
     let rounded = low / step * step;
     (rounded > 0).then_some(rounded)
 }
@@ -405,10 +401,9 @@ fn threads_that_fit(estimate: PeakEstimate, limit: u64) -> Option<u64> {
         .find(|&threads| fits(threads))
 }
 
-/// Bytes as a person reads them here: `92.2 GB`.
-#[allow(clippy::cast_precision_loss)]
+/// Bytes as a person reads them here, in the binary units every log line uses: `85.9 GiB`.
 fn gb(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / 1e9)
+    crate::progress_text::size_in_bytes(bytes)
 }
 
 /// **The line a run logs for an estimate within [`WARN_SHARE`]**, or whose limit could not be

@@ -111,9 +111,9 @@ fn above_eighty_five_percent_the_run_is_warned() {
     ) else {
         panic!("105.4 GB is over 85% of 118 GB");
     };
-    // 76.1 GB is the largest budget within 100.3 GB, rounded down; at 80 GB, (100.3 / 1.16 − 80) GB
-    // over 1.05 kB × 216,262 walked records is 28.5 threads.
-    assert_eq!(near.budget_that_fits, Some(76_000_000_000));
+    // 76.1 GB (70.9 GiB) is the largest budget within 100.3 GB, rounded down to a whole gibibyte;
+    // at 80 GB, (100.3 / 1.16 − 80) GB over 1.05 kB × 216,262 walked records is 28.5 threads.
+    assert_eq!(near.budget_that_fits, Some(70 << 30));
     assert_eq!(near.threads_that_fit, Some(28));
 }
 
@@ -153,8 +153,8 @@ fn fewer_threads_are_suggested_where_they_would_fit() {
     assert_eq!(near.threads_that_fit, Some(61));
     let message = near.warning(Some(Path::new("/scratch/pvc_tmp_ab12")));
     for expected in [
-        "refinement memory, window from contig 0 position 1: about 46.7 GB expected",
-        "117% of the 40.0 GB",
+        "refinement memory, window from contig 0 position 1: about 43.5 GiB expected",
+        "117% of the 37.3 GiB",
         "Within 85% would be --refine-window-bytes",
         "or 61 threads or fewer (--threads)",
         "`pvc resume-calling --scratch-dir /scratch/pvc_tmp_ab12 --refine-window-bytes ",
@@ -166,16 +166,16 @@ fn fewer_threads_are_suggested_where_they_would_fit() {
     // The whole line, as the implementation report quotes it.
     assert_eq!(
         message,
-        "refinement memory, window from contig 0 position 1: about 46.7 GB expected at its peak, \
-         117% of the 40.0 GB this run may use (the memory.max of the control group pvc runs in), \
-         above the 85% at which pvc warns; the run goes on. The estimate is 10.0 GB for a window \
-         as --refine-window-bytes counts it (20.0 GB allowed), 30.2 GB for 96 threads' working \
-         arrays (300,000 walked records at 1.05 kB each a thread), and 16% on top for the memory \
-         allocator. Within 85% would be --refine-window-bytes 14000000000 (14.0 GB) or less, or \
-         61 threads or fewer (--threads). If the system kills the run for memory after calling \
-         has ended, its scratch directory keeps the calls, and `pvc resume-calling --scratch-dir \
-         /scratch/pvc_tmp_ab12 --refine-window-bytes 14000000000` finishes it. Later windows \
-         warn again only where their estimate is higher still."
+        "refinement memory, window from contig 0 position 1: about 43.5 GiB expected at its \
+         peak, 117% of the 37.3 GiB this run may use (the memory.max of the control group pvc \
+         runs in), above the 85% at which pvc warns; the run goes on. The estimate is 9.3 GiB for \
+         a window as --refine-window-bytes counts it (18.6 GiB allowed), 28.2 GiB for 96 threads' \
+         working arrays (300,000 walked records at 1,050 bytes each a thread), and 16% on top for \
+         the memory allocator. Within 85% would be --refine-window-bytes 13958643712 (13.0 GiB) \
+         or less, or 61 threads or fewer (--threads). If the system kills the run for memory \
+         after calling has ended, its scratch directory keeps the calls, and `pvc resume-calling \
+         --scratch-dir /scratch/pvc_tmp_ab12 --refine-window-bytes 13958643712` finishes it. \
+         Later windows warn again only where their estimate is higher still."
     );
 }
 
@@ -195,17 +195,17 @@ fn the_warning_before_calling_names_the_numbers_and_what_to_change() {
     };
     assert_eq!(
         near.warning(Some(Path::new("/scratch/pvc_tmp_ab12"))),
-        "refinement memory, before calling: about 131.8 GB expected at its peak, 112% of the \
-         118.0 GB this run may use (the memory.max of the control group pvc runs in), above the \
+        "refinement memory, before calling: about 122.8 GiB expected at its peak, 112% of the \
+         109.9 GiB this run may use (the memory.max of the control group pvc runs in), above the \
          85% at which pvc warns; the run goes on. This is an upper bound: no window is planned \
          yet, so each is taken to be as large as --refine-window-bytes and the longest contig \
-         allow; each window is estimated again once it is planned. The estimate is 100.0 GB for a \
-         window as --refine-window-bytes counts it (100.0 GB allowed), 13.6 GB for 48 threads' \
-         working arrays (270,328 walked records at 1.05 kB each a thread), and 16% on top for the \
-         memory allocator. Within 85% would be --refine-window-bytes 76000000000 (76.0 GB) or \
-         less. If the system kills the run for memory after calling has ended, its scratch \
+         allow; each window is estimated again once it is planned. The estimate is 93.1 GiB for a \
+         window as --refine-window-bytes counts it (93.1 GiB allowed), 12.7 GiB for 48 threads' \
+         working arrays (270,328 walked records at 1,050 bytes each a thread), and 16% on top for \
+         the memory allocator. Within 85% would be --refine-window-bytes 75161927680 (70.0 GiB) \
+         or less. If the system kills the run for memory after calling has ended, its scratch \
          directory keeps the calls, and `pvc resume-calling --scratch-dir /scratch/pvc_tmp_ab12 \
-         --refine-window-bytes 76000000000` finishes it."
+         --refine-window-bytes 75161927680` finishes it."
     );
     // With the hidden-duplication filter off there is nothing to resume from.
     assert!(
