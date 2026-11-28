@@ -521,7 +521,9 @@ fn a_phased_windows_posteriors_are_the_same_bits_everywhere() {
 /// The hash [`a_phased_windows_posteriors_are_the_same_bits_everywhere`] expects. **Re-recorded
 /// 2026-11-18** on Linux x86-64 when the posteriors became `f32`, summed over the rounds in `f32`
 /// (`refine_memory_2026-11-18.md`); the phase's bits did not move. It was `0x517a_406f_f350_f366`.
-const RECORDED_POSTERIOR_BITS: u64 = 0x3e83_c1c0_449f_3a86;
+/// **Re-recorded 2026-11-27** when the walk stopped weighing its states by alleles drawn from the
+/// templates (`refine_drawn_alleles_2026-11-27.md`). It was `0x3e83_c1c0_449f_3a86`.
+const RECORDED_POSTERIOR_BITS: u64 = 0xf6fc_fb58_fde0_efb4;
 
 /// **The fit runs in round 1 only** (phasing spec §2.4; code review 2026-11-02, a fit in every
 /// round went unnoticed): two rounds and five leave every sample's fit in the same state, since
@@ -837,8 +839,10 @@ fn a_phased_windows_phase_is_the_same_bits_everywhere() {
 }
 
 /// The hash and the count [`a_phased_windows_phase_is_the_same_bits_everywhere`] expects.
-const RECORDED_PHASE_BITS: u64 = 0x877b_d070_d59b_9d79;
-const RECORDED_PHASED_COLUMNS: usize = 2_834;
+/// **Re-recorded 2026-11-27** when the walk stopped weighing its states by alleles drawn from the
+/// templates (`refine_drawn_alleles_2026-11-27.md`). They were `0x877b_d070_d59b_9d79` and 2,834.
+const RECORDED_PHASE_BITS: u64 = 0xbd48_9385_1932_57b9;
+const RECORDED_PHASED_COLUMNS: usize = 2_894;
 
 /// **More rounds than the link test's masks hold are refused when the phasing is set up**, not in
 /// the middle of a window: 9 rounds would draw 8 × 9 = 72 paths, more than 64; 8 rounds draw 63.
