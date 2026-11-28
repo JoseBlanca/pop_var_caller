@@ -57,14 +57,13 @@ jobs:
         # in `score_one_sample` to `debug_assert` and running under `--release` fails six
         # tests, one per check. Under the debug run it fails none.
         #
-        # SCOPED TO `calling::` ON PURPOSE — the filter selects exactly the `calling`
-        # module's tests, 1,167 of them. Crate-wide, `cargo test --release --lib` has 3
-        # failures (measured 2026-09-13, after the older caller was deleted and ng's modules
-        # moved to the crate root): `alignment::left_align_repeated` and
-        # `alignment::left_align_structured`'s `an_offset_past_the_reference_panics`, and
-        # `genetics::tests::lgamma_panics_on_non_positive_in_debug` — `#[should_panic]`
-        # tests on checks that are debug-only by design and lack
-        # `#[cfg(debug_assertions)]`. Gating those three would let this step run crate-wide.
+        # SCOPED TO `calling::` — the filter selects exactly the `calling` module's tests,
+        # about 1,330 of them. A crate-wide `cargo test --release --lib --tests` also passes
+        # (5,374 tests, measured 2026-11-27): the `#[should_panic]` tests on debug-only
+        # checks are now `#[cfg(debug_assertions)]`, and the module that held one of them
+        # was deleted. The scope is kept for cost, not correctness: a release test build is
+        # fat-LTO and not incremental (about 6 minutes on 4 cores, see `[profile.test]` in
+        # Cargo.toml). Widen it if release-held assertions outside `calling` need covering.
         run: 'cargo test --release --lib calling:: --all-features'
 
       - name: Doc build (deny warnings)

@@ -162,6 +162,16 @@ host. Linux-only profilers (perf/flamegraph/samply) are best used on
 the Linux dev box; for macOS-side profiling use native tools (Xcode
 Instruments, `samply` running directly on the host binary).
 
+## Running the tests
+
+Run tests **without `--release`**: `cargo test --lib --tests` for the whole suite,
+`cargo test --lib <module path>` for one module. `cargo test --release` builds with the
+shipping profile (fat LTO, one codegen unit, not incremental), so every edit costs about
+5 minutes of rebuild, and the tests run no faster: 55 s for the whole suite either way.
+`[profile.test]` is already optimised (`opt-level = 2`) with debug assertions on; its
+comment in `Cargo.toml` has the measurements. Use `--release` only to check an `assert!`
+that must hold in the shipping build, scoped to the module (`cargo test --release --lib calling::`).
+
 ## Working autonomously
 
 The combination of the container sandbox plus the host read-only
