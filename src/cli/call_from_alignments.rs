@@ -230,19 +230,21 @@ pub struct CallFromAlignmentsArgs {
     /// A repeat longer than this, in bases, is a satellite and is not called.
     ///
     /// With 150 bp reads, a read spans a repeat plus a flank on each side only up to about
-    /// 90 bp, so longer repeats cannot be genotyped from reads that cross them.
+    /// 90 bp, so longer repeats cannot be genotyped from reads that cross them. At most 65,535.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_STR_LEN,
+        value_parser = crate::cli::parsers::parse_max_str_len,
         help_heading = "What counts as a repeat"
     )]
     pub max_str_len: u64,
 
     /// An STR bundle — repeats within 15 bases of each other, called as one locus — longer
-    /// than this, in bases, is a satellite and is not called. 0 calls no bundle.
+    /// than this, in bases, is a satellite and is not called. 0 calls no bundle. At most 65,535.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
+        value_parser = crate::cli::parsers::parse_max_str_len,
         help_heading = "What counts as a repeat"
     )]
     pub max_str_bundle_len: u64,

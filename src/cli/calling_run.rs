@@ -403,8 +403,13 @@ pub struct AdvancedCallingFlags {
     /// The widest locus assembled, in reference bases — and so the longest deletion called.
     ///
     /// The run's log says how many loci were too wide and how long they were. Long reads want a
-    /// larger value than short ones.
-    #[arg(long, default_value_t = crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
+    /// larger value than short ones. At most 65,535.
+    #[arg(
+        long,
+        default_value_t = crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        value_parser = crate::cli::parsers::parse_max_locus_span,
+        help_heading = "Advanced"
+    )]
     pub max_locus_span: u32,
 
     /// The false-discovery rate allowed among the calls the hidden-dup filter removes. 0 turns

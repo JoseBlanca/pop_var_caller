@@ -76,6 +76,44 @@ pub fn parse_min_purity(s: &str) -> Result<f32, String> {
     Ok(value)
 }
 
+/// The longest locus, in reference bases, this caller can describe: 65,535.
+///
+/// **Where a locus's positions are counted in 16 bits** — which stretch of the locus a read
+/// witnessed, and the locus's own length — a longer one cannot be told apart from one of
+/// 65,535. So the three options that bound a locus's length (`--max-locus-span`,
+/// `--max-str-len`, `--max-str-bundle-len`) refuse anything longer, rather than let a run
+/// shorten a long tract's depth at its far end or stop on a long generic locus.
+pub const LONGEST_LOCUS_BP: u64 = u16::MAX as u64;
+
+/// Parse a length in reference bases that bounds a locus: a whole number no larger than
+/// [`LONGEST_LOCUS_BP`]. Clap names the option in front of the message.
+fn parse_locus_length_bp(s: &str) -> Result<u64, String> {
+    let value: u64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{s}' is not a whole number of bases"))?;
+    if value > LONGEST_LOCUS_BP {
+        return Err(format!(
+            "{value} bases is longer than the longest locus this caller can describe, \
+             65,535 bases"
+        ));
+    }
+    Ok(value)
+}
+
+/// Parse `--max-str-len` or `--max-str-bundle-len`: see [`LONGEST_LOCUS_BP`].
+pub fn parse_max_str_len(s: &str) -> Result<u64, String> {
+    parse_locus_length_bp(s)
+}
+
+/// Parse `--max-locus-span`: see [`LONGEST_LOCUS_BP`]. Zero is refused later, with its own
+/// message, where the run's settings are checked.
+pub fn parse_max_locus_span(s: &str) -> Result<u32, String> {
+    parse_locus_length_bp(s).map(|value| {
+        u32::try_from(value).expect("a length no longer than 65,535 bases fits in u32")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +226,22 @@ mod tests {
     fn a_trailing_comma_is_rejected() {
         let err = parse_min_copies("6,4,4,3,3,3,").expect_err("a trailing comma must fail");
         assert!(err.contains("not a non-negative integer"), "got {err}");
+    }
+
+    /// **The three locus-length options take 65,535 and refuse 65,536**, and the refusal says
+    /// what the limit is.
+    #[test]
+    fn a_locus_length_above_65535_is_refused() {
+        assert_eq!(parse_max_str_len("65535"), Ok(65_535));
+        assert_eq!(parse_max_str_len("0"), Ok(0));
+        assert_eq!(parse_max_locus_span("65535"), Ok(65_535));
+        for refused in ["65536", "70000", "18446744073709551615"] {
+            let err = parse_max_str_len(refused).expect_err("past the longest locus");
+            assert!(err.contains("65,535 bases"), "got {err}");
+            let err = parse_max_locus_span(refused).expect_err("past the longest locus");
+            assert!(err.contains("65,535 bases"), "got {err}");
+        }
+        let err = parse_max_str_len("lots").expect_err("not a number");
+        assert!(err.contains("not a whole number"), "got {err}");
     }
 }
