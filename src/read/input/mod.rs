@@ -1886,7 +1886,9 @@ mod tests {
                 + counts.qc_fail
                 + counts.too_short
                 + counts.high_mismatch_fraction
-                + counts.bad_cigar;
+                + counts.bad_cigar
+                + counts.no_base_qualities
+                + counts.deletion_too_long;
             (names, counts.other_sample, dropped)
         };
 
@@ -2127,7 +2129,9 @@ mod tests {
                         + tally.qc_fail
                         + tally.too_short
                         + tally.high_mismatch_fraction
-                        + tally.bad_cigar,
+                        + tally.bad_cigar
+                        + tally.no_base_qualities
+                        + tally.deletion_too_long,
                     0,
                     "a foreign read is never a quality drop"
                 );

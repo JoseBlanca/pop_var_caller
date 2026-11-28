@@ -2078,7 +2078,9 @@ mod tests {
                 + counts.qc_fail
                 + counts.too_short
                 + counts.high_mismatch_fraction
-                + counts.bad_cigar,
+                + counts.bad_cigar
+                + counts.no_base_qualities
+                + counts.deletion_too_long,
             0,
             "the out-of-region read is charged to no drop reason at all"
         );

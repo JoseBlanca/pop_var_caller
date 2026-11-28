@@ -16,13 +16,14 @@ use crate::read::ReadFilterConfig;
 /// caller replacing an earlier recording can clear the whole family first — the key set
 /// shrinks when the mismatch filter turns off, and a stale floor beside an `"off"` is
 /// exactly the misreading the conditional key exists to prevent.
-pub const READ_FILTER_PROVENANCE_KEYS: [&str; 6] = [
+pub const READ_FILTER_PROVENANCE_KEYS: [&str; 7] = [
     "read-filter-min-mapq",
     "read-filter-min-read-length-bp",
     "read-filter-drop-qc-fail",
     "read-filter-drop-duplicates",
     "read-filter-max-read-mismatch-fraction",
     "read-filter-mismatch-bq-floor",
+    "read-filter-max-deletion-len-bp",
 ];
 
 /// **The prefix every one of those keys begins with**, so a reader can pick the whole family
@@ -52,8 +53,15 @@ const OFF: &str = "off";
 /// One key per **configurable** filter, each readable by eye; an off filter is the
 /// string `"off"`. The one absent-when-meaningless key is the mismatch base-quality
 /// floor, which exists only while the mismatch-fraction filter is on. The
-/// unconditional drops — secondary, supplementary and unmapped records, and a read
-/// whose CIGAR will not decode — are not settings, so no key records them.
+/// unconditional drops — secondary, supplementary and unmapped records, a read
+/// whose CIGAR will not decode, and a read with no base qualities — are not settings,
+/// so no key records them.
+///
+/// **The longest deletion a kept read may carry is recorded although no option sets
+/// it** (`read-filter-max-deletion-len-bp`, added 2026-11-28). It follows the walk's
+/// record cap, and a build that changes the cap changes which reads a walk kept. A psp
+/// written before the key existed has no such key, and a cohort mixing the two gets a
+/// report line naming the files that do not record it.
 pub fn read_filter_parameters(filters: &ReadFilterConfig) -> Vec<(String, ParameterValue)> {
     // Exhaustive, so a filter added to the policy fails to compile here rather than going
     // unrecorded — which would make two differently-filtered walks digest identically in the
@@ -65,6 +73,7 @@ pub fn read_filter_parameters(filters: &ReadFilterConfig) -> Vec<(String, Parame
         drop_duplicate,
         max_read_mismatch_fraction,
         mismatch_bq_floor,
+        max_deletion_len,
     } = *filters;
 
     let mut entries = vec![
@@ -114,6 +123,14 @@ pub fn read_filter_parameters(filters: &ReadFilterConfig) -> Vec<(String, Parame
             ParameterValue::String(OFF.to_string()),
         )),
     }
+    entries.push((
+        "read-filter-max-deletion-len-bp".to_string(),
+        // The same fallback as the read length's: a string of digits past TOML's integer.
+        match i64::try_from(max_deletion_len.get()) {
+            Ok(length) => ParameterValue::Integer(length),
+            Err(_) => ParameterValue::String(max_deletion_len.get().to_string()),
+        },
+    ));
     entries
 }
 
@@ -138,6 +155,7 @@ mod tests {
                 MismatchFraction::try_new(0.25).expect("a quarter is in [0, 1]"),
             ),
             mismatch_bq_floor: BaseQual(13),
+            max_deletion_len: Bp(4_321),
         };
         let entries: std::collections::BTreeMap<String, ParameterValue> =
             read_filter_parameters(&policy).into_iter().collect();
@@ -166,7 +184,11 @@ mod tests {
             entries.get("read-filter-mismatch-bq-floor"),
             Some(&ParameterValue::Integer(13))
         );
-        assert_eq!(entries.len(), 6, "six keys, nothing extra");
+        assert_eq!(
+            entries.get("read-filter-max-deletion-len-bp"),
+            Some(&ParameterValue::Integer(4_321))
+        );
+        assert_eq!(entries.len(), 7, "seven keys, nothing extra");
         for key in entries.keys() {
             assert!(
                 READ_FILTER_PROVENANCE_KEYS.contains(&key.as_str()),
@@ -222,7 +244,7 @@ mod tests {
             !entries.contains_key("read-filter-mismatch-bq-floor"),
             "a floor beside an off mismatch filter would invite misreading"
         );
-        assert_eq!(entries.len(), 5, "five keys while the floor is meaningless");
+        assert_eq!(entries.len(), 6, "six keys while the floor is meaningless");
     }
 
     /// A length past TOML's signed integer is recorded as its own digits in a string —

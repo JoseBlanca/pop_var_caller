@@ -504,8 +504,8 @@ fn a_sample_with_no_reads_is_named_and_the_run_does_not_treat_it_as_a_failure() 
 /// **The read filters say why they dropped reads, per read group, and only the reasons that
 /// fired.**
 ///
-/// A read filter has nine reasons and a run trips two or three; printing the other six as zeros
-/// is eight numbers a reader scans past to find the one that matters.
+/// A read filter has eleven reasons and a run trips two or three; printing the other eight as
+/// zeros is eight numbers a reader scans past to find the one that matters.
 #[test]
 fn the_report_names_only_the_filter_reasons_that_fired() {
     let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
@@ -545,6 +545,48 @@ fn the_report_names_only_the_filter_reasons_that_fired() {
     assert!(
         !text.contains("supplementary") && !text.contains("unmapped"),
         "the reasons that did not fire are not printed: {text}",
+    );
+}
+
+/// **The two reasons added on 2026-11-28 are named and counted in the drop total** — reads
+/// that used to stop the walk: no base qualities, and a deletion too long to walk.
+#[test]
+fn the_report_names_reads_dropped_for_no_qualities_or_a_long_deletion() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let filters = ReadFilterCounts {
+        kept: 900,
+        no_base_qualities: 3,
+        deletion_too_long: 2,
+        ..ReadFilterCounts::default()
+    };
+    let written = a_run(
+        3,
+        0,
+        Vec::new(),
+        Vec::new(),
+        vec![walked(
+            "zeta",
+            ground_mostly_called(),
+            vec![(Some(ReadGroupId(0)), filters)],
+        )],
+    );
+
+    let text = rendered(
+        &written,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        1_000,
+    );
+
+    assert!(
+        text.contains("zeta: 900 reads kept, 5 dropped by the read filters"),
+        "both reasons are drops: {text}",
+    );
+    assert!(
+        text.contains(
+            "library rg-zeta of zeta: 3 with no base qualities, 2 with a deletion too long to walk"
+        ),
+        "{text}",
     );
 }
 

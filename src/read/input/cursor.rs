@@ -2365,6 +2365,8 @@ mod tests {
             too_short: 1,
             high_mismatch_fraction: 1,
             bad_cigar: 1,
+            no_base_qualities: 0,
+            deletion_too_long: 0,
             other_sample: 0,
         };
         (records, expected)
@@ -3317,6 +3319,8 @@ mod tests {
                 too_short: 0,
                 high_mismatch_fraction: 0,
                 bad_cigar: 0,
+                no_base_qualities: 0,
+                deletion_too_long: 0,
                 other_sample: 0,
             }
         );

@@ -258,6 +258,11 @@ order-independent.
 | 7 | **too short** | decoded read length `< min_read_length` — very short reads rarely contribute a reliable alignment | `Some(30)` | `DEFAULT_MIN_READ_LENGTH` | `min_read_length` |
 | 8 | **high mismatch fraction** ⚠ | the read's fraction of quality-clearing mismatches against the reference exceeds the threshold — a defence against contamination, adaptor runthrough, and chimeric tails the aligner placed anyway. **Reference-dependent — pending the reference-accessor spec** | `Some(0.10)` | `DEFAULT_MAX_READ_MISMATCH_FRACTION` | `max_read_mismatch_fraction` |
 | 9 | **bad CIGAR** | the alignment is ill-formed: an adjacent insertion/deletion pair, or a deletion at a read boundary — signals the aligner was genuinely confused | on | — | none (always applied) |
+| 10 | **no base qualities** | the read's base qualities are missing (SAM `QUAL *` beside real bases) or differ in number from its bases. The generic-path walk refuses such a read with an error that stopped the run (added 2026-11-28, owner decision B5) | on (unconditional) | — | none |
+| 11 | **deletion too long** | one of the read's deletions is longer than `max_deletion_len` bases. The walk opens one record for a deletion, covering it and the base before it, and refuses a record wider than its 5,000-base cap with an error that stopped the run; 4,999 is the longest that fits, held equal to the cap minus one at compile time (added 2026-11-28, owner decision B5) | `4_999` | `DEFAULT_MAX_DELETION_LEN` | none (a fixed setting, recorded in the psp header as `read-filter-max-deletion-len-bp`) |
+
+**#10 and #11 run after #7 and around #9**: the post-decode order is #7, #10, #9, #11, #8,
+all four reference-free checks before the one that fetches the reference.
 
 **The decode boundary sits between #6 and #7.** Filters #1–#6 read only the record's flag
 and MAPQ — both available *before* the sequence, qualities, and CIGAR are decoded; #7–#9
