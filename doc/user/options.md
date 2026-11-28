@@ -116,5 +116,5 @@ are off by default, and they cannot be given together. A psp records the choice,
   and `pvc dev estimate-contamination` estimates contamination on its own (see
   [Estimated parameters](parameters.md#contamination-on-its-own)). Both are tools for developing
   pvc.
-- The environment variables `NG_SLIPPAGE_REFIT_ROUNDS`, `NG_SLIPPAGE_REFIT_FREE` and
-  `NG_TRACT_DISCOVERY` change how STRs are called. They are for development. Do not set them.
+- The environment variable `NG_TRACT_DISCOVERY` changes how STRs are called. It is for
+  development. Do not set it.

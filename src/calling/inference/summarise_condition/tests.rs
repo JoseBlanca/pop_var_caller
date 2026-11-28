@@ -45,7 +45,6 @@ mod driver;
 mod final_pass;
 mod frequency_loop;
 mod repeat_tract;
-mod slippage_refit;
 
 /// The repeat unit every repeat tract in this file is built on — **a dinucleotide**, so that
 /// a whole repeat and a single base are different steps and the part-repeat half of the

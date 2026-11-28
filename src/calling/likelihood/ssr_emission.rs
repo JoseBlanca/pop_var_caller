@@ -114,7 +114,7 @@ pub struct BundleCandidate<'a> {
 ///
 /// **The tier-two seam** (spec §6.1): every number here may be re-estimated between the
 /// caller's iterations, and the emission never asks where any of them came from. That is what
-/// makes the EM loop's re-fitting a change of nobody's code but its own.
+/// would make a per-locus re-fit a change of nobody's code but the loop's own.
 #[derive(Debug, Clone, Copy)]
 pub struct SsrScoringContext<'a> {
     /// The repeating unit, whose length is the period the stutter distribution is indexed by.

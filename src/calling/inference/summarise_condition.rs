@@ -30,7 +30,6 @@ use crate::calling::genotype_prior::{
     BundlePrior, CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow,
     SampleAlleleCopies, fill_sample_concentration, fill_ssr_bundle_seed, fill_ssr_seed,
 };
-use crate::calling::likelihood::copy_shares;
 use crate::calling::likelihood::generic::{
     assemble_genotype_log_likelihood_row, fill_generic_emissions,
 };
@@ -52,7 +51,6 @@ use crate::calling::{
 use crate::float;
 use crate::locus_generation::SsrBundleDetail;
 use crate::parameter_estimation::Provenance;
-use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::repeat_strata::RepeatCount;
 use crate::types::{AlleleId, Genotype, GenotypeRows, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
@@ -60,7 +58,6 @@ use std::iter::repeat_n;
 use super::repeat_tract_parameters::{
     TractPrior, TractScoringFits, bundle_candidates, tract_candidates,
 };
-use super::slippage_refit::{PooledSlipCounts, RefitEmissionCache, largest_movement, refit_cells};
 use super::{LocusGenotyper, RunnableCallingLoopConfig};
 
 /// Which prior one pass scores against — **a value, not a code path**.
@@ -92,13 +89,6 @@ use super::{LocusGenotyper, RunnableCallingLoopConfig};
 /// reason, and so does production's own E-step
 /// (`d9e7b076:src/var_calling/posterior_engine.rs`, `EmStepPhase::FirstIteration`).
 ///
-/// **It runs at the start of every outer round, not only the very first.** For the first round
-/// the reason is that the number does not exist yet; for the later ones it is different — a
-/// round begins with new slippage numbers, and the expected copies it would inherit were
-/// converged under the *old* ones, so carrying them in seeds the new round at the old round's
-/// answer. That is the same self-reinforcing start, with the previous round standing in for the
-/// seed (spec §3).
-///
 /// **Inherited from GATK and from production, and never measured here — soft.** The argument is
 /// arithmetic about the prior's size, not a count of calls that moved. It should bite hardest
 /// where the read likelihood is weakest against a 20-to-30 Phred prior, which is the tomato
@@ -107,7 +97,7 @@ use super::{LocusGenotyper, RunnableCallingLoopConfig};
 #[derive(Clone, Copy)]
 pub(crate) enum PassPrior<'a> {
     /// **No prior at all** — every candidate genotype equally likely, and no concentration
-    /// built, so nothing reads the cohort's expected copies. The first pass of every round.
+    /// built, so nothing reads the cohort's expected copies. The first pass at every locus.
     Flat,
     /// The seed plus what the **other** samples showed here — every pass but the first.
     LeaveOneOut {
@@ -625,8 +615,7 @@ pub(crate) fn sum_cohort_expected_copies(buffers: CohortSummingBuffers<'_>) {
 /// successors rather than for it: the prior-free initialisation's M-step writes finite copies
 /// before the first swap, so by the time this is first called the previous row is a real
 /// estimate. What the spelling protects is any later caller that compares before a pass has
-/// advanced — the final pass, and the slippage round, which restarts the initialisation and
-/// could reorder the swap.
+/// advanced, such as the final pass.
 ///
 /// # Why `.abs()`, which two alleles cannot show
 ///
@@ -809,8 +798,7 @@ pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
 
     // The initialisation: one E-step on the reads alone, then the M-step, which together
     // mint the expected copies the first seeded pass's prior is built from. It is **not**
-    // counted as a pass — `passes` counts the passes that had a prior — and it runs at the
-    // start of every outer round, not only the very first (§3).
+    // counted as a pass — `passes` counts the passes that had a prior (§3).
     for row in 0..row_count {
         score_one_sample(
             scratch.sample_scoring_buffers_mut(row),
@@ -1631,8 +1619,8 @@ fn generic_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> &'a [GenericLocus
 /// **Everything a repeat tract carries beside its samples' reads** — handed out together
 /// because the two per-locus facts below are read within a line or two of the observations.
 ///
-/// *(Two callers: the tract's table fill and the slippage round's read attribution. The
-/// per-locus prior seed destructures the evidence itself.)*
+/// *(One caller, the tract's table fill. The per-locus prior seed destructures the evidence
+/// itself.)*
 struct TractEvidence<'a> {
     /// One entry per sample of the run, in run order. **A tract rules no sample out**
     /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), so every sample has one.
@@ -1648,7 +1636,7 @@ struct TractEvidence<'a> {
 /// must read the same one: the run reports which rung of the tract ladder answered, so a second
 /// lookup keyed differently would make the run's own record false. [`str_prior_of`] is the one
 /// lookup; [`SummariseConditionLoop::call_locus`] makes it before the seed and hands the same
-/// value to every build of the tract's likelihood table, slippage rounds included.
+/// value to the build of the tract's likelihood table.
 enum StrLocusPrior<'a> {
     /// An STR segment: its stratum's allele length variation, keyed by the reference tract's
     /// repeat count.
@@ -1782,11 +1770,9 @@ fn tract_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> TractEvidence<'a> {
 /// and on a contamination list that disagrees with the fit the parameters were gathered under —
 /// all three by
 /// [`repeat_tract_parameters`](super::repeat_tract_parameters).
-// **Test-only since the slippage round was built**: the driver now calls the `_for_round`
-// spelling below, and this frozen wrapper is what the module's parity and cost fixtures
-// exercise the two fills through. The `expect` rather than an `allow`, so that if the last
-// test caller goes this line turns into a compile error instead of shipping dead code.
-#[cfg_attr(not(test), expect(dead_code))]
+///
+/// `str_prior` is the locus's [`str_prior_of`], looked up once by the caller: `None` at an
+/// SNP/indel site, and at a repeat locus the same value the prior's seed was built from.
 fn fill_what_no_pass_recomputes<Model: SsrEmissionModel>(
     emission: &Model,
     evidence: &LocusEvidence<'_>,
@@ -1794,76 +1780,20 @@ fn fill_what_no_pass_recomputes<Model: SsrEmissionModel>(
     candidates: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     scratch: &mut CallingScratch<Model::Scratch>,
-) {
-    fill_what_no_pass_recomputes_for_round(
-        emission,
-        evidence,
-        parameters,
-        candidates,
-        genotypes,
-        scratch,
-        str_prior_of(evidence, parameters).as_ref(),
-        SlippageRoundBuild {
-            adopted_slippage: None,
-            emissions: None,
-        },
-    );
-}
-
-/// [`fill_what_no_pass_recomputes`], with the slippage round's two channels — what the loop's
-/// driver calls, since only it holds a round; everything else fills the frozen build above.
-///
-/// `str_prior` is the locus's [`str_prior_of`], looked up once by the caller: `None` at an
-/// SNP/indel site, and at a repeat locus the one value every round's table is gathered under.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the frozen build's six inputs plus the two things a repeat locus brings from \
-              outside one build — its prior, looked up once per locus, and the slippage round's \
-              channels"
-)]
-fn fill_what_no_pass_recomputes_for_round<Model: SsrEmissionModel>(
-    emission: &Model,
-    evidence: &LocusEvidence<'_>,
-    parameters: &FrozenParameters<'_>,
-    candidates: &CandidateAlleles,
-    genotypes: &GenotypeTableView<'_>,
-    scratch: &mut CallingScratch<Model::Scratch>,
     str_prior: Option<&StrLocusPrior<'_>>,
-    refit: SlippageRoundBuild<'_>,
 ) {
     match evidence {
         LocusEvidence::Generic { .. } => {
-            // The slippage round is the repeat-tract path's: an ordinary site has no slippage
-            // numbers to re-fit, so its rounds are ignored structurally (spec §5.1's closing
-            // paragraph) and its build takes nothing from them.
             fill_generic_locus_emissions(evidence, parameters, candidates, genotypes, scratch);
         }
         LocusEvidence::Ssr { .. } => {
             let prior =
                 str_prior.expect("a repeat locus's caller looked up its prior with `str_prior_of`");
             fill_tract_likelihood_table(
-                emission, evidence, parameters, candidates, genotypes, scratch, prior, refit,
+                emission, evidence, parameters, candidates, genotypes, scratch, prior,
             );
         }
     }
-}
-
-/// **What one build of the tract's likelihood table takes from the slippage round, and hands
-/// back to it** — nothing at the shipped configuration, where the round is frozen.
-///
-/// Two channels, each `None` on the frozen path:
-///
-/// - `adopted_slippage` — the round's re-fitted numbers, one entry per `(read group,
-///   candidate)` cell of the gather, applied over the frozen gather so this round's table is
-///   scored under them (spec §5.1's *rebuild the table*). `None` until a round has adopted
-///   anything, which is also every build the frozen configuration ever makes.
-/// - `emissions` — a cache the build copies each row's per-`(observation, candidate)`
-///   emissions into as it fills them, so the round's attribution can read the same numbers
-///   the genotype likelihoods were assembled from without recomputing an emission. `None`
-///   wherever no round will run, and the build then copies nothing.
-struct SlippageRoundBuild<'a> {
-    adopted_slippage: Option<&'a [Option<Slippage>]>,
-    emissions: Option<&'a mut RefitEmissionCache>,
 }
 
 /// The SNP/indel half of [`fill_what_no_pass_recomputes`]: the emissions, once per locus.
@@ -1915,10 +1845,7 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
 ///
 /// They are this tract's: which stutter model and which substitution rate a `(read group,
 /// candidate)` cell takes depends on the candidate's own repeat count, so the table is gathered
-/// per locus (`doc/devel/ng/spec/read_likelihoods.md` §4.4). It is gathered **inside** the
-/// slippage round rather than before it, because that round exists to re-fit exactly these
-/// numbers from the locus's own reads — a round that changed them and did not re-read them
-/// would score the tract under the numbers it had just replaced.
+/// per locus (`doc/devel/ng/spec/read_likelihoods.md` §4.4).
 ///
 /// # What it allocates, and it is the repeat path's own cost
 ///
@@ -1948,7 +1875,7 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
 /// this is a caller bug.
 #[allow(
     clippy::too_many_arguments,
-    reason = "the same inputs as `fill_what_no_pass_recomputes_for_round`, which passes them on"
+    reason = "the same inputs as `fill_what_no_pass_recomputes`, which passes them on"
 )]
 fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     emission: &Model,
@@ -1958,7 +1885,6 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     genotypes: &GenotypeTableView<'_>,
     scratch: &mut CallingScratch<Model::Scratch>,
     prior: &StrLocusPrior<'_>,
-    mut refit: SlippageRoundBuild<'_>,
 ) {
     let tract = tract_evidence_of(evidence);
     let scored_candidates = match (tract.shape, prior) {
@@ -1997,14 +1923,6 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
              bundle's"
         ),
     };
-    // **The slippage round's numbers go over the frozen gather, not instead of it.** The
-    // gather is re-run each round because everything *else* a cell carries is frozen and this
-    // is its one builder; what a round adopted then replaces the stutter models it re-fitted,
-    // so this build scores the tract under the round's numbers (spec §5.1). `None` on every
-    // frozen build.
-    if let Some(adopted) = refit.adopted_slippage {
-        scratch.tract_fits_mut().apply_refitted_slippage(adopted);
-    }
 
     // **Charged before the buffers are taken, not as each row is scored.** The walk below runs
     // inside one borrow of this scratch, where no method of it can be called — so what a row
@@ -2045,9 +1963,6 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
         contamination_of_each_read_group,
     );
     let genotype_count = buffers.genotype_count;
-    if let Some(cache) = refit.emissions.as_mut() {
-        cache.begin_locus(candidates.len());
-    }
     for row in 0..row_count {
         let run_sample = buffers.run_sample_of_each_row[row];
         let scored = row * genotype_count..(row + 1) * genotype_count;
@@ -2059,152 +1974,7 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
             &mut buffers.genotype_likelihoods[scored],
             &mut *buffers.row_scratch,
         );
-        // **Copied while this row's emissions are still in the one reused row scratch** — the
-        // next row's fill overwrites them, and the slippage round's attribution reads the
-        // cached emission per `(read, allele)` (spec §5.1). One `memcpy` per row, and only
-        // where a round asked for it; the frozen path takes this branch never.
-        if let Some(cache) = refit.emissions.as_mut() {
-            cache.push_row(buffers.row_scratch.emissions());
-        }
     }
-}
-
-/// **Attribute every read of one repeat tract to the candidate alleles, under the genotype
-/// posteriors, and pool the slips** — the E-side of the slippage round's re-fit
-/// (`doc/devel/ng/spec/calling_em_loop.md` §5.1).
-///
-/// A read's weight is split across the genotypes by each genotype's posterior, and within a
-/// genotype across its alleles by the responsibility `copy share × cached emission`,
-/// normalised over the genotype's own alleles. **Posteriors, not called genotypes** — the
-/// spec's explicit ruling, which is HipSTR's choice and not production's hard assignment
-/// (`d9e7b076:src/ssr/cohort/em.rs:1192`): a call would push a thinly covered tract's numbers
-/// toward whichever genotype won by a whisker.
-///
-/// The posteriors are minted here by scoring each row once against the converged frequencies
-/// — the loop leaves only the last row's posterior behind, so a caller wanting every row's
-/// must score them again (the same walk the final pass makes). **The scoring's one side
-/// effect is undone before the next row**: `score_one_sample` replaces the row's expected
-/// copies with the post-convergence posterior's, and the final pass will make the same walk
-/// again later, so this one stashes each row's copies and puts them back — a round that
-/// merely *measured* must leave the loop's state as it found it, or a re-fit whose numbers
-/// never moved would still change the locus's calls.
-///
-/// # What is in the pool and what is out
-///
-/// - **A read that ran out inside the tract is out.** It witnessed a lower bound, not a
-///   length, so there is no length difference to bin. Production's pool has no such reads
-///   either — its per-sample length counts are over spanning reads.
-/// - **A `(read, allele)` pair whose length difference is not a whole number of motif units
-///   is out** — the part-repeat shares are placeholders the re-fit must not fit (spec §5.1,
-///   *"hold the count at three"*). Out of numerator and denominator both: its weight joins
-///   neither the slipped count nor the expected count.
-/// - **A pair whose cell the fit has no frozen numbers for is out**, for the same shape of
-///   reason: there is no frozen level to expect slips from and nothing to pull a re-fit
-///   toward, and [`TractScoringFits::apply_refitted_slippage`] leaves such a cell's shipped
-///   constants standing.
-/// - **A read a genotype explains not at all** — every one of its alleles' emissions zero —
-///   contributes nothing under that genotype: what explains it is the junk or contaminant
-///   term, which attributes to no allele.
-///
-/// # Determinism
-///
-/// Rows in row order, observations in the merge's order within each, genotypes and alleles
-/// in table order — every `f64` sum below runs in one fixed order, so the pooled counts are
-/// identical at any worker count (spec §8).
-fn attribute_reads_under_the_posteriors<SsrEmissionScratch>(
-    scratch: &mut CallingScratch<SsrEmissionScratch>,
-    genotypes: &GenotypeTableView<'_>,
-    prior_model: &dyn GenotypePriorModel,
-    tract: &TractEvidence<'_>,
-    candidates: &CandidateAlleles,
-    emissions: &RefitEmissionCache,
-) -> PooledSlipCounts {
-    let SsrLocusShape::Segment { detail, .. } = tract.shape else {
-        unreachable!("the slippage round runs at STR segments only")
-    };
-    let period = i64::from(detail.motif.ssr_period().get());
-    let candidate_count = candidates.len();
-    let candidate_byte_lengths: Vec<i64> = candidates.iter().map(|b| b.len() as i64).collect();
-    // Copied out because the walk below borrows the whole scratch mutably to score each row,
-    // and the frozen cells live on that same scratch. One small vector per round, on the
-    // round's own path only.
-    let frozen_of_each_cell: Vec<Option<Slippage>> =
-        scratch.tract_fits().frozen_slippage_cells().to_vec();
-    let copy_share = copy_shares(genotypes.ploidy());
-    let counts_of_each_genotype = genotypes.genotype_allele_counts();
-    let allele_count = genotypes.allele_count();
-
-    let mut pooled = PooledSlipCounts::default();
-    let mut stashed_copies: Vec<f64> = Vec::new();
-    for row in 0..scratch.row_count() {
-        let inbreeding = scratch.inbreeding_coefficient_by_row()[row];
-        stashed_copies.clear();
-        stashed_copies.extend_from_slice(scratch.sample_expected_copies(row));
-        score_one_sample(
-            scratch.sample_scoring_buffers_mut(row),
-            genotypes,
-            PassPrior::LeaveOneOut {
-                model: prior_model,
-                inbreeding,
-            },
-        );
-        let run_sample = scratch.run_sample_of_each_row()[row];
-        let sample = &tract.per_sample[run_sample];
-        let posterior = scratch.posterior_row();
-        for (position, observation) in sample.complete_observations() {
-            let reads = f64::from(observation.num_obs);
-            let read_group = observation.read_group.0 as usize;
-            for (genotype, &genotype_posterior) in posterior.iter().enumerate() {
-                if genotype_posterior <= 0.0 {
-                    continue;
-                }
-                let carried_copies =
-                    &counts_of_each_genotype[genotype * allele_count..][..allele_count];
-                // The genotype's own normaliser: what its alleles explain of this read,
-                // copy-weighted — the same product the likelihood row sums
-                // (`likelihood::ssr`'s row), read back from the build's cache.
-                let mut explained = 0.0;
-                for (candidate, &copies) in carried_copies.iter().enumerate() {
-                    if copies == 0 {
-                        continue;
-                    }
-                    explained += copy_share[copies as usize]
-                        * emissions.emission_at(row, position, candidate);
-                }
-                if explained <= 0.0 {
-                    continue;
-                }
-                for (candidate, &copies) in carried_copies.iter().enumerate() {
-                    if copies == 0 {
-                        continue;
-                    }
-                    let responsibility = copy_share[copies as usize]
-                        * emissions.emission_at(row, position, candidate)
-                        / explained;
-                    let weight = reads * genotype_posterior * responsibility;
-                    if weight <= 0.0 {
-                        continue;
-                    }
-                    let cell = read_group * candidate_count + candidate;
-                    let Some(frozen) = frozen_of_each_cell[cell] else {
-                        continue;
-                    };
-                    let bp_diff =
-                        observation.bases.len() as i64 - candidate_byte_lengths[candidate];
-                    if bp_diff % period != 0 {
-                        continue;
-                    }
-                    pooled.add(bp_diff / period, weight, frozen.level);
-                }
-            }
-        }
-        // Put the row's expected copies back — see the function note for why a measuring
-        // round must not move the loop's state.
-        scratch
-            .sample_expected_copies_mut(row)
-            .copy_from_slice(&stashed_copies);
-    }
-    pooled
 }
 
 /// Where `q(o)` — the contaminating population's frequency for the allele an observation shows —
@@ -2416,34 +2186,30 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
 /// **Summarise the cohort, then condition each sample on it** — arm A of the step-9 seam, and
 /// the whole of `doc/devel/ng/spec/calling_em_loop.md` §2's pseudocode in one function.
 ///
-/// Two loops, one inside the other, and **ng ships with the outer one switched off**:
+/// One loop: the **frequency loop** ([`run_frequency_loop`]), over a likelihood table built
+/// once per locus.
 ///
-/// 1. the **slippage round**, which re-fits this locus's slippage numbers from its own
-///    reads and rebuilds the table under them (§5.1) — built, and `max_rounds = 0` by
-///    default, which is the frozen setting: the round's body runs once and does not repeat;
-/// 2. the **frequency loop**, the inner one, and the only one that repeats at the shipped
-///    configuration ([`run_frequency_loop`]).
+/// **Spec §2's pseudocode has two more loops around it, and neither is here.**
 ///
-/// **Spec §2's pseudocode has a third, outermost loop — the discovery round (§4.1) — and it
-/// is not here.** Building it showed that discovery's eligible set reads no posterior, so
-/// discovery runs as a **pre-pass inside candidate selection** before this arm is called
-/// (`DiscoveryMode::BeforeTheLoop`;
-/// `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5), and the loops here
-/// run over a table already widened.
+/// - **The discovery round (§4.1).** Building it showed that discovery's eligible set reads no
+///   posterior, so discovery runs as a **pre-pass inside candidate selection** before this arm
+///   is called (`DiscoveryMode::BeforeTheLoop`;
+///   `doc/devel/ng/research/tract_genotype_accuracy_2026-09-03.md` §6.5), and the loop here
+///   runs over a table already widened.
+/// - **The slippage round (§5.1)**, which re-fitted a repeat tract's slippage numbers from its
+///   own reads and rebuilt the table under them. It was built, measured and deleted (owner,
+///   2026-11-28). Measured on the GIAB HG002 tandem-repeat benchmark at 30×, one sample, over
+///   fitted per-stratum slippage: at the designed pull-backs (50 pseudo-counts on the direction
+///   split and fall-off, 20 slipped reads on the level, at most 3 rounds) it changed the
+///   genotype of **7 tracts in 6,993, net +1 correct** (4 spurious heterozygotes fixed, 2 real
+///   ones collapsed, 1 call silenced). With no pull-back (HipSTR's setting) collapsed
+///   heterozygotes rose from 28 to 72 and period-2+ accuracy fell 0.56 points
+///   (`doc/devel/ng/research/tract_accuracy_program_report.md`, lever L3). It was never measured
+///   at low depth or on a cohort; doing so means rebuilding it (the last commit that holds it
+///   is `a9690a90`).
 ///
-/// **The slippage round reads `config.slippage_refit`**, and at zero rounds — the shipped
-/// default — its body builds one table, runs the frequency loop, and breaks, with no table
-/// rebuilt and no read attributed. Computing the locus's emissions, assembling the likelihood
-/// table from them and running the frequency loop are all inside that body; what a round adds
-/// is a reason to go round again, not the work.
-///
-/// **On the SNP/indel path the slippage round is ignored structurally rather than
-/// half-honoured** (spec §5.1's closing paragraph): there are no slippage numbers to re-fit. A
-/// run that switched the re-fit on therefore re-fits its tracts and leaves its ordinary sites
-/// untouched, with no per-locus setting anywhere.
-///
-/// **At the defaults the locus's emissions are therefore computed exactly once**, before the
-/// frequency loop, whatever the pass count — which is what makes the expensive half of the
+/// **The locus's emissions are computed exactly once**, before the frequency loop, whatever
+/// the pass count — which is what makes the expensive half of the
 /// likelihood's cost independent of it (§2, §8), and is what
 /// [`EmissionCost`](crate::calling::EmissionCost) records. **The genotype-likelihood table
 /// assembled from them is written once too where nothing is contaminated**, because with no
@@ -2655,145 +2421,58 @@ where
             ),
         };
 
-        // **Whether this locus runs the slippage round at all** (spec §5.1). Frozen —
-        // `max_rounds` 0, the shipped configuration — is this code at zero rounds: the test
-        // below is the only thing that executes for it, no table is rebuilt and no read is
-        // attributed. An ordinary site ignores the setting structurally, whatever a run asked
-        // for: it has no slippage numbers to re-fit (§5.1's closing paragraph).
-        let refit_config = &config.slippage_refit;
-        // **An STR bundle runs no round**: its cells carry no frozen slippage to re-fit
-        // (`TractScoringFits::gather_for_bundle`).
-        let refit_may_run = !refit_config.is_frozen()
-            && matches!(
-                evidence,
-                LocusEvidence::Ssr {
-                    shape: SsrLocusShape::Segment { .. },
-                    ..
-                }
-            );
-        // The round's working memory, allocated only where a round may run: the emissions the
-        // build caches for the attribution, the numbers the last round adopted, and a buffer
-        // for the next re-fit. The frozen path allocates none of it — the three empty
-        // constructors below hold no heap until something pushes into them.
-        let mut cached_emissions = refit_may_run.then(RefitEmissionCache::default);
-        let mut adopted_cells: Vec<Option<Slippage>> = Vec::new();
-        let mut refitted_cells: Vec<Option<Slippage>> = Vec::new();
-        let mut rounds_adopted: u32 = 0;
-
-        // ── the slippage round (spec §5.1), `max_rounds` 0 by default ──
-        let outcome = loop {
-            // **The expensive half, once per round**: the emissions read no allele
-            // frequency, so nothing the frequency loop does can move them — only a
-            // slippage round that adopted new numbers can, by coming back around here.
-            fill_what_no_pass_recomputes_for_round(
-                &self.emission,
-                evidence,
-                parameters,
-                &candidates,
-                &genotypes,
-                scratch,
-                str_prior.as_ref(),
-                SlippageRoundBuild {
-                    adopted_slippage: (rounds_adopted > 0).then_some(adopted_cells.as_slice()),
-                    emissions: cached_emissions.as_mut(),
-                },
-            );
-            // **And the cheap half, once here and then once per pass where something is
-            // contaminated.** This first one is what the prior-free initialisation pass
-            // reads, and there is no estimate of the frequencies for it to score against —
-            // no pass has run — so it scores the reads alone, which is that pass's whole
-            // job (§3).
-            let reassembly =
-                table_moves_with_the_loop.then(|| TableReassembly::of(evidence, parameters));
-            assemble_genotype_likelihood_table(
-                evidence,
-                parameters,
-                &genotypes,
-                if contaminated {
-                    ContaminantFrequencies::TheReadsAlone
-                } else {
-                    ContaminantFrequencies::NoneFitted
-                },
-                scratch,
-            );
-            let outcome = run_frequency_loop(
-                scratch,
-                &genotypes,
-                &self.prior,
-                config,
-                reassembly.as_ref(),
-            );
-            // **One more assembly against the frequencies the loop settled on**, so that
-            // the final pass scores every sample against the same estimate the convergence
-            // test just accepted rather than against the one the last pass started from.
-            // Where nothing is contaminated the table reads no frequency and there is
-            // nothing to assemble again.
-            //
-            // **What it costs is worth naming**: the genotypes and the site quality then
-            // come from a table one assembly *newer* than the one the convergence test
-            // looked at. At a locus that settled, the two differ by less than the
-            // convergence threshold by construction; at one that hit the pass cap, the
-            // difference is whatever the last pass moved — and such a locus is emitted
-            // flagged, which is what that flag is for (§6).
-            if let Some(reassembly) = reassembly.as_ref() {
-                reassembly.assemble(
-                    &genotypes,
-                    ContaminantFrequencies::TheLoopsOwnEstimate,
-                    scratch,
-                );
-            }
-            // ── the round's own body: attribute, re-fit, and either stop or go round ──
-            //
-            // The frozen arm and every ordinary site break here having built one table,
-            // which is the whole of the frozen behaviour.
-            if !refit_may_run {
-                break outcome;
-            }
-            // The cap counts **adopted** rounds — each one a table rebuild and a rerun of
-            // the frequency loop — mirroring production's `for _ in 0..refit_max_rounds`
-            // (`d9e7b076:src/ssr/cohort/em.rs:572`): at the cap, the numbers the last round
-            // adopted stand and no further attribution runs.
-            if rounds_adopted >= refit_config.max_rounds {
-                break outcome;
-            }
-            let tract = tract_evidence_of(evidence);
-            let pooled = attribute_reads_under_the_posteriors(
-                scratch,
-                &genotypes,
-                &self.prior,
-                &tract,
-                &candidates,
-                cached_emissions
-                    .as_ref()
-                    .expect("a round that may run cached its build's emissions"),
-            );
-            refit_cells(
-                scratch.tract_fits().frozen_slippage_cells(),
-                &pooled,
-                refit_config,
-                &mut refitted_cells,
-            );
-            // **Test before adopt, and a converging round's numbers are discarded** —
-            // production's shape exactly (`em.rs:576-580`): the round that moves less
-            // than the threshold keeps the numbers the table was already built under,
-            // so the emitted calls were scored under the numbers the test accepted.
-            let standing: &[Option<Slippage>] = if rounds_adopted == 0 {
-                scratch.tract_fits().frozen_slippage_cells()
+        // **The expensive half, once per locus**: the emissions read no allele frequency, so
+        // nothing the frequency loop does can move them.
+        fill_what_no_pass_recomputes(
+            &self.emission,
+            evidence,
+            parameters,
+            &candidates,
+            &genotypes,
+            scratch,
+            str_prior.as_ref(),
+        );
+        // **And the cheap half, once here and then once per pass where something is
+        // contaminated.** This first one is what the prior-free initialisation pass reads, and
+        // there is no estimate of the frequencies for it to score against — no pass has run —
+        // so it scores the reads alone, which is that pass's whole job (§3).
+        let reassembly =
+            table_moves_with_the_loop.then(|| TableReassembly::of(evidence, parameters));
+        assemble_genotype_likelihood_table(
+            evidence,
+            parameters,
+            &genotypes,
+            if contaminated {
+                ContaminantFrequencies::TheReadsAlone
             } else {
-                &adopted_cells
-            };
-            if largest_movement(standing, &refitted_cells)
-                < refit_config.round_convergence_threshold
-            {
-                break outcome;
-            }
-            std::mem::swap(&mut adopted_cells, &mut refitted_cells);
-            rounds_adopted += 1;
-            // And round again: rebuild the table under the adopted numbers and rerun
-            // the frequency loop to convergence — the nested shape spec §5.1 decides.
-        };
-        // The probe for the round's stopping rule — nothing on the scoring path reads it.
-        scratch.record_slippage_refit_rounds(rounds_adopted);
+                ContaminantFrequencies::NoneFitted
+            },
+            scratch,
+        );
+        let outcome = run_frequency_loop(
+            scratch,
+            &genotypes,
+            &self.prior,
+            config,
+            reassembly.as_ref(),
+        );
+        // **One more assembly against the frequencies the loop settled on**, so that the final
+        // pass scores every sample against the same estimate the convergence test just accepted
+        // rather than against the one the last pass started from. Where nothing is
+        // contaminated the table reads no frequency and there is nothing to assemble again.
+        //
+        // **What it costs is worth naming**: the genotypes and the site quality then come from
+        // a table one assembly *newer* than the one the convergence test looked at. At a locus
+        // that settled, the two differ by less than the convergence threshold by construction;
+        // at one that hit the pass cap, the difference is whatever the last pass moved — and
+        // such a locus is emitted flagged, which is what that flag is for (§6).
+        if let Some(reassembly) = reassembly.as_ref() {
+            reassembly.assemble(
+                &genotypes,
+                ContaminantFrequencies::TheLoopsOwnEstimate,
+                scratch,
+            );
+        }
 
         // **Read before the final pass rather than inside its argument list**, because at a
         // tract it reads the scratch's own parameter table and the pass takes that scratch

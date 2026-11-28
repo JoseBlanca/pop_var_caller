@@ -110,7 +110,7 @@
 //! | tier | which numbers | how they arrive |
 //! |---|---|---|
 //! | **frozen for the whole run** | the per-read-group error rate and its calibration scale, the STR substitution rate, the contamination **fraction** | fields of the run-level views — [`ReadGroupCalibration`], [`ContaminationView`] — which nothing downstream may write |
-//! | **re-estimable per locus, off by default** | the slippage level, the direction split, the fall-off | per call, inside the STR scoring context, so the caller's loop can re-fit them with no change here. This is the one constraint spec §6.1 makes binding |
+//! | **read per call** | the slippage level, the direction split, the fall-off | per call, inside the STR scoring context, so a caller could re-estimate them per locus with no change here — the constraint spec §6.1 makes binding. The caller's own per-locus re-fit was measured and deleted (2026-11-28); nothing re-estimates them today |
 //! | **re-estimated every iteration** | the per-locus allele frequencies | the prior reads them — and so does one term here: the contaminating population's frequency for the allele an observation shows, which moves with the loop (spec §3.6, corrected 2026-08-24) |
 //!
 //! [`ContaminationMixture`] is where the first and third tiers meet: it holds the frozen
@@ -2027,7 +2027,6 @@ pub struct SsrRowScratch<ModelScratch> {
     emissions: Vec<f64>,
     /// The same cache for reads sequenced on the reverse strand, where the misread rate after a
     /// long run makes them differ (`str_context_error.md`); equal to `emissions` everywhere else.
-    /// Read by the row only, never by the slippage re-fit, which takes `emissions` for every read.
     reverse_emissions: Vec<f64>,
     candidates: usize,
     model: ModelScratch,
@@ -2121,14 +2120,6 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
     /// The whole cache, for a filler that walks it in order rather than by index.
     pub fn emissions_mut(&mut self) -> &mut [f64] {
         &mut self.emissions
-    }
-
-    /// The whole cache to read — what the slippage re-fit copies out per row, because this
-    /// one buffer is reused across rows and only the last row's emissions survive a table
-    /// build. Meaningful between a row's fill and the next row's
-    /// [`prepare_emissions`](Self::prepare_emissions).
-    pub fn emissions(&self) -> &[f64] {
-        &self.emissions
     }
 
     /// The emission model's own scratch — its placement buffer and its alignment matrix.

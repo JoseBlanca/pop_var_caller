@@ -267,37 +267,13 @@ pub enum CallingRunError {
 /// which is why it is a flag here rather than a number read out of a parameters file.
 pub const DEFAULT_PLOIDY: u8 = 2;
 
-/// **The tract-accuracy program's measurement switch for the per-locus slippage re-fit**
-/// (lever L3, `doc/devel/ng/research/tract_accuracy_program_report.md`): how many re-fit
-/// rounds a repeat tract may run, as an environment variable.
-///
-/// Absent or `0` is the frozen shipped default — no rounds, the loop untouched. A positive
-/// whole number runs that many rounds at the configuration's default pull-backs
-/// (`SlippageRefitConfig`: 50 pseudo-counts on the direction split and fall-off, 20 slipped
-/// reads on the level); anything else is refused before a read is decoded, because a
-/// measurement switch that fell back silently would report the frozen loop as the re-fitted
-/// arm.
-///
-/// **An environment variable by design, not an oversight**: there is no parameters-file key
-/// for this yet, deliberately — the arm is enabled per run while the program measures it, and
-/// a *keep* verdict owes this switch proper parameters-file plumbing before the experiment
-/// spelling is retired.
-const NG_SLIPPAGE_REFIT_ROUNDS: &str = "NG_SLIPPAGE_REFIT_ROUNDS";
-
-/// Zero both of the re-fit's pull-backs — the spec's **free** setting (HipSTR's), where the
-/// locus's own reads set the numbers outright. `1` is the only accepted value; anything else
-/// set is refused loudly. The same measurement-switch caveat as
-/// [`NG_SLIPPAGE_REFIT_ROUNDS`] applies: an arm's spelling, owed real plumbing on a keep.
-const NG_SLIPPAGE_REFIT_FREE: &str = "NG_SLIPPAGE_REFIT_FREE";
-
 /// **A measurement switch for STR allele discovery** (lever L7). The discovery pre-pass runs
 /// at every STR segment by default, admitting the sequences one sample showed too often for
 /// slippage to explain — 2 reads **and** 15% of that sample's spanning reads.
 ///
 /// Absent or `1` is that default, [`DiscoveryMode::BeforeTheLoop`]; `0` switches it off, for
-/// measuring. Anything else is refused before a read is decoded, for the reason the other
-/// switches give: a measurement switch that fell back silently would report one arm as the
-/// other.
+/// measuring. Anything else is refused before a read is decoded, because a measurement switch
+/// that fell back silently would report one arm as the other.
 ///
 /// **Not a user option, by the owner's decision (2026-11-23)**: discovery is fixed behaviour,
 /// documented in `doc/user/methods.md`; this variable exists only to measure without it.
@@ -592,48 +568,10 @@ pub fn calling_settings(
     }
 }
 
-/// The calling-loop configuration this run asks for: the shipped defaults, with the slippage
-/// re-fit's round count read once from [`NG_SLIPPAGE_REFIT_ROUNDS`], its pull-backs
-/// zeroed where [`NG_SLIPPAGE_REFIT_FREE`] asks for the free setting, and the discovery
+/// The calling-loop configuration this run asks for: the shipped defaults, with the discovery
 /// pre-pass switched off where [`NG_TRACT_DISCOVERY`] asks for it.
 pub fn calling_loop_config_for_this_run() -> Result<RunnableCallingLoopConfig, CallingRunError> {
     let mut config = CallingLoopConfig::DEFAULT;
-    match std::env::var(NG_SLIPPAGE_REFIT_ROUNDS) {
-        Ok(rounds) => {
-            config.slippage_refit.max_rounds = rounds.trim().parse().map_err(|error| {
-                CallingRunError::CallingLoopSettings(format!(
-                    "{NG_SLIPPAGE_REFIT_ROUNDS} must be a whole number of re-fit rounds \
-                     (0 is the frozen default), not {rounds:?}: {error}"
-                ))
-            })?;
-        }
-        Err(std::env::VarError::NotPresent) => {}
-        Err(std::env::VarError::NotUnicode(value)) => {
-            return Err(CallingRunError::CallingLoopSettings(format!(
-                "{NG_SLIPPAGE_REFIT_ROUNDS} is set but is not text: {value:?}"
-            )));
-        }
-    }
-    match std::env::var(NG_SLIPPAGE_REFIT_FREE) {
-        Ok(value) if value.trim() == "1" => {
-            config
-                .slippage_refit
-                .direction_and_fall_off_pull_back_pseudocounts = 0.0;
-            config.slippage_refit.level_pull_back_slipped_reads = 0.0;
-        }
-        Ok(value) => {
-            return Err(CallingRunError::CallingLoopSettings(format!(
-                "{NG_SLIPPAGE_REFIT_FREE} accepts only 1 (zero both pull-backs), \
-                 not {value:?}"
-            )));
-        }
-        Err(std::env::VarError::NotPresent) => {}
-        Err(std::env::VarError::NotUnicode(value)) => {
-            return Err(CallingRunError::CallingLoopSettings(format!(
-                "{NG_SLIPPAGE_REFIT_FREE} is set but is not text: {value:?}"
-            )));
-        }
-    }
     match std::env::var(NG_TRACT_DISCOVERY) {
         // The pre-pass has been the shipped default since the owner adopted L7 (2026-09-03),
         // so `1` restates the default and `0` is the measurement arm that switches it off.

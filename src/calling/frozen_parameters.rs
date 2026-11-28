@@ -19,8 +19,7 @@ use std::collections::BTreeMap;
 ///
 /// **Assembled once per run and never written during calling.** Every error rate,
 /// contamination fraction and inbreeding coefficient arrives fitted and leaves unchanged;
-/// what a locus may move is its own allele frequencies, and — at a repeat tract with the
-/// re-fit switched on — its own slippage numbers
+/// what a locus may move is its own allele frequencies
 /// (`doc/devel/ng/spec/calling_em_loop.md` §5). Each field is another document's to define;
 /// this type only gathers them so that the loop borrows them once, at the boundary where
 /// calling begins.
